@@ -2,7 +2,7 @@
 # web-manager-framework — 生产环境容器编排 (docker compose)
 #
 # 拓扑说明：
-#   web (nginx) ── 反代 /api ──► server (Go/Gin) ──► MySQL / Redis（外部实例）
+#   uni_console (nginx) ── 反代 /api ──► uni_core (Go/Gin) ──► MySQL / Redis（外部实例）
 #
 # MySQL / Redis 复用「外部生产实例」（RDS / 云 Redis / 自建集群），
 # 由 DB/Redis DBA 团队提供，不在 compose 中托管数据库服务。
@@ -14,7 +14,7 @@
 #   docker compose config                                  # 渲染并校验
 #   docker compose up -d --build                           # 构建并启动
 #   docker compose ps                                      # 状态
-#   docker compose logs -f server                          # 后端日志
+#   docker compose logs -f uni_core                          # 后端日志
 #   docker compose down                                    # 停止并移除
 #
 # 所有可覆盖项见 .env.example，本文件给出安全的「生产默认值」。
@@ -24,9 +24,9 @@ name: web-manager-framework
 
 services:
   # ── Go 后端 ─────────────────────────────────────────────────────────────
-  server:
+  uni_core:
     build:
-      context: ./server
+      context: ./uni_core
       args:
         # Go 模块代理：默认 goproxy.cn（本环境 proxy.golang.org 不可达）。
         # 生产可连官方源的环境改走 https://proxy.golang.org,direct，或企业私服，
@@ -37,8 +37,8 @@ services:
         VERSION: ${VERSION:-}
         BUILD_TIME: ${BUILD_TIME:-}
         COMMIT_HASH: ${COMMIT_HASH:-}
-    image: ${SERVER_IMAGE:-webmanager/server}:${SERVER_IMAGE_TAG:-latest}
-    container_name: wmf-server
+    image: ${SERVER_IMAGE:-webmanager/uni_core}:${SERVER_IMAGE_TAG:-latest}
+    container_name: wmf-uni_core
     restart: unless-stopped
 
     # 环境变量覆盖配置键（viper 点号→下划线，优先级高于 config.docker.yaml）。
@@ -101,7 +101,7 @@ services:
     volumes:
       # 生产配置：以 config.docker.yaml 为基线（DB/Redis 走外部实例、日志 stdout），
       # 上面 environment 的键逐项覆盖。改配置请编辑该文件后 `docker compose up -d` 重建。
-      - ./server/configs/config.docker.yaml:/app/configs/config.yaml:ro
+      - ./uni_core/configs/config.docker.yaml:/app/configs/config.yaml:ro
       # 上传文件持久化：挂宿主机目录，容器重建/滚动升级不丢数据。
       # 生产建议改用命名卷或对象存储（sys.file.backend=s3/minio/oss/cos）见 config.yaml。
       - uploads-data:/app/uploads
@@ -111,7 +111,7 @@ services:
       - "host.docker.internal:host-gateway"
 
     # 仅暴露到内部网络，不对宿主机直接发布端口——
-    # 生产统一由 web(nginx) 反代 /api，后端不直连外网，缩小攻击面。
+    # 生产统一由 uni_console(nginx) 反代 /api，后端不直连外网，缩小攻击面。
     expose:
       - "8088"
 
@@ -146,16 +146,16 @@ services:
         condition: service_started
         required: false
 
-    # 加入 tracing 网络，使 server 能以服务名 "jaeger" 解析、上报 OTLP。
+    # 加入 tracing 网络，使 uni_core 能以服务名 "jaeger" 解析、上报 OTLP。
     # 不启用 tracing 时该网络无任何服务，无副作用。
     networks:
       - default
       - tracing
 
-  # ── Vue 3 前端（nginx 托管 dist + /api 反代 server） ───────────────────
-  web:
+  # ── Vue 3 前端（nginx 托管 dist + /api 反代 uni_core） ───────────────────
+  uni_console:
     build:
-      context: ./web
+      context: ./uni_console
       args:
         NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
         # VITE_* 编译期变量：统一由根 .env 覆盖（见 .env.example），
@@ -168,15 +168,15 @@ services:
         VITE_WITH_CREDENTIALS: ${VITE_WITH_CREDENTIALS:-false}
         VITE_OPEN_ROUTE_INFO: ${VITE_OPEN_ROUTE_INFO:-false}
         VITE_DROP_CONSOLE: ${VITE_DROP_CONSOLE:-true}
-    image: ${WEB_IMAGE:-webmanager/web}:${WEB_IMAGE_TAG:-latest}
-    container_name: wmf-web
+    image: ${WEB_IMAGE:-webmanager/uni_console}:${WEB_IMAGE_TAG:-latest}
+    container_name: wmf-uni_console
     restart: unless-stopped
 
     environment:
       TZ: ${TZ:-Asia/Shanghai}
 
     depends_on:
-      server:
+      uni_core:
         condition: service_healthy
         restart: true
 
@@ -215,12 +215,12 @@ services:
 # ⚠️ 仅按需、临时拉起 —— 用 --profile tracing 显式启用，默认 `docker compose up`
 #    不会启动本服务，也不影响生产主链路。
 #
-#   docker compose --profile tracing up -d        # 连同 web/server 一起拉起
+#   docker compose --profile tracing up -d        # 连同 uni_console/uni_core 一起拉起
 #   docker compose --profile tracing up -d jaeger # 只起追踪侧
 #
 # 与后端打通：Jaeger v2 基于 OTel Collector 构建，all-in-one 内置
 #   otlp receiver(4317)/jaeger receiver/zipkin receiver + 内存存储 + query UI，
-#   因此 server 直接用 OTLP gRPC 出站上报即可，无需再叠一层独立 collector。
+#   因此 uni_core 直接用 OTLP gRPC 出站上报即可，无需再叠一层独立 collector。
 #   .env 里应设置（注意：裸 host:port，不带 http://，且必须 0.0.0.0 监听）：
 #     OBSERVABILITY_TRACING_ENABLED=true
 #     OBSERVABILITY_TRACING_ENDPOINT=jaeger:4317
@@ -236,7 +236,7 @@ services:
     environment:
       TZ: ${TZ:-Asia/Shanghai}
       # 内置 all-in-one 配置默认监听 localhost；容器内必须改为 0.0.0.0，
-      # 才能让别的容器(server)经 tracing 网络连入上报。
+      # 才能让别的容器(uni_core)经 tracing 网络连入上报。
       JAEGER_LISTEN_HOST: 0.0.0.0
     # v2 用内置 all-in-one 配置，无需挂载自定义 config（见官方
     # cmd/jaeger/internal/all-in-one.yaml：otlp 4317/4318、jaeger 14250/14268、
@@ -260,9 +260,9 @@ volumes:
   uploads-data:
     name: wmf-uploads
 
-# ── 网络：追踪堆栈内部隔离（server 经 tracing 网络访问 Jaeger） ────────────
-# 默认桥接网络仍承载 web↔server 主链路。tracing 网络只服务追踪侧服务，
-# 使 Jaeger 与业务网络隔离，并让 server 能以服务名 "jaeger" 解析。
+# ── 网络：追踪堆栈内部隔离（uni_core 经 tracing 网络访问 Jaeger） ────────────
+# 默认桥接网络仍承载 uni_console↔uni_core 主链路。tracing 网络只服务追踪侧服务，
+# 使 Jaeger 与业务网络隔离，并让 uni_core 能以服务名 "jaeger" 解析。
 networks:
   tracing:
     name: wmf-tracing

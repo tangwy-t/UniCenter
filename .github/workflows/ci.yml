@@ -15,12 +15,12 @@ on:
   pull_request:
 
 jobs:
-  web:
+  uni_console:
     name: Frontend (typecheck / lint / test)
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: web
+        working-directory: uni_console
     steps:
       - uses: actions/checkout@v4
 
@@ -32,7 +32,7 @@ jobs:
         with:
           node-version: '20.19'
           cache: pnpm
-          cache-dependency-path: web/pnpm-lock.yaml
+          cache-dependency-path: uni_console/pnpm-lock.yaml
 
       - run: pnpm install --frozen-lockfile
 
@@ -46,19 +46,19 @@ jobs:
       - name: Unit tests
         run: pnpm test
 
-  server:
+  uni_core:
     name: Backend (vet / lint / test)
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: server
+        working-directory: uni_core
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26'
-          cache-dependency-path: server/go.sum
+          cache-dependency-path: uni_core/go.sum
 
       - run: go mod download
 
@@ -86,7 +86,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26'
-          cache-dependency-path: server/go.sum
+          cache-dependency-path: uni_core/go.sum
 
       # apigen 从 Go 响应 DTO 的 json tag 生成前端类型,并从
       # internal/pkg/permission 生成前端权限码常量。
@@ -95,8 +95,8 @@ jobs:
       # 前端残留的 system:xxx 字面量是否都仍合法。
       - name: Regenerate and diff
         run: |
-          cd server && go run ./tools/apigen -out ../web/src/types/api/api.generated.d.ts -permout ../web/src/enums/permission.ts
-          cd .. && git diff --exit-code -- web/src/types/api/api.generated.d.ts web/src/enums/permission.ts
+          cd uni_core && go run ./tools/apigen -out ../uni_console/src/types/api/api.generated.d.ts -permout ../uni_console/src/enums/permission.ts
+          cd .. && git diff --exit-code -- uni_console/src/types/api/api.generated.d.ts uni_console/src/enums/permission.ts
 
       - uses: actions/setup-node@v4
         with:
@@ -104,4 +104,4 @@ jobs:
 
       - name: Permission drift guard (frontend)
         run: node scripts/check-permissions.mjs
-        working-directory: web
+        working-directory: uni_console

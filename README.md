@@ -37,7 +37,7 @@ An enterprise-grade RBAC (Role-Based Access Control) administration framework, b
 
 ## 特性 / Features
 
-### 后端 / Backend (`server/`)
+### 后端 / Backend (`uni_core/`)
 
 - **RBAC 权限体系 / RBAC model**：用户 / 角色 / 菜单 / 部门 / 数据权限（DataScope）五位一体，支持菜单、按钮、接口三级鉴权。
   Users, roles, menus, departments and DataScope in one unified model, with menu / button / API three-level authorization.
@@ -52,7 +52,7 @@ An enterprise-grade RBAC (Role-Based Access Control) administration framework, b
 - **优雅停机 / Graceful shutdown**：分阶段 drain → cleanup 生命周期管理，编排 HTTP / DB / Redis / 调度器 / 连接的有序关闭。
   Staged drain → cleanup lifecycle with ordered shutdown of HTTP / DB / Redis / scheduler / connections.
 
-### 前端 / Frontend (`web/`)
+### 前端 / Frontend (`uni_console/`)
 
 - **插件化架构 / Plugin architecture**：`src/modules/<name>/` 一个目录即一个业务插件，增删文件夹即启用 / 停用，开箱即用。
   Each directory under `src/modules/<name>/` is a business plugin — add or remove a folder to enable or disable a module.
@@ -97,7 +97,7 @@ An enterprise-grade RBAC (Role-Based Access Control) administration framework, b
 
 ```
 WebManagerFramework/
-├── server/                    # Go 后端 / Backend
+├── uni_core/                    # Go 后端 / Backend
 │   ├── cmd/server/            # 入口（main.go，生命周期编排 / lifecycle orchestration）
 │   ├── configs/               # 配置文件（本地 / docker 环境 / local & docker env）
 │   ├── docs/                  # Swagger 生成物（docs.go / swagger.json / yaml）
@@ -111,7 +111,7 @@ WebManagerFramework/
 │       ├── scheduler/         # 定时任务调度 / Job scheduler
 │       ├── task/              # 任务注册表 / Task registry
 │       └── pkg/               # 基础设施（jwt / redis / datascope / migration …）
-├── web/                       # Vue 3 前端 / Frontend
+├── uni_console/                       # Vue 3 前端 / Frontend
 │   ├── src/
 │   │   ├── framework/         # 插件运行时 · 路由注册 · 生命周期 / Plugin runtime
 │   │   ├── components/        # 组件库（art-*）/ Component library
@@ -138,7 +138,7 @@ WebManagerFramework/
 
 ```bash
 # ── 后端 / Backend ──
-cd server
+cd uni_core
 cp configs/config.yaml configs/config.local.yaml   # （可选）覆盖本地配置 / (optional) local override
 go mod download
 make run          # 启动于 http://localhost:9999
@@ -150,15 +150,15 @@ make lint         # 静态检查（golangci-lint，缺失时降级 go vet）/ li
 make swagger      # 重新生成 API 文档（swag v1.16.6）/ regenerate API docs
 
 # ── 前端 / Frontend ──
-cd web
+cd uni_console
 pnpm install
 pnpm dev          # http://localhost:3006
 pnpm build        # 类型检查 + 产物构建 / type-check + build
 pnpm test         # Vitest 单元测试 / unit tests
 ```
 
-> 前端开发环境通过 Vite 代理把 `/api` 转发到 `http://127.0.0.1:9999`（见 `web/.env.example` 的 `VITE_API_PROXY_URL`）。
-> The dev frontend proxies `/api` to `http://127.0.0.1:9999` via Vite (see `VITE_API_PROXY_URL` in `web/.env.example`).
+> 前端开发环境通过 Vite 代理把 `/api` 转发到 `http://127.0.0.1:9999`（见 `uni_console/.env.example` 的 `VITE_API_PROXY_URL`）。
+> The dev frontend proxies `/api` to `http://127.0.0.1:9999` via Vite (see `VITE_API_PROXY_URL` in `uni_console/.env.example`).
 
 ### Docker Compose 一键部署 / One-Click Deployment
 
@@ -174,8 +174,8 @@ docker compose up -d --build
 
 # 3. 查看状态与日志 / Status & logs
 docker compose ps
-docker compose logs -f server
-docker compose logs -f web
+docker compose logs -f uni_core
+docker compose logs -f uni_console
 
 # 4. 停止 / Stop
 docker compose down
@@ -243,7 +243,7 @@ Frontend dynamic routes are generated from backend-delivered menus + permission 
 
 | 模块 / Module | 目录 / Directory | 说明 / Description |
 |------|------|------|
-| 仪表盘 / Dashboard | `web/src/modules/dashboard` | 数据总览 / overview |
+| 仪表盘 / Dashboard | `uni_console/src/modules/dashboard` | 数据总览 / overview |
 | 用户管理 / Users | `system-user` | 用户 CRUD、部门树、角色分配 / CRUD, dept tree, role assignment |
 | 角色管理 / Roles | `system-role` | 角色、菜单 / 数据权限分配 / role & menu/data perms |
 | 菜单管理 / Menus | `system-menu` | 菜单 / 路由 / 权限点 / menus, routes, permission points |
@@ -279,7 +279,7 @@ Frontend dynamic routes are generated from backend-delivered menus + permission 
 ⚠️ **不要把两者混用。** 例如把成功判定写成 `code === ApiStatus.unauthorized`
 是恒不成立的：后端未授权业务码是 `10001`，永不等于 HTTP `401`，
 该分支会让**每一个成功响应都被误判为失败**。
-`web/src/utils/http/status.test.ts` 与 `interceptor.test.ts` 已用断言锁定这一点。
+`uni_console/src/utils/http/status.test.ts` 与 `interceptor.test.ts` 已用断言锁定这一点。
 
 All endpoints share one envelope, `{ code, msg, data }`, carrying **both** an HTTP
 status and a business code. These are two **disjoint** namespaces and must be used
@@ -293,8 +293,8 @@ against an HTTP status is always false.
 
 ## API 文档 / API Documentation
 
-后端基于 [swag](https://github.com/swaggo/swag) 自动生成 Swagger 文档（`server/docs/`），运行时在 Swagger UI 中访问。接口统一前缀 `/api/v1`，采用 RESTful 风格，Bearer JWT 鉴权。
-The backend auto-generates Swagger docs (`server/docs/`) via [swag](https://github.com/swaggo/swag), served through Swagger UI at runtime. All endpoints share the `/api/v1` prefix, follow RESTful conventions, and use Bearer JWT auth.
+后端基于 [swag](https://github.com/swaggo/swag) 自动生成 Swagger 文档（`uni_core/docs/`），运行时在 Swagger UI 中访问。接口统一前缀 `/api/v1`，采用 RESTful 风格，Bearer JWT 鉴权。
+The backend auto-generates Swagger docs (`uni_core/docs/`) via [swag](https://github.com/swaggo/swag), served through Swagger UI at runtime. All endpoints share the `/api/v1` prefix, follow RESTful conventions, and use Bearer JWT auth.
 
 ---
 

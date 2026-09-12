@@ -48,9 +48,9 @@ logs/
 .env
 .env.*
 !.env.example
-server/configs/config.yaml
-server/configs/config.docker.yaml
-!server/configs/config.example.yaml
+uni_core/configs/config.yaml
+uni_core/configs/config.docker.yaml
+!uni_core/configs/config.example.yaml
 
 # ── pnpm 本地内容存储 ──
 .pnpm-store/

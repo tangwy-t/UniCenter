@@ -1,0 +1,8 @@
+/node_modules/*
+/dist/*
+/src/main.ts
+# 生成物:由 uni_core/tools/apigen 从 Go 响应 DTO 生成(见 pnpm gen:api)。
+# 它必须与生成器输出**逐字节一致**,否则 check:api-types 的
+# "重新生成并 git diff --exit-code" 会永远失败。
+# prettier 会把生成器的缩进规整掉 → 提前排除,而非每次生成后再格式化。
+/src/types/api/api.generated.d.ts
