@@ -1,4 +1,4 @@
-# WebManagerFramework
+# UniCenter
 
 > 企业级 RBAC 权限管理系统 · Go + Vue 3 全栈方案
 
@@ -29,9 +29,9 @@ An enterprise-grade RBAC (Role-Based Access Control) administration framework, b
 
 ## 项目简介 / Overview
 
-**WebManagerFramework** 是一套面向企业管理后台的全栈 Web 管理框架，后端采用 Go (Gin) 分层架构，前端采用 Vue 3 + TypeScript 的插件化架构。核心能力是完整的 RBAC 权限体系与数据权限（DataScope）自动注入，开箱即可作为各类管理系统的基座。
+**UniCenter** 是一套面向企业管理后台的全栈 Web 管理框架，后端采用 Go (Gin) 分层架构，前端采用 Vue 3 + TypeScript 的插件化架构。核心能力是完整的 RBAC 权限体系与数据权限（DataScope）自动注入，开箱即可作为各类管理系统的基座。
 
-**WebManagerFramework** is a full-stack administration framework targeting enterprise management consoles. The backend follows a layered Go (Gin) architecture; the frontend follows a plugin-based Vue 3 + TypeScript architecture. Its core strengths are a complete RBAC system and row-level DataScope auto-injection, ready to serve as the foundation for a wide range of management systems.
+**UniCenter** is a full-stack administration framework targeting enterprise management consoles. The backend follows a layered Go (Gin) architecture; the frontend follows a plugin-based Vue 3 + TypeScript architecture. Its core strengths are a complete RBAC system and row-level DataScope auto-injection, ready to serve as the foundation for a wide range of management systems.
 
 ---
 
@@ -96,7 +96,7 @@ An enterprise-grade RBAC (Role-Based Access Control) administration framework, b
 ## 目录结构 / Project Structure
 
 ```
-WebManagerFramework/
+UniCenter/
 ├── uni_core/                    # Go 后端 / Backend
 │   ├── cmd/server/            # 入口（main.go，生命周期编排 / lifecycle orchestration）
 │   ├── configs/               # 配置文件（本地 / docker 环境 / local & docker env）

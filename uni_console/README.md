@@ -1,4 +1,4 @@
-# 后台管理系统 (Web Admin)
+# 后台管理系统 (UniConsole)
 
 基于 Vue 3 + TypeScript + Vite 7 + Element Plus + Tailwind CSS 4 的插件化后台管理框架前端。
 

@@ -1,5 +1,5 @@
 # ============================================================
-# web-admin — 多阶段构建
+# uni-console — 多阶段构建
 # 构建阶段：node:22-alpine + pnpm（vue-tsc 类型检查 + vite 构建）
 # 运行阶段：nginx 托管 dist 静态资源，/api 反向代理到 compose 服务 uni_core:8088
 # （nginx.conf 见 ./nginx.conf，为生产镜像专用配置）

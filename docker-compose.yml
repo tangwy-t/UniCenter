@@ -1,5 +1,5 @@
 # ============================================================================
-# web-manager-framework — 生产环境容器编排 (docker compose)
+# uni-center — 生产环境容器编排 (docker compose)
 #
 # 拓扑说明：
 #   uni_console (nginx) ── 反代 /api ──► uni_core (Go/Gin) ──► MySQL / Redis（外部实例）
@@ -20,7 +20,7 @@
 # 所有可覆盖项见 .env.example，本文件给出安全的「生产默认值」。
 # ============================================================================
 
-name: web-manager-framework
+name: uni-center
 
 services:
   # ── Go 后端 ─────────────────────────────────────────────────────────────
@@ -37,7 +37,7 @@ services:
         VERSION: ${VERSION:-}
         BUILD_TIME: ${BUILD_TIME:-}
         COMMIT_HASH: ${COMMIT_HASH:-}
-    image: ${SERVER_IMAGE:-webmanager/uni_core}:${SERVER_IMAGE_TAG:-latest}
+    image: ${SERVER_IMAGE:-tangwy-t/uni_core}:${SERVER_IMAGE_TAG:-latest}
     container_name: wmf-uni_core
     restart: unless-stopped
 
@@ -168,7 +168,7 @@ services:
         VITE_WITH_CREDENTIALS: ${VITE_WITH_CREDENTIALS:-false}
         VITE_OPEN_ROUTE_INFO: ${VITE_OPEN_ROUTE_INFO:-false}
         VITE_DROP_CONSOLE: ${VITE_DROP_CONSOLE:-true}
-    image: ${WEB_IMAGE:-webmanager/uni_console}:${WEB_IMAGE_TAG:-latest}
+    image: ${WEB_IMAGE:-tangwy-t/uni_console}:${WEB_IMAGE_TAG:-latest}
     container_name: wmf-uni_console
     restart: unless-stopped
 

@@ -63,3 +63,7 @@ uni_core/configs/config.docker.yaml
 .vscode/
 *.iml
 docs/
+.gotoolchain/
+.gocache/
+.gopath/
+go.work.sum
