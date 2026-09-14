@@ -1,0 +1,564 @@
+{
+  "AgentMetric": [
+    {
+      "name": "CollectDurationMs",
+      "json": "collect_duration_ms",
+      "type": "float64",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "ReportSuccessCount",
+      "json": "report_success_count",
+      "type": "int64",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "ReportErrorCount",
+      "json": "report_error_count",
+      "type": "int64",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "LastReportError",
+      "json": "last_report_error",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "WSReconnectCount",
+      "json": "ws_reconnect_count",
+      "type": "int64",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "MemResidentMB",
+      "json": "mem_resident_mb",
+      "type": "*float64",
+      "pointer": true,
+      "omit_empty": true
+    },
+    {
+      "name": "PendingBacklog",
+      "json": "pending_backlog",
+      "type": "*int64",
+      "pointer": true,
+      "omit_empty": true
+    },
+    {
+      "name": "LastReportLatencyMs",
+      "json": "last_report_latency_ms",
+      "type": "*float64",
+      "pointer": true,
+      "omit_empty": true
+    },
+    {
+      "name": "ReportDropCount",
+      "json": "report_drop_count",
+      "type": "*int64",
+      "pointer": true,
+      "omit_empty": true
+    },
+    {
+      "name": "AgentUptimeSec",
+      "json": "agent_uptime_sec",
+      "type": "*int64",
+      "pointer": true,
+      "omit_empty": true
+    }
+  ],
+  "DiskIOMetric": [
+    {
+      "name": "Name",
+      "json": "name",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "ReadBytesPerSec",
+      "json": "read_bytes_per_sec",
+      "type": "float64",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "WriteBytesPerSec",
+      "json": "write_bytes_per_sec",
+      "type": "float64",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "ReadOpsPerSec",
+      "json": "read_ops_per_sec",
+      "type": "float64",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "WriteOpsPerSec",
+      "json": "write_ops_per_sec",
+      "type": "float64",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "IOTimePercent",
+      "json": "io_time_percent",
+      "type": "float64",
+      "pointer": false,
+      "omit_empty": true
+    }
+  ],
+  "DiskMetric": [
+    {
+      "name": "Mountpoint",
+      "json": "mountpoint",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "FSType",
+      "json": "fs_type",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "UsedPercent",
+      "json": "used_percent",
+      "type": "float64",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "UsedGB",
+      "json": "used_gb",
+      "type": "float64",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "TotalGB",
+      "json": "total_gb",
+      "type": "float64",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "InodesUsedPercent",
+      "json": "inodes_used_percent",
+      "type": "float64",
+      "pointer": false,
+      "omit_empty": true
+    }
+  ],
+  "Hello": [
+    {
+      "name": "InstanceID",
+      "json": "instance_id",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Hostname",
+      "json": "hostname",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "OS",
+      "json": "os",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Arch",
+      "json": "arch",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "AgentVersion",
+      "json": "agent_version",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Kernel",
+      "json": "kernel",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "EnrollToken",
+      "json": "enroll_token",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "AgentToken",
+      "json": "agent_token",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Platform",
+      "json": "platform",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "PlatformVer",
+      "json": "platform_ver",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "CPUModel",
+      "json": "cpu_model",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "CPUCores",
+      "json": "cpu_cores",
+      "type": "int",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "MemTotalMB",
+      "json": "mem_total_mb",
+      "type": "float64",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "BootTime",
+      "json": "boot_time",
+      "type": "int64",
+      "pointer": false,
+      "omit_empty": true
+    }
+  ],
+  "HelloAck": [
+    {
+      "name": "Accepted",
+      "json": "accepted",
+      "type": "bool",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "DeviceID",
+      "json": "device_id",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "AgentToken",
+      "json": "agent_token",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "ReportInterval",
+      "json": "report_interval",
+      "type": "int",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "RejectReason",
+      "json": "reject_reason",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "ServerTime",
+      "json": "server_time",
+      "type": "int64",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "V",
+      "json": "v",
+      "type": "int",
+      "pointer": false,
+      "omit_empty": true
+    }
+  ],
+  "MetricsSample": [
+    {
+      "name": "T",
+      "json": "t",
+      "type": "int64",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "CPUUsedPercent",
+      "json": "cpu_used_percent",
+      "type": "float64",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "CPUPerCore",
+      "json": "cpu_per_core",
+      "type": "[]float64",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "CPUIOWait",
+      "json": "cpu_iowait",
+      "type": "*float64",
+      "pointer": true,
+      "omit_empty": true
+    },
+    {
+      "name": "Load1",
+      "json": "load1",
+      "type": "float64",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Load5",
+      "json": "load5",
+      "type": "float64",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Load15",
+      "json": "load15",
+      "type": "float64",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "MemUsedPercent",
+      "json": "mem_used_percent",
+      "type": "float64",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "MemUsedMB",
+      "json": "mem_used_mb",
+      "type": "float64",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "MemAvailableMB",
+      "json": "mem_available_mb",
+      "type": "float64",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "SwapUsedPercent",
+      "json": "swap_used_percent",
+      "type": "*float64",
+      "pointer": true,
+      "omit_empty": true
+    },
+    {
+      "name": "SwapUsedMB",
+      "json": "swap_used_mb",
+      "type": "*float64",
+      "pointer": true,
+      "omit_empty": true
+    },
+    {
+      "name": "Disks",
+      "json": "disks",
+      "type": "[]agentproto.DiskMetric",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "DiskIO",
+      "json": "disk_io",
+      "type": "[]agentproto.DiskIOMetric",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "NICs",
+      "json": "nics",
+      "type": "[]agentproto.NICMetric",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "TCPTotal",
+      "json": "tcp_total",
+      "type": "int",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "TCPEstablished",
+      "json": "tcp_established",
+      "type": "int",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "TCPListen",
+      "json": "tcp_listen",
+      "type": "int",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "TCPTimeWait",
+      "json": "tcp_time_wait",
+      "type": "int",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "TCPCloseWait",
+      "json": "tcp_close_wait",
+      "type": "int",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "UDPTotal",
+      "json": "udp_total",
+      "type": "int",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "ProcCount",
+      "json": "proc_count",
+      "type": "int",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Sensors",
+      "json": "sensors",
+      "type": "[]agentproto.SensorMetric",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "UptimeSec",
+      "json": "uptime_sec",
+      "type": "int64",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Agent",
+      "json": "agent",
+      "type": "agentproto.AgentMetric",
+      "pointer": false,
+      "omit_empty": false
+    }
+  ],
+  "NICMetric": [
+    {
+      "name": "Name",
+      "json": "name",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "RXBytesPerSec",
+      "json": "rx_bytes_per_sec",
+      "type": "float64",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "TXBytesPerSec",
+      "json": "tx_bytes_per_sec",
+      "type": "float64",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "RXPacketsPerSec",
+      "json": "rx_packets_per_sec",
+      "type": "float64",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "TXPacketsPerSec",
+      "json": "tx_packets_per_sec",
+      "type": "float64",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "RXErrorsPerSec",
+      "json": "rx_errors_per_sec",
+      "type": "float64",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "TXErrorsPerSec",
+      "json": "tx_errors_per_sec",
+      "type": "float64",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "RXDroppedPerSec",
+      "json": "rx_dropped_per_sec",
+      "type": "float64",
+      "pointer": false,
+      "omit_empty": true
+    }
+  ],
+  "SensorMetric": [
+    {
+      "name": "Name",
+      "json": "name",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "TemperatureC",
+      "json": "temperature_c",
+      "type": "*float64",
+      "pointer": true,
+      "omit_empty": true
+    }
+  ]
+}
