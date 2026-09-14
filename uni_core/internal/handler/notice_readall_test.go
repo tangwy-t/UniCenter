@@ -10,8 +10,8 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/apperror"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/contextkeys"
+	"github.com/tangwy-t/uni-core/internal/pkg/apperror"
+	"github.com/tangwy-t/uni-core/internal/pkg/contextkeys"
 )
 
 // stubReadAllService 内嵌接口空变体,仅重写 MarkAllRead(其它方法不会被本测试触及)。

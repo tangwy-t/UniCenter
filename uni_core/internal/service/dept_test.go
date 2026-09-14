@@ -4,11 +4,11 @@ import (
 	"context"
 	"testing"
 
-	"github.com/tangwy-t/webmanager-server/internal/model/dto/request"
-	"github.com/tangwy-t/webmanager-server/internal/model/entity"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/apperror"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/logger"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/util"
+	"github.com/tangwy-t/uni-core/internal/model/dto/request"
+	"github.com/tangwy-t/uni-core/internal/model/entity"
+	"github.com/tangwy-t/uni-core/internal/pkg/apperror"
+	"github.com/tangwy-t/uni-core/internal/pkg/logger"
+	"github.com/tangwy-t/uni-core/internal/pkg/util"
 
 	"gorm.io/gorm"
 )

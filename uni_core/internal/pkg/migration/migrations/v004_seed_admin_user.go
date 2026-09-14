@@ -8,10 +8,10 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 
-	"github.com/tangwy-t/webmanager-server/internal/model/entity"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/crypto"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/migration"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/util"
+	"github.com/tangwy-t/uni-core/internal/model/entity"
+	"github.com/tangwy-t/uni-core/internal/pkg/crypto"
+	"github.com/tangwy-t/uni-core/internal/pkg/migration"
+	"github.com/tangwy-t/uni-core/internal/pkg/util"
 )
 
 func init() {

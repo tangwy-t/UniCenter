@@ -33,19 +33,19 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 
-	_ "github.com/tangwy-t/webmanager-server/docs" // 注册 swagger spec，供 gin-swagger 读取
-	"github.com/tangwy-t/webmanager-server/internal/model/entity"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/config"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/database"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/datascope"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/lifecycle"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/logger"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/migration"
-	_ "github.com/tangwy-t/webmanager-server/internal/pkg/migration/migrations" // 触发所有迁移 init() 注册
-	redisPkg "github.com/tangwy-t/webmanager-server/internal/pkg/redis"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/snowflake"
-	"github.com/tangwy-t/webmanager-server/internal/router"
-	"github.com/tangwy-t/webmanager-server/internal/wireup"
+	_ "github.com/tangwy-t/uni-core/docs" // 注册 swagger spec，供 gin-swagger 读取
+	"github.com/tangwy-t/uni-core/internal/model/entity"
+	"github.com/tangwy-t/uni-core/internal/pkg/config"
+	"github.com/tangwy-t/uni-core/internal/pkg/database"
+	"github.com/tangwy-t/uni-core/internal/pkg/datascope"
+	"github.com/tangwy-t/uni-core/internal/pkg/lifecycle"
+	"github.com/tangwy-t/uni-core/internal/pkg/logger"
+	"github.com/tangwy-t/uni-core/internal/pkg/migration"
+	_ "github.com/tangwy-t/uni-core/internal/pkg/migration/migrations" // 触发所有迁移 init() 注册
+	redisPkg "github.com/tangwy-t/uni-core/internal/pkg/redis"
+	"github.com/tangwy-t/uni-core/internal/pkg/snowflake"
+	"github.com/tangwy-t/uni-core/internal/router"
+	"github.com/tangwy-t/uni-core/internal/wireup"
 )
 
 func main() {

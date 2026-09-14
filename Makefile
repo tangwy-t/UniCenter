@@ -1,5 +1,5 @@
 # ============================================================
-# WebManagerFramework — 项目统一 Makefile
+# UniCenter — 项目统一 Makefile
 # 单入口同时管理 uni_core(Go) 与 uni_console(Vue3/pnpm) 两端 + Docker 编排。
 #
 # 用法:
@@ -19,7 +19,7 @@ SERVER_DIR     := uni_core
 WEB_DIR        := uni_console
 
 # ── Go 模块与版本注入 ───────────────────────────────────────
-GO_MODULE      := github.com/tangwy-t/webmanager-server
+GO_MODULE      := github.com/tangwy-t/uni-core
 # 用 ?= 允许 CI/命令行覆盖;但 ?= 对「已定义但为空」的环境变量不会赋值,
 # 故追加 strip 空值兜底,保证空值也回退到 git/date 推算,避免注入 empty。
 VERSION       ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -58,7 +58,7 @@ SWAG_VERSION   ?= v1.16.6
 ## 帮助
 ## ───────────────────────────────────────────────────────────
 help: ## 显示本帮助
-	@printf "WebManagerFramework 统一构建入口\n\n"
+	@printf "UniCenter 统一构建入口\n\n"
 	@printf "后端(uni_core) : make uni_core-run | uni_core-build | uni_core-test | uni_core-lint | uni_core-vet | uni_core-fmt | uni_core-swagger | uni_core-clean\n"
 	@printf "前端(uni_console)    : make uni_console-install | uni_console-dev | uni_console-build | uni_console-serve | uni_console-test | uni_console-lint | uni_console-fix | uni_console-fmt\n"
 	@printf "全量         : make all | test | lint | fmt | build | run | clean\n"

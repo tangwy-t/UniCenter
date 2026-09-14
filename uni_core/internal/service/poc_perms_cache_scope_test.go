@@ -3,7 +3,7 @@ package service
 import (
 	"testing"
 
-	"github.com/tangwy-t/webmanager-server/internal/pkg/datascope"
+	"github.com/tangwy-t/uni-core/internal/pkg/datascope"
 )
 
 // 本文件是「权限持久缓存键不含 scope 指纹，与 singleflight 去重键自相矛盾」

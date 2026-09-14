@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tangwy-t/webmanager-server/internal/pkg/metricshistory"
+	"github.com/tangwy-t/uni-core/internal/pkg/metricshistory"
 )
 
 // pt 构造一个采样点:T 为 now 前 offsetSec 秒,count=count,各耗时字段=v。

@@ -9,9 +9,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/tangwy-t/webmanager-server/internal/model/dto/request"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/app"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/apperror"
+	"github.com/tangwy-t/uni-core/internal/model/dto/request"
+	"github.com/tangwy-t/uni-core/internal/pkg/app"
+	"github.com/tangwy-t/uni-core/internal/pkg/apperror"
 )
 
 type stubOnlineService struct {

@@ -26,7 +26,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/tangwy-t/webmanager-server/internal/model/dto/response"
+	"github.com/tangwy-t/uni-core/internal/model/dto/response"
 )
 
 // ── profile 元信息 ────────────────────────────────────────────
@@ -399,7 +399,7 @@ func toResponseNode(n *buildNode) (*response.FlameNode, bool) {
 func shortenFn(full string) string {
 	name := full
 	for _, p := range []string{
-		"github.com/tangwy-t/webmanager-server/",
+		"github.com/tangwy-t/uni-core/",
 		"github.com/",
 		"gorm.io/",
 		"go.uber.org/",

@@ -4,17 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/util"
+	"github.com/tangwy-t/uni-core/internal/pkg/util"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/robfig/cron/v3"
-	"github.com/tangwy-t/webmanager-server/internal/model/entity"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/lifecycle"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/logger"
-	"github.com/tangwy-t/webmanager-server/internal/service"
+	"github.com/tangwy-t/uni-core/internal/model/entity"
+	"github.com/tangwy-t/uni-core/internal/pkg/lifecycle"
+	"github.com/tangwy-t/uni-core/internal/pkg/logger"
+	"github.com/tangwy-t/uni-core/internal/service"
 	"go.uber.org/zap"
 )
 

@@ -1,10 +1,10 @@
 package middleware
 
 import (
-	"github.com/tangwy-t/webmanager-server/internal/pkg/app"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/apperror"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/contextkeys"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/logger"
+	"github.com/tangwy-t/uni-core/internal/pkg/app"
+	"github.com/tangwy-t/uni-core/internal/pkg/apperror"
+	"github.com/tangwy-t/uni-core/internal/pkg/contextkeys"
+	"github.com/tangwy-t/uni-core/internal/pkg/logger"
 	"runtime/debug"
 
 	"github.com/gin-gonic/gin"

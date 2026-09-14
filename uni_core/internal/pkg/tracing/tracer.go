@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/tangwy-t/webmanager-server/internal/pkg/config"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/lifecycle"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/logger"
+	"github.com/tangwy-t/uni-core/internal/pkg/config"
+	"github.com/tangwy-t/uni-core/internal/pkg/lifecycle"
+	"github.com/tangwy-t/uni-core/internal/pkg/logger"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
@@ -49,7 +49,7 @@ func NewTracer(cfg *config.TracingConfig, lc lifecycle.ManagerInterface, log log
 
 	serviceName := cfg.ServiceName
 	if serviceName == "" {
-		serviceName = "webmanager-server" // 与模块名一致的回退值
+		serviceName = "uni-core" // 与模块名一致的回退值
 	}
 	res, err := resource.New(ctx,
 		resource.WithAttributes(semconv.ServiceName(serviceName)),

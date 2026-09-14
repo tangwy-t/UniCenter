@@ -1,4 +1,4 @@
-module github.com/tangwy-t/webmanager-server
+module github.com/tangwy-t/uni-core
 
 go 1.26
 

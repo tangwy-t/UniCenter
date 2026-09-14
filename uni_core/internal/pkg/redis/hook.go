@@ -35,7 +35,7 @@ func (h *TracingHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
 			return next(ctx, cmd)
 		}
 
-		ctx, span := otel.Tracer("github.com/tangwy-t/webmanager-server/internal/pkg/redis").Start(ctx, "REDIS "+cmdName,
+		ctx, span := otel.Tracer("github.com/tangwy-t/uni-core/internal/pkg/redis").Start(ctx, "REDIS "+cmdName,
 			trace.WithSpanKind(trace.SpanKindClient),
 		)
 		defer span.End()
@@ -58,7 +58,7 @@ func (h *TracingHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
 // ProcessPipelineHook 在 Pipeline 执行前后创建 Span。
 func (h *TracingHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
 	return func(ctx context.Context, cmds []redis.Cmder) error {
-		ctx, span := otel.Tracer("github.com/tangwy-t/webmanager-server/internal/pkg/redis").Start(ctx, "REDIS PIPELINE",
+		ctx, span := otel.Tracer("github.com/tangwy-t/uni-core/internal/pkg/redis").Start(ctx, "REDIS PIPELINE",
 			trace.WithSpanKind(trace.SpanKindClient),
 		)
 		defer span.End()

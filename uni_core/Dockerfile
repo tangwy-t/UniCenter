@@ -1,5 +1,5 @@
 # ============================================================
-# webmanager-server — 多阶段构建
+# uni_core — 多阶段构建
 # 构建阶段：golang:1.26-alpine（CGO 禁用，静态链接）
 # 运行阶段：alpine 最小镜像
 # 配置由 docker-compose 挂载到 /app/configs/config.yaml，镜像内不含配置文件。
@@ -39,9 +39,9 @@ RUN VERSION="${VERSION:-docker}" && \
     COMMIT_HASH="${COMMIT_HASH:-unknown}" && \
     go build \
       -ldflags "-s -w \
-        -X 'github.com/tangwy-t/webmanager-server/internal/pkg/version.Version=${VERSION}' \
-        -X 'github.com/tangwy-t/webmanager-server/internal/pkg/version.BuildTime=${BUILD_TIME}' \
-        -X 'github.com/tangwy-t/webmanager-server/internal/pkg/version.CommitHash=${COMMIT_HASH}'" \
+        -X 'github.com/tangwy-t/uni-core/internal/pkg/version.Version=${VERSION}' \
+        -X 'github.com/tangwy-t/uni-core/internal/pkg/version.BuildTime=${BUILD_TIME}' \
+        -X 'github.com/tangwy-t/uni-core/internal/pkg/version.CommitHash=${COMMIT_HASH}'" \
       -o /out/server ./cmd/server
 
 # ---- 运行阶段 ----

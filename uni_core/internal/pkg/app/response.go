@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/tangwy-t/webmanager-server/internal/pkg/apperror"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/logger"
+	"github.com/tangwy-t/uni-core/internal/pkg/apperror"
+	"github.com/tangwy-t/uni-core/internal/pkg/logger"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"

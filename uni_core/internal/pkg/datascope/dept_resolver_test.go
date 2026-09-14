@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/tangwy-t/webmanager-server/internal/pkg/datascope"
+	"github.com/tangwy-t/uni-core/internal/pkg/datascope"
 )
 
 type stubAuthRepo struct {

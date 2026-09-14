@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tangwy-t/webmanager-server/internal/pkg/util"
+	"github.com/tangwy-t/uni-core/internal/pkg/util"
 )
 
 // 本文件是「存储型 cr0ss-site scripting」链（评审报告 #1）修复后的回归验证。

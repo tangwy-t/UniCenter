@@ -3,7 +3,7 @@ package entity
 import (
 	"testing"
 
-	"github.com/tangwy-t/webmanager-server/internal/pkg/datascope/rule"
+	"github.com/tangwy-t/uni-core/internal/pkg/datascope/rule"
 )
 
 // dimsOf 汇总规则的维度集合。

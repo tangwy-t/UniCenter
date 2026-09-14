@@ -10,11 +10,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tangwy-t/webmanager-server/internal/model/dto/response"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/app"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/apperror"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/logger"
-	pproftext "github.com/tangwy-t/webmanager-server/internal/pkg/pproftext"
+	"github.com/tangwy-t/uni-core/internal/model/dto/response"
+	"github.com/tangwy-t/uni-core/internal/pkg/app"
+	"github.com/tangwy-t/uni-core/internal/pkg/apperror"
+	"github.com/tangwy-t/uni-core/internal/pkg/logger"
+	pproftext "github.com/tangwy-t/uni-core/internal/pkg/pproftext"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"

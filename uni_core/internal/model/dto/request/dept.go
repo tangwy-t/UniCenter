@@ -1,6 +1,6 @@
 package request
 
-import "github.com/tangwy-t/webmanager-server/internal/pkg/util"
+import "github.com/tangwy-t/uni-core/internal/pkg/util"
 
 // CreateDeptReq is the request payload for creating a new department.
 // ParentID uses util.JsonUint64 to accept both string and number JSON values,

@@ -3,7 +3,7 @@ package util
 import (
 	"testing"
 
-	"github.com/tangwy-t/webmanager-server/internal/pkg/logger/loggertest"
+	"github.com/tangwy-t/uni-core/internal/pkg/logger/loggertest"
 )
 
 // Mirrors the service-layer copy pairs: request DTO (*JsonUint64) → entity (*uint64).

@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/tangwy-t/webmanager-server/internal/pkg/util"
+	"github.com/tangwy-t/uni-core/internal/pkg/util"
 )
 
 // 小写 list_class：DictItem 走缓存契约，snake_case 与 is_default 一致；

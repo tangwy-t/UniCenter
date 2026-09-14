@@ -1,6 +1,6 @@
 package request
 
-import "github.com/tangwy-t/webmanager-server/internal/pkg/app"
+import "github.com/tangwy-t/uni-core/internal/pkg/app"
 
 // LoginLogQuery holds the query parameters for paginated login log listing.
 type LoginLogQuery struct {

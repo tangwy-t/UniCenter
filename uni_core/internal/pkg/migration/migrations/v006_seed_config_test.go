@@ -3,7 +3,7 @@ package migrations
 import (
 	"testing"
 
-	"github.com/tangwy-t/webmanager-server/internal/pkg/util"
+	"github.com/tangwy-t/uni-core/internal/pkg/util"
 )
 
 // TestFileAllowedExtsRejectsActiveContent 是上传白名单的安全守卫：

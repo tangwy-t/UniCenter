@@ -1,7 +1,7 @@
 package response
 
 import (
-	"github.com/tangwy-t/webmanager-server/internal/pkg/util"
+	"github.com/tangwy-t/uni-core/internal/pkg/util"
 )
 
 // JobResp 定时任务响应。

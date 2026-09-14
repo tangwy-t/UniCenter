@@ -1,7 +1,7 @@
 package response
 
 import (
-	"github.com/tangwy-t/webmanager-server/internal/pkg/util"
+	"github.com/tangwy-t/uni-core/internal/pkg/util"
 )
 
 // DictDataResp is the response DTO for a dictionary data entry.

@@ -4,8 +4,8 @@ import (
 	"context"
 	"strconv"
 
-	"github.com/tangwy-t/webmanager-server/internal/model/dto/request"
-	"github.com/tangwy-t/webmanager-server/internal/model/entity"
+	"github.com/tangwy-t/uni-core/internal/model/dto/request"
+	"github.com/tangwy-t/uni-core/internal/model/entity"
 
 	"gorm.io/gorm"
 )

@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tangwy-t/webmanager-server/internal/model/entity"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/session"
+	"github.com/tangwy-t/uni-core/internal/model/entity"
+	"github.com/tangwy-t/uni-core/internal/pkg/session"
 )
 
 // 本文件是「角色/数据范围变更只清权限缓存、不吊销 token」（评审报告 #3）

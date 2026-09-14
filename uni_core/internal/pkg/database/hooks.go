@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"sync/atomic"
 
-	"github.com/tangwy-t/webmanager-server/internal/pkg/contextkeys"
+	"github.com/tangwy-t/uni-core/internal/pkg/contextkeys"
 
 	sf "github.com/bwmarrin/snowflake"
 	"gorm.io/gorm"

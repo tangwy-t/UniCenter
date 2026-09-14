@@ -6,9 +6,9 @@ import (
 	"testing"
 
 	"github.com/glebarez/sqlite"
-	"github.com/tangwy-t/webmanager-server/internal/model/entity"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/database"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/datascope"
+	"github.com/tangwy-t/uni-core/internal/model/entity"
+	"github.com/tangwy-t/uni-core/internal/pkg/database"
+	"github.com/tangwy-t/uni-core/internal/pkg/datascope"
 	"gorm.io/gorm"
 )
 

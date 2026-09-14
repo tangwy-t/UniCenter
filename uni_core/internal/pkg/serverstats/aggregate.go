@@ -3,8 +3,8 @@ package serverstats
 import (
 	"time"
 
-	"github.com/tangwy-t/webmanager-server/internal/pkg/metricshistory"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/util"
+	"github.com/tangwy-t/uni-core/internal/pkg/metricshistory"
+	"github.com/tangwy-t/uni-core/internal/pkg/util"
 )
 
 // bucketAcc 聚合单个时间桶的中间状态。

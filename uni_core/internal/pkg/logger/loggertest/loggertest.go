@@ -3,8 +3,8 @@
 package loggertest
 
 import (
-	"github.com/tangwy-t/webmanager-server/internal/pkg/config"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/logger"
+	"github.com/tangwy-t/uni-core/internal/pkg/config"
+	"github.com/tangwy-t/uni-core/internal/pkg/logger"
 )
 
 // New returns a debug-level Logger suitable for use in unit tests.

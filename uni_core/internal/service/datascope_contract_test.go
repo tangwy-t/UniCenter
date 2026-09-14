@@ -3,9 +3,9 @@ package service
 import (
 	"testing"
 
-	"github.com/tangwy-t/webmanager-server/internal/model/entity"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/datascope"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/logger"
+	"github.com/tangwy-t/uni-core/internal/model/entity"
+	"github.com/tangwy-t/uni-core/internal/pkg/datascope"
+	"github.com/tangwy-t/uni-core/internal/pkg/logger"
 )
 
 // TestDimensionResolverCoverage 注册端(entity.ScopeEntities 规则维度)

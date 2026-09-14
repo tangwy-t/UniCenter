@@ -1,6 +1,6 @@
 package request
 
-import "github.com/tangwy-t/webmanager-server/internal/pkg/util"
+import "github.com/tangwy-t/uni-core/internal/pkg/util"
 
 // MenuQuery holds the query parameters for menu listing.
 type MenuQuery struct {

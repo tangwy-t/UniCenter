@@ -6,7 +6,7 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 
-	"github.com/tangwy-t/webmanager-server/internal/pkg/metricshistory"
+	"github.com/tangwy-t/uni-core/internal/pkg/metricshistory"
 )
 
 // HistoryStore 服务器监控历史的 Redis 滚动窗口实现。

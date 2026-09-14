@@ -3,8 +3,8 @@ package ws
 import (
 	"context"
 	"encoding/json"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/contextkeys"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/logger"
+	"github.com/tangwy-t/uni-core/internal/pkg/contextkeys"
+	"github.com/tangwy-t/uni-core/internal/pkg/logger"
 	"sync"
 	"time"
 

@@ -6,11 +6,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tangwy-t/webmanager-server/internal/model/dto/request"
-	"github.com/tangwy-t/webmanager-server/internal/model/entity"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/jwt"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/logger"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/session"
+	"github.com/tangwy-t/uni-core/internal/model/dto/request"
+	"github.com/tangwy-t/uni-core/internal/model/entity"
+	"github.com/tangwy-t/uni-core/internal/pkg/jwt"
+	"github.com/tangwy-t/uni-core/internal/pkg/logger"
+	"github.com/tangwy-t/uni-core/internal/pkg/session"
 )
 
 // errStub 用于模拟 Redis 故障。

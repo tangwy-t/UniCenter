@@ -1,7 +1,7 @@
 package entity
 
 import (
-	"github.com/tangwy-t/webmanager-server/internal/pkg/datascope/rule"
+	"github.com/tangwy-t/uni-core/internal/pkg/datascope/rule"
 	"time"
 )
 
