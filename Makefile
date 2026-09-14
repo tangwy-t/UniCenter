@@ -17,6 +17,7 @@ SHELL := /bin/bash
 # ── 目录 ────────────────────────────────────────────────────
 SERVER_DIR     := uni_core
 WEB_DIR        := uni_console
+PROTO_DIR      := uni_protocol
 
 # ── Go 模块与版本注入 ───────────────────────────────────────
 GO_MODULE      := github.com/tangwy-t/UniCenter/uni_core
@@ -49,8 +50,10 @@ SWAG_VERSION   ?= v1.16.6
 .PHONY: help all \
         uni_core-run uni_core-build uni_core-test uni_core-lint uni_core-vet uni_core-fmt \
         uni_core-swagger uni_core-clean \
+        uni_protocol-test uni_protocol-vet uni_protocol-lint uni_protocol-fmt \
+        uni_protocol-deps uni_protocol-contract uni_protocol-fuzz \
         uni_console-install uni_console-dev uni_console-build uni_console-serve uni_console-test uni_console-lint uni_console-fix uni_console-fmt \
-        test lint fmt build run clean \
+        test lint fmt build run clean contract \
         docker-build docker-up docker-down docker-logs docker-ps \
         docker-build-tracing docker-up-tracing docker-down-tracing
 
@@ -60,6 +63,7 @@ SWAG_VERSION   ?= v1.16.6
 help: ## 显示本帮助
 	@printf "UniCenter 统一构建入口\n\n"
 	@printf "后端(uni_core) : make uni_core-run | uni_core-build | uni_core-test | uni_core-lint | uni_core-vet | uni_core-fmt | uni_core-swagger | uni_core-clean\n"
+	@printf "协议(uni_protocol)   : make uni_protocol-test | uni_protocol-lint | uni_protocol-fmt | uni_protocol-contract | uni_protocol-fuzz\n"
 	@printf "前端(uni_console)    : make uni_console-install | uni_console-dev | uni_console-build | uni_console-serve | uni_console-test | uni_console-lint | uni_console-fix | uni_console-fmt\n"
 	@printf "全量         : make all | test | lint | fmt | build | run | clean\n"
 	@printf "Docker       : make docker-build | docker-up | docker-down | docker-logs | docker-ps\n"
@@ -103,6 +107,50 @@ uni_core-swagger: ## 后端重新生成 swagger 文档(docs/)
 uni_core-clean: ## 清理后端产物(bin/ 与 docs/)
 	rm -rf $(SERVER_DIR)/bin/ $(SERVER_DIR)/docs/
 
+## ──────────────────────────────────────────────────────────
+## 协议契约 uni_protocol
+## ───────────────────────────────────────────────────────────
+# 本仓库不使用 GitHub Actions(CI 工作流已移除),原先挂在 CI 上的契约门禁
+# 全部落到这里:一条 `make uni_protocol-contract` 跑完形状漂移守卫、单源双向
+# 守卫、未知字段容忍、golden 回环与零第三方依赖断言。
+
+uni_protocol-test: ## 协议模块单元测试(go test -race)
+	cd $(PROTO_DIR) && go test ./... -race -count=1
+
+uni_protocol-vet: ## 协议模块 go vet
+	cd $(PROTO_DIR) && go vet ./...
+
+# 与 uni_core-lint 同理:优先 golangci-lint,未安装时降级 go vet;
+# 显式 if/else 分支,避免 lint 非零退出被 vet 成功掩盖。
+uni_protocol-lint: ## 协议模块静态检查(golangci-lint,缺省降级 go vet)
+	@cd $(PROTO_DIR) && \
+	if command -v golangci-lint >/dev/null 2>&1; then \
+		golangci-lint run ./...; \
+	else \
+		echo "golangci-lint 未安装,降级 go vet"; \
+		go vet ./...; \
+	fi
+
+uni_protocol-fmt: ## 协议模块 gofmt 格式化(直接写回)
+	cd $(PROTO_DIR) && gofmt -l -w .
+
+# 零依赖断言:go.work 含 uni_core,工作区模式下 `go list -m all` 会列出整个
+# 工作区依赖图,不能用它判断本模块依赖;改为按包的依赖模块过滤自身后必须为空。
+uni_protocol-deps: ## 断言协议模块零第三方依赖
+	@cd $(PROTO_DIR) && \
+	ext=$$(go list -f '{{if .Module}}{{.Module.Path}}{{end}}' -deps ./... | sed '/^$$/d' | grep -v '^github.com/tangwy-t/UniCenter/uni_protocol$$' | sort -u); \
+	if [ -n "$$ext" ]; then \
+		echo "uni_protocol 必须零第三方依赖,实际依赖:"; echo "$$ext"; exit 1; \
+	fi; \
+	echo "uni_protocol 零第三方依赖 ✓"
+
+uni_protocol-contract: uni_protocol-deps ## 协议契约门禁(形状漂移+单源守卫+golden+零依赖)
+	cd $(PROTO_DIR) && go test ./... -count=1 -v -run 'TestJSONTagConventions|TestUnknownFieldsAreTolerated|TestShapeDriftAdditiveOnly|TestGoldenFilesRoundTrip|TestRegistryIsCompleteAndConsistent|TestVersionsAreConsistent|TestCloseCodesAreExhaustivelyMapped|TestSnapshotDTORegistryCoversAllPayloads'
+
+uni_protocol-fuzz: ## 协议模块模糊测试短跑(Decode + Encode 两个目标)
+	cd $(PROTO_DIR) && go test ./... -run FuzzDecodeEnvelope -fuzz FuzzDecodeEnvelope -fuzztime 10s
+	cd $(PROTO_DIR) && go test ./... -run FuzzEncode -fuzz FuzzEncode -fuzztime 10s
+
 ## ───────────────────────────────────────────────────────────
 ## 前端 uni_console
 ## ───────────────────────────────────────────────────────────
@@ -139,11 +187,13 @@ build: uni_core-build uni_console-build ## 同 all
 
 run: uni_core-run ## 运行后端(带前端时请配合 uni_console-dev)
 
-test: uni_core-test uni_console-test ## 全量测试(uni_core + uni_console)
+test: uni_core-test uni_protocol-test uni_console-test ## 全量测试(uni_core + uni_protocol + uni_console)
 
-lint: uni_core-lint uni_console-lint ## 全量静态检查(uni_core + uni_console)
+lint: uni_core-lint uni_protocol-lint uni_console-lint ## 全量静态检查(uni_core + uni_protocol + uni_console)
 
-fmt: uni_core-fmt uni_console-fmt ## 全量格式化(uni_core + uni_console)
+fmt: uni_core-fmt uni_protocol-fmt uni_console-fmt ## 全量格式化(uni_core + uni_protocol + uni_console)
+
+contract: uni_protocol-contract ## 契约门禁(当前仅协议模块)
 
 clean: uni_core-clean ## 清理(后端产物;前端 dist 请在 uni_console/ 内单独处理或全局 git clean)
 
