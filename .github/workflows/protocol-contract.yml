@@ -1,0 +1,44 @@
+name: protocol-contract
+
+on:
+  push:
+    paths:
+      - 'uni_protocol/**'
+      - 'go.work'
+      - '.github/workflows/protocol-contract.yml'
+  pull_request:
+    paths:
+      - 'uni_protocol/**'
+      - 'go.work'
+      - '.github/workflows/protocol-contract.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
+      - name: 单元测试（含 -race）
+        working-directory: uni_protocol
+        run: go test ./... -race
+
+      - name: 模糊测试短跑
+        working-directory: uni_protocol
+        run: go test ./... -run FuzzDecodeEnvelope -fuzz FuzzDecodeEnvelope -fuzztime 10s
+
+      - name: 零依赖校验
+        working-directory: uni_protocol
+        run: |
+          deps=$(go list -m all | tail -n +2 | wc -l)
+          if [ "$deps" -ne 0 ]; then
+            echo "uni_protocol 必须零第三方依赖，实际 $deps 个："
+            go list -m all
+            exit 1
+          fi
+
+      - name: 契约形状守护
+        working-directory: uni_protocol
+        run: go test ./... -run 'TestJSONTagConventions|TestRegistryIsCompleteAndConsistent|TestUnknownFieldsAreTolerated|TestGoldenFilesRoundTrip' -v
