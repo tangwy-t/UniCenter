@@ -1,0 +1,1 @@
+{"v":1,"id":"1700000000003","type":"core.hello_ack","ts":1700000000003,"data":{"accepted":true,"device_id":"1234567890123456789","agent_token":"ERASE-ME","report_interval":10,"server_time":1700000000003,"v":1}}

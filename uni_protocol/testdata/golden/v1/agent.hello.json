@@ -1,0 +1,1 @@
+{"v":1,"id":"1700000000002","type":"agent.hello","ts":1700000000002,"data":{"instance_id":"6f1c0b2e-0000-4000-8000-000000000001","hostname":"web-01","os":"linux","arch":"amd64","agent_version":"0.1.0","enroll_token":"ERASE-ME"}}
