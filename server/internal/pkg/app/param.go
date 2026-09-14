@@ -5,7 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/tangwy-t/webmanager-server/internal/pkg/apperror"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/apperror"
 )
 
 // Uint64Param 解析路径参数为 uint64 并在失败时写 400 响应。

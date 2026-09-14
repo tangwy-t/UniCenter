@@ -6,10 +6,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/tangwy-t/webmanager-server/internal/model/dto/response"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/app"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/apperror"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/database"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/model/dto/response"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/app"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/apperror"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/database"
 )
 
 // SQLMonitorServiceInterface 由 handler/interfaces.go 迁移至此:接口定义在消费方(handler),

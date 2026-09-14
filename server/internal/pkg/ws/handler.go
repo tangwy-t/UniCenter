@@ -1,7 +1,7 @@
 package ws
 
 import (
-	"github.com/tangwy-t/webmanager-server/internal/pkg/logger"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/logger"
 	"net"
 	"net/http"
 	"net/url"

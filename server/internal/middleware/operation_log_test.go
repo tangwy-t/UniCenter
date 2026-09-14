@@ -10,11 +10,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/tangwy-t/webmanager-server/internal/model/entity"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/apperror"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/contextkeys"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/datascope"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/logger"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/model/entity"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/apperror"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/contextkeys"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/datascope"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/logger"
 )
 
 // captureOpLogService captures operation log entries created by the middleware.

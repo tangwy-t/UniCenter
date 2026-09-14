@@ -10,9 +10,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/tangwy-t/webmanager-server/internal/model/dto/request"
-	"github.com/tangwy-t/webmanager-server/internal/model/dto/response"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/apperror"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/model/dto/request"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/model/dto/response"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/apperror"
 )
 
 // ── 测试替身 ────────────────────────────────────────────

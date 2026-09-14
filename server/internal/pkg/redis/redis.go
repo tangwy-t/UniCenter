@@ -4,9 +4,9 @@ package redis
 import (
 	"context"
 	"fmt"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/config"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/lifecycle"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/logger"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/config"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/lifecycle"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/logger"
 	"time"
 
 	"go.uber.org/zap"

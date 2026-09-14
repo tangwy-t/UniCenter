@@ -1,9 +1,9 @@
 package request
 
 import (
-	"github.com/tangwy-t/webmanager-server/internal/pkg/app"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/app"
 
-	"github.com/tangwy-t/webmanager-server/internal/pkg/util"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/util"
 )
 
 type NoticeQuery struct {

@@ -2,8 +2,8 @@ package repository
 
 import (
 	"context"
-	"github.com/tangwy-t/webmanager-server/internal/model/entity"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/datascope"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/model/entity"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/datascope"
 	"time"
 
 	"gorm.io/gorm"

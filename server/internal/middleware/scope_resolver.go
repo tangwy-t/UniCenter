@@ -1,8 +1,8 @@
 package middleware
 
 import (
-	"github.com/tangwy-t/webmanager-server/internal/pkg/datascope"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/jwt"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/datascope"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/jwt"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"

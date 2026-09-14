@@ -4,10 +4,10 @@ import (
 	"context"
 	"testing"
 
-	"github.com/tangwy-t/webmanager-server/internal/model/dto/request"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/logger"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/redis/cache"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/util"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/model/dto/request"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/logger"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/redis/cache"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/util"
 )
 
 // 本文件是「JWT 密钥经缓存管理接口泄露」（评审报告 #2）修复后的回归验证。

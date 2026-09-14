@@ -11,8 +11,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/tangwy-t/webmanager-server/internal/pkg/logger/loggertest"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/serverstats"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/logger/loggertest"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/serverstats"
 )
 
 // 采样协程应发布缓存快照,HTTP 请求读到完整指标。

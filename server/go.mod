@@ -1,4 +1,4 @@
-module github.com/tangwy-t/webmanager-server
+module github.com/tangwy-t/WebManagerFramework/server
 
 go 1.26
 

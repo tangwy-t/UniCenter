@@ -1,7 +1,7 @@
 package middleware
 
 import (
-	"github.com/tangwy-t/webmanager-server/internal/pkg/contextkeys"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/contextkeys"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"

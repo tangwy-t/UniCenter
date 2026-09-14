@@ -10,8 +10,8 @@ import (
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 
-	"github.com/tangwy-t/webmanager-server/internal/model/entity"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/datascope"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/model/entity"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/datascope"
 )
 
 func newScopeTestDB(t *testing.T) *gorm.DB {

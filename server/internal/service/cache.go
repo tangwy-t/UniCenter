@@ -4,12 +4,12 @@ import (
 	"context"
 	"errors"
 
-	"github.com/tangwy-t/webmanager-server/internal/model/dto/request"
-	"github.com/tangwy-t/webmanager-server/internal/model/dto/response"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/apperror"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/logger"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/redis/cache"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/util"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/model/dto/request"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/model/dto/response"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/apperror"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/logger"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/redis/cache"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/util"
 
 	"go.uber.org/zap"
 )

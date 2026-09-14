@@ -3,7 +3,7 @@ package service
 import (
 	"errors"
 
-	"github.com/tangwy-t/webmanager-server/internal/pkg/apperror"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/apperror"
 	"gorm.io/gorm"
 )
 

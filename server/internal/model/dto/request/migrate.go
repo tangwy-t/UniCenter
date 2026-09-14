@@ -1,6 +1,6 @@
 package request
 
-import "github.com/tangwy-t/webmanager-server/internal/pkg/util"
+import "github.com/tangwy-t/WebManagerFramework/server/internal/pkg/util"
 
 // MigrateFilesReq is the request body for file migration.
 type MigrateFilesReq struct {

@@ -1,8 +1,8 @@
 package request
 
 import (
-	"github.com/tangwy-t/webmanager-server/internal/pkg/app"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/util"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/app"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/util"
 )
 
 // OnlineUserQuery 在线用户列表查询参数(keyword 匹配 用户名/姓名/IP)。

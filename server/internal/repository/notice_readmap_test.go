@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tangwy-t/webmanager-server/internal/model/entity"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/util"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/model/entity"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/util"
 	"gorm.io/gorm"
 )
 

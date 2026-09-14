@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/tangwy-t/webmanager-server/internal/model/entity"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/apperror"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/model/entity"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/apperror"
 )
 
 // ── ID 存在性校验 ──────────────────────────────────────────────────

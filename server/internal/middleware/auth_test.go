@@ -8,9 +8,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/tangwy-t/webmanager-server/internal/pkg/contextkeys"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/jwt"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/logger"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/contextkeys"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/jwt"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/logger"
 )
 
 // stubSecretCfg 返回固定 JWT secret,满足 ConfigGetterInterface。

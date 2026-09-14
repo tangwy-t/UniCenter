@@ -4,9 +4,9 @@ import (
 	"context"
 	"strings"
 
-	"github.com/tangwy-t/webmanager-server/internal/model/dto/response"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/app"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/apperror"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/model/dto/response"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/app"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/apperror"
 
 	"github.com/gin-gonic/gin"
 )

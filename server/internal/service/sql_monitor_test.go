@@ -13,10 +13,10 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	goredis "github.com/redis/go-redis/v9"
 
-	"github.com/tangwy-t/webmanager-server/internal/model/dto/response"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/database"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/sqlhistory"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/util"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/model/dto/response"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/database"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/sqlhistory"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/util"
 )
 
 // newTestSQLStats 构造最小 SQLStats,写入两条记录供快照读取。

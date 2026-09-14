@@ -3,7 +3,7 @@ package migrations
 import (
 	"testing"
 
-	"github.com/tangwy-t/webmanager-server/internal/pkg/permission"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/permission"
 )
 
 // TestSeedPermsMatchPermissionRegistry 是权限码漂移守卫:种子菜单(menuDefinitions)

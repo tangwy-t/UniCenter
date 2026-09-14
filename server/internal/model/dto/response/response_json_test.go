@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/tangwy-t/webmanager-server/internal/pkg/util"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/util"
 )
 
 // bigID exceeds JavaScript's Number.MAX_SAFE_INTEGER (2^53-1). Every snowflake

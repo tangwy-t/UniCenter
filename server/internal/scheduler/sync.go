@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/tangwy-t/webmanager-server/internal/service"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/service"
 
 	"go.uber.org/zap"
 )

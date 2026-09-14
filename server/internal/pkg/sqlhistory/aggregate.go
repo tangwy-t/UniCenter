@@ -3,8 +3,8 @@ package sqlhistory
 import (
 	"time"
 
-	"github.com/tangwy-t/webmanager-server/internal/pkg/metricshistory"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/util"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/metricshistory"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/util"
 )
 
 // bucketAcc 聚合中间累加器。

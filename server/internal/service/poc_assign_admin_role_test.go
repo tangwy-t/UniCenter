@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/tangwy-t/webmanager-server/internal/model/dto/request"
-	"github.com/tangwy-t/webmanager-server/internal/model/entity"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/apperror"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/model/dto/request"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/model/entity"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/apperror"
 )
 
 // 本文件是「AssignRoles / Create 缺"admin 角色不可授"守卫」（评审报告 #5）

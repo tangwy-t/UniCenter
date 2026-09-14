@@ -3,9 +3,9 @@ package migrations
 import (
 	"gorm.io/gorm"
 
-	"github.com/tangwy-t/webmanager-server/internal/model/entity"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/migration"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/util"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/model/entity"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/migration"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/util"
 )
 
 func init() {

@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/tangwy-t/webmanager-server/internal/pkg/logger"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/logger"
 
 	"go.uber.org/zap"
 )

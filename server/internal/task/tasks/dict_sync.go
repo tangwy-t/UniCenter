@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/tangwy-t/webmanager-server/internal/service"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/service"
 )
 
 // DictSyncTask 字典缓存同步定时任务。

@@ -1,7 +1,7 @@
 package response
 
 import (
-	"github.com/tangwy-t/webmanager-server/internal/pkg/util"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/util"
 )
 
 // MenuResp is the response payload for a single menu record, supporting tree structure.

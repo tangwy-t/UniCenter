@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/tangwy-t/webmanager-server/internal/model/entity"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/apperror"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/storage"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/thumb"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/model/entity"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/apperror"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/storage"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/thumb"
 )
 
 const (

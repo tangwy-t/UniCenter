@@ -7,9 +7,9 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/datascope"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/jwt"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/logger"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/datascope"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/jwt"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/logger"
 )
 
 // stubAuthSvc 记录回源 ctx 是否携带 ScopeContext。

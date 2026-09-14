@@ -1,6 +1,6 @@
 package response
 
-import "github.com/tangwy-t/webmanager-server/internal/pkg/util"
+import "github.com/tangwy-t/WebManagerFramework/server/internal/pkg/util"
 
 // LoginResp is the response payload returned after a successful login.
 type LoginResp struct {

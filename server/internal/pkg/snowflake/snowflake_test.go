@@ -4,7 +4,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/tangwy-t/webmanager-server/internal/pkg/logger"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/logger"
 )
 
 // TestNewValidWorker workers 0 与 1023 均在合法范围内。

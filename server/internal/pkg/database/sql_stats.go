@@ -8,8 +8,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/tangwy-t/webmanager-server/internal/pkg/metricshistory"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/util"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/metricshistory"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/util"
 )
 
 // 操作类型索引

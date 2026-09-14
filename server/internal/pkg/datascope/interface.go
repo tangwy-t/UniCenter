@@ -3,7 +3,7 @@ package datascope
 import (
 	"context"
 
-	"github.com/tangwy-t/webmanager-server/internal/pkg/datascope/rule"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/datascope/rule"
 )
 
 // DataScopeable is re-exported from the rule package for backward compatibility.

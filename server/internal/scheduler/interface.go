@@ -2,9 +2,9 @@ package scheduler
 
 import (
 	"context"
-	"github.com/tangwy-t/webmanager-server/internal/model/entity"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/redis/pubsub"
-	"github.com/tangwy-t/webmanager-server/internal/task"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/model/entity"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/redis/pubsub"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/task"
 	"time"
 )
 

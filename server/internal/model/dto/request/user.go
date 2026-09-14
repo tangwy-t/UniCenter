@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/tangwy-t/webmanager-server/internal/pkg/app"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/app"
 
-	"github.com/tangwy-t/webmanager-server/internal/pkg/util"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/util"
 )
 
 // UserQuery holds the query parameters for paginated user listing.

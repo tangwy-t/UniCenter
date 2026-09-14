@@ -6,7 +6,7 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 
-	"github.com/tangwy-t/webmanager-server/internal/pkg/metricshistory"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/metricshistory"
 )
 
 // Store SQL 历史存储接口(消费方 service 定义)。

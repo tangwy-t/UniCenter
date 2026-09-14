@@ -2,7 +2,7 @@ package ws
 
 import (
 	"context"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/redis/pubsub"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/redis/pubsub"
 )
 
 type BrokerInterface interface {

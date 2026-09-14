@@ -1,7 +1,7 @@
 package datascope
 
 import (
-	"github.com/tangwy-t/webmanager-server/internal/pkg/logger"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/logger"
 )
 
 // ScopeResolver 是 scope 解析器，持有各维度 resolver 的映射。

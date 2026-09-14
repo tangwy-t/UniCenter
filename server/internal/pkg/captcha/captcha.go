@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/tangwy-t/webmanager-server/internal/pkg/apperror"
-	"github.com/tangwy-t/webmanager-server/internal/pkg/logger"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/apperror"
+	"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/logger"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"

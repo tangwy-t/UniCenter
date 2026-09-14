@@ -199,7 +199,7 @@ func hexOf(n int) string {
 
 func TestShortenFn(t *testing.T) {
 	cases := []struct{ in, want string }{
-		{"github.com/tangwy-t/webmanager-server/internal/pkg/ws.(*Client).WritePump", "pkg/ws.(*Client).WritePump"},
+		{"github.com/tangwy-t/WebManagerFramework/server/internal/pkg/ws.(*Client).WritePump", "pkg/ws.(*Client).WritePump"},
 		{"strings.(*genericReplacer).Replace", "strings.(*genericReplacer).Replace"},
 		{"github.com/go-sql-driver/mysql.(*mysqlConn).startWatcher.func1", "go-sql-driver/mysql.(*mysqlConn).startWatcher.func1"},
 		{"runtime.mallocgc", "runtime.mallocgc"},

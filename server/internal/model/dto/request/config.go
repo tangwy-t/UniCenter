@@ -1,6 +1,6 @@
 package request
 
-import "github.com/tangwy-t/webmanager-server/internal/pkg/app"
+import "github.com/tangwy-t/WebManagerFramework/server/internal/pkg/app"
 
 type ConfigQuery struct {
 	app.PageRequest

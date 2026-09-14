@@ -39,9 +39,9 @@ RUN VERSION="${VERSION:-docker}" && \
     COMMIT_HASH="${COMMIT_HASH:-unknown}" && \
     go build \
       -ldflags "-s -w \
-        -X 'github.com/tangwy-t/webmanager-server/internal/pkg/version.Version=${VERSION}' \
-        -X 'github.com/tangwy-t/webmanager-server/internal/pkg/version.BuildTime=${BUILD_TIME}' \
-        -X 'github.com/tangwy-t/webmanager-server/internal/pkg/version.CommitHash=${COMMIT_HASH}'" \
+        -X 'github.com/tangwy-t/WebManagerFramework/server/internal/pkg/version.Version=${VERSION}' \
+        -X 'github.com/tangwy-t/WebManagerFramework/server/internal/pkg/version.BuildTime=${BUILD_TIME}' \
+        -X 'github.com/tangwy-t/WebManagerFramework/server/internal/pkg/version.CommitHash=${COMMIT_HASH}'" \
       -o /out/server ./cmd/server
 
 # ---- 运行阶段 ----

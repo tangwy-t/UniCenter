@@ -1,6 +1,6 @@
 package entity
 
-import "github.com/tangwy-t/webmanager-server/internal/pkg/datascope/rule"
+import "github.com/tangwy-t/WebManagerFramework/server/internal/pkg/datascope/rule"
 
 type SysMenu struct {
 	BaseEntity
