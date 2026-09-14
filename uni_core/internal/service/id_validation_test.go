@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/tangwy-t/uni-core/internal/model/entity"
-	"github.com/tangwy-t/uni-core/internal/pkg/apperror"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/model/entity"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/apperror"
 )
 
 // ── ID 存在性校验 ──────────────────────────────────────────────────

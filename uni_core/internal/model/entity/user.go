@@ -3,7 +3,7 @@ package entity
 import (
 	"time"
 
-	"github.com/tangwy-t/uni-core/internal/pkg/datascope/rule"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/datascope/rule"
 )
 
 type SysUser struct {

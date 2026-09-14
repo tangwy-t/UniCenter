@@ -24,7 +24,7 @@ func TestGenPackageSortsAndEmitsStably(t *testing.T) {
 import (
 	"time"
 
-	"github.com/tangwy-t/uni-core/internal/pkg/util"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/util"
 )
 
 // UserInfoResp 登录用户信息。
@@ -44,7 +44,7 @@ type RoleBriefResp struct {
 `)
 	writeSample(t, dir, "user.go", `package response
 
-import "github.com/tangwy-t/uni-core/internal/pkg/util"
+import "github.com/tangwy-t/UniCenter/uni_core/internal/pkg/util"
 
 // UserResp 用户详情。
 type UserResp struct {

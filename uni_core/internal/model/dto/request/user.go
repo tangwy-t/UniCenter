@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/tangwy-t/uni-core/internal/pkg/app"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/app"
 
-	"github.com/tangwy-t/uni-core/internal/pkg/util"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/util"
 )
 
 // UserQuery holds the query parameters for paginated user listing.

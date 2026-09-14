@@ -1,6 +1,6 @@
 package request
 
-import "github.com/tangwy-t/uni-core/internal/pkg/util"
+import "github.com/tangwy-t/UniCenter/uni_core/internal/pkg/util"
 
 // MigrateFilesReq is the request body for file migration.
 type MigrateFilesReq struct {

@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/tangwy-t/uni-core/internal/model/dto/request"
-	"github.com/tangwy-t/uni-core/internal/model/entity"
-	"github.com/tangwy-t/uni-core/internal/pkg/apperror"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/request"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/model/entity"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/apperror"
 )
 
 // 本文件是「角色 Update 缺 admin 守卫 + 全量批量赋值 → 竖直提权」

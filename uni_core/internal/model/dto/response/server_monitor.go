@@ -1,6 +1,6 @@
 package response
 
-import "github.com/tangwy-t/uni-core/internal/pkg/util"
+import "github.com/tangwy-t/UniCenter/uni_core/internal/pkg/util"
 
 // ServerMonitorResp is the top-level response for /api/v1/monitor/server.
 type ServerMonitorResp struct {

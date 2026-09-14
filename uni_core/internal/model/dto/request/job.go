@@ -1,6 +1,6 @@
 package request
 
-import "github.com/tangwy-t/uni-core/internal/pkg/app"
+import "github.com/tangwy-t/UniCenter/uni_core/internal/pkg/app"
 
 // JobQuery 定时任务列表查询参数。
 type JobQuery struct {

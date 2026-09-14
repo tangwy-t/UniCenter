@@ -1,3 +1,3 @@
-module github.com/tangwy-t/uni-protocol
+module github.com/tangwy-t/UniCenter/uni_protocol
 
 go 1.26

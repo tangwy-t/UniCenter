@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/gorilla/websocket"
-	"github.com/tangwy-t/uni-core/internal/pkg/contextkeys"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/contextkeys"
 )
 
 // TestClientIdentityUsesContextkeys ws 客户端身份必须落在 contextkeys.UserID,

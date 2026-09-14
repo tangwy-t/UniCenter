@@ -1,8 +1,8 @@
 package request
 
 import (
-	"github.com/tangwy-t/uni-core/internal/pkg/app"
-	"github.com/tangwy-t/uni-core/internal/pkg/util"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/app"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/util"
 )
 
 // FileQuery 文件列表查询参数。

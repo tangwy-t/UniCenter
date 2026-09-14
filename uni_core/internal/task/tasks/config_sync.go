@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/tangwy-t/uni-core/internal/model/entity"
-	"github.com/tangwy-t/uni-core/internal/service"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/model/entity"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/service"
 )
 
 // ConfigSyncTask 配置缓存同步定时任务。

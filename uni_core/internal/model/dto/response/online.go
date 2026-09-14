@@ -1,6 +1,6 @@
 package response
 
-import "github.com/tangwy-t/uni-core/internal/pkg/util"
+import "github.com/tangwy-t/UniCenter/uni_core/internal/pkg/util"
 
 // OnlineSession 是聚合成一行的"逻辑会话"(同一用户同一设备)。
 type OnlineSession struct {

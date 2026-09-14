@@ -1,4 +1,4 @@
-module github.com/tangwy-t/uni-core
+module github.com/tangwy-t/UniCenter/uni_core
 
 go 1.26
 

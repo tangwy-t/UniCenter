@@ -3,7 +3,7 @@
 // 24h 固定保留、跨后端重启不丢。
 package sqlhistory
 
-import "github.com/tangwy-t/uni-core/internal/pkg/util"
+import "github.com/tangwy-t/UniCenter/uni_core/internal/pkg/util"
 
 // historyKey Redis 列表 key:当前单实例部署,全局唯一。
 const historyKey = "monitor:sql:history"

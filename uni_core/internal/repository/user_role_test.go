@@ -5,12 +5,12 @@ import (
 	"testing"
 
 	"github.com/glebarez/sqlite"
-	"github.com/tangwy-t/uni-core/internal/model/dto/request"
-	"github.com/tangwy-t/uni-core/internal/model/entity"
-	"github.com/tangwy-t/uni-core/internal/pkg/app"
-	"github.com/tangwy-t/uni-core/internal/pkg/database"
-	"github.com/tangwy-t/uni-core/internal/pkg/logger"
-	"github.com/tangwy-t/uni-core/internal/pkg/snowflake"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/request"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/model/entity"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/app"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/database"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/snowflake"
 	"gorm.io/gorm"
 )
 

@@ -1,6 +1,6 @@
 package entity
 
-import "github.com/tangwy-t/uni-core/internal/pkg/datascope"
+import "github.com/tangwy-t/UniCenter/uni_core/internal/pkg/datascope"
 
 // ScopeEntities 列出所有需要数据权限自动注入的实体。
 //

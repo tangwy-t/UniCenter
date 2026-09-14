@@ -8,8 +8,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/tangwy-t/uni-core/internal/pkg/metricshistory"
-	"github.com/tangwy-t/uni-core/internal/pkg/util"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/metricshistory"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/util"
 )
 
 // 操作类型索引

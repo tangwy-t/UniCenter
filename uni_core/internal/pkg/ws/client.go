@@ -3,8 +3,8 @@ package ws
 import (
 	"context"
 	"encoding/json"
-	"github.com/tangwy-t/uni-core/internal/pkg/contextkeys"
-	"github.com/tangwy-t/uni-core/internal/pkg/logger"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/contextkeys"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
 	"sync"
 	"time"
 

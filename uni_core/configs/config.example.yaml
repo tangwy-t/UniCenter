@@ -78,7 +78,7 @@ observability:
     enabled: false           # 是否启用分布式追踪
     endpoint: "localhost:4317" # OTLP gRPC collector 地址
     sampleRate: 0.1          # 采样率 (0.0-1.0)
-    serviceName: "uni-core" # 上报服务标识(留空回退模块名)
+    serviceName: "uni_core" # 上报服务标识(留空回退模块名)
   # pprof 启停与自动关闭时长不走此文件:由 DB 配置键
   # sys.pprof.enabled / sys.pprof.autoOffSeconds 控制(可热更,经 pprof API)。
 

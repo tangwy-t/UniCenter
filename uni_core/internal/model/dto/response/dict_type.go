@@ -1,7 +1,7 @@
 package response
 
 import (
-	"github.com/tangwy-t/uni-core/internal/pkg/util"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/util"
 )
 
 // DictTypeResp is the response DTO for a dictionary type.

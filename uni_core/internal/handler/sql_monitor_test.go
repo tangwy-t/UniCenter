@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tangwy-t/uni-core/internal/model/dto/response"
-	"github.com/tangwy-t/uni-core/internal/pkg/database"
-	"github.com/tangwy-t/uni-core/internal/pkg/util"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/response"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/database"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/util"
 )
 
 // TestToSQLStatsResponse_WireFormatUnchanged 锁定 /monitor/sql/stats 的

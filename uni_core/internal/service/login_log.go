@@ -4,13 +4,13 @@ import (
 	"context"
 	"time"
 
-	"github.com/tangwy-t/uni-core/internal/model/dto/request"
-	"github.com/tangwy-t/uni-core/internal/model/dto/response"
-	"github.com/tangwy-t/uni-core/internal/model/entity"
-	"github.com/tangwy-t/uni-core/internal/pkg/app"
-	"github.com/tangwy-t/uni-core/internal/pkg/apperror"
-	"github.com/tangwy-t/uni-core/internal/pkg/logger"
-	"github.com/tangwy-t/uni-core/internal/pkg/util"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/request"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/response"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/model/entity"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/app"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/apperror"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/util"
 )
 
 // LoginLogRepositoryInterface 由 service/interface.go 迁移至此:接口定义在消费方,

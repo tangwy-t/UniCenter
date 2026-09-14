@@ -7,10 +7,10 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/tangwy-t/uni-core/internal/model/dto/response"
-	"github.com/tangwy-t/uni-core/internal/pkg/database"
-	"github.com/tangwy-t/uni-core/internal/pkg/logger"
-	"github.com/tangwy-t/uni-core/internal/pkg/sqlhistory"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/response"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/database"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/sqlhistory"
 )
 
 // defaultSnapshotTTL 快照响应缓存的默认有效期。

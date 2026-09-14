@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tangwy-t/uni-core/internal/model/dto/request"
-	"github.com/tangwy-t/uni-core/internal/model/entity"
-	"github.com/tangwy-t/uni-core/internal/pkg/logger"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/request"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/model/entity"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
 )
 
 // 本文件是「先删物理文件后删元数据 → 坏元数据残留」（评审报告 #16）

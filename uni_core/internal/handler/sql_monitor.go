@@ -6,10 +6,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/tangwy-t/uni-core/internal/model/dto/response"
-	"github.com/tangwy-t/uni-core/internal/pkg/app"
-	"github.com/tangwy-t/uni-core/internal/pkg/apperror"
-	"github.com/tangwy-t/uni-core/internal/pkg/database"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/response"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/app"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/apperror"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/database"
 )
 
 // SQLMonitorServiceInterface 由 handler/interfaces.go 迁移至此:接口定义在消费方(handler),

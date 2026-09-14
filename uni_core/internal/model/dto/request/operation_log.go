@@ -3,7 +3,7 @@ package request
 import (
 	"time"
 
-	"github.com/tangwy-t/uni-core/internal/pkg/app"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/app"
 )
 
 // OperationLogQuery holds the query parameters for paginated operation log listing.

@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/tangwy-t/uni-core/internal/service"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/service"
 )
 
 // DictSyncTask 字典缓存同步定时任务。

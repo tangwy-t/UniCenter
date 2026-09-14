@@ -4,11 +4,11 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/tangwy-t/uni-core/internal/pkg/app"
-	"github.com/tangwy-t/uni-core/internal/pkg/apperror"
-	"github.com/tangwy-t/uni-core/internal/pkg/contextkeys"
-	"github.com/tangwy-t/uni-core/internal/pkg/jwt"
-	"github.com/tangwy-t/uni-core/internal/pkg/logger"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/app"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/apperror"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/contextkeys"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/jwt"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
 	"go.uber.org/zap"
 )
 

@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tangwy-t/uni-core/internal/pkg/metricshistory"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/metricshistory"
 )
 
 func f64p(v float64) *float64 { return &v }

@@ -1,6 +1,6 @@
 package tasks
 
-import "github.com/tangwy-t/uni-core/internal/task"
+import "github.com/tangwy-t/UniCenter/uni_core/internal/task"
 
 // Deps 汇集各任务需要的依赖。装配点(wireup)只需提供依赖,
 // 任务清单本身在此维护 —— 新增任务时改这个文件,不动 DI 装配代码。

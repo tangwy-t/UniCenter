@@ -2,9 +2,9 @@ package scheduler
 
 import (
 	"context"
-	"github.com/tangwy-t/uni-core/internal/model/entity"
-	"github.com/tangwy-t/uni-core/internal/pkg/redis/pubsub"
-	"github.com/tangwy-t/uni-core/internal/task"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/model/entity"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/redis/pubsub"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/task"
 	"time"
 )
 

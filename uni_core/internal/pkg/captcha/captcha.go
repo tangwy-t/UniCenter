@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/tangwy-t/uni-core/internal/pkg/apperror"
-	"github.com/tangwy-t/uni-core/internal/pkg/logger"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/apperror"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"

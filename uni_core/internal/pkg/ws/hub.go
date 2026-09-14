@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	jwtPkg "github.com/tangwy-t/uni-core/internal/pkg/jwt"
-	"github.com/tangwy-t/uni-core/internal/pkg/logger"
+	jwtPkg "github.com/tangwy-t/UniCenter/uni_core/internal/pkg/jwt"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
 	"go.uber.org/zap"
 )
 

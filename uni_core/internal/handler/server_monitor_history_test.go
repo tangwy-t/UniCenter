@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tangwy-t/uni-core/internal/pkg/serverstats"
-	"github.com/tangwy-t/uni-core/internal/pkg/util"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/serverstats"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/util"
 )
 
 // TestServerHistoryAdapterPreservesJSONShape 适配器必须保形:

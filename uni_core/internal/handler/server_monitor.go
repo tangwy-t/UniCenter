@@ -15,13 +15,13 @@ import (
 	"github.com/shirou/gopsutil/v3/mem"
 	"go.uber.org/zap"
 
-	"github.com/tangwy-t/uni-core/internal/model/dto/response"
-	"github.com/tangwy-t/uni-core/internal/pkg/app"
-	"github.com/tangwy-t/uni-core/internal/pkg/apperror"
-	"github.com/tangwy-t/uni-core/internal/pkg/logger"
-	"github.com/tangwy-t/uni-core/internal/pkg/serverstats"
-	"github.com/tangwy-t/uni-core/internal/pkg/util"
-	"github.com/tangwy-t/uni-core/internal/pkg/version"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/response"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/app"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/apperror"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/serverstats"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/util"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/version"
 )
 
 // defaultSampleInterval 后台采样协程的默认采集节奏。

@@ -2,7 +2,7 @@ package ws
 
 import (
 	"context"
-	"github.com/tangwy-t/uni-core/internal/pkg/redis/pubsub"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/redis/pubsub"
 )
 
 type BrokerInterface interface {

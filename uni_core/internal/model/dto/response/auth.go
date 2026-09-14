@@ -1,6 +1,6 @@
 package response
 
-import "github.com/tangwy-t/uni-core/internal/pkg/util"
+import "github.com/tangwy-t/UniCenter/uni_core/internal/pkg/util"
 
 // LoginResp is the response payload returned after a successful login.
 type LoginResp struct {

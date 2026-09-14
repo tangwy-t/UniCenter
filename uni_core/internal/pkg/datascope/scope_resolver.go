@@ -1,7 +1,7 @@
 package datascope
 
 import (
-	"github.com/tangwy-t/uni-core/internal/pkg/logger"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
 )
 
 // ScopeResolver 是 scope 解析器，持有各维度 resolver 的映射。

@@ -3,7 +3,7 @@ package datascope
 import (
 	"context"
 
-	"github.com/tangwy-t/uni-core/internal/pkg/datascope/rule"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/datascope/rule"
 )
 
 // DataScopeable is re-exported from the rule package for backward compatibility.

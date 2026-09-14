@@ -1,6 +1,6 @@
 package entity
 
-import "github.com/tangwy-t/uni-core/internal/pkg/datascope/rule"
+import "github.com/tangwy-t/UniCenter/uni_core/internal/pkg/datascope/rule"
 
 type SysDept struct {
 	BaseEntity

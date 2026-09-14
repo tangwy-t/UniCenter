@@ -19,7 +19,7 @@ SERVER_DIR     := uni_core
 WEB_DIR        := uni_console
 
 # ── Go 模块与版本注入 ───────────────────────────────────────
-GO_MODULE      := github.com/tangwy-t/uni-core
+GO_MODULE      := github.com/tangwy-t/UniCenter/uni_core
 # 用 ?= 允许 CI/命令行覆盖;但 ?= 对「已定义但为空」的环境变量不会赋值,
 # 故追加 strip 空值兜底,保证空值也回退到 git/date 推算,避免注入 empty。
 VERSION       ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")

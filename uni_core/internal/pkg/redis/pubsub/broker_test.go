@@ -9,8 +9,8 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	goredis "github.com/redis/go-redis/v9"
 
-	"github.com/tangwy-t/uni-core/internal/pkg/lifecycle"
-	"github.com/tangwy-t/uni-core/internal/pkg/logger"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/lifecycle"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
 )
 
 // fakeLC 忽略清理注册,满足 ManagerInterface。

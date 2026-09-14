@@ -1,7 +1,7 @@
 package middleware
 
 import (
-	"github.com/tangwy-t/uni-core/internal/pkg/contextkeys"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/contextkeys"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"

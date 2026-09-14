@@ -14,7 +14,7 @@ import (
 	"go.uber.org/zap"
 	gormlogger "gorm.io/gorm/logger"
 
-	"github.com/tangwy-t/uni-core/internal/pkg/contextkeys"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/contextkeys"
 )
 
 var (
@@ -84,7 +84,7 @@ func (l *ZapGormLogger) Trace(ctx context.Context, begin time.Time, fc func() (s
 	table := extractTable(sql)
 
 	// ── OpenTelemetry SQL Span ──────────────────────────────────
-	ctx, span := otel.Tracer("github.com/tangwy-t/uni-core/internal/pkg/database").Start(ctx, "SQL "+op+" "+table,
+	ctx, span := otel.Tracer("github.com/tangwy-t/UniCenter/uni_core/internal/pkg/database").Start(ctx, "SQL "+op+" "+table,
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithTimestamp(begin),
 	)

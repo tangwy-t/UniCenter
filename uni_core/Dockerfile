@@ -39,9 +39,9 @@ RUN VERSION="${VERSION:-docker}" && \
     COMMIT_HASH="${COMMIT_HASH:-unknown}" && \
     go build \
       -ldflags "-s -w \
-        -X 'github.com/tangwy-t/uni-core/internal/pkg/version.Version=${VERSION}' \
-        -X 'github.com/tangwy-t/uni-core/internal/pkg/version.BuildTime=${BUILD_TIME}' \
-        -X 'github.com/tangwy-t/uni-core/internal/pkg/version.CommitHash=${COMMIT_HASH}'" \
+        -X 'github.com/tangwy-t/UniCenter/uni_core/internal/pkg/version.Version=${VERSION}' \
+        -X 'github.com/tangwy-t/UniCenter/uni_core/internal/pkg/version.BuildTime=${BUILD_TIME}' \
+        -X 'github.com/tangwy-t/UniCenter/uni_core/internal/pkg/version.CommitHash=${COMMIT_HASH}'" \
       -o /out/server ./cmd/server
 
 # ---- 运行阶段 ----

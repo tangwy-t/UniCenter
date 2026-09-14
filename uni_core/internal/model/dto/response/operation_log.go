@@ -1,7 +1,7 @@
 package response
 
 import (
-	"github.com/tangwy-t/uni-core/internal/pkg/util"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/util"
 )
 
 // OperationLogResp is the response payload for a single operation log record.

@@ -6,7 +6,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/tangwy-t/uni-core/internal/pkg/util"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/util"
 )
 
 // historyKey 历史采样点的 Redis list key(全局唯一;当前单实例部署)。

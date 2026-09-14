@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/tangwy-t/uni-core/internal/pkg/apperror"
-	"github.com/tangwy-t/uni-core/internal/pkg/util"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/apperror"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/util"
 )
 
 // validateIDsExist checks that every requested ID exists in the repository,

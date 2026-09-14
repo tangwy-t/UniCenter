@@ -1,6 +1,6 @@
 package request
 
-import "github.com/tangwy-t/uni-core/internal/pkg/app"
+import "github.com/tangwy-t/UniCenter/uni_core/internal/pkg/app"
 
 type ConfigQuery struct {
 	app.PageRequest

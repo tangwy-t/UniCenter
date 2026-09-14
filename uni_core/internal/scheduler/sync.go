@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/tangwy-t/uni-core/internal/service"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/service"
 
 	"go.uber.org/zap"
 )

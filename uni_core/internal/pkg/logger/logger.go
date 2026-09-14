@@ -4,8 +4,8 @@ package logger
 
 import (
 	"context"
-	"github.com/tangwy-t/uni-core/internal/pkg/config"
-	"github.com/tangwy-t/uni-core/internal/pkg/contextkeys"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/config"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/contextkeys"
 	"os"
 
 	"go.uber.org/zap"

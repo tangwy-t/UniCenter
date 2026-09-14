@@ -1,6 +1,6 @@
 package response
 
-import "github.com/tangwy-t/uni-core/internal/pkg/util"
+import "github.com/tangwy-t/UniCenter/uni_core/internal/pkg/util"
 
 // SQLHistoryPoint 单个时间桶的聚合指标(SQL 历史时序 HTTP 契约)。
 // JSON 字段与改造前的 database.HistoryPoint 完全一致。
