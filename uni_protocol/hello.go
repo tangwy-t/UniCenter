@@ -93,12 +93,13 @@ type HelloAck struct {
 // Validate 校验 HelloAck：accepted=true 必须有 device_id 且 report_interval 满足下限；
 // accepted=false 必须带 reject_reason。
 func (a *HelloAck) Validate() error {
+	// report_interval 是字段级约束：非 0 时必须 ≥2，与 accepted 取值无关。
+	if a.ReportInterval != 0 && a.ReportInterval < 2 {
+		return decodeErr(StagePayload, "report_interval", ErrInvalidPayload)
+	}
 	if a.Accepted {
 		if a.DeviceID == "" {
 			return decodeErr(StagePayload, "device_id", ErrMissingField)
-		}
-		if a.ReportInterval != 0 && a.ReportInterval < 2 {
-			return decodeErr(StagePayload, "report_interval", ErrInvalidPayload)
 		}
 		return nil
 	}

@@ -114,15 +114,16 @@ func TestDecodeTyped(t *testing.T) {
 }
 
 func TestDecodeTypedRejectsWrongDirection(t *testing.T) {
-	// core 收到 core.* 视为方向错误（回环/伪造）
+	// core 收到 core.* 视为方向错误（回环/伪造）：必须与「未知类型」可区分，
+	// 否则调用方无法把它映射成 CloseUnsupportedType(4003)。
 	ack := &HelloAck{Accepted: true, DeviceID: "1", ReportInterval: 10}
 	m, err := NewMessage("1", TypeCoreHelloAck, ack)
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, err = DecodeTypedFor(m, DirAgentToCore)
-	if !errors.Is(err, ErrUnknownType) {
-		t.Fatalf("方向不符应返回 ErrUnknownType，实际 %v", err)
+	if !errors.Is(err, ErrWrongDirection) {
+		t.Fatalf("方向不符应返回 ErrWrongDirection，实际 %v", err)
 	}
 	if _, err := DecodeTypedFor(m, DirCoreToAgent); err != nil {
 		t.Fatalf("方向相符不应失败: %v", err)

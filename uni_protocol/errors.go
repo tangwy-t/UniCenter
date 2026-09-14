@@ -15,6 +15,9 @@ var (
 	ErrUnsupportedVersion = errors.New("agentproto: unsupported protocol version")
 	// ErrUnknownType 表示请求解码一个未在注册表中登记的消息类型。
 	ErrUnknownType = errors.New("agentproto: unknown message type")
+	// ErrWrongDirection 表示消息方向与本端允许的方向不符（回环/伪造）。
+	// 与 ErrUnknownType 区分开：未知类型要「忽略并计数」，方向不符要关连接（CloseUnsupportedType）。
+	ErrWrongDirection = errors.New("agentproto: wrong message direction")
 	// ErrInvalidID 表示 id 不是合法的十进制无符号整数串。
 	ErrInvalidID = errors.New("agentproto: invalid id")
 	// ErrInvalidTimestamp 表示 ts 非法（缺失/非正/越界）。

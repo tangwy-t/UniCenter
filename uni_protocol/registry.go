@@ -64,11 +64,17 @@ func DecodeTyped(m *Message) (any, error) {
 }
 
 // DecodeTypedFor 在解码前额外校验本端允许的方向，用于拒绝回环/伪造消息。
-// 方向不符时返回 ErrUnknownType（对外表现为「我不认识这个类型」）。
+//
+// 「未知类型」与「方向不符」必须可区分：
+//   - 未知类型 → ErrUnknownType：调用方应「忽略并计数」，不断连（类型可演进的前提）；
+//   - 方向不符 → ErrWrongDirection：这是回环/伪造，调用方应用 CloseUnsupportedType 关连接。
 func DecodeTypedFor(m *Message, allowed Direction) (any, error) {
 	spec, ok := LookupType(m.Type)
-	if !ok || spec.Direction != allowed {
+	if !ok {
 		return nil, decodeErr(StageType, "type", ErrUnknownType)
+	}
+	if spec.Direction != allowed {
+		return nil, decodeErr(StageType, "type", ErrWrongDirection)
 	}
 	return decodeSpecPayload(spec, m)
 }
@@ -80,6 +86,13 @@ func decodeSpecPayload(spec TypeSpec, m *Message) (any, error) {
 	}
 	if err := m.DecodeData(out); err != nil {
 		return nil, err
+	}
+	// 载荷的语义校验必须在解码路径上生效，否则越界值（如 cpu_used_percent=-1）
+	// 会静默通过 DecodeTyped 落进下游存储，ErrInvalidPayload 也就永远不可达。
+	if v, ok := out.(interface{ Validate() error }); ok {
+		if err := v.Validate(); err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
 }

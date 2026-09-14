@@ -120,6 +120,8 @@ func (m *Message) Validate() error {
 		return decodeErr(StageEnvelope, "id", ErrMissingField)
 	case len(m.ID) > MaxIDLen:
 		return decodeErr(StageEnvelope, "id", ErrMalformed)
+	case !isDecimalID(m.ID):
+		return decodeErr(StageEnvelope, "id", ErrInvalidID)
 	}
 	switch {
 	case m.Type == "":
@@ -131,6 +133,21 @@ func (m *Message) Validate() error {
 		return decodeErr(StageEnvelope, "ts", ErrInvalidTimestamp)
 	}
 	return validateDataShape(m.Data)
+}
+
+// isDecimalID 报告 s 是否为非空的十进制无符号整数串。
+// 雪花 id 一律以十进制字符串上线（避免 JS 精度丢失），故契约层拒绝其它形态：
+// 这既让 ErrInvalidID 可达，也避免「看起来像 id 的任意串」进入日志与存储。
+func isDecimalID(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // isDataEmpty 把 data 缺失 / null / 空串统一视为空载荷。
