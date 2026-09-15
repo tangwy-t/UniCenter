@@ -14,6 +14,7 @@ import (
 
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/entity"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/agentmetrics"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/database"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/repository"
 )
@@ -42,14 +43,6 @@ type FlushResourceRepo interface {
 	ResolveID(ctx context.Context, deviceID uint64, kind, name string) (uint64, error)
 }
 
-// 配置键与文件名常量。
-const (
-	// configAgentReportInterval 是 agent 上报间隔（秒），CloseGrace 由它推导。
-	configAgentReportInterval = "sys.agent.reportInterval"
-	// defaultAgentReportIntervalSec 取 v008 种子的值（10s）。
-	defaultAgentReportIntervalSec = 10
-)
-
 // FlushStats 是一轮的统计（任务与测试都读它）。
 type FlushStats struct {
 	// DevicesScanned 是本轮枚举到的活跃设备数。
@@ -62,6 +55,20 @@ type FlushStats struct {
 	ResourcesUpserted int
 	// Errors 是本轮失败次数（每个失败桶/失败设备各 +1）。
 	Errors int
+}
+
+// accrue 把一批的读数并进累计值（回填按批跑时必须逐批累加，否则 stats 只反映最后一批）。
+//
+// 为什么不做成导出方法：它是两个内部读数的合并规则，不是给外部调用的能力面。
+// 逐字段相加而不是「取最大」：DevicesScanned/BucketsWritten 等在多批之间是**不相交**
+// 的集合（同一台设备只属于一批），相加才是全轮的真实读数。
+func (st FlushStats) accrue(part FlushStats) FlushStats {
+	st.DevicesScanned += part.DevicesScanned
+	st.BucketsWritten += part.BucketsWritten
+	st.BucketsSkipped += part.BucketsSkipped
+	st.ResourcesUpserted += part.ResourcesUpserted
+	st.Errors += part.Errors
+	return st
 }
 
 // AgentMetricsFlushService 把 Redis 热层落成 5min 指标行。
@@ -80,12 +87,22 @@ type AgentMetricsFlushService struct {
 	log     logger.LoggerInterface
 	// now 可注入（测试用固定时钟，区间直接可算）。
 	now func() time.Time
+	// backfillBatchDevices / pacing / sleep 是回填限速的三个参数（spec §7.1）：
+	// 批大小是常量（见 defaultBackfillBatchDevices 的依据），节奏可注入
+	// （WithBackfillPacing），sleep 可注入是为了让断言**观测**停顿而不是真的等它
+	// （照 WithClock 的先例：时间相关的东西必须能被替身观测）。
+	backfillBatchDevices int
+	pacing               time.Duration
+	sleep                func(time.Duration)
 }
 
 func NewAgentMetricsFlushService(raw FlushRawReader, metrics DeviceMetricWriter,
 	resources FlushResourceRepo, cfg AgentConfigGetter, log logger.LoggerInterface) *AgentMetricsFlushService {
 	return &AgentMetricsFlushService{
 		raw: raw, metrics: metrics, resources: resources, cfg: cfg, log: log, now: time.Now,
+		backfillBatchDevices: defaultBackfillBatchDevices,
+		pacing:               defaultBackfillPacing,
+		sleep:                time.Sleep,
 	}
 }
 
@@ -103,6 +120,18 @@ func (s *AgentMetricsFlushService) WithCursorStore(rdb goredis.Cmdable) *AgentMe
 func (s *AgentMetricsFlushService) WithClock(now func() time.Time) *AgentMetricsFlushService {
 	if now != nil {
 		s.now = now
+	}
+	return s
+}
+
+// WithBackfillPacing 覆盖回填的**批间停顿**（非正数 = 保持默认，同
+// WithEmptyHourGrace 的先例：「传 0」最可能的意思是「忘了填」，静默把节奏关掉
+// 等于让限速退化成一次性突发，那正是 spec §7.1 要避免的）。
+//
+// 批大小不在这里暴露：它是常量（defaultBackfillBatchDevices），理由见那里的注释。
+func (s *AgentMetricsFlushService) WithBackfillPacing(d time.Duration) *AgentMetricsFlushService {
+	if d > 0 {
+		s.pacing = d
 	}
 	return s
 }
@@ -136,18 +165,38 @@ func (s *AgentMetricsFlushService) Bootstrap(ctx context.Context) error {
 //
 // 返回的 error 是「本轮有失败」的汇总（sentinel：ErrFlushPartial），用于让任务层
 // 记日志/告警；**游标语义不受它影响** —— 失败设备的水位留在原处，下轮重试同一批桶。
+// 唯一的例外是「命中缺分区」（ErrMetricPartitionMissing）：那时本轮**立即中止**，
+// 因为故障域是整个集群的写入，继续跑只会把同一个错误刷 N 遍（spec §7.3）。
 func (s *AgentMetricsFlushService) FlushOnce(ctx context.Context) (FlushStats, error) {
-	var stats FlushStats
-	now := s.now()
-
 	devices, err := s.raw.Index(ctx)
 	if err != nil {
-		return stats, fmt.Errorf("agentmetrics flush: 枚举活跃设备失败: %w", err)
+		return FlushStats{}, fmt.Errorf("agentmetrics flush: 枚举活跃设备失败: %w", err)
 	}
-	stats.DevicesScanned = len(devices)
+	return s.flushDeviceSet(ctx, devices, s.closedBucketUpper())
+}
 
-	grace := s.closeGrace()
-	upper := alignDown(now.Add(-grace).Unix(), resolutionSeconds(agentmetrics.Resolution5m))
+// closedBucketUpper 返回已闭 5m 桶的半开上界：`alignDown(now − CloseGrace, 300)`。
+//
+// 一次算好、全设备共用（同一次刷新里所有设备看到的「现在已经闭到哪」必须一致，
+// 否则同一轮的设备之间会出现一个桶的相位差）。
+func (s *AgentMetricsFlushService) closedBucketUpper() int64 {
+	// 宽限的推导与 rollup 共用同一个函数（agentCloseGrace，见 agent_metrics_timing.go）：
+	// 两个档位的「当前桶何时算闭」是同一条数据链的上下游，绝不能各写一份。
+	return alignDown(s.now().Add(-agentCloseGrace(s.cfg)).Unix(),
+		resolutionSeconds(agentmetrics.Resolution5m))
+}
+
+// flushDeviceSet 是按**给定设备集合**跑一轮落库：常规 flush 与分批回填共用它。
+//
+// 为什么要抽出这个入口（而不是让 backfill 自己写循环调 flushDevice）：5m 是唯一真值
+// 来源，写路径只能有一条（见 backfill 的注释）。回填需要的是「按批、带节奏地跑标准写
+// 路径」，而不是另造一条写路径 —— 这个函数就是那个「标准写路径」的集合版本，
+// 批次边界由调用方决定，服务内部没有任何「回填专用」的行为。
+func (s *AgentMetricsFlushService) flushDeviceSet(ctx context.Context, devices []uint64,
+	upper int64) (FlushStats, error) {
+
+	var stats FlushStats
+	stats.DevicesScanned = len(devices)
 
 	failures := 0
 	for _, deviceID := range devices {
@@ -155,12 +204,24 @@ func (s *AgentMetricsFlushService) FlushOnce(ctx context.Context) (FlushStats, e
 		stats.BucketsWritten += written
 		stats.BucketsSkipped += skipped
 		stats.ResourcesUpserted += upserted
-		if ferr != nil {
-			failures++
-			stats.Errors++
-			s.log.Error("agentmetrics flush: 设备本轮落库失败，水位留在原处待下轮重试",
-				zap.Uint64("deviceId", deviceID), zap.Error(ferr))
+		if ferr == nil {
+			continue
 		}
+		failures++
+		stats.Errors++
+		if errors.Is(ferr, ErrMetricPartitionMissing) {
+			// P1：缺分区是整个集群的写入故障（同一分钟里所有设备一起失败），
+			// 不是某一台设备的问题 —— 继续跑其余设备只会把同一个错误刷 N 遍，
+			// 而每一遍都是必然失败的徒劳重试（spec §7.3「中止本轮，不做 500 次徒劳重试」）。
+			// 立即返回哨兵：任务层据此按 P1 告警，而不是当成「部分失败、下轮重试」。
+			s.log.Error("agentmetrics flush: 命中「分区缺失」（P1，整个集群的写入都受影响），本轮立即中止",
+				zap.Int("devicesScanned", stats.DevicesScanned),
+				zap.Int("devicesDone", stats.DevicesScanned-stats.Errors),
+				zap.Error(ferr))
+			return stats, ferr
+		}
+		s.log.Error("agentmetrics flush: 设备本轮落库失败，水位留在原处待下轮重试",
+			zap.Uint64("deviceId", deviceID), zap.Error(ferr))
 	}
 	if failures > 0 {
 		return stats, fmt.Errorf("%w: %d/%d 台设备落库失败（水位未推进，下轮重试）",
@@ -171,6 +232,15 @@ func (s *AgentMetricsFlushService) FlushOnce(ctx context.Context) (FlushStats, e
 
 // ErrFlushPartial 表示本轮有设备/桶失败（游标未推进，下轮重试同一批桶）。
 var ErrFlushPartial = errors.New("agentmetrics flush: 本轮部分落库失败")
+
+// ErrMetricPartitionMissing 表示写入命中了「没有任何分区能收下这一行」
+// （MySQL 1526 / PG 23514，spec §7.3 的「缺分区是硬失败」）。
+//
+// 为什么要有这个哨兵（而不是把驱动错误原样上抛）：两种失败的**处置完全不同** ——
+// 普通写失败是「这台设备下轮重试」，缺分区是「整个集群的写入都写不进去，
+// 必须 P1 告警 + 本轮立即中止 + 先跑分区对账」。任务层只有靠 errors.Is 才能区分它们，
+// 而按错误串匹配驱动报码是注定要漂移的（见 database.IsMissingPartition 的注释）。
+var ErrMetricPartitionMissing = errors.New("agentmetrics flush: 指标分区缺失（P1）")
 
 // ─ 单设备 ─────────────────────────────────────────────
 
@@ -223,6 +293,14 @@ func (s *AgentMetricsFlushService) flushDevice(ctx context.Context, deviceID uin
 		n, uerr := s.writeBucket(ctx, deviceID, b, wide, subs)
 		if uerr != nil {
 			// 写失败同样立即返回：水位留在轮初，下轮重试同一批桶。
+			//
+			// 但「缺分区」是**另一类**失败：它的故障域是整个集群（同一分钟里所有设备
+			// 一起失败），重试同一批桶一万次也不会成功。故这里把它摘成哨兵上抛，
+			// 由 flushDeviceSet 判 P1 并**中止整轮**（spec §7.3）。
+			if database.IsMissingPartition(uerr) {
+				return written, skipped, upserted, fmt.Errorf("%w: device=%d bucket=%d: %w",
+					ErrMetricPartitionMissing, deviceID, b, uerr)
+			}
 			return written, skipped, upserted, uerr
 		}
 		lastBucketed = b
@@ -452,19 +530,6 @@ func (s *AgentMetricsFlushService) writeCursor(ctx context.Context, deviceID uin
 // rewindCursor 回退水位（backfill 专用）：仅当 target 比当前值更旧时才写入。
 func (s *AgentMetricsFlushService) rewindCursor(ctx context.Context, deviceID uint64, target int64) (bool, error) {
 	return s.cursors.Rewind(ctx, deviceID, agentmetrics.Resolution5m, target)
-}
-
-// closeGrace 取 `reportInterval×2`：避免把**还在收数据**的当前桶写坏。
-//
-// 为什么是 2× 而不是 1×：10s 上报的桶在边界处最多可能有一条样例在途（网络抖动 +
-// agent 侧批量缓冲），1× 只留一个上报间隔等于没有余量。2× 是最小安全余量，
-// 代价是「当前桶延后一个 5min 才落库」—— 对 5min 栅格的消费方无感。
-func (s *AgentMetricsFlushService) closeGrace() time.Duration {
-	sec := s.cfg.GetInt(context.Background(), configAgentReportInterval, defaultAgentReportIntervalSec)
-	if sec <= 0 {
-		sec = defaultAgentReportIntervalSec
-	}
-	return time.Duration(sec) * 2 * time.Second
 }
 
 // resolutionSeconds 返回档位桶宽（秒），供区间计算使用。

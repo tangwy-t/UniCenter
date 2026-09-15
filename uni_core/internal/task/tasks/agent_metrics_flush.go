@@ -3,10 +3,12 @@ package tasks
 import (
 	"context"
 	"encoding/json"
+	"errors"
 
 	"go.uber.org/zap"
 
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/service"
 )
 
 // AgentMetricsFlushTask 把 Redis 热层里**已闭**的 5min 桶落成 device_metric_5m 行。
@@ -56,6 +58,16 @@ func (t *AgentMetricsFlushTask) Execute(ctx context.Context, params json.RawMess
 		zap.Int("errors", stats.Errors),
 	}
 	if err != nil {
+		if errors.Is(err, service.ErrMetricPartitionMissing) {
+			// P1：缺分区是**整个集群**的写入故障（spec §7.3），不是某一台设备的问题，
+			// 且**重试无用** —— 分区没建好之前每一轮都会失败。故这里把话说明白：
+			// 先让 agent-metrics-partition 对账补齐分区，再放行 flush。
+			// （日志级别与措辞是运维的告警规则入口：这条必须与「部分失败、下轮重试」
+			// 区分开，否则一次缺分区会被当成可自愈抖动。）
+			t.log.Error("agent-metrics-flush: P1 指标分区缺失，本轮已中止 —— 先跑分区对账(agent-metrics-partition)再放行 flush",
+				append(fields, zap.Error(err))...)
+			return err
+		}
 		t.log.Error("agent-metrics-flush: 本轮部分失败（失败设备的水位未推进，下轮重试同一批桶）",
 			append(fields, zap.Error(err))...)
 		return err

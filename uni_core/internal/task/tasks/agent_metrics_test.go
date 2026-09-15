@@ -269,6 +269,55 @@ func TestAgentMetricTasksPropagateServiceErrors(t *testing.T) {
 	}
 }
 
+// TestAgentMetricTasksLogMissingPartitionAsP1 钉住任务层**识别**缺分区哨兵：
+// 它不是「部分失败、下轮重试」，而是「P1 + 重试无用，先跑分区对账」。
+//
+// 为什么必须在任务层断言：哨兵只在服务层上抛是不够的 —— 任务层若把它当普通失败，
+// 运维看到的是一条「本轮部分失败（下轮重试）」的日志，而真实的处置要求完全不同
+// （分区没建好之前，每一轮都会以同样的方式失败；spec §7.3 把它定为 P1）。
+func TestAgentMetricTasksLogMissingPartitionAsP1(t *testing.T) {
+	// 两个任务都用**缺分区哨兵**作为服务返回值：任务在构造时固定 logger，
+	// 故构造器以捕获日志为参数（这样日志里的 P1 标注才能被断言）。
+	cases := []struct {
+		name string
+		// build 用给定的 logger 造任务（替身的错误固定为缺分区哨兵）。
+		build func(logger.LoggerInterface) task.Task
+	}{
+		{"flush", func(lg logger.LoggerInterface) task.Task {
+			return NewAgentMetricsFlushTask(&fakeAgentService{flushErr: service.ErrMetricPartitionMissing}, lg)
+		}},
+		{"backfill", func(lg logger.LoggerInterface) task.Task {
+			return NewAgentMetricsBackfillTask(&fakeAgentService{backfillErr: service.ErrMetricPartitionMissing}, lg)
+		}},
+	}
+	for _, c := range cases {
+		buf := &bytes.Buffer{}
+		core := zapcore.NewCore(zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig()),
+			zapcore.AddSync(buf), zapcore.DebugLevel)
+		lg, err := logger.NewWithCore(core)
+		if err != nil {
+			t.Fatalf("NewWithCore: %v", err)
+		}
+		tk := c.build(lg)
+
+		err = tk.Execute(context.Background(), nil)
+		if !errors.Is(err, service.ErrMetricPartitionMissing) {
+			t.Fatalf("%s 任务把缺分区哨兵换成了别的错误（告警无法按哨兵分派）：%v", c.name, err)
+		}
+		logs := buf.String()
+		if !strings.Contains(logs, "P1") {
+			t.Fatalf("%s 任务的日志没有标注 P1（缺分区会被当成可自愈抖动）：\n%s", c.name, logs)
+		}
+		if !strings.Contains(logs, "分区缺失") {
+			t.Fatalf("%s 任务的日志没有说明「分区缺失」（排障入口必须是可读的）：\n%s", c.name, logs)
+		}
+		// 缺分区不能被写成「下轮重试同一批桶」—— 那句话会让人以为等一轮就好。
+		if strings.Contains(logs, "下轮重试同一批桶") {
+			t.Fatalf("%s 任务把缺分区当成了「部分失败、下轮重试」：\n%s", c.name, logs)
+		}
+	}
+}
+
 // backfill 的 Bootstrap 失败同样要上抛（Redis 不可用时不能假装补齐成功）。
 func TestAgentMetricsBackfillTaskPropagatesBootstrapError(t *testing.T) {
 	fake := &fakeAgentService{bootstrapErr: errBoomBootstrap}

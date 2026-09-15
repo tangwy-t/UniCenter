@@ -3,11 +3,13 @@ package tasks
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"go.uber.org/zap"
 
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/service"
 )
 
 // AgentMetricsBackfillTask 补齐游标已经越过、但当时**没有数据**的那批已闭桶。
@@ -91,6 +93,14 @@ func (t *AgentMetricsBackfillTask) Execute(ctx context.Context, params json.RawM
 		zap.Int("errors", stats.Flush.Errors),
 	}
 	if err != nil {
+		if errors.Is(err, service.ErrMetricPartitionMissing) {
+			// 回放的写路径就是 flush 的写路径，故缺分区在这里的处置完全相同：
+			// P1 + 中止（重放会写回旧桶，而旧桶正是最可能落在「已被回收/未预建」的
+			// 分区上的那一批 —— spec §7.3 的「过去方向」）。
+			t.log.Error("agent-metrics-backfill: P1 指标分区缺失，本轮已中止 —— 先跑分区对账(agent-metrics-partition)再重放",
+				append(fields, zap.Error(err))...)
+			return err
+		}
 		t.log.Error("agent-metrics-backfill: 本轮部分失败（失败设备的水位未推进，下轮重试同一批桶）",
 			append(fields, zap.Error(err))...)
 		return err

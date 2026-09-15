@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/agenthub"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/ws"
 )
 
 // 本文件用**真实 TCP**（httptest.NewServer + gorilla 客户端）驱动未鉴权的 agent
@@ -319,6 +321,64 @@ func TestAgentWSOriginPolicyMatchesConsole(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("跨站 Origin 应返回 403，实际 %d", resp.StatusCode)
+	}
+}
+
+// TestAgentUpGraderSharesOriginCheckWithConsole 钉住「两处用的是**同一个函数**」。
+//
+// 缺陷本体：agent 侧的 Origin 判定曾经是 console 侧逐行复制的一份拷贝（注释还自称
+// 「复用同一套判定」）。拷贝的问题不是「当前不一致」，而是**改动会漏**：策略收紧时
+// 只改一边，另一边静默沿用旧策略，而两个端点挂在同一个 api 组上。
+//
+// 断言分三层，缺一层都能被绕过：
+//  1. **函数值同一**（reflect 取代码指针）：`agentUpGrader.CheckOrigin` 必须就是
+//     ws.CheckOrigin —— 这是「同一份实现」的直接证据。行为一致做不到这一点：
+//     两份拷贝当前恰好相同也会「行为一致」。
+//  2. **行为矩阵一致**：在若干 Origin 用例上两者的返回值必须逐个相同
+//     （防止将来有人把共享函数包一层再挂上去，指针相同但语义已被改写）。
+//  3. **策略本身的期望值**：用例带 want，避免「两边一起错」也算通过。
+func TestAgentUpGraderSharesOriginCheckWithConsole(t *testing.T) {
+	if agentUpGrader.CheckOrigin == nil {
+		t.Fatal("agent upGrader 没有装 CheckOrigin：gorilla 会退回默认同源判定，" +
+			"不带 Origin 的 agent 直接被拒（整条上报通道不可用）")
+	}
+	if reflect.ValueOf(agentUpGrader.CheckOrigin).Pointer() != reflect.ValueOf(ws.CheckOrigin).Pointer() {
+		t.Fatal("agent 与 console 的 Origin 判定不是同一个函数（又变成了一份拷贝）—— " +
+			"策略改动会漏掉一个端点")
+	}
+
+	cases := []struct {
+		name   string
+		origin string
+		host   string
+		want   bool
+	}{
+		{"无 Origin（agent 正是这一类）", "", "api.example.com", true},
+		{"同主机任意端口", "https://example.com:5173", "example.com:8080", true},
+		{"同主机同端口", "https://api.example.com", "api.example.com", true},
+		{"真跨站拒绝", "https://evil.example.net", "api.example.com", false},
+		{"localhost 开发放行", "http://localhost:5173", "api.example.com", true},
+		{"环回地址开发放行", "http://127.0.0.1:3000", "api.example.com", true},
+		{"伪装 localhost 子域拒绝", "http://localhost.evil.com", "api.example.com", false},
+		{"无法解析的 Origin 拒绝", "http://[::1", "api.example.com", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest("GET", "http://"+tc.host+"/agent/ws", nil)
+			if tc.origin != "" {
+				r.Header.Set("Origin", tc.origin)
+			}
+			r.Host = tc.host
+
+			agentGot := agentUpGrader.CheckOrigin(r)
+			consoleGot := ws.CheckOrigin(r)
+			if agentGot != consoleGot {
+				t.Fatalf("同一请求上 agent 判定 = %v、console 判定 = %v（两处策略已分叉）", agentGot, consoleGot)
+			}
+			if agentGot != tc.want {
+				t.Fatalf("CheckOrigin(origin=%q, host=%q) = %v, want %v", tc.origin, tc.host, agentGot, tc.want)
+			}
+		})
 	}
 }
 

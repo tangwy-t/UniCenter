@@ -1,16 +1,13 @@
 package handler
 
 import (
-	"net"
-	"net/http"
-	"net/url"
-
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
 
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/agenthub"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/ws"
 )
 
 // AgentConnRegistrar 是 handler 需要的 hub 能力面（消费方窄接口）。
@@ -43,42 +40,18 @@ var _ AgentConnRegistrar = (*agenthub.Hub)(nil)
 
 // agentUpGrader 是 agent 通道的升级器。
 //
-// Origin 策略**照抄**既有 console WS（internal/pkg/ws/handler.go 的 checkOrigin），
-// 而不是自造一套：
-//   - 无 Origin → 放行。agent 是**非浏览器客户端**，Origin 头对它没有意义，
-//     它本来就不带；把它当跨站请求拒掉会让整条上报通道直接不可用。
-//   - 同主机（任意端口）与 localhost/127.0.0.1/::1 → 放行（开发环境跨端口）。
-//   - 其余来源 → 拒绝：浏览器发起的跨站 WebSocket 请求确实存在（CSWSH），
-//     外部站点不该能替用户连上 agent 通道。
+// Origin 策略**与 console WS 共用同一个函数**（internal/pkg/ws.CheckOrigin，
+// 由本文件的 TestAgentUpGraderSharesOriginCheckWithConsole 断言「是同一个函数值」，
+// 不只是「行为当前恰好一致」）：两个端点肩并肩挂在同一个 api 组上，
+// 策略一旦分叉就会变成「为什么 console 能连、agent 不能」的线上玄学 ——
+// 而这正是「一份实现 + 一处修改」能避免的 Shotgun Surgery。
 //
-// 复用同一套判定的另一个理由：这两个端点肩并肩挂在同一个 api 组上，策略不一致
-// 只会让「为什么 console 能连、agent 不能」变成线上玄学。
+// 为什么 agent 端点沿用「无 Origin 放行」这条：agent 是**非浏览器客户端**，
+// Origin 头对它没有意义、它本来就不带；把它当跨站请求拒掉会让整条上报通道直接不可用。
 var agentUpGrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
-	CheckOrigin:     checkAgentOrigin,
-}
-
-// checkAgentOrigin 与 console WS 的 checkOrigin 同策略（见 agentUpGrader 的说明）。
-func checkAgentOrigin(r *http.Request) bool {
-	origin := r.Header.Get("Origin")
-	if origin == "" {
-		return true // 非浏览器客户端（agent 正是这一类）
-	}
-	u, err := url.Parse(origin)
-	if err != nil {
-		return false
-	}
-	originHost := u.Hostname()
-	reqHost, _, err := net.SplitHostPort(r.Host)
-	if err != nil {
-		reqHost = r.Host // r.Host 不带端口
-	}
-	if originHost == reqHost {
-		return true
-	}
-	// 开发环境允许本机跨端口连接（与 console WS 一致）。
-	return originHost == "localhost" || originHost == "127.0.0.1" || originHost == "::1"
+	CheckOrigin:     ws.CheckOrigin,
 }
 
 // AgentWSHandler 是 agent 的 WebSocket 入口。

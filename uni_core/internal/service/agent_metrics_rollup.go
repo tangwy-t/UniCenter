@@ -626,30 +626,14 @@ func (s *AgentMetricsRollupService) writeCursor(ctx context.Context, deviceID ui
 
 // closedHourUpper 返回已闭小时的半开上界：`alignDown(now − CloseGrace, 3600)`。
 func (s *AgentMetricsRollupService) closedHourUpper() int64 {
-	return alignDown(s.now().Add(-s.closeGrace()).Unix(), resolutionSeconds(agentmetrics.Resolution1h))
-}
-
-// closeGrace 取 `reportInterval×2`，与 flush 的宽限**同源同值**。
-//
-// 为什么是两个服务各自的宽限却取同一个值：它们防的是同一件事（「还在收数据的当前桶/当前小时
-// 不得被写成权威值」），而 1h 的输入就是 5m 的产物。若 rollup 的宽限比 flush 的更小，
-// 它会比 flush 先看到一个小时并把它算成「空/残缺」；虽然 repair 集合能兜住「残缺」，
-// 兜不住「整小时都还没落库」。取同一个推导式（reportInterval×2）让两者的边界只差一个档位，
-// 也避免出现第二份「宽限该取多少」的私有约定。
-func (s *AgentMetricsRollupService) closeGrace() time.Duration {
-	return 2 * s.reportInterval()
-}
-
-// reportInterval 返回 agent 上报间隔（秒 → Duration，非法值回落默认值）。
-func (s *AgentMetricsRollupService) reportInterval() time.Duration {
-	sec := s.cfg.GetInt(context.Background(), configAgentReportInterval, defaultAgentReportIntervalSec)
-	if sec <= 0 {
-		sec = defaultAgentReportIntervalSec
-	}
-	return time.Duration(sec) * time.Second
+	return alignDown(s.now().Add(-agentCloseGrace(s.cfg)).Unix(),
+		resolutionSeconds(agentmetrics.Resolution1h))
 }
 
 // expectedSamplesPerHour 返回一个完整小时应有的原始样本数（用于「样本偏薄」告警）。
+//
+// 上报间隔与服务侧宽限共用同一处推导（agentReportInterval / agentCloseGrace，
+// 见 agent_metrics_timing.go）：这里不再有第二份「读配置 + 回落默认值」的实现。
 func (s *AgentMetricsRollupService) expectedSamplesPerHour() int {
-	return agentmetrics.ExpectedSamplesPerHour(s.reportInterval())
+	return agentmetrics.ExpectedSamplesPerHour(agentReportInterval(s.cfg))
 }

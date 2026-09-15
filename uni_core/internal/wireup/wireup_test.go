@@ -361,7 +361,7 @@ type wsClient struct {
 
 // dialAgentWS 连上 `<srvURL>/api/v1/agent/ws`。
 //
-// **不**带 Origin 头：agent 是非浏览器客户端，handler 的 checkAgentOrigin 对
+// **不**带 Origin 头：agent 是非浏览器客户端，handler 与 console 共用的 ws.CheckOrigin 对
 // 无 Origin 放行（带一个非本机 Origin 反而会被拒 —— 那是 CSWSH 防线）。
 func dialAgentWS(t *testing.T, srvURL string) *wsClient {
 	t.Helper()
