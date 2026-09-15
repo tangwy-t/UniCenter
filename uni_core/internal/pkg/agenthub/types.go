@@ -11,7 +11,6 @@ import (
 	"time"
 
 	agentproto "github.com/tangwy-t/UniCenter/uni_protocol"
-	"go.uber.org/zap"
 
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
 )
@@ -41,30 +40,42 @@ import (
 
 // Conn 是单条 agent 连接的状态与出站通路。
 //
-// 为什么 socket 交互收敛在 `sendFn`/`writeCloseFn` 两个函数字段上：hub 的顶替与
+// 为什么出站交互收敛在 `sendFn`/`writeCloseFn` 两个函数字段上：hub 的顶替与
 // 关闭路径必须能在**不写真实 socket** 的前提下被测试（见 hub_test.go 的 newIdleConn），
 // 而 gorilla 的 `*websocket.Conn` 不允许并发写、也不该被测试替身冒充。
 // 生产态由 conn.go 的 NewConn 把这两个字段绑到真实 `websocket.Conn` 上；
-// 测试态留 nil 即可短路。
+// 测试态留 nil 即可短路。入站/控制通路是 `ws`（conn.go 的 socket 窄接口），
+// 同样在生产态绑真实连接、测试态绑内存替身。
 //
 // 读循环、心跳、入湖与背压计数不在这里 —— 见 conn.go。
 type Conn struct {
 	hub  *Hub
 	opts Options
+	deps Deps
 	log  logger.LoggerInterface
+
+	// ws 是入站/控制通路（生产态 = 真实 *websocket.Conn，见 conn.go 的 socket 窄接口）；
+	// nil 表示未接管真实 socket（测试态）。
+	ws socket
 
 	// sendFn/writeCloseFn 是**唯一**的出站通路；nil 表示未接管真实 socket（测试态）。
 	sendFn       func(b []byte) error
 	writeCloseFn func(code int, reason string) error
+
+	// send 是数据帧的出站队列（Task 2 的背压面）：满了就丢弃并计数，绝不阻塞读循环。
+	// 控制帧（ping / 关闭）不走这里 —— 见 conn.go 的 sendPing 与 finish。
+	send chan []byte
 
 	// done 在关闭时被关闭，用于让发送协程退出。
 	done chan struct{}
 	// once 保证关闭逻辑只执行一次 —— CloseWith 的幂等由它守住。
 	once sync.Once
 
-	mu    sync.Mutex
-	state ConnState
-	devID uint64
+	mu      sync.Mutex
+	state   ConnState
+	devID   uint64
+	dropped int64
+	skew    int64
 }
 
 // deviceID 返回该连接当前绑定的设备 ID；尚未鉴权时为 0。
@@ -85,34 +96,9 @@ func (c *Conn) deviceID() uint64 {
 //   - **幂等**：重复调用不 panic，关闭帧只下发一次（sync.Once 守）。
 //   - **对 nil socket 短路**：未接管真实 socket 时（出站函数为 nil）不写、不 panic。
 func (c *Conn) CloseWith(code int, reason string) {
-	c.once.Do(func() {
-		c.mu.Lock()
-		c.state = StateClosed
-		c.mu.Unlock()
-
-		if c.done != nil {
-			close(c.done)
-		}
-
-		if reason != "" {
-			c.log.Info("closing agent connection",
-				zap.Uint64("device_id", c.deviceID()),
-				zap.Int("close_code", code),
-				zap.String("detail", reason))
-		}
-
-		fn := c.writeCloseFn
-		if fn == nil {
-			// 测试态：未接管真实 socket —— 短路，不写、不 panic。
-			return
-		}
-		if err := fn(code, agentproto.CloseReason(code)); err != nil {
-			c.log.Warn("write close frame failed",
-				zap.Uint64("device_id", c.deviceID()),
-				zap.Int("close_code", code),
-				zap.Error(err))
-		}
-	})
+	// 实现体在 conn.go 的 finish：它与「对端已断开的收尾」（teardown）共用同一个
+	// once，才能保证 done 只被关一次 —— 两条收尾路径是并发到达的。
+	c.once.Do(func() { c.finish(code, reason, true) })
 }
 
 // ConnState 是单连接的状态机状态。**只允许按 StateAwaitHello → StateEnrolling

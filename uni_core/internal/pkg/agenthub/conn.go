@@ -1,0 +1,739 @@
+package agenthub
+
+import (
+	"context"
+	"errors"
+	"net"
+	"strconv"
+	"time"
+
+	"github.com/gorilla/websocket"
+	agentproto "github.com/tangwy-t/UniCenter/uni_protocol"
+	"go.uber.org/zap"
+
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
+)
+
+// ── 消费方窄接口（仓库既有约定：接口定义在消费方）──────────────
+
+// Enroller 处理带 enroll_token 的首次注册（由 service.AgentIngestService 实现）。
+type Enroller interface {
+	Enroll(ctx context.Context, h *agentproto.Hello) (deviceID uint64, agentToken string, err error)
+}
+
+// Authenticator 处理带 agent_token 的重连鉴权。
+type Authenticator interface {
+	Authenticate(ctx context.Context, h *agentproto.Hello) (deviceID uint64, err error)
+}
+
+// Ingestor 把一条已校验的样本写进热层（Redis 原始窗 + 水位）。
+type Ingestor interface {
+	Ingest(ctx context.Context, deviceID uint64, s *agentproto.MetricsSample) error
+}
+
+// Toucher 刷新设备的 last_seen_at（online 由它推导，不落库）。
+type Toucher interface {
+	Touch(ctx context.Context, deviceID uint64) error
+}
+
+// Policy 是下发给 agent 的运行参数。
+//
+// 注意协议现状：hello_ack 只有 ReportInterval（秒），**没有**心跳间隔字段
+// —— 所以 HeartbeatInterval 不上线，它在本包里的用途是校准服务端 ping 的节奏
+// （见 pingInterval），并由 wireup 用来推导 hub 的 PingInterval/PongWait。
+type Policy interface {
+	ReportInterval() time.Duration
+	HeartbeatInterval() time.Duration
+}
+
+// Deps 是单连接状态机的依赖束。
+//
+// 为什么打包成结构体而不是 6 个构造参数：这些依赖**全是接口**，调用方一旦把
+// 两个同为「服务」的依赖写反，编译器救不了；具名字段至少让写反一眼可见。
+type Deps struct {
+	Enroller      Enroller
+	Authenticator Authenticator
+	Ingestor      Ingestor
+	Toucher       Toucher
+	Decider       Decider
+	Policy        Policy
+}
+
+// socket 是连接的入站/控制通路。生产态就是 `*websocket.Conn`（NewConn 收它），
+// 测试态是内存替身 —— 这样读循环里的每一条守卫（方向校验、关闭码、读超时、
+// 背压）都能在**不起真实 TCP** 的前提下被驱动：gorilla 不导出可注入的
+// Conn 构造函数，只有 Upgrade 能拿到真连接，而真实升级路径由 handler 负责。
+type socket interface {
+	ReadMessage() (messageType int, p []byte, err error)
+	WriteMessage(messageType int, data []byte) error
+	WriteControl(messageType int, data []byte, deadline time.Time) error
+	SetReadLimit(limit int64)
+	SetReadDeadline(t time.Time) error
+	SetPongHandler(h func(appData string) error)
+	Close() error
+}
+
+var (
+	// errSendQueueFull 表示发送队列已满：消息被**丢弃并计数**（读循环绝不因此阻塞）。
+	errSendQueueFull = errors.New("agenthub: send queue full")
+	// errConnClosed 表示连接已关闭，消息不再入队。
+	errConnClosed = errors.New("agenthub: conn closed")
+	// errNilMessage 表示 SendMessage 收到 nil —— 一个笔误不该打崩读循环。
+	errNilMessage = errors.New("agenthub: nil message")
+)
+
+const (
+	// minReportIntervalSeconds 是契约层的下限：HelloAck.ReportInterval 非 0 时必须 ≥2。
+	minReportIntervalSeconds = 2
+	// defaultReportIntervalSeconds 取配置项 sys.agent.reportInterval 的种子值。
+	// 依赖缺失时**不能**退回下限 2：那会让 agent 以 5 倍频率上报，把热层与
+	// 数据库一起压上去。
+	defaultReportIntervalSeconds = 10
+)
+
+// NewConn 创建一条**已接管真实 socket** 的连接。
+//
+// hub 用于在 hello 成功（设备 ID 已知）后把连接登记进注册表：顶替同设备的旧连接
+// 必须由注册表做（它才知道谁是「旧」的），所以这里必须拿到 *Hub 而不是窄接口。
+//
+// 收尾（注销）不在这里做：CloseWith 刻意**不动注册表** —— 关闭幂等与
+// 「已关闭但尚未注销的连接仍能被 DrainAll 通知到」是 Task 1 用断言钉住的语义。
+// 注销由 handler 在 Serve 返回后按连接身份做。
+func NewConn(hub *Hub, ws *websocket.Conn, deps Deps, log logger.LoggerInterface) *Conn {
+	return newConn(hub, ws, deps, log)
+}
+
+// newConn 是 NewConn 的实现，并顺带接受测试态的 socket 替身。
+func newConn(hub *Hub, ws socket, deps Deps, log logger.LoggerInterface) *Conn {
+	opts := Options{}.withDefaults()
+	if hub != nil {
+		opts = hub.opts
+	}
+	c := &Conn{
+		hub:   hub,
+		opts:  opts,
+		deps:  deps,
+		log:   log,
+		ws:    ws,
+		send:  make(chan []byte, opts.SendQueue),
+		done:  make(chan struct{}),
+		state: StateAwaitHello,
+	}
+	if ws != nil {
+		c.sendFn = func(b []byte) error {
+			return ws.WriteMessage(websocket.TextMessage, b)
+		}
+		c.writeCloseFn = func(code int, reason string) error {
+			return ws.WriteControl(websocket.CloseMessage,
+				websocket.FormatCloseMessage(code, reason), time.Now().Add(opts.WriteTimeout))
+		}
+	}
+	return c
+}
+
+// ── 可观测状态 ─────────────────────────────────────────────
+
+// DeviceID 返回连接绑定的设备 ID；尚未完成 hello 时为 0。
+func (c *Conn) DeviceID() uint64 { return c.deviceID() }
+
+// State 返回当前状态机状态。
+func (c *Conn) State() ConnState {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.state
+}
+
+// DroppedCount 返回因发送队列满而被丢弃的**数据帧**数。
+// 控制帧（ping / 关闭）不走队列，因此永远不计入这里 —— 它们不会被丢弃。
+func (c *Conn) DroppedCount() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.dropped
+}
+
+// SkewCount 返回被「时钟偏移超限」拒绝的消息数（软校验：拒绝该条、不断连）。
+func (c *Conn) SkewCount() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.skew
+}
+
+func (c *Conn) setState(s ConnState) {
+	c.mu.Lock()
+	c.state = s
+	c.mu.Unlock()
+}
+
+func (c *Conn) bindDevice(id uint64) {
+	c.mu.Lock()
+	c.devID = id
+	c.mu.Unlock()
+}
+
+func (c *Conn) countSkew() {
+	c.mu.Lock()
+	c.skew++
+	c.mu.Unlock()
+}
+
+// socket 返回入站通路；未接管真实 socket（测试态）时为 nil。
+func (c *Conn) socket() socket { return c.ws }
+
+// ── 运行期 ─────────────────────────────────────────────────
+
+// Serve 跑这条连接：一个读循环（本协程）+ 一个写协程（串行化写 socket）。
+//
+// gorilla 的 `*websocket.Conn` 不允许并发 WriteMessage，所以数据帧**只能**由
+// writeLoop 一个协程写；控制帧（ping / 关闭）走 WriteControl —— gorilla 明确
+// 允许它与其它方法并发调用，这也正是「队列满时心跳/关闭帧仍能送达」的落点。
+//
+// Serve 返回前会关掉底层 socket；销注册表留给调用方（见 NewConn 的说明）。
+func (c *Conn) Serve(ctx context.Context) {
+	sock := c.socket()
+	if sock == nil {
+		// 未接管真实 socket（Task 1 的 newIdleConn/newBareConn）：没有入站通路，
+		// 读循环无从开始 —— 短路而不是 panic。
+		return
+	}
+	defer func() {
+		// 兜底关闭底层 TCP：无论走哪条收尾路径都不留半开连接。
+		// 关闭帧在此之前已经写入（TCP 保证在 FIN 之前送达）。
+		if err := sock.Close(); err != nil {
+			c.log.Debug("agent socket close failed", zap.Error(err))
+		}
+	}()
+
+	go c.writeLoop()
+	c.readLoop(ctx, sock)
+	c.teardown("读循环结束")
+}
+
+// writeLoop 串行化所有出站数据帧，并按 pingInterval 发 keepalive。
+func (c *Conn) writeLoop() {
+	ticker := time.NewTicker(c.pingInterval())
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.done:
+			return
+		case <-ticker.C:
+			c.sendPing()
+		case b := <-c.send:
+			if err := c.sendFn(b); err != nil {
+				// 写失败说明链路已断：收尾并退出 —— 不再尝试下发关闭帧（写不出去）。
+				c.log.Warn("agent write failed", zap.Uint64("device_id", c.deviceID()), zap.Error(err))
+				c.teardown("写 socket 失败")
+				return
+			}
+		}
+	}
+}
+
+// sendPing 下发一个 WebSocket ping 控制帧。
+//
+// 为什么走 WriteControl 而不是发送队列：队列可能在接收端退避时被填满，而
+// **丢心跳会被两端误判成链路已死**（我们判它超时、它判我们掉线），
+// 所以控制帧必须有一条不经过队列的独立通路。同理见 finish（关闭帧）。
+func (c *Conn) sendPing() {
+	sock := c.socket()
+	if sock == nil {
+		return
+	}
+	if err := sock.WriteControl(websocket.PingMessage, nil, time.Now().Add(c.opts.WriteTimeout)); err != nil {
+		c.log.Warn("agent ping failed", zap.Uint64("device_id", c.deviceID()), zap.Error(err))
+	}
+}
+
+// pingInterval 是服务端 ping 的节奏：以 opts.PingInterval 为上限，
+// 且**不慢于** agent 的心跳节奏（Policy.HeartbeatInterval）。
+//
+// 为什么要看 agent 的心跳节奏：半开连接（NAT / 代理静默丢弃）只能靠 ping/pong
+// 发现；若我们的 ping 比 agent 自己的心跳还慢，就会比 agent 更晚发现链路已死。
+func (c *Conn) pingInterval() time.Duration {
+	interval := c.opts.PingInterval
+	if c.deps.Policy == nil {
+		return interval
+	}
+	if hb := c.deps.Policy.HeartbeatInterval(); hb > 0 && hb < interval {
+		return hb
+	}
+	return interval
+}
+
+// reportIntervalSeconds 把 Policy.ReportInterval 折算成 hello_ack 要的**秒**。
+func (c *Conn) reportIntervalSeconds() int {
+	if c.deps.Policy == nil {
+		return defaultReportIntervalSeconds
+	}
+	secs := int(c.deps.Policy.ReportInterval() / time.Second)
+	if secs < minReportIntervalSeconds {
+		// 契约层拒绝 report_interval ∈ (0,2)，退回默认值而不是发一个非法 ack。
+		return defaultReportIntervalSeconds
+	}
+	return secs
+}
+
+// SendMessage 把一条信封消息排进发送队列。
+//
+// 队列满时**丢弃并计数**（DroppedCount），绝不阻塞读循环：阻塞读循环会让 TCP
+// 接收窗口关闭，进而把 agent 也拖死；而 agent 侧有本地待发队列，丢一帧趋势数据
+// 不致命。控制帧（ping / 关闭帧）不走这条队列。
+func (c *Conn) SendMessage(m *agentproto.Message) error {
+	if m == nil {
+		return errNilMessage
+	}
+	b, err := m.Marshal()
+	if err != nil {
+		return err
+	}
+	return c.enqueue(b)
+}
+
+func (c *Conn) enqueue(b []byte) error {
+	if c.send == nil || c.sendFn == nil {
+		// 未接管真实 socket（测试态）：短路，不排队、不计数、不 panic。
+		return nil
+	}
+	select {
+	case <-c.done:
+		return errConnClosed
+	default:
+	}
+	select {
+	case c.send <- b:
+		return nil
+	default:
+		c.mu.Lock()
+		c.dropped++
+		dropped := c.dropped
+		c.mu.Unlock()
+		c.log.Warn("agent send queue full, message dropped",
+			zap.Uint64("device_id", c.deviceID()),
+			zap.Int64("dropped_total", dropped))
+		return errSendQueueFull
+	}
+}
+
+// readLoop 是单连接的唯一入站循环。处理顺序**不可调换**（每一步都对应一个
+// 精确的关闭码，调换就会让某两种情形塌缩成同一个码，agent 也就无从区分处理策略）：
+//
+//  1. SetReadLimit：单帧上限（没有它，一条巨帧就能打爆服务端内存）
+//  2. Decode 信封：版本越界 → 4000；JSON 非法或信封校验失败 → 4002
+//     （契约层的 Decode = Unmarshal + Message.Validate，所以「解码」与「信封校验」
+//     是同一次调用；版本必须按 ErrUnsupportedVersion 哨兵单独摘出来，
+//     否则旧版 agent 只会收到「报文损坏」，一直重试同一个版本）
+//  3. LookupType 未登记 → 4003
+//  4. 方向不符（收到 core.* 或回环）→ 4003
+//  5. hello 之前收到非 hello → 4008
+//  6. 时钟偏移超限 → 拒绝该条并计数，**不断连**
+//  7. 按类型分派（表见 agentHandlers）
+//  8. 每条成功处理的消息后 Touch（刷新 last_seen_at）
+//
+// 为什么第 5 步（hello 之前）排在方向校验之后：一条 core.hello_ack 作为首帧
+// 同时满足「非 hello」与「方向错误」，两者必须归到**方向**这个码上
+// （它是伪造/回环信号，客户端据此应加载新协议而不是先去发 hello 再等超时）；
+// 只有「方向正确、但 hello 之前发」的帧才归到 4008。
+func (c *Conn) readLoop(ctx context.Context, sock socket) {
+	sock.SetReadLimit(c.opts.MaxMessageBytes)
+	if err := c.refreshReadDeadline(sock); err != nil {
+		c.log.Warn("set read deadline failed", zap.Uint64("device_id", c.deviceID()), zap.Error(err))
+	}
+	// pong 同样算「活跃」信号：不刷新读期限的话，ping/pong keepalive 形同虚设。
+	sock.SetPongHandler(func(string) error { return c.refreshReadDeadline(sock) })
+
+	for {
+		_, raw, err := sock.ReadMessage()
+		if err != nil {
+			c.handleReadError(err)
+			return
+		}
+		// 任何入站消息都刷新读超时窗口（不只是心跳）：上报类消息同样证明设备活着。
+		if derr := c.refreshReadDeadline(sock); derr != nil {
+			c.log.Warn("set read deadline failed", zap.Uint64("device_id", c.deviceID()), zap.Error(derr))
+		}
+		if !c.handleFrame(ctx, raw) {
+			return
+		}
+	}
+}
+
+// refreshReadDeadline 把读期限推到 now+PongWait。
+//
+// 为什么「判状态」与「设期限」必须在同一个临界区里：收尾（finish）会把读期限
+// 压到当下以解开阻塞的读，而读循环在**每条**消息后、以及启动时都会刷新期限 ——
+// 两者交错时，若刷新落在「置 Closed 之后、压期限之前」，它会把这个「解阻塞期限」
+// 推回未来，于是读循环要一直挂到 PongWait（默认 90s）才结束，
+// 关闭后的 Serve 也就迟迟不返回（停机排空被拖住）。
+// 放进同一把锁后，置 Closed 之后不可能再有一次刷新把期限推回去。
+func (c *Conn) refreshReadDeadline(sock socket) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.state == StateClosed {
+		// 已收尾：finish 压下的「当下期限」必须保持原样（它正等着把读解开）。
+		return nil
+	}
+	return sock.SetReadDeadline(time.Now().Add(c.opts.PongWait))
+}
+
+// handleReadError 判别读循环的退出原因，并只在**真超时**时下发 4005。
+func (c *Conn) handleReadError(err error) {
+	if c.State() == StateClosed {
+		// 我们自己关了这条连接：finish 会把读期限压到当下以解开阻塞的读，
+		// 于是这里必然收到一个超时错误 —— 那是主动关闭的收尾，不是心跳超时。
+		return
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		c.CloseWith(agentproto.CloseHeartbeatTimeout, "超过 PongWait 未收到任何消息")
+		return
+	}
+	// 对端主动断开 / EOF / 底层协议错误：连接已经没了，无需（也无法）再下发关闭帧。
+	c.log.Info("agent connection read ended", zap.Uint64("device_id", c.deviceID()), zap.Error(err))
+}
+
+// handleFrame 处理一条入站帧；返回 false 表示连接已关闭，读循环必须退出。
+func (c *Conn) handleFrame(ctx context.Context, raw []byte) bool {
+	m, err := agentproto.Decode(raw)
+	if err != nil {
+		if errors.Is(err, agentproto.ErrUnsupportedVersion) {
+			// 版本越界必须先于「报文损坏」被摘出来：它要的是「升级客户端」，不是「修 JSON」。
+			c.CloseWith(agentproto.CloseVersionMismatch, "信封版本不在受支持区间")
+			return false
+		}
+		c.CloseWith(agentproto.CloseMalformedMessage, "信封 JSON 非法或校验失败")
+		return false
+	}
+
+	if _, ok := agentproto.LookupType(m.Type); !ok {
+		c.CloseWith(agentproto.CloseUnsupportedType, "未登记的消息类型")
+		return false
+	}
+	if agentproto.DirectionOf(m.Type) != agentproto.DirAgentToCore {
+		// 协议注释：收到 core.* 即方向错误（回环或伪造），用 CloseUnsupportedType。
+		c.CloseWith(agentproto.CloseUnsupportedType, "方向错误：core→agent 的消息出现在 agent 通道上")
+		return false
+	}
+	if c.State() == StateAwaitHello && m.Type != agentproto.TypeAgentHello {
+		// 状态机只能前进：hello 之前的一切（含上报）都在这里被拦，agent 必须先握手。
+		c.CloseWith(agentproto.CloseProtocolViolation, "hello 之前收到非 hello 消息")
+		return false
+	}
+
+	now := time.Now().UnixMilli()
+	if agentproto.ExceedsClockSkew(m.TS, now) {
+		// 软校验：拒绝**这一条**并计数，不断连 —— 关连接不会让 agent 的时钟变准，
+		// 只会让整机指标长期全丢。契约层同样要求「不得篡改 ts」。
+		c.countSkew()
+		c.log.Warn("agent message rejected: clock skew",
+			zap.Uint64("device_id", c.deviceID()),
+			zap.String("type", m.Type),
+			zap.Int64("ts", m.TS),
+			zap.Int64("now", now),
+			zap.Int64("max_skew_ms", agentproto.MaxClockSkewMs))
+		return true
+	}
+
+	handle, ok := agentHandlers[m.Type]
+	if !ok {
+		// 表里缺项只可能是协议新增了 agent→core 类型而没接线（守卫测试会先红）。
+		// 关连接而不是静默忽略：让不匹配立刻在 agent 侧可见。
+		c.CloseWith(agentproto.CloseUnsupportedType, "已登记但状态机未接线的类型")
+		return false
+	}
+	if !handle(c, ctx, m) {
+		return false
+	}
+
+	// 步骤 8：每条成功处理的消息后刷新 last_seen_at（而不是只在心跳时）——
+	// online 由 last_seen_at 推导（不落库），只在心跳时刷新会把「只上报不心跳」
+	// 的实现误判成离线。
+	c.touch(ctx)
+	return true
+}
+
+// agentHandlers 是「已登记且 agent→core 的类型 → 处理函数」的分派表。
+//
+// 为什么用表而不是 switch：协议新增一个 agent→core 类型时表里会缺项，
+// TestConnDispatchCoversAllAgentToCoreTypes 立刻变红；switch 漏分支则只会静默忽略。
+var agentHandlers = map[string]func(*Conn, context.Context, *agentproto.Message) bool{
+	agentproto.TypeAgentHello:         (*Conn).handleHello,
+	agentproto.TypeAgentHeartbeat:     (*Conn).handleHeartbeat,
+	agentproto.TypeAgentReportMetrics: (*Conn).handleMetrics,
+}
+
+// handleHello 完成 enroll 或重连鉴权，并回 core.hello_ack。
+func (c *Conn) handleHello(ctx context.Context, m *agentproto.Message) bool {
+	// 状态机只能前进：hello 只允许在 StateAwaitHello 时到达。放行的话，
+	// 一条运行中的连接能把自己换成另一台设备 —— 注册表里的 deviceID 与
+	// 已经入湖的样本归属会一起错乱。
+	if c.State() != StateAwaitHello {
+		c.CloseWith(agentproto.CloseProtocolViolation, "hello 只允许在握手阶段发送")
+		return false
+	}
+
+	h := &agentproto.Hello{}
+	if err := m.DecodeData(h); err != nil {
+		c.CloseWith(agentproto.CloseMalformedMessage, "hello 载荷无法解码")
+		return false
+	}
+
+	// 凭据判定**先于**载荷校验：两个 token 都缺失/同时存在是「凭据问题」（4001），
+	// 与「报文损坏」（4002）是两回事 —— agent 收到 4001 才会去补/换 token，
+	// 收到 4002 只会去查 JSON 序列化。
+	// 也正因为这个顺序，这里用 DecodeData + 显式 Validate，而不是 DecodeTypedFor：
+	// 后者会把 Hello.Validate 里的凭据错误一并折成载荷错误，凭据永远归不到 4001。
+	kind, credErr := h.Credential()
+	if credErr != nil {
+		c.CloseWith(agentproto.CloseUnauthorized, "hello 凭据缺失或歧义")
+		return false
+	}
+	if err := h.Validate(); err != nil {
+		c.CloseWith(agentproto.CloseMalformedMessage, "hello 载荷校验失败")
+		return false
+	}
+
+	c.setState(StateEnrolling)
+
+	var (
+		deviceID   uint64
+		agentToken string
+	)
+	switch kind {
+	case agentproto.CredentialEnroll:
+		if c.deps.Enroller == nil {
+			c.log.Error("agenthub: Enroller 未装配，无法处理 enroll", zap.String("instance_id", h.InstanceID))
+			c.CloseWith(agentproto.CloseUnauthorized, "enroller 未装配")
+			return false
+		}
+		id, token, err := c.deps.Enroller.Enroll(ctx, h)
+		if err != nil {
+			c.log.Warn("agent enroll failed", zap.String("instance_id", h.InstanceID), zap.Error(err))
+			c.CloseWith(agentproto.CloseUnauthorized, "enroll 失败")
+			return false
+		}
+		deviceID, agentToken = id, token
+	case agentproto.CredentialAgent:
+		if c.deps.Authenticator == nil {
+			c.log.Error("agenthub: Authenticator 未装配，无法处理重连鉴权", zap.String("instance_id", h.InstanceID))
+			c.CloseWith(agentproto.CloseUnauthorized, "authenticator 未装配")
+			return false
+		}
+		id, err := c.deps.Authenticator.Authenticate(ctx, h)
+		if err != nil {
+			c.log.Warn("agent authenticate failed", zap.String("instance_id", h.InstanceID), zap.Error(err))
+			c.CloseWith(agentproto.CloseUnauthorized, "鉴权失败")
+			return false
+		}
+		deviceID = id
+	}
+
+	if deviceID == 0 {
+		// 鉴权「成功」却拿到 0 号设备：雪花 ID 不可能为 0（Credential() 也已经
+		// 排除了「两种 token 都没有」）。放任下去会把连接注册成 0 号设备，
+		// 注册表会因此串号 —— 所以这里按失败关闭处理。
+		c.log.Error("agenthub: 鉴权返回了 0 号设备", zap.String("instance_id", h.InstanceID))
+		c.CloseWith(agentproto.CloseUnauthorized, "鉴权返回 0 号设备")
+		return false
+	}
+
+	// 先鉴权后查启停，且两者用**同一个码**（4001）：否则关闭码会泄露
+	// 「该设备是否存在」——被停用/删除的设备与 token 非法的设备必须无从区分。
+	if !c.accept(ctx, deviceID) {
+		c.CloseWith(agentproto.CloseUnauthorized, "设备不存在/已停用或状态查询失败")
+		return false
+	}
+
+	c.bindDevice(deviceID)
+	if c.hub != nil {
+		// 登记进注册表：同设备已有连接时由 hub 用 CloseDuplicateInstance 顶掉旧的。
+		if err := c.hub.Register(c); err != nil {
+			c.log.Warn("agent hub register failed", zap.Uint64("device_id", deviceID), zap.Error(err))
+		}
+	}
+
+	ack := &agentproto.HelloAck{
+		Accepted:       true,
+		DeviceID:       strconv.FormatUint(deviceID, 10),
+		ReportInterval: c.reportIntervalSeconds(),
+		ServerTime:     time.Now().UnixMilli(),
+		V:              agentproto.CurrentVersion,
+	}
+	if kind == agentproto.CredentialEnroll {
+		// agent_token 的明文**只此一次**：DB 里只存 sha256。重连分支绝不再下发。
+		ack.AgentToken = agentToken
+	}
+	msg, err := agentproto.NewMessage(m.ID, agentproto.TypeCoreHelloAck, ack)
+	if err != nil {
+		c.log.Error("agenthub: 构造 hello_ack 失败", zap.Uint64("device_id", deviceID), zap.Error(err))
+		c.CloseWith(agentproto.CloseServerShutdown, "服务端构造应答失败")
+		return false
+	}
+	if err := c.SendMessage(msg); err != nil {
+		// 应答被背压丢弃：记日志但不关连接 —— 队列满说明链路已在退避，
+		// agent 收不到 hello_ack 会自己超时重连，比我们在这里僵持更干净。
+		c.log.Warn("agent hello_ack dropped by backpressure",
+			zap.Uint64("device_id", deviceID), zap.Error(err))
+	}
+
+	c.setState(StateActive)
+	c.log.Info("agent connection active",
+		zap.Uint64("device_id", deviceID),
+		zap.String("instance_id", h.InstanceID),
+		zap.String("hostname", h.Hostname),
+		zap.String("credential", credentialLabel(kind)))
+	return true
+}
+
+// accept 询问 Decider：设备是否处于可接受上报的状态（启用态）。
+//
+// 「不接受」与「查询失败」都返回 false：把 DB 故障当成放行，会让停用设备照样
+// 上报（fail-open 是安全侧错误）。两种情形的关闭码由调用方统一取 4001。
+func (c *Conn) accept(ctx context.Context, deviceID uint64) bool {
+	if c.deps.Decider == nil {
+		c.log.Error("agenthub: Decider 未装配，无法确认设备状态", zap.Uint64("device_id", deviceID))
+		return false
+	}
+	ok, err := c.deps.Decider.IsAccepting(ctx, deviceID)
+	if err != nil {
+		c.log.Error("agent device state check failed", zap.Uint64("device_id", deviceID), zap.Error(err))
+		return false
+	}
+	if !ok {
+		c.log.Warn("agent device not accepting reports", zap.Uint64("device_id", deviceID))
+	}
+	return ok
+}
+
+// handleMetrics 解码、校验并写入一条指标样本。
+func (c *Conn) handleMetrics(ctx context.Context, m *agentproto.Message) bool {
+	// DecodeTypedFor 一次做完「方向复核 + 解码 + 载荷 Validate」：
+	// 方向在 handleFrame 已经拦过，这里复核是因为协议把「回环/伪造」的判定权
+	// 也交给了它（ErrWrongDirection），而载荷语义必须在这里就拒 ——
+	// 越界值（如 cpu_used_percent=-1）静默落进热层会污染后续全部聚合。
+	decoded, err := agentproto.DecodeTypedFor(m, agentproto.DirAgentToCore)
+	if err != nil {
+		c.CloseWith(agentproto.CloseMalformedMessage, "指标载荷无法解码或语义非法")
+		return false
+	}
+	sample, ok := decoded.(*agentproto.MetricsSample)
+	if !ok {
+		c.CloseWith(agentproto.CloseMalformedMessage, "指标载荷类型不符")
+		return false
+	}
+	if c.deps.Ingestor == nil {
+		c.log.Error("agenthub: Ingestor 未装配，样本被丢弃", zap.Uint64("device_id", c.deviceID()))
+		return true
+	}
+	if err := c.deps.Ingestor.Ingest(ctx, c.deviceID(), sample); err != nil {
+		// 入湖失败**不关连接**：热层故障是服务端问题，关连接只会让整机指标
+		// 在故障期间全丢；agent 侧的重试与本地队列会兜住。
+		c.log.Warn("agent ingest failed",
+			zap.Uint64("device_id", c.deviceID()),
+			zap.Int64("sample_ts", sample.T),
+			zap.Error(err))
+	}
+	return true
+}
+
+// handleHeartbeat 处理 agent 心跳。
+//
+// 心跳不携带数据，它的唯一语义是「这台设备还活着」；而「活着」的记账
+// （Toucher.Touch → last_seen_at）由 readLoop 在**每条**成功处理的消息后统一做，
+// 所以这里不再重复 Touch（重复调用只会白打一次 DB）。
+func (c *Conn) handleHeartbeat(_ context.Context, m *agentproto.Message) bool {
+	c.log.Debug("agent heartbeat", zap.Uint64("device_id", c.deviceID()), zap.Int64("ts", m.TS))
+	return true
+}
+
+// touch 刷新设备的 last_seen_at。
+//
+// 失败只记日志、不关连接：last_seen_at 是能由后续消息自然修正的推断量
+// （online 由它推导），为它断连得不偿失。
+func (c *Conn) touch(ctx context.Context) {
+	deviceID := c.deviceID()
+	if deviceID == 0 {
+		return
+	}
+	if c.deps.Toucher == nil {
+		c.log.Error("agenthub: Toucher 未装配，last_seen_at 无法刷新",
+			zap.Uint64("device_id", deviceID))
+		return
+	}
+	if err := c.deps.Toucher.Touch(ctx, deviceID); err != nil {
+		c.log.Warn("agent touch failed", zap.Uint64("device_id", deviceID), zap.Error(err))
+	}
+}
+
+// ── 收尾 ──────────────────────────────────────────────────
+
+// finish 是唯一的收尾实现（由 once 守，故天然幂等）：置 StateClosed、关 done
+// （让写协程与 ping ticker 退出）、解开阻塞的读循环，并按需下发关闭帧。
+//
+// 关闭帧走 writeCloseFn（生产态 = websocket.WriteControl）而**不经过发送队列**：
+// 队列可能已满，而关闭帧绝不能丢 —— 丢它会让对端一直挂着等关闭。
+func (c *Conn) finish(code int, reason string, writeCloseFrame bool) {
+	// 置 Closed 与「把读期限压到当下」必须在同一临界区里完成（与
+	// refreshReadDeadline 争同一把锁）：读循环在启动时与每条消息后都会刷新读期限，
+	// 若那一次刷新插在两者之间，它会把解阻塞期限推回未来，读循环就要挂到
+	// PongWait（默认 90s）才结束 —— 关闭后排空会被拖住。
+	c.mu.Lock()
+	c.state = StateClosed
+	if c.ws != nil {
+		// 压到当下：阻塞在 ReadMessage 上的读循环会立刻以超时返回。
+		if err := c.ws.SetReadDeadline(time.Now()); err != nil {
+			c.log.Warn("set read deadline on close failed", zap.Error(err))
+		}
+	}
+	c.mu.Unlock()
+
+	if c.done != nil {
+		close(c.done)
+	}
+
+	if !writeCloseFrame {
+		// 对端已经断开（或写 socket 失败）：写也没人收，且不该用自造的码
+		// 覆盖对端真实的关闭码。
+		c.log.Info("agent connection ended",
+			zap.Uint64("device_id", c.deviceID()),
+			zap.String("detail", reason))
+		return
+	}
+
+	if reason != "" {
+		c.log.Info("closing agent connection",
+			zap.Uint64("device_id", c.deviceID()),
+			zap.Int("close_code", code),
+			zap.String("detail", reason))
+	}
+
+	fn := c.writeCloseFn
+	if fn == nil {
+		// 测试态：未接管真实 socket —— 短路，不写、不 panic。
+		return
+	}
+	if err := fn(code, agentproto.CloseReason(code)); err != nil {
+		c.log.Warn("write close frame failed",
+			zap.Uint64("device_id", c.deviceID()),
+			zap.Int("close_code", code),
+			zap.Error(err))
+	}
+}
+
+// teardown 结束运行期但**不下发关闭帧**：用于「对端已断开 / 写 socket 失败 /
+// 读循环自然结束」这些连接已经不在的路径。
+func (c *Conn) teardown(reason string) {
+	c.once.Do(func() { c.finish(0, reason, false) })
+}
+
+// credentialLabel 是 hello 凭据种类的日志标签（不进线上报文）。
+func credentialLabel(k agentproto.CredentialKind) string {
+	switch k {
+	case agentproto.CredentialEnroll:
+		return "enroll"
+	case agentproto.CredentialAgent:
+		return "agent_token"
+	default:
+		return "none"
+	}
+}
