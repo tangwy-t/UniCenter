@@ -361,7 +361,9 @@ func (c *Conn) enqueue(b []byte) error {
 //  3. LookupType 未登记 → 4003
 //  4. 方向不符（收到 core.* 或回环）→ 4003
 //  5. hello 之前收到非 hello → 4008
-//  6. 时钟偏移超限 → 拒绝该条并计数，**不断连**
+//  6. 时钟偏移超限 → 拒绝该条并计数，**不断连**（**hello 除外**：握手帧的 TS
+//     偏移无语义价值，而对首帧应用「拒绝但不断连」会让连接永久停在 StateAwaitHello，
+//     详见 handleFrame 里该分支的说明）
 //  7. 按类型分派（表见 agentHandlers）
 //  8. 每条成功处理的消息后 Touch（刷新 last_seen_at）
 //
@@ -456,7 +458,33 @@ func (c *Conn) handleFrame(ctx context.Context, raw []byte) bool {
 	}
 
 	now := time.Now().UnixMilli()
-	if agentproto.ExceedsClockSkew(m.TS, now) {
+	if m.Type == agentproto.TypeAgentHello {
+		// hello **不做**时钟偏移软校验（只记日志）。理由（二选一里选了「不应用」这条）：
+		//
+		//  1. 语义：hello 是**握手帧**，它的 TS 偏移没有任何语义价值 —— 它不携带
+		//     时间序列数据，不会落进任何一个指标桶；要防的「时间戳错位污染分桶」
+		//     这件事在 hello 上根本不存在。而它的载荷 `HelloAck.ServerTime` 本身就是
+		//     用来让 agent 自行校准时钟的（§5.5），先把 ack 发出去才是正确的修复路径。
+		//  2. 状态机：软校验的分支是「拒绝该条但**不断连**」。对首帧 hello 应用它，
+		//     连接会停在 StateAwaitHello（既没握手成功、也没关闭），一直挂到 PongWait
+		//     （默认 90s）才以**心跳超时**（4005）关闭 —— 一台时钟偏移超限的设备因此
+		//     永远连不上，而症状是一个与真实原因无关的关闭码（排障会被带到「网络/
+		//     心跳」方向上去）。
+		//  3. 若改成「超限就明确关闭」，同样不可接受：关连接不会让 agent 的时钟变准，
+		//     只会把它永久挡在门外（连 hello_ack 里的 ServerTime 都拿不到，无从校准），
+		//     且既有的关闭码里没有一个语义等于「时钟偏移」（4008 是协议违规、
+		//     4002 是报文损坏，借用它们会把两种完全不同的故障塌缩成同一个码）。
+		//
+		// 偏移仍然**可见**：metrics/heartbeat 的软校验照旧（拒绝+计数+日志），
+		// 这里额外记一条 Warn 带上实际偏移，让「这台设备时钟不准」不必靠猜。
+		if agentproto.ExceedsClockSkew(m.TS, now) {
+			c.log.Warn("agent hello clock skew（不拒绝：握手帧的 TS 偏移无语义价值，且 hello_ack.ServerTime 会让 agent 自行校准）",
+				zap.Int64("ts", m.TS),
+				zap.Int64("now", now),
+				zap.Int64("skew_ms", m.TS-now),
+				zap.Int64("max_skew_ms", agentproto.MaxClockSkewMs))
+		}
+	} else if agentproto.ExceedsClockSkew(m.TS, now) {
 		// 软校验：拒绝**这一条**并计数，不断连 —— 关连接不会让 agent 的时钟变准，
 		// 只会让整机指标长期全丢。契约层同样要求「不得篡改 ts」。
 		c.countSkew()

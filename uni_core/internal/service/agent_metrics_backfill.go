@@ -93,10 +93,16 @@ func (s *AgentMetricsFlushService) BackfillOnce(ctx context.Context, deviceIDs [
 			// readCursor 按 Bootstrap 语义初始化」的情形（初始化值就是 target）。
 			continue
 		}
-		if werr := s.writeCursor(ctx, deviceID, target); werr != nil {
+		// 回退走 Lua 的「只后退」原子写：Go 侧的 `cursor > target` 判定之后、
+		// 写之前仍可能被并发者改动（另一个 backfill 回退得更深），
+		// 只有 Redis 侧的比较才能保证「绝不写下比当前更大的值」。
+		applied, werr := s.rewindCursor(ctx, deviceID, target)
+		if werr != nil {
 			return stats, werr
 		}
-		stats.CursorsRewound++
+		if applied {
+			stats.CursorsRewound++
+		}
 	}
 	if stats.CursorsRewound > 0 {
 		s.log.Info("agentmetrics backfill: 5m 水位已回退，本轮将重放该窗口",

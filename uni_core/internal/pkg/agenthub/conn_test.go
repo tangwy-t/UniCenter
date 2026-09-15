@@ -1066,6 +1066,78 @@ func TestConnMetricsIngest(t *testing.T) {
 
 // ── 测试 11：时钟偏移 ───────────────────────────────────────
 
+// TestConnHelloWithClockSkewStillCompletesHandshake 钉住「hello **不**做时钟偏移软校验」。
+//
+// 缺陷本体（修复前）：软校验排在分派**之前**，且它的语义是「拒绝该条但不断连」。
+// 首帧 hello 若时钟偏移超限，于是被拒绝 → 连接既没握手成功、也没关闭，
+// **永久停在 StateAwaitHello**，直到 PongWait（默认 90s）才因读超时按
+// CloseHeartbeatTimeout（4005）关闭 —— 一台时钟不准的设备因此永远连不上，
+// 而症状是一个指向「网络/心跳」的关闭码。
+//
+// 断言（三件事都必须成立）：
+//  1. hello_ack 真的发出去了（连接进 Active）—— agent 由此拿到 ServerTime 自行校准；
+//  2. 连接**没有**停在 AwaitHello、也没有被关闭；
+//  3. 偏移**不计入** SkewCount（它的语义是「被拒的消息数」，hello 没有被拒）。
+func TestConnHelloWithClockSkewStillCompletesHandshake(t *testing.T) {
+	f := newFixture(t, Options{SendQueue: 8})
+	f.stub.setEnroll(1001, "agent-token-1", nil)
+	f.serve()
+
+	now := time.Now().UnixMilli()
+	skewed := now - agentproto.MaxClockSkewMs - 3600_000 // 偏了 1 小时以上
+	if !agentproto.ExceedsClockSkew(skewed, now) {
+		t.Fatalf("夹具失效：ts=%d 未超出允许偏移 %d", skewed, agentproto.MaxClockSkewMs)
+	}
+
+	h := testHello()
+	h.EnrollToken = "enroll-token"
+	// 只有信封 ts 偏移，载荷本身完全合法（这正是「设备的钟不准」的真实形态）。
+	f.push(rawFrame(t, agentproto.CurrentVersion, agentproto.TypeAgentHello, skewed, h))
+
+	// 缺陷形态是「既没有 hello_ack、也没有关闭帧，连接挂在 StateAwaitHello 直到
+	// PongWait 读超时」。先有界等待「二者之一发生」，再**断言状态**：这样反向验证
+	// （恢复旧行为）得到的是一条直接指向缺陷的红灯，而不是「2s 内没有出站帧」
+	// （那句话既可以是没有 ack，也可以是没有关闭帧，指向不明）。
+	deadline := time.Now().Add(waitTimeout)
+	for time.Now().Before(deadline) {
+		if len(f.sock.frames()) > 0 || len(f.sock.closeFrames()) > 0 {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if got := f.conn.State(); got == StateAwaitHello {
+		t.Fatal("连接停在 StateAwaitHello：偏移超限的首帧 hello 被拒绝但没关连接（缺陷本体：既没握手成功，也没关闭）")
+	}
+
+	msg := f.waitData(t)
+	if msg.Type != agentproto.TypeCoreHelloAck {
+		// 偏移超限的首帧必须照常握手；收到别的说明 hello 又被拒了。
+		t.Fatalf("首帧 hello 偏移超限时出站消息 = %q, want %q（握手必须完成）",
+			msg.Type, agentproto.TypeCoreHelloAck)
+	}
+	ack := &agentproto.HelloAck{}
+	if err := msg.DecodeData(ack); err != nil {
+		t.Fatalf("解码 hello_ack: %v", err)
+	}
+	if !ack.Accepted || ack.DeviceID != "1001" {
+		t.Fatalf("hello_ack = %+v, want accepted/device_id=1001", ack)
+	}
+	// ServerTime 是 agent 自我校准的唯一来源，必须存在（否则「让 agent 自己校准」
+	// 这条修复理由不成立）。
+	if ack.ServerTime == 0 {
+		t.Fatal("hello_ack.ServerTime = 0：agent 无从校准时钟")
+	}
+
+	f.waitState(t, StateActive)
+	if got := f.conn.State(); got == StateAwaitHello {
+		t.Fatal("连接停在 StateAwaitHello：偏移超限的首帧 hello 被拒绝但没关连接（缺陷本体）")
+	}
+	if got := f.conn.SkewCount(); got != 0 {
+		t.Fatalf("SkewCount = %d, want 0（hello 没有被拒，不得计入「被拒消息数」）", got)
+	}
+	f.expectNoClose(t, 60*time.Millisecond)
+}
+
 // TestConnClockSkewRejectsMessageWithoutDisconnect 钉住软校验语义：
 // 偏移超限的**那一条**被拒并计数，**不断连**（agent 的时钟不会因为我们关连接就变准，
 // 断连只会让整机指标长期全丢）。

@@ -73,9 +73,11 @@ type AgentMetricsFlushService struct {
 	raw       FlushRawReader
 	metrics   DeviceMetricWriter
 	resources FlushResourceRepo
-	rdb       goredis.Cmdable
-	cfg       AgentConfigGetter
-	log       logger.LoggerInterface
+	// cursors 是水位游标的唯一存取实现（键构造 + Lua 原子比较-写，见
+	// agentmetrics.CursorStore）。服务侧不再自己拼键、也不再自己 SET。
+	cursors *agentmetrics.CursorStore
+	cfg     AgentConfigGetter
+	log     logger.LoggerInterface
 	// now 可注入（测试用固定时钟，区间直接可算）。
 	now func() time.Time
 }
@@ -93,7 +95,7 @@ func NewAgentMetricsFlushService(raw FlushRawReader, metrics DeviceMetricWriter,
 // 故 wireup 传的是同一个客户端；显式注入而不是从 raw 反查，是为了让游标这一层
 // 不依赖 FlushRawReader 的具体实现（接口只要 Index/Bucket 两个能力）。
 func (s *AgentMetricsFlushService) WithCursorStore(rdb goredis.Cmdable) *AgentMetricsFlushService {
-	s.rdb = rdb
+	s.cursors = agentmetrics.NewCursorStore(rdb)
 	return s
 }
 
@@ -121,14 +123,10 @@ func (s *AgentMetricsFlushService) Bootstrap(ctx context.Context) error {
 	}
 	start := s.bootstrapStart()
 	for _, deviceID := range devices {
-		key := agentmetrics.CursorKey(deviceID, agentmetrics.Resolution5m)
-		if err := s.rdb.Get(ctx, key).Err(); err == nil {
-			continue // 已有水位：不动
-		} else if !errors.Is(err, goredis.Nil) {
-			return fmt.Errorf("agentmetrics flush bootstrap: 读水位 %s: %w", key, err)
-		}
-		if err := s.writeCursor(ctx, deviceID, start); err != nil {
-			return err
+		// Init 是 SETNX 语义（键缺失才写）+ 回读生效值：已有水位时**绝不覆写**，
+		// 且「两个实例同时发现键缺失」时以先写下的那个值为准（不回写自己的候选值）。
+		if _, err := s.cursors.Init(ctx, deviceID, agentmetrics.Resolution5m, start); err != nil {
+			return fmt.Errorf("agentmetrics flush bootstrap: %w", err)
 		}
 	}
 	return nil
@@ -233,7 +231,13 @@ func (s *AgentMetricsFlushService) flushDevice(ctx context.Context, deviceID uin
 	}
 
 	// 走到这里说明**本轮每个桶都成功**（空桶也算成功），才前移水位。
-	if err := s.writeCursor(ctx, deviceID, lastBucketed); err != nil {
+	//
+	// 前移是**乐观 CAS**：只在「水位仍是轮初读到的 cursor」且「lastBucketed > cursor」
+	// 时写入（agentmetrics.CursorStore.Advance）。这一条是「水位只在全成功后前移」
+	// 在**实例层**的落点 —— 若本轮跑的过程中有人把水位回退过（backfill 正在发起重放），
+	// 我们就**不写**：本轮并没有处理回退出来的那段桶，写上 lastBucketed 等于用一次
+	// 合法的前移把那段桶永久跳过（回退就此丢失）。让位只会让下轮重读水位后继续。
+	if err := s.writeCursor(ctx, deviceID, cursor, lastBucketed); err != nil {
 		return written, skipped, upserted, err
 	}
 	return written, skipped, upserted, nil
@@ -398,23 +402,20 @@ const bootstrapWindow = 24 * time.Hour
 // 为什么缺失时**写回**而不是只在内存里用：写回让「首次 flush」这件事可见且幂等
 // （第二次调用读到同一个值），也让运维能直接看到水位。写失败则上抛 —— 否则整轮都在
 // 一个「内存里的假水位」上跑，下一轮又从 24h 前重算一遍。
+//
+// 「写回」走 CursorStore.Init（SETNX + 回读生效值）：两个实例同时发现键缺失时，
+// 返回值是**先写下的那个值**，故两边本轮用的是同一个区间起点。
 func (s *AgentMetricsFlushService) readCursor(ctx context.Context, deviceID uint64) (int64, error) {
-	key := agentmetrics.CursorKey(deviceID, agentmetrics.Resolution5m)
-	v, err := s.rdb.Get(ctx, key).Int64()
-	if err == nil {
+	v, ok, err := s.cursors.Read(ctx, deviceID, agentmetrics.Resolution5m)
+	if err != nil {
+		// Redis 故障**必须上抛**：把它当成「没有游标」会让整轮从 24h 前重算并
+		// 回写更小的水位，已落库的桶被重写、且这是不可观测的降级。
+		return 0, err
+	}
+	if ok {
 		return v, nil
 	}
-	if !errors.Is(err, goredis.Nil) {
-		// 只有「键不存在」才走 Bootstrap。Redis 故障时**必须上抛**：把它当成
-		// 「没有游标」会让整轮从 24h 前重算并**回写更小的水位**，
-		// 已落库的桶被重写、且这是不可观测的降级。
-		return 0, fmt.Errorf("读水位 %s: %w", key, err)
-	}
-	start := s.bootstrapStart()
-	if werr := s.writeCursor(ctx, deviceID, start); werr != nil {
-		return 0, werr
-	}
-	return start, nil
+	return s.cursors.Init(ctx, deviceID, agentmetrics.Resolution5m, s.bootstrapStart())
 }
 
 // CursorFor 返回**本轮实际会使用**的起点水位（unix 秒）——缺水位时按 Bootstrap 语义
@@ -428,13 +429,29 @@ func (s *AgentMetricsFlushService) CursorFor(ctx context.Context, deviceID uint6
 	return s.readCursor(ctx, deviceID)
 }
 
-// writeCursor 落水位（unix 秒，无 TTL：水位必须跨天常驻）。
-func (s *AgentMetricsFlushService) writeCursor(ctx context.Context, deviceID uint64, sec int64) error {
-	key := agentmetrics.CursorKey(deviceID, agentmetrics.Resolution5m)
-	if err := s.rdb.Set(ctx, key, sec, 0).Err(); err != nil {
-		return fmt.Errorf("写水位 %s: %w", key, err)
+// writeCursor 前移水位：只在「当前值仍是 expected（轮初读到的水位）」且 next > expected
+// 时写入（Lua 原子比较-写，见 agentmetrics.CursorStore.Advance）。
+//
+// 两个参数都不可省：
+//   - expected 必须是**本轮真正读到的**值。传推导值、传「上一轮的值」都会让 CAS 失真；
+//   - next 是本轮实际成功处理到的最后一个桶。
+//
+// 旧实现的 `Set(key, lastBucketed, 0)` 是**无条件**写入，而 lastBucketed 是由轮初游标
+// 推导出来的：轮初读到 H，期间 backfill 把水位回退到 T（准备重放 [T+300, H]），
+// 本轮结束时那句无条件 SET 会把水位推回 now−300 —— 回退出来的桶本轮没被处理，
+// 水位却越过了它们，于是「待重放的桶」永远不会被 flush 处理。
+func (s *AgentMetricsFlushService) writeCursor(ctx context.Context, deviceID uint64,
+	expected, next int64) error {
+
+	if _, err := s.cursors.Advance(ctx, deviceID, agentmetrics.Resolution5m, expected, next); err != nil {
+		return err
 	}
 	return nil
+}
+
+// rewindCursor 回退水位（backfill 专用）：仅当 target 比当前值更旧时才写入。
+func (s *AgentMetricsFlushService) rewindCursor(ctx context.Context, deviceID uint64, target int64) (bool, error) {
+	return s.cursors.Rewind(ctx, deviceID, agentmetrics.Resolution5m, target)
 }
 
 // closeGrace 取 `reportInterval×2`：避免把**还在收数据**的当前桶写坏。

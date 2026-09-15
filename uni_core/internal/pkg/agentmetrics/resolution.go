@@ -40,7 +40,7 @@ func (r Resolution) String() string {
 // 两者共用一个变量会让「改显示名」顺手改坏键名契约。
 var cursorKeySuffixes = [...]string{"cursor_5m", "cursor_1h"}
 
-// CursorKey 返回该设备在该档位的水位键。
+// CursorKey 返回该设备在该档位的水位键；**未登记的档位返回错误**，绝不退化成 5m。
 //
 // 键名契约（与 spec §7 表格逐字一致，也是 flush/rollup/运维手工 DEL 的共用契约）：
 //
@@ -53,14 +53,21 @@ var cursorKeySuffixes = [...]string{"cursor_5m", "cursor_1h"}
 // 键名找不到数据，且症状是「静默读不到」，见 raw.go 里 latestKey 的注释。
 // 契约守卫见 resolution_test.go 的 TestCursorKeyMatchesSpecContract（用字符串字面量
 // 钉住键名，不复用本函数）。
-func CursorKey(deviceID uint64, r Resolution) string {
-	idx := int(r)
-	if idx < 0 || idx >= len(cursorKeySuffixes) {
-		// 未知档位绝不静默退化成 5m：那会让 rollup 的水位写进 flush 的键里，
-		// 两个档位互相覆盖水位（症状是「某些桶永远重算 / 永远漏算」）。
-		idx = 0
+//
+// 为什么未登记档位是**错误**而不是退化成 5m（这里是本轮修复的点，旧实现与旧注释相反）：
+// 退化会让 rollup 的水位写进 flush 的键里（`cursor_1h` 的值落在 `cursor_5m` 上），
+// 两个档位互相覆盖水位，症状是「某些桶永远重算 / 永远漏算」且**完全不可观测**。
+// 返回错误的代价可接受：唯一的生产调用点是 agentmetrics.CursorStore 的三个方法
+// （Read/Advance/Rewind），它们本就返回 error，且档位参数全部是受控枚举常量，
+// 这条分支在生产路径上不可达 —— 它存在的意义是把「手滑传错档位」从静默数据损坏
+// 变成一条立刻可见的错误。
+func CursorKey(deviceID uint64, r Resolution) (string, error) {
+	// Resolution 是 uint8，故不存在负值下标；越界只有「大于已登记档位数」一种。
+	if int(r) >= len(cursorKeySuffixes) {
+		return "", fmt.Errorf("agentmetrics: 未登记的指标档位 %d（已登记：%v）",
+			uint8(r), cursorKeySuffixes)
 	}
-	return fmt.Sprintf("%s%d:%s", historyKeyPrefix, deviceID, cursorKeySuffixes[idx])
+	return fmt.Sprintf("%s%d:%s", historyKeyPrefix, deviceID, cursorKeySuffixes[r]), nil
 }
 
 // repairKeySuffix 是 1h 回滚的 repair 集合键后缀。

@@ -73,7 +73,10 @@ type RollupStats struct {
 type AgentMetricsRollupService struct {
 	metrics RollupMetricRepo
 	devices RollupDeviceSource
-	rdb     goredis.Cmdable
+	// rdb 只服务 repair 集合（SMembers/SAdd/SRem 一族）；水位游标一律走 cursors。
+	rdb goredis.Cmdable
+	// cursors 是与 flush 共用的水位游标存取实现（键构造 + Lua 原子比较-写）。
+	cursors *agentmetrics.CursorStore
 	cfg     AgentConfigGetter
 	log     logger.LoggerInterface
 	// now 可注入（测试用固定时钟，区间直接可算）。
@@ -128,6 +131,7 @@ func NewAgentMetricsRollupService(metrics RollupMetricRepo, raw RollupDeviceSour
 // 与它们所在的 Redis 必须和 flush 用的是**同一个**（否则两个档位的水位会分裂到两处）。
 func (s *AgentMetricsRollupService) WithCursorStore(rdb goredis.Cmdable) *AgentMetricsRollupService {
 	s.rdb = rdb
+	s.cursors = agentmetrics.NewCursorStore(rdb)
 	return s
 }
 
@@ -289,8 +293,13 @@ func (s *AgentMetricsRollupService) rollupDevice(ctx context.Context, deviceID u
 	}
 
 	// 走到这里说明普通区间里每个小时都成功（空小时也算成功），才前移水位。
+	//
+	// 前移走同一族游标的乐观 CAS（expected = 轮初读到的 cursor）：与 flush 同一个
+	// 原语、同一条理由 —— 1h 水位不会被回退（repair 是另一族键），但复用同一实现
+	// 能让「游标只能被原子地比较-写」这条不变量在两个档位上一致成立，
+	// 未来给 1h 加任何回退/重放能力时不会再长出第二份读-比-写。
 	if last != cursor {
-		if err := s.writeCursor(ctx, deviceID, last); err != nil {
+		if err := s.writeCursor(ctx, deviceID, cursor, last); err != nil {
 			return stats, err
 		}
 	}
@@ -508,25 +517,20 @@ func (s *AgentMetricsRollupService) dropRepairHour(ctx context.Context, deviceID
 // （第二次调用读到同一个值），也让运维能直接看到水位。写失败则上抛 —— 否则整轮都在
 // 一个「内存里的假水位」上跑，下一轮又从同一个起点重算一遍。
 func (s *AgentMetricsRollupService) readCursor(ctx context.Context, deviceID uint64, upper int64) (int64, error) {
-	key := agentmetrics.CursorKey(deviceID, agentmetrics.Resolution1h)
-	v, err := s.rdb.Get(ctx, key).Int64()
-	if err == nil {
-		return v, nil
+	v, ok, err := s.cursors.Read(ctx, deviceID, agentmetrics.Resolution1h)
+	if err != nil {
+		// Redis 故障**必须上抛**：把它当成「没有游标」会让整轮从 180d 前重算并
+		// 回写更小的水位，已回滚的小时被重写，且这是不可观测的降级。
+		return 0, err
 	}
-	if !errors.Is(err, goredis.Nil) {
-		// 只有「键不存在」才走 Bootstrap。Redis 故障时**必须上抛**：把它当成
-		// 「没有游标」会让整轮从 180d 前重算并**回写更小的水位**，已回滚的小时被重写，
-		// 且这是不可观测的降级。
-		return 0, fmt.Errorf("读水位 %s: %w", key, err)
+	if ok {
+		return v, nil
 	}
 	start, serr := s.bootstrapCursor(ctx, deviceID, upper)
 	if serr != nil {
 		return 0, serr
 	}
-	if werr := s.writeCursor(ctx, deviceID, start); werr != nil {
-		return 0, werr
-	}
-	return start, nil
+	return s.cursors.Init(ctx, deviceID, agentmetrics.Resolution1h, start)
 }
 
 // bootstrapCursor 返回缺省的水位值：**第一个要处理的小时** =
@@ -604,11 +608,16 @@ func (s *AgentMetricsRollupService) CursorFor(ctx context.Context, deviceID uint
 	return s.readCursor(ctx, deviceID, s.closedHourUpper())
 }
 
-// writeCursor 落水位（unix 秒，无 TTL：水位必须跨天常驻）。
-func (s *AgentMetricsRollupService) writeCursor(ctx context.Context, deviceID uint64, sec int64) error {
-	key := agentmetrics.CursorKey(deviceID, agentmetrics.Resolution1h)
-	if err := s.rdb.Set(ctx, key, sec, 0).Err(); err != nil {
-		return fmt.Errorf("写水位 %s: %w", key, err)
+// writeCursor 前移 `cursor_1h`：只在「当前值仍是 expected（轮初读到的水位）」且
+// next > expected 时写入（Lua 原子比较-写，见 agentmetrics.CursorStore.Advance）。
+//
+// 与 flush 共用同一个原语：水位是「已成功处理到（含）哪个桶/小时」的记账，
+// 唯一的正确写法就是「在原子上确认水位没被别人动过，然后只往前走」。
+func (s *AgentMetricsRollupService) writeCursor(ctx context.Context, deviceID uint64,
+	expected, next int64) error {
+
+	if _, err := s.cursors.Advance(ctx, deviceID, agentmetrics.Resolution1h, expected, next); err != nil {
+		return err
 	}
 	return nil
 }
