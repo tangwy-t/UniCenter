@@ -36,7 +36,27 @@ import (
 	"github.com/tangwy-t/UniCenter/uni_core/internal/task/tasks"
 
 	goredis "github.com/redis/go-redis/v9"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
+)
+
+const (
+	// configAgentReportInterval / configAgentHeartbeatInterval 是 agent 两侧节奏的
+	// 配置键（v008 种子：10s / 30s）。键名在此逐字写出而不复用 service 内部的
+	// 未导出常量：wireup 是装配点，键名与种子的对应关系应当一眼可见。
+	configAgentReportInterval    = "sys.agent.reportInterval"
+	configAgentHeartbeatInterval = "sys.agent.heartbeatInterval"
+	// defaultAgentReportIntervalSec 与 v008 种子同值。缺配置时**不得**退化成
+	// agent 侧的 2s 下限（那会让 agent 以 5 倍频率上报，把热层与 DB 一起压上去）。
+	defaultAgentReportIntervalSec = 10
+	// defaultAgentHeartbeatIntervalSec 与 v008 种子同值。
+	defaultAgentHeartbeatIntervalSec = 30
+
+	// agentDrainPollInterval 是 drain 相位里「等连接收尾」的轮询间隔。
+	// 连接收尾的正常耗时是「读循环从 SetReadDeadline(now) 返回 + handler 的
+	// defer Unregister 执行完」，量级是毫秒；20ms 让停机几乎立刻完成，
+	// 又不会变成忙等（drain 期的 CPU 不该被这里吃掉）。
+	agentDrainPollInterval = 20 * time.Millisecond
 )
 
 // Init 完成所有 repo/service/handler/scheduler 的构造和组装。
@@ -45,7 +65,32 @@ import (
 // 逐字段镜像,main 里还要手工抄送 30 个字段 —— 新增 handler 需要改三处,
 // 漏一处即静默空指针。初始化失败(如 tracer/scheduler 启动失败)返回
 // error 由 main 统一退出,避免带病启动后静默失效。
+//
+// 生产路径恒为 initHooks{}（两个接缝都不覆盖）。
 func Init(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalClient, log *logger.Logger, lc *lifecycle.Manager, cfg *config.Config) (*router.Dependencies, error) {
+	return initWith(db, sqlStats, redis, log, lc, cfg, initHooks{})
+}
+
+// initHooks 是 Init 装配过程中的两个**可观测接缝**，零值即生产行为。
+//
+// 为什么需要接缝（而不是直接调 partitionSvc.Reconcile / scheduler.NewScheduler）：
+// Plan 2C 有两条从外部观测不到的装配契约，只有在这两个边界上才能钉住——
+//  1. 「启动期 reconcile 先于 scheduler 构造」：两者的先后顺序没有可断言的副作用，
+//     除非在构造点上看一眼「此刻 6 张指标表是否已存在」；
+//  2. 「reconcile 失败不阻断启动」：需要一个可控的失败注入点，否则只能靠真去把
+//     DDL 弄坏（连带把后面所有装配一起弄坏），那样的测试什么也证明不了。
+//
+// 它们不是「可配置行为」——没有任何配置项能改到它们，只在同包测试里被替换。
+type initHooks struct {
+	// reconcile 覆盖启动期分区对账入口；nil → 真实 partitionSvc.Reconcile。
+	// 签名与 (*service.AgentMetricsPartitionService).Reconcile 一致（方法值可直接赋值）。
+	reconcile func(ctx context.Context) (service.PartitionStats, error)
+	// aroundScheduler **包裹**（而非替换）调度器构造：它拿到真实构造闭包，可以在
+	// 调用前后观测，并照常返回真实调度器。nil → 直接调真实构造。
+	aroundScheduler func(build func() (*scheduler.Scheduler, error)) (*scheduler.Scheduler, error)
+}
+
+func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalClient, log *logger.Logger, lc *lifecycle.Manager, cfg *config.Config, hooks initHooks) (*router.Dependencies, error) {
 	// ── Focused Stores & Broker ────────────────────────────────────────
 	cacheStore := cache.NewStore(redis)
 	sessionStore := session.NewSession(cacheStore)
@@ -148,28 +193,6 @@ func Init(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalClien
 		fileSvc = service.NewFileServiceWithRemoteS3(fileRepo, configSvc, log, s3Backend)
 	}
 
-	// ── Task Registry ──────────────────────────────────────────────────
-	// 任务清单由 tasks.All 维护(与任务实现同包),此处只提供依赖。
-	taskRegistry := task.NewRegistry(tasks.All(tasks.Deps{
-		OpLogRepo:    opLogRepo,
-		LoginLogRepo: loginLogRepo,
-		JobLogRepo:   jobLogRepo,
-		ConfigRepo:   configRepo,
-		DictTypeRepo: dictTypeRepo,
-		DictDataRepo: dictDataRepo,
-		ConfigSvc:    configSvc,
-		CacheStore:   cacheStore,
-	})...)
-
-	// ── Scheduler ──────────────────────────────────────────────────────
-	jobScheduler, err := scheduler.NewScheduler(taskRegistry, jobRepo, jobLogRepo, locker, broker, log, configSvc, lc)
-	if err != nil {
-		return nil, fmt.Errorf("wireup: init scheduler: %w", err)
-	}
-
-	// ── Job Service ────────────────────────────────────────────────────
-	jobSvc := service.NewJobService(jobRepo, jobLogRepo, jobScheduler, taskRegistry, log)
-
 	// ── Agent 指标热层（每设备原始滚动窗 + 水位投影）─────────────────────
 	// Step 取 sys.agent.reportInterval（秒，默认 10）——它与 agent 的上报节奏同源；
 	// 窗口容量按 24h/Step 再放 1.2 倍余量（滚动窗只保留 24h，更长区间走 DB 冷层）。
@@ -192,20 +215,112 @@ func Init(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalClien
 	// Append（入湖）/ Query+Bucket（查询）/ Purge（删除连带清理）三面，
 	// 各消费方只声明自己需要的窄接口（接口定义在消费方）。
 	// configSvc 直接满足 AgentConfigGetter（GetString + GetInt）—— 无需适配器。
-	// 入湖服务（AgentIngestService）**当前故意不构造**（H1）。
 	//
-	// 它唯一的消费者是 2C 的 AgentHub（WS 入站）；本计划范围内没有任何调用方，
-	// 构造出来只能赋给 `_`（死赋值：读代码的人不知道这是「留着给 2C」还是
-	// 「漏了消费者」）。所以这里不留死赋值，只留一条明确的交接说明。
-	//
-	// TODO(2C): AgentHub 落地时在此构造并注入 —— 依赖已全部备齐：
-	//   agentIngestSvc := service.NewAgentIngestService(deviceRepo, rawStore, latestStore, configSvc, log)
-	// deviceRepo 满足 AgentDeviceRepository（Create/FindByID/FindByInstanceID/
-	// FindByTokenHash/UpdateEnroll/Touch），rawStore 满足 AgentRawStore（Append），
-	// latestStore 满足 AgentLatestStore（Set），configSvc 满足 AgentConfigGetter
-	// （GetString + GetInt，无需适配器）。
+	// AgentIngestService 是 agent 通道**唯一**的入站实现，它的
+	// Enroll / Authenticate / Ingest / Touch / IsAccepting 逐字满足 agenthub 的
+	// Enroller / Authenticator / Ingestor / Toucher / Decider 五个窄接口
+	// （装配见下方 agentDeps，接口见 internal/pkg/agenthub/conn.go 与 types.go）。
+	// 这就是 Plan 2B 留下的那条「2C 交接说明」的落点：这个服务至此有了真实
+	// 消费者，不再需要「构造出来只能赋给 `_`」的将就写法。
+	agentIngestSvc := service.NewAgentIngestService(deviceRepo, rawStore, latestStore, configSvc, log)
 	agentQuerySvc := service.NewAgentMetricsQueryService(rawStore, deviceMetricRepo, deviceResourceRepo, log)
 	deviceSvc := service.NewDeviceService(deviceRepo, deviceResourceRepo, rawStore, latestStore, configSvc, log)
+
+	// ── Agent 后台服务（5m 落库 / 1h 回滚 / 6 张表分区对账）─────────────
+	// flush 与 rollup **显式**注入同一个 Redis 客户端：两者消费同一族水位
+	// （cursor_5m / cursor_1h）与同一个 repair 集合，注入两个不同的 Redis 会让
+	// 两个档位的水位互不相认（见各自 WithCursorStore 的说明）。
+	agentFlushSvc := service.NewAgentMetricsFlushService(
+		rawStore, deviceMetricRepo, deviceResourceRepo, configSvc, log).WithCursorStore(redis)
+	agentRollupSvc := service.NewAgentMetricsRollupService(
+		deviceMetricRepo, rawStore, configSvc, log).WithCursorStore(redis)
+	// 分区协调器自带锁键、锁租约与每表超时（**不复用** SysJob 的 job 锁，见其
+	// PartitionLocker 说明），锁走同一个 Redis。
+	agentPartitionSvc := service.NewAgentMetricsPartitionService(
+		repository.NewDeviceMetricSchemaRepository(db), configSvc, locker, log)
+
+	// ── Agent Hub（agent 侧 WS 注册表 + 单连接状态机的依赖束）───────────
+	// PingInterval/PongWait 由 sys.agent.heartbeatInterval 推导：服务端 ping 必须
+	// **不慢于** agent 的心跳节奏（conn.pingInterval 取两者中较小者），而「多久没
+	// 收到任何消息即判死」取 3×hb —— 够一次丢包 + 一轮重传，同时保证 PingInterval
+	// 明显小于 PongWait（否则连接会被自己的心跳判超时）。MaxMessageBytes / SendQueue
+	// 不在此覆盖：零值由 agenthub 的 withDefaults 填成协议上限与 64。
+	agentPolicy := newAgentIntervalPolicy(configSvc)
+	agentHeartbeat := agentPolicy.HeartbeatInterval()
+	agentHub := agenthub.NewHub(agenthub.Options{
+		PingInterval: agentHeartbeat,
+		PongWait:     3 * agentHeartbeat,
+	}, log)
+	agentDeps := agenthub.Deps{
+		// 五个入站能力面由**同一个** AgentIngestService 满足（方法集逐字匹配上面
+		// 列出的五个窄接口，已逐个 go doc 核对）；名字写反在这里是编译错误，
+		// 而不是运行期的静默串号。
+		Enroller:      agentIngestSvc,
+		Authenticator: agentIngestSvc,
+		Ingestor:      agentIngestSvc,
+		Toucher:       agentIngestSvc,
+		Decider:       agentIngestSvc,
+		// Policy 只负责「下发/校准上报与心跳节奏」，由两个配置键包成小适配器。
+		Policy: agentPolicy,
+	}
+
+	// ── 启动期分区 reconcile（**必须**在 scheduler.NewScheduler 之前）─────
+	// 顺序的理由：调度器一旦 Start 就会按 cron 触发指标任务（flush 是
+	// `0 */5 * * * *`），而 flush 写的是 device_metric_5m —— 表/分区尚不存在时
+	// 那些写入会直接失败。所以「确保 6 张指标表以分区形态存在」必须先于
+	// 「任何可能触发指标写入的组件」，这是 Plan 2C 唯一的顺序契约。
+	// 失败**不阻断启动**：一次 DDL 失败（权限抖动、主库正在切换、慢 DDL 超时）不该
+	// 让整个服务起不来 —— 控制面（REST/console）仍然可用，且 partition 任务每天
+	// 4 点会再对账一次。日志必须写明后果，否则「服务起来了但指标一行都没落」
+	// 会变成无从归因的现象。
+	reconcile := hooks.reconcile
+	if reconcile == nil {
+		reconcile = agentPartitionSvc.Reconcile
+	}
+	if _, err := reconcile(context.Background()); err != nil {
+		log.Error("wireup: 启动期分区对账失败，分区未就绪，指标写入可能因缺分区失败（服务继续启动）",
+			zap.Error(err))
+	}
+
+	// ── Task Registry ──────────────────────────────────────────────────
+	// 任务清单由 tasks.All 维护(与任务实现同包),此处只提供依赖。
+	taskRegistry := task.NewRegistry(tasks.All(tasks.Deps{
+		OpLogRepo:    opLogRepo,
+		LoginLogRepo: loginLogRepo,
+		JobLogRepo:   jobLogRepo,
+		ConfigRepo:   configRepo,
+		DictTypeRepo: dictTypeRepo,
+		DictDataRepo: dictDataRepo,
+		ConfigSvc:    configSvc,
+		CacheStore:   cacheStore,
+		// 设备指标域（Plan 2C）：三个后台服务 + 结构化日志。
+		// AgentFlush 同时供 flush / backfill 两个任务使用 —— 它们是同一实例的两个
+		// 入口（落库 / 回退水位后落库），所以这里只填一次。
+		AgentFlush:     agentFlushSvc,
+		AgentRollup:    agentRollupSvc,
+		AgentPartition: agentPartitionSvc,
+		// Log 允许 nil（任务侧退化成 Nop），但装配点没有理由交 nil：4 个指标任务的
+		// 全部可观测性就是那几行结构化读数。
+		Log: log,
+	})...)
+
+	// ── Scheduler ──────────────────────────────────────────────────────
+	realBuildScheduler := func() (*scheduler.Scheduler, error) {
+		return scheduler.NewScheduler(taskRegistry, jobRepo, jobLogRepo, locker, broker, log, configSvc, lc)
+	}
+	buildScheduler := realBuildScheduler
+	if hooks.aroundScheduler != nil {
+		buildScheduler = func() (*scheduler.Scheduler, error) {
+			return hooks.aroundScheduler(realBuildScheduler)
+		}
+	}
+	jobScheduler, err := buildScheduler()
+	if err != nil {
+		return nil, fmt.Errorf("wireup: init scheduler: %w", err)
+	}
+
+	// ── Job Service ────────────────────────────────────────────────────
+	jobSvc := service.NewJobService(jobRepo, jobLogRepo, jobScheduler, taskRegistry, log)
 
 	// ── Handlers ───────────────────────────────────────────────────────
 	userHdl := handler.NewUserHandler(userSvc, captchaPkg)
@@ -262,6 +377,41 @@ func Init(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalClien
 	// ── Permission Guard ─────────────────────────────────────────────────
 	permGuard := middleware.NewPermissionGuard(authSvc, sessionStore, configSvc, log)
 
+	// ── Agent WS Handler（未鉴权入口）─────────────────────────────────────
+	// hub 是上面的 agentHub（与 4 个后台任务共享同一个 rawStore 与同一族水位），
+	// deps 是完整依赖束 —— 首帧 hello 的全部校验（enroll / 鉴权 / 停用拒绝）
+	// 都落在它上面。入口挂在 api 组（鉴权组之外），见 router.go。
+	agentWSHdl := handler.NewAgentWSHandler(agentHub, agentDeps, log)
+
+	// ── Agent 连接排空（drain 相位）────────────────────────────────────────
+	// 停机时先向注册表里每条连接下发 CloseServerShutdown(4007)——协议内登记的码，
+	// agent 侧据此走「服务端维护」而不是「网络抖动」的重连退避；再**有界**等待
+	// 连接收尾：连接从注册表移除发生在 handler 的 defer Unregister（Serve 返回
+	// 之后），而 CloseWith 只是把读期限压到当下让读循环立刻退出，两者之间有一段
+	// 窗口。有界 = 轮询 OnlineCount 直到清零或 ctx 到期（drain 相位的 ctx 由
+	// lifecycle 按 Phase.Timeout 授权）；无界等待会让一次停机被一条卡死的连接拖住。
+	// 超时**不返回 error**：关闭通知已经发出，为一条不领情的连接把整个停机判成失败
+	// 只会掩盖真正的失败（lifecycle 会把错误 join 进 ShutdownStaged）。
+	lc.RegisterTo("drain", "agenthub", func(ctx context.Context) error {
+		notified := agentHub.DrainAll("服务端停机")
+		if notified == 0 {
+			return nil
+		}
+		ticker := time.NewTicker(agentDrainPollInterval)
+		defer ticker.Stop()
+		for agentHub.OnlineCount() > 0 {
+			select {
+			case <-ctx.Done():
+				log.Warn("agent hub drain: 等待连接收尾超时（关闭通知已下发）",
+					zap.Int("notified", notified), zap.Int("remaining", agentHub.OnlineCount()))
+				return nil
+			case <-ticker.C:
+			}
+		}
+		log.Info("agent hub drained", zap.Int("notified", notified))
+		return nil
+	})
+
 	return &router.Dependencies{
 		Infra: router.InfraDeps{
 			Hub:           hub,
@@ -311,13 +461,60 @@ func Init(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalClien
 		Device: router.DeviceDeps{
 			DeviceHdl: deviceHdl,
 		},
-		// agent WS 入口的**最小**构造：hub 是真实注册表，依赖束（enroll/
-		// 鉴权/入湖/touch/策略）留空 —— 本任务只要求路由可挂载（未挂载时
-		// 路由整条不存在，未鉴权入口会 404 而不是 101）。
-		// **完整装配**（Enroller/Authenticator/Ingestor/Toucher/Decider/Policy
-		// 全部接上，并让 hub 与 flush/partition 共享实例）留给 Task 8。
+		// agent WS 入口：hub 与依赖束都是**完整装配**（enroll / 鉴权 / 入湖 /
+		// touch / 策略六个能力面全部接上，且 hub 与 4 个后台任务共享同一批
+		// 服务实例与同一族水位）。未挂载时路由整条不存在，agent 会拿到 404
+		// 而不是 101 —— 所以这个字段不能是可选装饰。
 		Agent: router.AgentDeps{
-			AgentWSHdl: handler.NewAgentWSHandler(agenthub.NewHub(agenthub.Options{}, log), agenthub.Deps{}, log),
+			AgentWSHdl: agentWSHdl,
 		},
 	}, nil
+}
+
+// ── agent 运行参数适配器 ────────────────────────────────────────────────
+
+// agentIntervalPolicy 把 sys.agent.* 两个节奏配置键适配成 agenthub.Policy。
+//
+// 为什么每次调用都读配置（而不是在 Init 里取一次快照）：sys.agent.* 支持热更，
+// agent 下一轮 ping 与新连接的 hello_ack 就该用新值。读一次快照会把「改配置」
+// 变成「重启才生效」，而这两个值就是下发节奏本身 —— 热更失效时最难排查
+// （配置显示改了、行为没变）。
+type agentIntervalPolicy struct {
+	cfg agentIntervalConfig
+}
+
+// agentIntervalConfig 是适配器需要的配置能力面；*service.ConfigService 直接满足
+// （接口定义在消费方，与仓库既有约定一致）。
+type agentIntervalConfig interface {
+	GetInt(ctx context.Context, key string, defaultVal int) int
+}
+
+func newAgentIntervalPolicy(cfg agentIntervalConfig) agentIntervalPolicy {
+	return agentIntervalPolicy{cfg: cfg}
+}
+
+// ReportInterval 是 hello_ack 下发给 agent 的上报间隔。
+//
+// 非正数一律退化成默认值：0 或负数会让 agent 侧的心跳/上报退避到不确定的行为，
+// 而 hello_ack 的契约层只接受「0（表示不带该字段）或 ≥2」—— 发一个负数过去
+// 会被 agent 判成非法应答，连接直接不可用。
+func (p agentIntervalPolicy) ReportInterval() time.Duration {
+	return p.seconds(configAgentReportInterval, defaultAgentReportIntervalSec)
+}
+
+// HeartbeatInterval 是 agent 的心跳节奏。
+//
+// 它**不上线**（协议现状：hello_ack 只有 report_interval），用途是校准服务端 ping
+// 的节奏（conn.pingInterval 取 opts.PingInterval 与它的较小值），并由 wireup
+// 反过来推导 hub 的 PingInterval/PongWait。
+func (p agentIntervalPolicy) HeartbeatInterval() time.Duration {
+	return p.seconds(configAgentHeartbeatInterval, defaultAgentHeartbeatIntervalSec)
+}
+
+func (p agentIntervalPolicy) seconds(key string, fallback int) time.Duration {
+	secs := p.cfg.GetInt(context.Background(), key, fallback)
+	if secs <= 0 {
+		secs = fallback
+	}
+	return time.Duration(secs) * time.Second
 }
