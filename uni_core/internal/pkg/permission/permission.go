@@ -28,6 +28,11 @@ func All() []string {
 		PermDeptList,
 		PermDeptQuery,
 		PermDeptSort,
+		PermDeviceDelete,
+		PermDeviceDisable,
+		PermDeviceEnable,
+		PermDeviceList,
+		PermDeviceQuery,
 		PermDictDataAdd,
 		PermDictDataDelete,
 		PermDictDataEdit,
@@ -121,6 +126,15 @@ const (
 	PermDeptList   = "system:dept:list"
 	PermDeptQuery  = "system:dept:query"
 	PermDeptSort   = "system:dept:sort"
+)
+
+// ── 设备管理 / device:* ─────────────────────────────────────────────────
+const (
+	PermDeviceList    = "device:list"
+	PermDeviceQuery   = "device:query"
+	PermDeviceDelete  = "device:delete"
+	PermDeviceEnable  = "device:enable"
+	PermDeviceDisable = "device:disable"
 )
 
 // ── 字典管理 / system:dict:* ─────────────────────────────────────────────
