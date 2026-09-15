@@ -24,6 +24,7 @@ import (
 	"github.com/tangwy-t/UniCenter/uni_core/internal/handler"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/response"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/entity"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/agentmetrics"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/config"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/database"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/lifecycle"
@@ -782,6 +783,219 @@ func TestInit_AgentFrameRateLimitClosesWith4006(t *testing.T) {
 		t.Fatalf("preauth 键 = %v, want [agent:ws:preauth:127.0.0.1]（**不得带源端口**）", preKeys)
 	}
 	t.Logf("device_id=%d 超限收到 %d（%s）；preauth 键=%v", deviceID, code, reason, preKeys)
+}
+
+// ── 断言 7：启动期不需要显式 flushSvc.Bootstrap（懒初始化与 Bootstrap 等价）──
+//
+// 裁决：**等价**，故启动期**不调** Bootstrap（见 wireup.go 同处的注释）。依据三处，
+// 逐条对应下面的断言：
+//
+//  1. **取值同源**：service/agent_metrics_flush.go 的 Bootstrap 用 `s.bootstrapStart()`
+//     （第 153 行），readCursor 的缺键分支也调 `s.bootstrapStart()`（第 496 行）——
+//     同一个函数，同一个 `alignDown(now−24h, 300)`（第 467-473 行，且夹 0 下界）。
+//  2. **覆盖面同源**：Bootstrap 枚举 `raw.Index()` 逐设备 Init（第 149-160 行）；
+//     FlushOnce 枚举同一个集合（第 171 行），而 flushDevice 在**任何提前 return 之前**
+//     就先调 readCursor（第 267-276 行）—— 故一轮 flush 必然把「Bootstrap 会建的水位键」
+//     全部建出来，不多也不少。
+//  3. **已有水位不被改写**：Init 是 `EXISTS → GET`，否则 `SET`（pkg/agentmetrics/cursor.go
+//     的 initCursorScript，第 101-107 行，SETNX 语义 + 回读生效值），故显式 Bootstrap 对
+//     已存在的水位**没有任何副作用**（既有守卫 TestCursorStoreInitNeverOverwrites）。
+//
+// 唯一的差异是起点的**时间锚**：显式 Bootstrap 锚在进程启动时刻，懒初始化锚在首次读取
+// 时刻。两者都 ≤ 扫描时刻的 now−24h，而早于 now−24h 的桶**必然**是空的（Bootstrap 自己的
+// 注释：「从 0 起步会白扫 1970 年以来的 6_000_000+ 个桶…而结果与从 24h 起步完全一致」），
+// 加上 `from = cursor + 300`（第 272 行）这套约定在两条路径上都会丢掉「cursor 自己那个桶」，
+// 故这个锚差在数据上不可观测。
+//
+// 为什么另建一份 flush 服务：wireup **不导出** agentFlushSvc（同 e2e_test.go 文件头的
+// 说明）。这份实例只用来调 CursorFor / Bootstrap —— 它们读写的是**同一个 Redis 上的
+// 同一个键**；下面那一轮 flush 走的仍是 wireup 装配的那一份（调度器 → 注册表 → 任务）。
+func TestInit_NoStartupBootstrapAndLazyCursorMatchesBootstrap(t *testing.T) {
+	env := newE2EFixture(t)
+	ctx := context.Background()
+
+	// 1) 种一个「启动前就在上报」的设备：原始点直接进热层（走生产同源的
+	//    RawStore.Append，它同时把设备登记进 agent:device:index —— Bootstrap 与
+	//    FlushOnce 的**同一个**枚举源）。桶取 2h 前：已闭、且仍在 24h 热层窗内。
+	const devID = uint64(1001)
+	rawStore := agentmetrics.NewRawStore(env.f.rdb, agentmetrics.RawOptions{
+		Step: 10 * time.Second, MaxPoints: 10000, QueryTTL: time.Second,
+	})
+	bucketTS := (time.Now().Unix()/300)*300 - 2*3600
+	for i := 0; i < 3; i++ {
+		if err := rawStore.Append(ctx, devID, metricsSample(bucketTS*1000+int64(i)*30_000)); err != nil {
+			t.Fatalf("seed raw append: %v", err)
+		}
+	}
+
+	// 2) 真实装配。启动期分区对账**故意失败**：6 张指标表因此不存在，下面那一轮 flush 的
+	//    写路径必然失败 —— 这正是需要的（「写入失败 → 水位留在轮初」让我们能**直接读到**
+	//    轮初那个懒初始化的值；否则整轮成功会把水位推进到 now−300，轮初水位就再也看不见了）。
+	//    顺带复用断言 5 已覆盖的「对账失败不阻断启动」这条接缝。
+	if _, err := env.f.initWith(t, initHooks{
+		reconcile: func(context.Context) (service.PartitionStats, error) {
+			return service.PartitionStats{}, fmt.Errorf("%w: DDL 被权限拒绝", service.ErrPartitionPartial)
+		},
+		aroundScheduler: func(build func() (*scheduler.Scheduler, error)) (*scheduler.Scheduler, error) {
+			s, berr := build()
+			if berr != nil {
+				return nil, berr
+			}
+			env.sched = s
+			return s, nil
+		},
+	}); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if env.sched == nil {
+		t.Fatal("aroundScheduler 接缝没有拿到调度器 —— 后台任务无法按生产路径触发")
+	}
+
+	// 前置 A：写入方确实不存在（否则下面那轮 flush 会成功并把水位推走）。
+	if present := metricTablesPresent(t, env.f.db); len(present) != 0 {
+		t.Fatalf("前置：对账失败后不该有指标表，实际存在 %v", present)
+	}
+
+	// 前置 B（本任务要钉住的那条决策）：Init 之后水位键**必须不存在** —— 启动期没有显式
+	// Bootstrap。设备已在活跃集合里，若 wireup 真的调了 flushSvc.Bootstrap，此刻它就在。
+	// 键名用**契约字面量**（不复用 agentmetrics.CursorKey）：键名是 spec §7 的契约，
+	// 复用实现会让键名写错时自洽通过（同 resolution_test.go / raw_test.go 的守卫体例）。
+	cursorKey := fmt.Sprintf("agent:device:%d:cursor_5m", devID)
+	if _, err := env.f.rdb.Get(ctx, cursorKey).Result(); !errors.Is(err, goredis.Nil) {
+		t.Fatalf("Init 之后 %s 已存在（err=%v）—— 启动期显式调了 Bootstrap，"+
+			"而 readCursor 会在键缺失时做同一件事（两者不该同时存在）", cursorKey, err)
+	}
+
+	svc := service.NewAgentMetricsFlushService(rawStore,
+		repository.NewDeviceMetricRepository(env.f.db),
+		repository.NewDeviceResourceRepository(env.f.db),
+		flushCfgStub{}, logger.NewNop()).WithCursorStore(env.f.rdb)
+
+	// ① 懒初始化的起点（直接断言，毫秒级、红灯可读）。CursorFor 就是为这类断言建的接缝：
+	//    起点一旦退化成 0，靠「桶计数」这种间接信号只能得到超时而不是一条可读的失败。
+	var start int64
+	cands := withLazyCursorCandidates(func() {
+		v, cerr := svc.CursorFor(ctx, devID)
+		if cerr != nil {
+			t.Fatalf("CursorFor: %v", cerr)
+		}
+		start = v
+	})
+	assertLazyCursorStart(t, start, cands, "CursorFor（readCursor 的缺键分支）")
+
+	// ② 把键删掉：让下面那轮**真实** flush 自己走一遍「缺键 → 懒初始化」
+	//    （① 已经把同一个值写过一次，删掉才算把两条路径都覆盖到）。
+	if err := env.f.rdb.Del(ctx, cursorKey).Err(); err != nil {
+		t.Fatalf("删水位键: %v", err)
+	}
+
+	// ③ 真实一轮 flush：经调度器 → 注册表 → 任务的真实触发（与 cron 到点同一条路径）。
+	//    写路径必然失败（表不存在）→「失败不推进水位」→ 轮初水位留在键上。
+	assertTaskTargetRegistered(t, e2eJobTargetFlush)
+	job := &entity.SysJob{
+		BaseEntity:   entity.BaseEntity{ID: e2eFlushJobID},
+		Name:         e2eJobTargetFlush,
+		JobGroup:     "等价性",
+		InvokeTarget: e2eJobTargetFlush,
+	}
+	var runErr error
+	cands = withLazyCursorCandidates(func() {
+		runErr = env.sched.RunOnce(ctx, job)
+	})
+	if runErr == nil {
+		t.Fatal("一轮 flush 竟然成功了 —— 说明它没有真的往表里写（种下的桶没被读到），" +
+			"下面的水位断言会退化成「整轮成功后推进到的值」的永真对照")
+	}
+	got, err := env.f.rdb.Get(ctx, cursorKey).Int64()
+	if err != nil {
+		t.Fatalf("读水位（一轮 flush 之后）: %v", err)
+	}
+	assertLazyCursorStart(t, got, cands,
+		"一轮真实 flush 之后的轮初水位（键缺失 → readCursor 懒初始化，且失败不推进）")
+
+	// ④a 缺键时 Bootstrap 写入的起点与 ① 的懒初始化**是同一个值**。
+	if err := env.f.rdb.Del(ctx, cursorKey).Err(); err != nil {
+		t.Fatalf("删水位键: %v", err)
+	}
+	var bootErr error
+	cands = withLazyCursorCandidates(func() { bootErr = svc.Bootstrap(ctx) })
+	if bootErr != nil {
+		t.Fatalf("Bootstrap: %v", bootErr)
+	}
+	bootStart, err := env.f.rdb.Get(ctx, cursorKey).Int64()
+	if err != nil {
+		t.Fatalf("读水位（Bootstrap 之后）: %v", err)
+	}
+	assertLazyCursorStart(t, bootStart, cands, "Bootstrap（键缺失时写入的起点）")
+
+	// ④b Bootstrap 对**已存在**的水位没有任何副作用（与 ④a 合起来才叫「等价」）。
+	//    刻意写一个 48h 前的水位（与 Bootstrap 的候选值 24h 前明确不同）：若现值恰好等于
+	//    候选值，「没被改写」就会退化成一句永真的断言。下面那条自检不是形式主义 ——
+	//    将来谁把生产窗口改成 48h，它就会响铃，提醒这条断言已经变空。
+	existing := alignDown5m(time.Now().Unix() - 2*lazyBootstrapWindowSec)
+	for _, c := range cands {
+		if existing == c {
+			t.Fatalf("前置自检：写入的 %d 与 Bootstrap 的候选值相同 —— 「不改写已有水位」会永真", existing)
+		}
+	}
+	if err := env.f.rdb.Set(ctx, cursorKey, existing, 0).Err(); err != nil {
+		t.Fatalf("写入水位: %v", err)
+	}
+	if err := svc.Bootstrap(ctx); err != nil {
+		t.Fatalf("Bootstrap（已有水位）: %v", err)
+	}
+	kept, err := env.f.rdb.Get(ctx, cursorKey).Int64()
+	if err != nil {
+		t.Fatalf("读水位（Bootstrap 之后）: %v", err)
+	}
+	if kept != existing {
+		t.Fatalf("Bootstrap 改写了已存在的水位：%d → %d —— 水位是「已成功落库到（含）」的"+
+			"记账，覆写会让最近的水位被无谓重放，也会让两个实例对同一段桶用不同的区间起点",
+			existing, kept)
+	}
+}
+
+// flushCfgStub 是 AgentConfigGetter 的替身：一律返回调用方给的缺省值。
+//
+// 上面的断言只碰 CursorFor / Bootstrap，二者都不读配置（配置只影响 CloseRound 的
+// CloseGrace 与回填节奏，这两个入口都不涉及）；用替身是为了不让这个测试去构造一条
+// 与主题无关的依赖链。
+type flushCfgStub struct{}
+
+func (flushCfgStub) GetString(_ context.Context, _ string, def string) string { return def }
+func (flushCfgStub) GetInt(_ context.Context, _ string, def int) int          { return def }
+
+// lazyBootstrapWindowSec 与实现的 Bootstrap 窗口**同源**（= raw 点的 Redis 保留期）。
+const lazyBootstrapWindowSec = int64(24 * 3600)
+
+// alignDown5m 是测试侧独立的 5min 对齐实现（不复用实现里的函数，否则对齐写错也自洽）。
+func alignDown5m(sec int64) int64 { return sec - sec%300 }
+
+// withLazyCursorCandidates 在 fn 前后各采一次墙钟，返回期间「now−24h 对齐」的候选值。
+//
+// 为什么可以有两个候选：服务用的是**真实时钟**（wireup 没有时钟接缝，WithClock 只在
+// 单测里用），若 fn 恰好跨过一个 5min 边界，前后两次对齐就会差 300s。这不是放宽期望值
+// 的强度 —— 起点由服务自己的 now 唯一决定，而 fn 期间的 now 被这两个采样夹住了；
+// 至于「起点是不是 now−24h 而不是 0/更早」，两个候选都能把它区分开（差 6_000_000 个桶）。
+func withLazyCursorCandidates(fn func()) []int64 {
+	before := alignDown5m(time.Now().Unix() - lazyBootstrapWindowSec)
+	fn()
+	after := alignDown5m(time.Now().Unix() - lazyBootstrapWindowSec)
+	if after == before {
+		return []int64{before}
+	}
+	return []int64{before, after}
+}
+
+func assertLazyCursorStart(t *testing.T, got int64, cands []int64, what string) {
+	t.Helper()
+	for _, c := range cands {
+		if got == c {
+			return
+		}
+	}
+	t.Fatalf("%s = %d，期望 %v（= alignDown(now−24h, 300)，与 Bootstrap 的 s.bootstrapStart() "+
+		"用同一个函数算；0 或任何更早的值都说明懒初始化退化了）", what, got, cands)
 }
 
 // metricsSample 造一条必填字段齐全的合法样本（限流集成用例只需要它过契约校验）。

@@ -314,6 +314,12 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 			zap.Error(err))
 	}
 
+	// ── 启动期**不**显式调 flushSvc.Bootstrap（已裁决：与懒初始化等价）─────
+	// 水位键的缺失由 readCursor 在一轮 flush 到达该设备时按 Bootstrap 语义补上
+	// （同一个 s.bootstrapStart() = alignDown(now−24h, 300)），而 Bootstrap 只在键缺失时
+	// 写（Init 是 SETNX 语义）；故启动期那句调用既不会多建出任何水位，也不会改写已有水位。
+	// 等价性由 TestInit_NoStartupBootstrapAndLazyCursorMatchesBootstrap 断言钉住。
+
 	// ── Task Registry ──────────────────────────────────────────────────
 	// 任务清单由 tasks.All 维护(与任务实现同包),此处只提供依赖。
 	taskRegistry := task.NewRegistry(tasks.All(tasks.Deps{
