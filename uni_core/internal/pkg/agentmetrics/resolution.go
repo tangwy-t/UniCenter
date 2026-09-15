@@ -62,3 +62,29 @@ func CursorKey(deviceID uint64, r Resolution) string {
 	}
 	return fmt.Sprintf("%s%d:%s", historyKeyPrefix, deviceID, cursorKeySuffixes[idx])
 }
+
+// repairKeySuffix 是 1h 回滚的 repair 集合键后缀。
+//
+// 与 cursorKeySuffixes **分开**登记：它们是两族键（游标是水位、repair 是待重算队列），
+// 合并成一张表会让「给游标加档位」顺手改出 `repair_5m` 这种没有语义的键名。
+const repairKeySuffix = "repair_1h"
+
+// RepairSetKey 返回该设备的 1h repair 集合键。
+//
+// 集合成员是**需要重算的小时桶起点**（unix 秒的十进制字符串）——成员本身就是小时，
+// 故「最老的那个」= 最小的成员，不需要额外维护「首次发现时间」这类元数据
+// （元数据多一份就多一个漂移面，且它一旦丢失，集合就无法按年龄收敛）。
+// 成员全部移除后 Redis 会自动删掉空集合，不留空键。
+//
+// 为什么只有 1h 变体、没有 Resolution 参数：repair 的语义是「**可推导**数据与真值不一致，
+// 需要重算」，而两者当中只有 1h 是推导出来的（5m 是唯一真值来源）。给它配一个
+// `repair_5m` 的对称键，只会把「5m 也可重算」这个错误观念变得顺手。
+//
+// 形态与 CursorKey **同源**（`agent:device:{id}:xxx`，前缀复用 historyKeyPrefix）：
+//
+//	agent:device:{id}:repair_1h
+//
+// 键名契约由 agent_metrics_rollup_test.go 用字符串字面量钉住（不复用本函数）。
+func RepairSetKey(deviceID uint64) string {
+	return fmt.Sprintf("%s%d:%s", historyKeyPrefix, deviceID, repairKeySuffix)
+}
