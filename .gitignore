@@ -62,7 +62,14 @@ uni_core/configs/config.docker.yaml
 .idea/
 .vscode/
 *.iml
-docs/
+
+# ── 本地工作文档目录(不入库) ──
+# **必须锚定到根**：要忽略的只有仓库根的 docs/(本地设计稿/过程文档工作目录)，
+# 而 uni_core/docs/ 是**已入库**的 swaggo 生成物(docs.go / swagger.json / swagger.yaml)。
+# 写成未锚定的 `docs/` 会连 uni_core/docs/ 一起忽略 —— `git add uni_core/docs/`
+# 直接非零退出(「下列路径根据您的一个 .gitignore 文件而被忽略」)，
+# 把 `git add … && git commit …` 这样的链拦腰截断(上一个任务只能靠 git add -f 绕开)。
+/docs/
 .gotoolchain/
 .gocache/
 .gopath/
