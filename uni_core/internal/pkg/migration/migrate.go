@@ -50,30 +50,55 @@ func setupJoinTables(db *gorm.DB) error {
 	return nil
 }
 
+// autoMigrateEntities 是 AutoMigrate 的实体清单。
+//
+// 例外的两类实体：
+//  1. **分区指标表**（device_metric_5m/_1h/_disk/_diskio/_nic/_sensor）**不在本清单**。
+//     AutoMigrate 只能建普通表，而 MySQL 事后转分区是整表 COPY 重建、PostgreSQL
+//     官方明确不允许把普通表转成分区表。它们由迁移 v008 注册的 pre-migrate 钩子
+//     以分区形态建表（见 migration.RegisterPreMigrate）。
+//  2. many2many 的 join 实体必须同时登记在 joinTableSetups，否则雪花 ID 回调用
+//     合成 schema 取不到 ID 字段、静默写出 id=0 的 join 行（见该变量注释）。
+//
+// 提取成变量而非内联在 MigrateAll 里，是为了让守卫测试能内省本清单
+// （auto_migrate_guard_test.go 的 TestAutoMigrateExcludesPartitionedMetricTables）。
+var autoMigrateEntities = []any{
+	&entity.SysUser{},
+	&entity.SysRole{},
+	&entity.SysDept{},
+	&entity.SysMenu{},
+	&entity.SysUserRole{},
+	&entity.SysRoleMenu{},
+	&entity.SysRoleDept{},
+	&entity.SysDictType{},
+	&entity.SysDictData{},
+	&entity.SysConfig{},
+	&entity.SysNotice{},
+	&entity.SysNoticeUser{},
+	&entity.SysFile{},
+	&entity.SysJob{},
+	&entity.SysJobLog{},
+	&entity.SysOperationLog{},
+	&entity.SysLoginLog{},
+	&entity.SysMigration{},
+	// ── 设备监控（业务域实体）────────────────────────────────
+	&entity.Device{},
+	&entity.DeviceResource{},
+	// 指标 6 表**刻意缺席**，见上方说明。
+}
+
+// AutoMigrateEntities 返回 AutoMigrate 清单的副本（守卫测试内省用）。
+func AutoMigrateEntities() []any {
+	out := make([]any, len(autoMigrateEntities))
+	copy(out, autoMigrateEntities)
+	return out
+}
+
 // MigrateAll 执行全部实体的 AutoMigrate。
-// 新增实体时只需在此处追加，无需修改 main()。
+// 新增实体时只需追加到 autoMigrateEntities，无需修改 main()。
 func MigrateAll(db *gorm.DB) error {
 	if err := setupJoinTables(db); err != nil {
 		return err
 	}
-	return db.AutoMigrate(
-		&entity.SysUser{},
-		&entity.SysRole{},
-		&entity.SysDept{},
-		&entity.SysMenu{},
-		&entity.SysUserRole{},
-		&entity.SysRoleMenu{},
-		&entity.SysRoleDept{},
-		&entity.SysDictType{},
-		&entity.SysDictData{},
-		&entity.SysConfig{},
-		&entity.SysNotice{},
-		&entity.SysNoticeUser{},
-		&entity.SysFile{},
-		&entity.SysJob{},
-		&entity.SysJobLog{},
-		&entity.SysOperationLog{},
-		&entity.SysLoginLog{},
-		&entity.SysMigration{},
-	)
+	return db.AutoMigrate(autoMigrateEntities...)
 }
