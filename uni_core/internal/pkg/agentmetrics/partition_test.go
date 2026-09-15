@@ -70,16 +70,77 @@ func TestWorstCaseRetentionIncludesOnePeriod(t *testing.T) {
 	}
 }
 
-func TestPlanFromIsIdempotentWhenNothingMissing(t *testing.T) {
-	spec := weeklySpec()
-	bounds := Desired(spec, testNow, 2)
-	existing := make([]string, 0, len(bounds))
+// boundNames 抽出分区名清单（现状 = 期望清单的构造顺序）。
+func boundNames(bounds []Bound) []string {
+	out := make([]string, 0, len(bounds))
 	for _, b := range bounds {
-		existing = append(existing, b.Name)
+		out = append(out, b.Name)
 	}
-	plan := PlanFrom(spec, existing, testNow, 2, 2)
-	if len(plan.Create) != 0 || len(plan.Truncate) != 0 || len(plan.Drop) != 0 {
-		t.Fatalf("现状满足期望时计划必须为空, got %+v", plan)
+	return out
+}
+
+// TestPlanFromIsIdempotentWhenNothingMissing 逐日遍历 7 个星期几。
+//
+// 为什么必须遍历 7 天（评审 F1）：`Desired` 原先用「从 cur 往前
+// periodsFor(retention)+1 个周期」定窗口起点，最老的那个期望分区**本身已部分过期**
+// （其上界 <= now-保留期），于是 existing == Desired 时协调器仍会输出
+// Truncate=[p_2026_w33] —— 周三~周日天天重复下发同一条 TRUNCATE（实测）。
+// 修法是把窗口起点改为**保留期截止点所在周期**：cutoff 落在首项分区内部，
+// 因此每个期望分区的上界都严格大于 cutoff，任意星期几都幂等。
+func TestPlanFromIsIdempotentWhenNothingMissing(t *testing.T) {
+	// testNow = 2026-09-14（周一）07:30 UTC；逐日 +1d 覆盖周一→周日。
+	for _, spec := range []Spec{weeklySpec(), monthlySpec()} {
+		for i := 0; i < 7; i++ {
+			now := testNow.AddDate(0, 0, i)
+			bounds := Desired(spec, now, 2)
+			plan := PlanFrom(spec, boundNames(bounds), now, 2, 2)
+			if len(plan.Create) != 0 || len(plan.Truncate) != 0 || len(plan.Drop) != 0 {
+				t.Fatalf("%s %s(%s): 现状满足期望时计划必须为空, got %+v",
+					spec.Table, now.Format("2006-01-02"), now.Weekday(), plan)
+			}
+		}
+	}
+}
+
+// TestPlanFromReclaimsPartitionsThatSlidOutOfWindow 证明「回收仍可达」。
+//
+// 修 F1 时窗口起点由 now 侧改为 cutoff 侧，窗口整体**前移**了一个周期的量级，
+// 但回收路径必须不受影响：滑出窗口的老分区由 §5 的 boundFromName 反解路径负责。
+// 这里把 now 推后 5 周，断言：
+//  1. 出现了 Truncate 或 Drop；
+//  2. 下界守卫 p_min 与上界哨兵 p_max 永不在其中；
+//  3. 至少有一个被回收的分区名**不在**新期望窗口里 —— 证明走的是 boundFromName
+//     反解，而不是恰好在窗口内的分区被顺带判过期。
+func TestPlanFromReclaimsPartitionsThatSlidOutOfWindow(t *testing.T) {
+	spec := weeklySpec()
+	existing := boundNames(Desired(spec, testNow, 2))
+
+	later := testNow.AddDate(0, 0, 7*5) // +5 周
+	plan := PlanFrom(spec, existing, later, 2, 2)
+	if len(plan.Truncate)+len(plan.Drop) == 0 {
+		t.Fatalf("now 推后 5 周必须有回收动作（保留期形同虚设 = §5 的回归）, 现状=%v", existing)
+	}
+	for _, name := range append(append([]string{}, plan.Truncate...), plan.Drop...) {
+		if name == GuardPartitionName || name == SentinelPartitionName {
+			t.Fatalf("守卫分区与哨兵分区永不回收, 却出现在计划里: %s", name)
+		}
+	}
+	inWindow := make(map[string]bool)
+	for _, name := range boundNames(Desired(spec, later, 2)) {
+		inWindow[name] = true
+	}
+	outOfWindow := 0
+	for _, name := range append(append([]string{}, plan.Truncate...), plan.Drop...) {
+		if !inWindow[name] {
+			outOfWindow++
+		}
+	}
+	if outOfWindow == 0 {
+		t.Fatal("回收必须覆盖已滑出期望窗口的老分区（只能由分区名反解得到），否则只是窗口内误判")
+	}
+	// 保留边界语义：最老的 hold=2 个只 TRUNCATE（保留分区名继续对账），更老的才 DROP。
+	if len(plan.Truncate) != 2 || len(plan.Drop) == 0 {
+		t.Fatalf("hold=2 应产出 2 条 Truncate + 若干 Drop, got truncate=%v drop=%v", plan.Truncate, plan.Drop)
 	}
 }
 
@@ -192,6 +253,62 @@ func TestReclaimDDLDistinguishesTruncateAndDrop(t *testing.T) {
 	}
 	if !strings.Contains(joined, "DROP PARTITION p_2026_w10") {
 		t.Fatalf("Drop 必须生成 DROP PARTITION: %v", stmts)
+	}
+}
+
+// TestReclaimDDLRefusesUnboundedDeleteOnFallbackDialect 守卫降级方言（评审 F2）。
+//
+// 缺陷背景：非 mysql/postgres 方言下 ReclaimDDL 原先生成 `DELETE FROM <表>` ——
+// **没有 WHERE**，等价于清空整张指标表（实测 sqlite 分支返回
+// `[DELETE FROM device_metric_5m]` 且 err=nil）。spec §7.3 明令
+// 「逐行 DELETE 降级等于把本设计作废，不应作为静默兜底」，降级必须走
+// 「分块 find-then-delete（DELETE ... LIMIT 1000 循环）」。故这里断言：
+// 非空回收请求在降级方言下必须**报错**，且**绝不返回未加限定条件的 DELETE FROM**。
+func TestReclaimDDLRefusesUnboundedDeleteOnFallbackDialect(t *testing.T) {
+	spec := weeklySpec()
+	truncateOnly := []string{"p_2026_w20"}
+	dropOnly := []string{"p_2026_w10"}
+
+	for _, dialect := range []string{"sqlite", "", "mssql"} { // "" = 空方言串（未知）
+		cases := []struct {
+			what     string
+			truncate []string
+			drop     []string
+		}{
+			{"truncate 非空", truncateOnly, nil},
+			{"drop 非空", nil, dropOnly},
+			{"两者都非空", truncateOnly, dropOnly},
+		}
+		for _, c := range cases {
+			stmts, err := ReclaimDDL(dialect, spec, c.truncate, c.drop)
+			if err == nil {
+				t.Fatalf("方言 %q %s: 必须返回错误（否则会退化成清空整表）, got %v", dialect, c.what, stmts)
+			}
+			if len(stmts) != 0 {
+				t.Fatalf("方言 %q %s: 报错时不得返回任何语句, got %v", dialect, c.what, stmts)
+			}
+			// 绝不包含未加限定条件的 DELETE FROM（无论出现在哪条语句里）。
+			for _, s := range stmts {
+				if strings.Contains(strings.ToUpper(s), "DELETE FROM") {
+					t.Fatalf("方言 %q: 降级路径不得生成无 WHERE 的 DELETE: %q", dialect, s)
+				}
+			}
+		}
+		// 无可回收时仍是合法的空操作（降级方言下协调器不该因为「没事可做」而报错）。
+		stmts, err := ReclaimDDL(dialect, spec, nil, nil)
+		if err != nil || len(stmts) != 0 {
+			t.Fatalf("方言 %q 无回收请求时应为空操作, got stmts=%v err=%v", dialect, stmts, err)
+		}
+	}
+
+	// mysql / postgres 分支一字未动（回归）。
+	my, err := ReclaimDDL("mysql", spec, truncateOnly, dropOnly)
+	if err != nil || len(my) != 2 {
+		t.Fatalf("mysql 分区回收不受影响: stmts=%v err=%v", my, err)
+	}
+	pg, err := ReclaimDDL("postgres", spec, truncateOnly, dropOnly)
+	if err != nil || len(pg) != 2 {
+		t.Fatalf("postgres 分支不受影响: stmts=%v err=%v", pg, err)
 	}
 }
 

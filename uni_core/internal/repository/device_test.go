@@ -131,11 +131,44 @@ func TestDeviceFindPageFiltersAndPagination(t *testing.T) {
 		t.Fatalf("online=false 应命中 2 台（含 NULL）, got %d", total)
 	}
 
-	// 分页
+	// 分页（既有的 Page=2/PageSize=2 语义：OFFSET = (2-1)*2 = 2 → 取到第 2 页）
 	q := &request.DeviceQuery{}
 	q.Page, q.PageSize = 2, 2
-	_, total, _ = repo.FindPage(ctx, q, since)
+	list, total, _ = repo.FindPage(ctx, q, since)
 	if total != 3 {
 		t.Fatalf("分页时 total 必须仍是全量 3, got %d", total)
+	}
+	if len(list) != 1 {
+		t.Fatalf("page2(offset=2, size=2) 必须返回剩余 1 条, got %d", len(list))
+	}
+	if list[0].ID == 1001 || list[0].ID == 1002 {
+		t.Fatalf("page2 必须是不在第 1 页的那台设备, got %d", list[0].ID)
+	}
+
+	// 第 1 页：paginate 的 Offset/Limit 必须生效，且排序仍为 last_seen_at DESC（评审 F4 回归）
+	q1 := &request.DeviceQuery{}
+	q1.Page, q1.PageSize = 1, 2
+	page1, total1, _ := repo.FindPage(ctx, q1, since)
+	if total1 != 3 || len(page1) != 2 {
+		t.Fatalf("page1 必须返回 2 条且 total 仍是 3, got len=%d total=%d", len(page1), total1)
+	}
+	pos := map[uint64]int{}
+	for i, d := range page1 {
+		pos[d.ID] = i
+	}
+	if pos[1001] > pos[1002] {
+		t.Fatalf("last_seen_at 较新的 1001 必须排在 1002 之前, got %v", pos)
+	}
+
+	// status 精确匹配（启停态，与在线状态正交）
+	enabled := entity.DeviceStatusEnabled
+	_, total, _ = repo.FindPage(ctx, &request.DeviceQuery{Status: &enabled}, since)
+	if total != 3 {
+		t.Fatalf("status=启用 应命中 3 台, got %d", total)
+	}
+	disabled := entity.DeviceStatusDisabled
+	_, total, _ = repo.FindPage(ctx, &request.DeviceQuery{Status: &disabled}, since)
+	if total != 0 {
+		t.Fatalf("status=停用 应命中 0 台, got %d", total)
 	}
 }

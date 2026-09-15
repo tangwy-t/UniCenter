@@ -48,40 +48,41 @@ func (r *DeviceRepo) Touch(ctx context.Context, id uint64, at time.Time) error {
 		UpdateColumn("last_seen_at", at).Error
 }
 
+// applyFilters 把列表筛选条件链到给定会话上（与 config.go/file.go 的
+// applyFilters 同款：纯函数式地把 db 链下去，不共享语句状态）。
+func (r *DeviceRepo) applyFilters(db *gorm.DB, q *request.DeviceQuery, onlineSince time.Time) *gorm.DB {
+	if q.Hostname != "" {
+		db = db.Where("hostname LIKE ?", "%"+q.Hostname+"%")
+	}
+	if q.Status != nil {
+		db = db.Where("status = ?", *q.Status)
+	}
+	if q.Online != nil {
+		if *q.Online {
+			db = db.Where("last_seen_at IS NOT NULL AND last_seen_at >= ?", onlineSince)
+		} else {
+			db = db.Where("last_seen_at IS NULL OR last_seen_at < ?", onlineSince)
+		}
+	}
+	return db
+}
+
 // FindPage 分页查询。
 //
 // onlineSince 是在线阈值折算出的时间点（service 依 sys.agent.offlineThreshold 计算）：
 //   - Online == nil  → 不过滤
 //   - Online == true → last_seen_at >= onlineSince
 //   - Online == false→ last_seen_at < onlineSince 或 IS NULL
+//
+// Count 与取页走 pagination.go 的公共 paginate[T]（本包 11 个仓储的统一入口）：
+// countDB 不带 Order/Offset/Limit，dataDB 才链排序；两个会话相互独立，
+// 避免 GORM 语句状态在 COUNT 与 SELECT 之间串味（评审 F4：device 曾是唯一
+// 手写 Count + Offset/Limit/Find 的例外）。
 func (r *DeviceRepo) FindPage(ctx context.Context, q *request.DeviceQuery, onlineSince time.Time) ([]entity.Device, int64, error) {
-	base := r.db.WithContext(ctx).Model(&entity.Device{})
-	if q.Hostname != "" {
-		base = base.Where("hostname LIKE ?", "%"+q.Hostname+"%")
-	}
-	if q.Status != nil {
-		base = base.Where("status = ?", *q.Status)
-	}
-	if q.Online != nil {
-		if *q.Online {
-			base = base.Where("last_seen_at IS NOT NULL AND last_seen_at >= ?", onlineSince)
-		} else {
-			base = base.Where("last_seen_at IS NULL OR last_seen_at < ?", onlineSince)
-		}
-	}
-
-	var total int64
-	if err := base.Count(&total).Error; err != nil {
-		return nil, 0, err
-	}
-
-	var list []entity.Device
-	if err := base.Order("last_seen_at DESC, id DESC").
-		Offset(q.Offset()).Limit(q.GetPageSize()).
-		Find(&list).Error; err != nil {
-		return nil, 0, err
-	}
-	return list, total, nil
+	countDB := r.applyFilters(r.db.WithContext(ctx).Model(&entity.Device{}), q, onlineSince)
+	dataDB := r.applyFilters(r.db.WithContext(ctx).Model(&entity.Device{}), q, onlineSince).
+		Order("last_seen_at DESC, id DESC")
+	return paginate[entity.Device](countDB, dataDB, q)
 }
 
 // SetStatus 设置启停态（管理侧属性，与在线状态正交）。

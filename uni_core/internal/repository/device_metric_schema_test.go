@@ -10,6 +10,7 @@ import (
 
 	"github.com/glebarez/sqlite"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/entity"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/agentmetrics"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/database"
 	"gorm.io/gorm"
 )
@@ -35,8 +36,11 @@ func TestMetricDDLColumnsMatchEntityTags(t *testing.T) {
 	//  2. 原 token 解析只 Trim 掉反引号/引号，PRIMARY KEY (a, b) 约束被 "," 切开后的
 	//     续行 token（如 "bucket_ts)"）会被当成一个列名 → 每个表都多出一个假列。
 	// 两处均为**解析修正，断言与期望值一字未改**（两个方向都仍逐列比对）。
+	//
+	// 评审 F5 追加：解析改调 repository 包内**唯一**的 parseDDLColumnNames，
+	// 与 device_metric.go 的查询白名单 init() 同源 —— 两处各写一套必然漂移
+	// （守卫修好了、生产仍在把 "bucket_ts)" 收进白名单）。
 	colRe := regexp.MustCompile("gorm:\"column:([a-z0-9_]+)")
-	colNameRe := regexp.MustCompile("^[a-z0-9_]+$")
 
 	for _, c := range cases {
 		ddl, ok := MetricColumnDDL(c.table)
@@ -52,18 +56,7 @@ func TestMetricDDLColumnsMatchEntityTags(t *testing.T) {
 			}
 		}
 		got := map[string]bool{}
-		for _, line := range strings.Split(ddl, ",") {
-			f := strings.Fields(strings.TrimSpace(line))
-			if len(f) == 0 {
-				continue
-			}
-			name := strings.Trim(f[0], "`\"")
-			if name == "" || strings.EqualFold(name, "PRIMARY") || strings.EqualFold(name, "UNIQUE") || strings.EqualFold(name, "KEY") {
-				continue
-			}
-			if !colNameRe.MatchString(name) {
-				continue // PRIMARY KEY (...) 约束的续行 token（如 "bucket_ts)"）：不是列定义
-			}
+		for _, name := range parseDDLColumnNames(ddl) {
 			got[name] = true
 		}
 		for name := range want {
@@ -97,6 +90,73 @@ func TestMetricTablesCountAndOrder(t *testing.T) {
 	}
 	if tables[0] != entity.TableNameMetric5m {
 		t.Fatalf("顺序必须稳定且以 _5m 打头, got %q", tables[0])
+	}
+}
+
+// TestMetricTableNamesAreThreeWayConsistent 守卫表名的三处来源（评审 F6）。
+//
+// 表名有两份来源：`pkg/agentmetrics.TableSpecs()`（分区策略的单一来源，裸字符串）
+// 与 `entity.TableNameMetric*` 常量（GORM 实体与列 DDL 使用），中间还有
+// `repository.MetricTables()`。三者**没有任何测试绑定**：改一处、另一处不改不会红，
+// 而后果是分区协调器/建表钩子对着一张不存在的表名跑 reconcile（建表与回收全落空）。
+//
+// 为什么守卫放在 repository 包：`pkg/agentmetrics` **不得** import `model/entity`
+// （架构设计 §2.3 禁则 3 —— 保持纯逻辑可脱 GORM 单测），只有 repository 能同时看到三方。
+func TestMetricTableNamesAreThreeWayConsistent(t *testing.T) {
+	fromSpecs := make(map[string]bool)
+	for _, s := range agentmetrics.TableSpecs() {
+		fromSpecs[s.Table] = true
+	}
+	fromRepo := make(map[string]bool)
+	for _, tbl := range MetricTables() {
+		fromRepo[tbl] = true
+	}
+	fromEntity := map[string]bool{
+		entity.TableNameMetric5m:     true,
+		entity.TableNameMetric1h:     true,
+		entity.TableNameMetricDisk:   true,
+		entity.TableNameMetricDiskIO: true,
+		entity.TableNameMetricNIC:    true,
+		entity.TableNameMetricSensor: true,
+	}
+	// 表数也要相等：只比集合会漏掉「两边同时少一张」。
+	if len(fromSpecs) != len(fromEntity) || len(fromRepo) != len(fromEntity) {
+		t.Fatalf("表数不一致: TableSpecs=%d MetricTables=%d entity=%d",
+			len(fromSpecs), len(fromRepo), len(fromEntity))
+	}
+	assertSameTableSet := func(what string, got map[string]bool) {
+		t.Helper()
+		for n := range fromEntity {
+			if !got[n] {
+				t.Errorf("%s 缺少 entity 常量里的表 %q", what, n)
+			}
+		}
+		for n := range got {
+			if !fromEntity[n] {
+				t.Errorf("%s 多出 entity 里没有的表 %q", what, n)
+			}
+		}
+	}
+	assertSameTableSet("agentmetrics.TableSpecs()", fromSpecs)
+	assertSameTableSet("repository.MetricTables()", fromRepo)
+
+	// 子表值列清单的键必须恰好是 4 张子表：少一个键 = upsertRows 报错，
+	// 若回退成静默 nil 就是「冲突退化成 DO NOTHING」（见 F3）。
+	fromSubCols := make(map[string]bool)
+	for tbl := range subValueColumnsByTable {
+		fromSubCols[tbl] = true
+	}
+	wantSub := map[string]bool{
+		entity.TableNameMetricDisk: true, entity.TableNameMetricDiskIO: true,
+		entity.TableNameMetricNIC: true, entity.TableNameMetricSensor: true,
+	}
+	if len(fromSubCols) != len(wantSub) {
+		t.Fatalf("subValueColumnsByTable 表数 = %d, want %d", len(fromSubCols), len(wantSub))
+	}
+	for tbl := range wantSub {
+		if !fromSubCols[tbl] {
+			t.Errorf("subValueColumnsByTable 缺少子表 %q", tbl)
+		}
 	}
 }
 

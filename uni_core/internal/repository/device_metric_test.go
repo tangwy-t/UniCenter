@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/glebarez/sqlite"
@@ -83,6 +84,167 @@ func TestWriteBucketIsIdempotent(t *testing.T) {
 	db.Where("resource_id = ? AND bucket_ts = ?", 2001, 1000).First(&d)
 	if d.UsedPercent == nil || *d.UsedPercent != 63 {
 		t.Fatalf("子表重放应覆盖为 63, got %v", d.UsedPercent)
+	}
+}
+
+// TestMetricQueryWhitelistExcludesDDLNoise 守卫查询白名单的解析（评审 F5）。
+//
+// 缺陷背景：init() 原先自己用裸 strings.Split 解析列 DDL，缺了「必须是裸标识符」
+// 这层过滤，于是 `PRIMARY KEY (device_id, bucket_ts)` 被 ',' 切开后的续行 token
+// "bucket_ts)" 被当成列名收进白名单（实测 6 张表各多 1 个假列），而且
+// sanitizeColumns(t, []string{"bucket_ts)"}) **放行**它 → 直接拼进 SELECT 投影。
+// 现在解析与守卫测试同源（parseDDLColumnNames），这里断言垃圾 token 不再进白名单、
+// 且白名单出口会拒绝它。
+func TestMetricQueryWhitelistExcludesDDLNoise(t *testing.T) {
+	noise := []string{"bucket_ts)", "resource_id)", "PRIMARY", "UNIQUE", "KEY", "PRIMARY KEY (device_id"}
+	for _, table := range MetricTables() {
+		allowed, ok := metricQueryColumns[table]
+		if !ok {
+			t.Fatalf("%s 不在查询白名单里", table)
+		}
+		if !allowed["bucket_ts"] {
+			t.Fatalf("%s 白名单必须含 bucket_ts", table)
+		}
+		for _, bad := range noise {
+			if allowed[bad] {
+				t.Errorf("%s 白名单混入了 DDL 约束 token %q（约束续行不是列定义）", table, bad)
+			}
+		}
+		// 白名单的唯一出口：垃圾列必须在 400 侧被拒，不得拼进 SQL。
+		if _, err := sanitizeColumns(table, []string{"bucket_ts)"}); err == nil {
+			t.Errorf("%s: sanitizeColumns 必须拒绝 %q", table, "bucket_ts)")
+		}
+		// 正常列仍必须放行（别把守卫修成拒绝一切）。
+		if _, err := sanitizeColumns(table, []string{"bucket_ts"}); err != nil {
+			t.Errorf("%s: sanitizeColumns 必须接受 bucket_ts: %v", table, err)
+		}
+	}
+}
+
+// TestUpsertRowsRejectsUnregisteredTable 守卫「表名未登记就必须硬失败」（评审 F3）。
+//
+// 缺陷背景：upsertRows 原先靠 `firstTable[T]` 在运行期判类型，未知类型返回 ""，
+// 于是值列清单为 nil → DoUpdates 为空 → 冲突时**静默退化成 DO NOTHING**
+// （实测：重放同一 (resource_id, bucket_ts)，err=nil 但值仍是旧值）。
+// 表名改为显式参数后，唯一的剩余缺口就是「传了未登记的表名」，它必须报错。
+func TestUpsertRowsRejectsUnregisteredTable(t *testing.T) {
+	db := newMetricTestDB(t)
+	rows := []entity.DeviceMetricDisk{{ResourceID: 3001, BucketTS: 1000, UsedPercent: ptr(50)}}
+
+	err := upsertRows(db, "device_metric_nope", rows)
+	if err == nil {
+		t.Fatal("未登记的表名必须返回错误（否则冲突会静默退化成 DO NOTHING）")
+	}
+	if !strings.Contains(err.Error(), "device_metric_nope") {
+		t.Fatalf("错误信息必须点明是哪张表: %v", err)
+	}
+	// 未登记的表：不得悄悄写进去（错误必须在执行前返回）
+	if db.Migrator().HasTable("device_metric_nope") {
+		t.Fatal("夹具不该存在该表")
+	}
+	// 空切片同样不得绕过校验（校验在行数判断之前）
+	if err := upsertRows(db, "device_metric_nope", []entity.DeviceMetricDisk{}); err == nil {
+		t.Fatal("空切片也不得绕过表名校验")
+	}
+	// 已登记的表：正常写入（对照）
+	if err := upsertRows(db, entity.TableNameMetricDisk, rows); err != nil {
+		t.Fatalf("已登记表必须可写: %v", err)
+	}
+}
+
+// TestWriteBucketReplaysAllFourSubTablesIdempotently 覆盖 4 张子表的幂等重放。
+//
+// 原先只有 _disk 被覆盖到（TestWriteBucketIsIdempotent）；_diskio / _nic / _sensor
+// 的「冲突时真的更新」没有任何断言 —— 若某张表的值列清单写错或缺失，
+// 旧的静默 DO NOTHING 会让这三张表悄悄只写首值。这里逐表断言：
+// 重放后**行数仍为 1** 且**值被覆盖为第二值**。
+func TestWriteBucketReplaysAllFourSubTablesIdempotently(t *testing.T) {
+	const firstVal, secondVal = 11.0, 77.0
+	cases := []struct {
+		name  string
+		table string
+		build func(v float64) MetricSubRows
+		read  func(t *testing.T, db *gorm.DB) (int64, *float64)
+	}{
+		{
+			name: "disk", table: entity.TableNameMetricDisk,
+			build: func(v float64) MetricSubRows {
+				return MetricSubRows{Disks: []entity.DeviceMetricDisk{{ResourceID: 4001, BucketTS: 1000, UsedPercent: &v}}}
+			},
+			read: func(t *testing.T, db *gorm.DB) (int64, *float64) {
+				var n int64
+				db.Table(entity.TableNameMetricDisk).Count(&n)
+				var row entity.DeviceMetricDisk
+				db.Table(entity.TableNameMetricDisk).Where("resource_id = ? AND bucket_ts = ?", 4001, 1000).First(&row)
+				return n, row.UsedPercent
+			},
+		},
+		{
+			name: "diskio", table: entity.TableNameMetricDiskIO,
+			build: func(v float64) MetricSubRows {
+				return MetricSubRows{DiskIO: []entity.DeviceMetricDiskIO{{ResourceID: 4002, BucketTS: 1000, ReadBytesPerSec: &v}}}
+			},
+			read: func(t *testing.T, db *gorm.DB) (int64, *float64) {
+				var n int64
+				db.Table(entity.TableNameMetricDiskIO).Count(&n)
+				var row entity.DeviceMetricDiskIO
+				db.Table(entity.TableNameMetricDiskIO).Where("resource_id = ? AND bucket_ts = ?", 4002, 1000).First(&row)
+				return n, row.ReadBytesPerSec
+			},
+		},
+		{
+			name: "nic", table: entity.TableNameMetricNIC,
+			build: func(v float64) MetricSubRows {
+				return MetricSubRows{NICs: []entity.DeviceMetricNIC{{ResourceID: 4003, BucketTS: 1000, RXBytesPerSec: &v}}}
+			},
+			read: func(t *testing.T, db *gorm.DB) (int64, *float64) {
+				var n int64
+				db.Table(entity.TableNameMetricNIC).Count(&n)
+				var row entity.DeviceMetricNIC
+				db.Table(entity.TableNameMetricNIC).Where("resource_id = ? AND bucket_ts = ?", 4003, 1000).First(&row)
+				return n, row.RXBytesPerSec
+			},
+		},
+		{
+			name: "sensor", table: entity.TableNameMetricSensor,
+			build: func(v float64) MetricSubRows {
+				return MetricSubRows{Sensors: []entity.DeviceMetricSensor{{ResourceID: 4004, BucketTS: 1000, TemperatureC: &v}}}
+			},
+			read: func(t *testing.T, db *gorm.DB) (int64, *float64) {
+				var n int64
+				db.Table(entity.TableNameMetricSensor).Count(&n)
+				var row entity.DeviceMetricSensor
+				db.Table(entity.TableNameMetricSensor).Where("resource_id = ? AND bucket_ts = ?", 4004, 1000).First(&row)
+				return n, row.TemperatureC
+			},
+		},
+	}
+	if len(cases) != len(subValueColumnsByTable) {
+		t.Fatalf("子表覆盖数 = %d, 登记的表 = %d —— 新增子表必须同时补进本测试",
+			len(cases), len(subValueColumnsByTable))
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			db := newMetricTestDB(t)
+			repo := NewDeviceMetricRepository(db)
+			ctx := context.Background()
+
+			if err := repo.WriteBucket(ctx, sampleWide(1000, 10), c.build(firstVal)); err != nil {
+				t.Fatalf("first WriteBucket(%s): %v", c.table, err)
+			}
+			if err := repo.WriteBucket(ctx, sampleWide(1000, 10), c.build(secondVal)); err != nil {
+				t.Fatalf("replay WriteBucket(%s): %v", c.table, err)
+			}
+			n, got := c.read(t, db)
+			if n != 1 {
+				t.Fatalf("%s 行数 = %d, want 1（同桶重放必须幂等）", c.table, n)
+			}
+			if got == nil || *got != secondVal {
+				t.Fatalf("%s 重放后值 = %v, want %v —— 冲突退化成 DO NOTHING（值列清单缺失/写错）",
+					c.table, got, secondVal)
+			}
+		})
 	}
 }
 

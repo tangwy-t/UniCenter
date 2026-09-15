@@ -3,6 +3,8 @@ package repository
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -116,6 +118,39 @@ var metricColumnDDL = map[string]string{
 	bucket_ts BIGINT NOT NULL,
 	temperature_c DOUBLE PRECISION,
 	PRIMARY KEY (resource_id, bucket_ts)`,
+}
+
+// ddlColumnNameRe 只接受**裸标识符**列名。约束续行（PRIMARY KEY 被 ',' 切开的
+// "bucket_ts)"）与大写关键字（PRIMARY/UNIQUE/KEY）都不匹配。
+var ddlColumnNameRe = regexp.MustCompile(`^[a-z0-9_]+$`)
+
+// parseDDLColumnNames 从列 DDL 片段解析出列名，是**唯一**的解析实现：
+// device_metric.go 的查询白名单 init() 与 device_metric_schema_test.go 的
+// 「DDL 列名 ↔ 实体字段」守卫**都调用它**（评审 F5）。
+//
+// 为什么必须同源：两处各写一套解析必然漂移 —— Task 6 的守卫修过「约束续行被当成列」
+// 之后，生产侧 init() 仍在用裸 strings.Split 把 "bucket_ts)" 收进查询白名单，
+// 且 sanitizeColumns 会放行它（实测探针：6 张表白名单各多 1 个假列，
+// sanitizeColumns(t, ["bucket_ts)"]) 无错返回）。
+//
+// 规则（与守卫的期望值一致）：
+//  1. 按 ',' 切分（每个列定义一段，约束尾随的续行自成一类 token）；
+//  2. 取每段首个 token 并去掉反引号/双引号；
+//  3. 只接受 ^[a-z0-9_]+$ —— 其余（约束续行、大写关键字）一律不是列定义。
+func parseDDLColumnNames(ddl string) []string {
+	names := make([]string, 0, 48)
+	for _, line := range strings.Split(ddl, ",") {
+		f := strings.Fields(strings.TrimSpace(line))
+		if len(f) == 0 {
+			continue
+		}
+		name := strings.Trim(f[0], "`\"")
+		if !ddlColumnNameRe.MatchString(name) {
+			continue
+		}
+		names = append(names, name)
+	}
+	return names
 }
 
 // MetricColumnDDL 返回某张指标表的列定义片段。

@@ -54,16 +54,16 @@ func (r *DeviceMetricRepo) WriteBucket(ctx context.Context, w *entity.DeviceMetr
 		if err := upsertWide(tx, entity.TableNameMetric5m, w); err != nil {
 			return err
 		}
-		if err := upsertRows(tx, subs.Disks); err != nil {
+		if err := upsertRows(tx, entity.TableNameMetricDisk, subs.Disks); err != nil {
 			return err
 		}
-		if err := upsertRows(tx, subs.DiskIO); err != nil {
+		if err := upsertRows(tx, entity.TableNameMetricDiskIO, subs.DiskIO); err != nil {
 			return err
 		}
-		if err := upsertRows(tx, subs.NICs); err != nil {
+		if err := upsertRows(tx, entity.TableNameMetricNIC, subs.NICs); err != nil {
 			return err
 		}
-		return upsertRows(tx, subs.Sensors)
+		return upsertRows(tx, entity.TableNameMetricSensor, subs.Sensors)
 	})
 }
 
@@ -86,31 +86,28 @@ func upsertWide(tx *gorm.DB, table string, w *entity.DeviceMetricWide) error {
 
 // upsertRows 对任意子表做批量 UPSERT；冲突键统一为 (resource_id, bucket_ts)。
 // 空切片直接跳过（空桶不写行，与 spec §7.1 一致）。
-func upsertRows[T any](tx *gorm.DB, rows []T) error {
+//
+// table 由调用方**显式**给出，与 upsertWide 的形状一致（评审 F3）：
+//   - 原先靠泛型 `firstTable[T]` 在运行期判类型，未知类型返回 ""，于是
+//     subValueColumns("") 为 nil → DoUpdates 为空 → 冲突时**静默退化成 DO NOTHING**
+//     （不报错、也不更新；实测重放后值仍是旧值）。删掉类型判定后这条静默路径不复存在。
+//   - 显式表名还避免了「结构体的 TableName() 未必等于目标表」这类陷阱
+//     （_1h 就是同一结构体两个表名，upsertWide 也必须靠显式表名）。
+//
+// 表名未登记（subValueColumnsByTable 缺条目）时**硬失败**：这是配置错误，
+// 若返回 nil 值列清单就会重演上面的静默 DO NOTHING。
+func upsertRows[T any](tx *gorm.DB, table string, rows []T) error {
+	cols, ok := subValueColumnsByTable[table]
+	if !ok {
+		return fmt.Errorf("agentmetrics: 子表 %q 未登记值列清单（subValueColumnsByTable 缺条目会让冲突静默退化成 DO NOTHING），拒绝写入", table)
+	}
 	if len(rows) == 0 {
 		return nil
 	}
-	return tx.Clauses(clause.OnConflict{
+	return tx.Table(table).Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "resource_id"}, {Name: "bucket_ts"}},
-		DoUpdates: clause.AssignmentColumns(subValueColumns(firstTable(tx, rows))),
+		DoUpdates: clause.AssignmentColumns(cols),
 	}).CreateInBatches(rows, 100).Error
-}
-
-// firstTable 返回这批行对应的表名（用于取该表的值列清单）。
-func firstTable[T any](_ *gorm.DB, rows []T) string {
-	var zero T
-	switch any(zero).(type) {
-	case entity.DeviceMetricDisk:
-		return entity.TableNameMetricDisk
-	case entity.DeviceMetricDiskIO:
-		return entity.TableNameMetricDiskIO
-	case entity.DeviceMetricNIC:
-		return entity.TableNameMetricNIC
-	case entity.DeviceMetricSensor:
-		return entity.TableNameMetricSensor
-	default:
-		return ""
-	}
 }
 
 var subValueColumnsByTable = map[string][]string{
@@ -121,8 +118,6 @@ var subValueColumnsByTable = map[string][]string{
 	entity.TableNameMetricSensor: {"temperature_c"},
 }
 
-func subValueColumns(table string) []string { return subValueColumnsByTable[table] }
-
 // metricQueryColumns 是允许出现在白名单投影里的列（防止 SQL 注入与误投影）。
 var metricQueryColumns = map[string]map[string]bool{}
 
@@ -130,15 +125,10 @@ func init() {
 	for _, table := range MetricTables() {
 		allowed := map[string]bool{"bucket_ts": true}
 		if ddl, ok := MetricColumnDDL(table); ok {
-			for _, line := range strings.Split(ddl, ",") {
-				f := strings.Fields(strings.TrimSpace(line))
-				if len(f) == 0 {
-					continue
-				}
-				name := strings.Trim(f[0], "`\"")
-				if name == "" || strings.EqualFold(name, "PRIMARY") {
-					continue
-				}
+			// 与一致性守卫**同源**解析（评审 F5）：只收裸标识符列名。
+			// 原先这里用裸 strings.Split，把 `PRIMARY KEY (device_id, bucket_ts)`
+			// 的续行 token "bucket_ts)" 也收进了白名单，且 sanitizeColumns 会放行它。
+			for _, name := range parseDDLColumnNames(ddl) {
 				allowed[name] = true
 			}
 		}

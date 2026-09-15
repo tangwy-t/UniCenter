@@ -100,17 +100,28 @@ func WorstCaseRetention(spec Spec) time.Duration {
 }
 
 // Desired 返回按上界严格递增排序的完整期望分区清单，
-// 首项是下界守卫分区、末项是上界哨兵分区，中间是 [now-(保留期+1周期), now+horizon) 的业务分区。
+// 首项是下界守卫分区、末项是上界哨兵分区，中间是 [cutoff 所在周期, now+horizon)
+// 的业务分区（cutoff = now - 保留期）。
+//
+// 窗口起点为什么由 **cutoff 所在的那个周期** 决定，而不是「从 now 往前数
+// periodsFor(retention)+1 个周期」（评审 F1）：后者会让最老的期望分区**自己就
+// 部分过期**（其上界 <= cutoff），于是 existing == Desired 时 PlanFrom 仍会输出
+// Truncate=[最老分区] —— 协调器每天重复下发同一条 TRUNCATE，与 Plan 的
+// 「现状满足期望时三段均为空」契约矛盾。取 cutoff 所在周期后，cutoff 落在首项
+// 分区内部，故**每个**期望分区的上界都严格大于 cutoff，对任意星期几都幂等；
+// 滑出窗口的老分区仍由 PlanFrom 的 boundFromName 路径回收（§5），不受影响。
 func Desired(spec Spec, now time.Time, horizon int) []Bound {
 	if horizon < 1 {
 		horizon = 1
 	}
 	cur := periodStart(now, spec.Granularity)
-	lookback := periodsFor(spec.Retention, spec.Granularity) + 1
-	first := addPeriod(cur, spec.Granularity, -lookback)
+	cutoff := now.Add(-spec.Retention)
+	first := periodStart(cutoff, spec.Granularity) // 包含 cutoff 的那个周期
 	last := addPeriod(cur, spec.Granularity, horizon)
 
-	out := make([]Bound, 0, lookback+horizon+2)
+	// 容量提示：periodsFor 是覆盖保留期所需周期数的上界估计，first 落在
+	// [cutoff-1周期, cutoff] 内，故实际条数 <= periodsFor+horizon+1（+3 留余量）。
+	out := make([]Bound, 0, periodsFor(spec.Retention, spec.Granularity)+horizon+3)
 	out = append(out, Bound{Name: GuardPartitionName, Lower: 0, Upper: first.Unix()})
 	for p := first; p.Before(last); p = addPeriod(p, spec.Granularity, 1) {
 		nxt := addPeriod(p, spec.Granularity, 1)
@@ -265,28 +276,41 @@ func AddPartitionDDL(dialect string, spec Spec, missing []Bound, hasSentinel boo
 }
 
 // ReclaimDDL 返回回收语句：
-//   - truncate：TRUNCATE PARTITION，保留边界、清空行、瞬时（PG 用 DELETE 降级）
+//   - truncate：TRUNCATE PARTITION，保留边界、清空行、瞬时（PG 用 DELETE 降级，
+//     删的是**分区子表**——PG 的分区是真实子表，故此 DELETE 天然只落在一个周期内）
 //   - drop：DROP PARTITION，彻底释放空间（PG 由调用方改用 DETACH CONCURRENTLY）
+//
+// 降级方言（sqlite / 未知）**不支持分区**，因此既不能 TRUNCATE/DROP PARTITION，
+// 也**绝不允许**退化成无 WHERE 的 `DELETE FROM <表>`（那是清空整张指标表 —— 评审 F2）。
+// 该分支返回**明确错误**，迫使调用方走 spec §7.3 的有界降级路径：
+// 分块 find-then-delete（`DELETE ... LIMIT 1000` 循环至 RowsAffected == 0）。
+// 无回收请求时（两个清单都空）返回空而非错误 —— 降级方言下「没事可做」是合法状态。
 func ReclaimDDL(dialect string, spec Spec, truncate, drop []string) ([]string, error) {
-	out := make([]string, 0, len(truncate)+len(drop))
-	for _, n := range truncate {
-		switch dialect {
-		case "mysql":
-			out = append(out, fmt.Sprintf("ALTER TABLE %s TRUNCATE PARTITION %s", spec.Table, n))
-		case "postgres":
-			out = append(out, fmt.Sprintf("DELETE FROM %s", n))
-		default:
-			out = append(out, fmt.Sprintf("DELETE FROM %s", spec.Table))
+	if dialect != "mysql" && dialect != "postgres" {
+		if len(truncate) == 0 && len(drop) == 0 {
+			return nil, nil
 		}
+		return nil, fmt.Errorf(
+			"agentmetrics: 方言 %q 不支持分区回收（%s 无分区概念），拒绝生成无界 DELETE；"+
+				"请走有界的批量 DELETE 路径（见 spec §7.3 降级路径：DELETE ... LIMIT 1000 循环至 RowsAffected == 0）",
+			dialect, spec.Table)
 	}
-	for _, n := range drop {
-		switch dialect {
-		case "mysql":
+
+	out := make([]string, 0, len(truncate)+len(drop))
+	switch dialect {
+	case "mysql":
+		for _, n := range truncate {
+			out = append(out, fmt.Sprintf("ALTER TABLE %s TRUNCATE PARTITION %s", spec.Table, n))
+		}
+		for _, n := range drop {
 			out = append(out, fmt.Sprintf("ALTER TABLE %s DROP PARTITION %s", spec.Table, n))
-		case "postgres":
+		}
+	case "postgres":
+		for _, n := range truncate {
+			out = append(out, fmt.Sprintf("DELETE FROM %s", n))
+		}
+		for _, n := range drop {
 			out = append(out, fmt.Sprintf("DROP TABLE IF EXISTS %s", n))
-		default:
-			_ = n
 		}
 	}
 	return out, nil
