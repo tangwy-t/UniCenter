@@ -107,6 +107,13 @@ type DeviceDeps struct {
 	DeviceHdl *handler.DeviceHandler
 }
 
+// AgentDeps holds agent channel handler dependencies.
+// 与 DeviceDeps 分开：设备管理走 JWT + 权限码，agent 通道是**未鉴权**入口，
+// 两者的鉴权模型不同，混在一起只会让「哪些端点需要 token」变得含糊。
+type AgentDeps struct {
+	AgentWSHdl *handler.AgentWSHandler
+}
+
 // Dependencies holds all injected dependencies for router setup, grouped by module.
 type Dependencies struct {
 	Infra   InfraDeps
@@ -118,6 +125,7 @@ type Dependencies struct {
 	Config  ConfigDeps
 	File    FileDeps
 	Device  DeviceDeps
+	Agent   AgentDeps
 }
 
 // Setup registers all middleware and routes on a new gin.Engine.
@@ -470,6 +478,14 @@ func Setup(deps Dependencies) *gin.Engine {
 
 	// WebSocket
 	api.GET("/ws", wsPkg.HandleUpgrade(deps.Infra.Hub, deps.Infra.Logger))
+
+	// agent 上报通道：**未鉴权**升级（agent 没有 JWT，凭据是首帧 hello 里的
+	// enroll/agent token），因此与 /ws 一样挂在 api 组、**不得**挪进 auth 组 ——
+	// 挂进去会让所有 agent 在握手阶段收到 401，整条通道静默失效。
+	// 握手阶段不做任何鉴权，全部校验在首帧上做（见 handler.AgentWSHandler）。
+	if deps.Agent.AgentWSHdl != nil {
+		api.GET("/agent/ws", deps.Agent.AgentWSHdl.Serve)
+	}
 
 	return r
 }

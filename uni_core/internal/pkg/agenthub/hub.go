@@ -15,6 +15,29 @@ import (
 // 也不该在注册表里留下 0 号设备的槽位。
 var errNilConn = errors.New("agenthub: nil conn")
 
+// ── 注册表对外暴露的窄接口（仓库既有约定：接口定义在消费方）──────
+
+// SelfUnregisterer 是**连接**需要的注册表能力面：登记自己 + 交出运行参数。
+//
+// 为什么用接口而不是具体 *Hub：Conn 只用到注册表的这两个方法，而 `NewConn` 的
+// 调用方（handler）需要在同一个对象上做「按连接身份注销」—— 把两件事定义成具名
+// 接口，handler 与 Conn 就都只依赖自己看得见的方法，谁也不必知道 `*Hub` 的完整
+// 能力面（DrainAll/DeviceIDs/CloseDevice 那是 wireup 与 task 的事）。
+//
+// opts() 未导出：Options 是**包内**配置，外部既不该也不能实现这个接口 ——
+// 于是「谁能当注册表」被收敛到本包（*Hub 与测试替身），这正是我们想要的边界。
+type SelfUnregisterer interface {
+	// Register 登记一条已完成 hello 的连接；同设备已有连接时顶掉旧的。
+	Register(c *Conn) error
+	// Unregister 按连接身份注销（只有当前登记的就是 c 时才移除）。
+	Unregister(deviceID uint64, c *Conn)
+	// opts 交出运行参数，供新建的连接沿用（ReadLimit / 队列深度 / 超时）。
+	opts() Options
+}
+
+// 编译期断言：*Hub 必须满足连接的窄接口（签名漂移在这里就红，而不是在 handler 里）。
+var _ SelfUnregisterer = (*Hub)(nil)
+
 // Hub 是「设备 ID → 连接」的注册表。
 //
 // 并发模型：一把 Mutex 保护 map。连接数是**单机千级**（设计上限 500~1000 设备），
@@ -24,16 +47,22 @@ var errNilConn = errors.New("agenthub: nil conn")
 // 但**注销必须按连接身份**（by-identity）：否则旧连接的延迟注销会把刚注册的
 // 新连接挤掉，表现为「设备莫名其妙离线」。
 type Hub struct {
-	opts Options
-	log  logger.LoggerInterface
+	// cfg 是已填默认值的运行参数。**字段名不叫 opts**：Go 不允许字段与方法同名，
+	// 而 SelfUnregisterer 需要一个 opts() 访问器（*Hub 与测试替身共用同一取法）。
+	cfg Options
+	log logger.LoggerInterface
 
 	mu    sync.Mutex
 	conns map[uint64]*Conn
 }
 
 func NewHub(opts Options, log logger.LoggerInterface) *Hub {
-	return &Hub{opts: opts.withDefaults(), log: log, conns: make(map[uint64]*Conn)}
+	return &Hub{cfg: opts.withDefaults(), log: log, conns: make(map[uint64]*Conn)}
 }
+
+// opts 实现 SelfUnregisterer：让新建的连接沿用注册表的运行参数，
+// 而调用方无需知道具体类型。
+func (h *Hub) opts() Options { return h.cfg }
 
 // Register 注册连接；同设备已存在时顶掉旧连接并返回 nil（不是错误）。
 //

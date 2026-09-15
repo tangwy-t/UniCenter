@@ -10,6 +10,7 @@ import (
 
 	"github.com/tangwy-t/UniCenter/uni_core/internal/handler"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/middleware"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/agenthub"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/agentmetrics"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/captcha"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/config"
@@ -309,6 +310,14 @@ func Init(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalClien
 		},
 		Device: router.DeviceDeps{
 			DeviceHdl: deviceHdl,
+		},
+		// agent WS 入口的**最小**构造：hub 是真实注册表，依赖束（enroll/
+		// 鉴权/入湖/touch/策略）留空 —— 本任务只要求路由可挂载（未挂载时
+		// 路由整条不存在，未鉴权入口会 404 而不是 101）。
+		// **完整装配**（Enroller/Authenticator/Ingestor/Toucher/Decider/Policy
+		// 全部接上，并让 hub 与 flush/partition 共享实例）留给 Task 8。
+		Agent: router.AgentDeps{
+			AgentWSHdl: handler.NewAgentWSHandler(agenthub.NewHub(agenthub.Options{}, log), agenthub.Deps{}, log),
 		},
 	}, nil
 }

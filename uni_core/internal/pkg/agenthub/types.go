@@ -49,7 +49,9 @@ import (
 //
 // 读循环、心跳、入湖与背压计数不在这里 —— 见 conn.go。
 type Conn struct {
-	hub  *Hub
+	// hub 是注册表的**窄接口**而非具体 *Hub：读循环只用它的 Register（hello 成功后）。
+	// 完整能力面（DrainAll/DeviceIDs/CloseDevice）属于 wireup 与 task，连接看不见。
+	hub  SelfUnregisterer
 	opts Options
 	deps Deps
 	log  logger.LoggerInterface

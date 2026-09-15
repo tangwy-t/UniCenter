@@ -93,21 +93,56 @@ const (
 
 // NewConn 创建一条**已接管真实 socket** 的连接。
 //
-// hub 用于在 hello 成功（设备 ID 已知）后把连接登记进注册表：顶替同设备的旧连接
-// 必须由注册表做（它才知道谁是「旧」的），所以这里必须拿到 *Hub 而不是窄接口。
+// hub 是**消费方窄接口**（SelfUnregisterer）而不是具体 *Hub：连接对注册表只用
+// 到两件事 —— hello 成功后 Register（顶替同设备的旧连接必须由注册表做，它才知道
+// 谁是「旧」的），以及交出运行参数 opts()。把它写成具名接口后，handler 侧的注入
+// 就不必依赖具体类型：同一个对象既能在这里被连接调用 Register，又能在 handler
+// 里被显式 Unregister。*Hub 天然满足它（见 hub.go 的编译期断言）。
 //
 // 收尾（注销）不在这里做：CloseWith 刻意**不动注册表** —— 关闭幂等与
 // 「已关闭但尚未注销的连接仍能被 DrainAll 通知到」是 Task 1 用断言钉住的语义。
 // 注销由 handler 在 Serve 返回后按连接身份做。
-func NewConn(hub *Hub, ws *websocket.Conn, deps Deps, log logger.LoggerInterface) *Conn {
-	return newConn(hub, ws, deps, log)
+func NewConn(hub SelfUnregisterer, ws *websocket.Conn, deps Deps, log logger.LoggerInterface) *Conn {
+	if ws == nil {
+		return newConn(hub, nil, deps, log)
+	}
+	return newConn(hub, realSocket{c: ws}, deps, log)
 }
 
+// realSocket 把生产态的 *websocket.Conn 适配到 socket 窄接口。
+//
+// 为什么要这层薄适配，而不是让 NewConn 的形参直接写成 *websocket.Conn：
+// 构造入口一旦钉死具体类型，测试就再也无法在**不起真实 TCP** 的前提下驱动读循环
+// —— 而那是 Task 2 全部守卫（方向校验、关闭码、读超时、背压）的落点。
+// 这层适配把具体类型挡在构造入口之外，代价是 7 行转发。
+type realSocket struct{ c *websocket.Conn }
+
+func (s realSocket) ReadMessage() (int, []byte, error) { return s.c.ReadMessage() }
+
+func (s realSocket) WriteMessage(mt int, data []byte) error {
+	return s.c.WriteMessage(mt, data)
+}
+
+func (s realSocket) WriteControl(mt int, data []byte, deadline time.Time) error {
+	return s.c.WriteControl(mt, data, deadline)
+}
+
+func (s realSocket) SetReadLimit(limit int64)            { s.c.SetReadLimit(limit) }
+func (s realSocket) SetReadDeadline(t time.Time) error   { return s.c.SetReadDeadline(t) }
+func (s realSocket) SetPongHandler(h func(string) error) { s.c.SetPongHandler(h) }
+func (s realSocket) Close() error                        { return s.c.Close() }
+
+// 编译期断言：适配器必须真的满足读循环要的窄接口 —— 漏一个方法在这里就红。
+var _ socket = realSocket{}
+
 // newConn 是 NewConn 的实现，并顺带接受测试态的 socket 替身。
-func newConn(hub *Hub, ws socket, deps Deps, log logger.LoggerInterface) *Conn {
+func newConn(hub SelfUnregisterer, ws socket, deps Deps, log logger.LoggerInterface) *Conn {
 	opts := Options{}.withDefaults()
 	if hub != nil {
-		opts = hub.opts
+		// opts() 是 SelfUnregisterer 的第二个（未导出）方法：它让调用方无需知道
+		// 具体类型也能拿到注册表的运行参数。nil 判定必须先做 —— nil 接口上调用
+		// 任何方法都会 panic。
+		opts = hub.opts()
 	}
 	c := &Conn{
 		hub:   hub,

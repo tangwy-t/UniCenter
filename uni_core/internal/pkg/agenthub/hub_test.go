@@ -71,7 +71,7 @@ func newIdleConn(h *Hub, id uint64) *Conn {
 	sink := &idleSink{}
 	c := &Conn{
 		hub:          h,
-		opts:         h.opts,
+		opts:         h.cfg,
 		log:          logger.NewNop(),
 		sendFn:       sink.send,
 		writeCloseFn: sink.close,
@@ -88,7 +88,7 @@ func newIdleConn(h *Hub, id uint64) *Conn {
 func newBareConn(h *Hub, id uint64) *Conn {
 	return &Conn{
 		hub:   h,
-		opts:  h.opts,
+		opts:  h.cfg,
 		log:   logger.NewNop(),
 		state: StateActive,
 		devID: id,
