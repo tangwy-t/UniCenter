@@ -99,21 +99,76 @@ func (s *RawStore) Append(ctx context.Context, deviceID uint64, sample *agentpro
 //
 // 这里**不用** Window.Query：Query 是「拖尾窗口」语义（相对 now 的窗口 + 查询时聚合），
 // 而 flush 需要的是「固定的已闭桶」，故直接 LRange 读取并按 T 过滤。
+//
+// 取点数的**唯一正确依据是「要读的最老点离最新点有多远」**，而不是请求窗口的宽度。
+// 原因在窗的写侧：metricshistory.Window.Append 用 LPUSH + LTRIM 写入，**index 0 是最新点**，
+// 于是「读多少条」等价于「从最新点往回覆盖多远」。一次 LRange 只能从头部往后取，
+// 想读到 fromMs 附近的点，就必须至少取到 (最新点T − fromMs) 这段时间的点数。
+//
+// 曾经写作 ((toMs-fromMs)/Step)*2 —— 只按**请求窗口宽度**估算。它对「贴着 now 的窗口」
+// （热层 Query 的拖尾窗口、下钻的相对区间查询）恰好成立，却与「这个桶离现在有多远」
+// 完全无关：flush 逐桶回填历史桶时，无论桶多老都只取最新 fetch 个点，**所有老桶一律被
+// 读成空桶**，可见范围只有最新的 fetch×Step（5min 桶、10s 节奏下约 10 分钟）。
+// 而空桶在 flush 里是「照常推进水位」的合法结果（见 agent_metrics_flush.go 的 flushDevice），
+// 水位会直接越过那个桶 —— device_metric_5m 出现**永久空洞**（5m 是唯一真值来源，
+// 1h 从它回滚）。Bootstrap 注释宣称的「从 now−24h 补齐」也因此在同一处失效：
+// 它只能补到最新约 10 分钟，更老的桶全被当空桶跳过。
+//
+// 保留 ×2 余量：真实上报节奏可能快于 Step（墙钟步进、reportInterval 被改小），
+// 少读会真的漏点，多读只是多取几条、由下面的 T 过滤与 MaxPoints 上限兜住。
 func (s *RawStore) Bucket(ctx context.Context, deviceID uint64, fromMs, toMs int64) ([]agentproto.MetricsSample, error) {
-	// 取点启发式与 metricshistory.queryUncached 保持一致：按 (toMs-fromMs)/Step 估算，
-	// 再乘 2 留余量，避免采样密度略高于 Step 时漏点。
+	key := historyKey(deviceID)
+	stepMs := s.opts.Step.Milliseconds()
+
+	// 兜底：拿不到「最新点的 T」时的按窗口宽度估算（就是上面被否定的那条启发式，
+	// 此处只在信息缺失时当保守退路用）。
+	widthFetch := int64(1)
+	if stepMs > 0 {
+		widthFetch = ((toMs - fromMs) / stepMs) * 2
+	}
+	if widthFetch < 1 {
+		widthFetch = 1
+	}
+
+	// 第一步：读头部一条拿最新点的 T。fetch 必须由它推出来，而不能由窗口宽度推。
+	// 列表为空（该设备从无原始点 / 已 Purge）→ 直接返回空，**不再发第二次请求**。
+	head, err := s.rdb.LIndex(ctx, key, 0).Result()
+	if err == goredis.Nil {
+		return []agentproto.MetricsSample{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
 	fetch := int64(1)
-	if s.opts.Step > 0 {
-		fetch = ((toMs - fromMs) / s.opts.Step.Milliseconds()) * 2
+	var newest agentproto.MetricsSample
+	switch {
+	case json.Unmarshal([]byte(head), &newest) != nil || stepMs <= 0:
+		// 头部这条解析不了（只可能来自旧版本协议），或 Step 未配置、无法把时间
+		// 距离换算成点数：此时**不能**按「1 条」读（那会让整桶读空），也**不能**
+		// 让整桶失败 —— 单条脏数据只该伤到它自己。故取到容量上限；连上限都没配
+		// （MaxPoints<=0）时退回窗口宽度估算。
+		fetch = s.opts.MaxPoints
+		if fetch <= 0 {
+			fetch = widthFetch
+		}
+	case newest.T < fromMs:
+		// 请求的是未来窗口（最新点还没走到 fromMs）：区间内不可能有数据，读 1 条即可判空。
+		fetch = 1
+	default:
+		// 距离 = 最新点回到 fromMs 的跨度；×2 余量 + 2 条头部兜底。
+		fetch = (newest.T-fromMs)/stepMs*2 + 2
 	}
 	if fetch < 1 {
 		fetch = 1
 	}
+	// 上界夹到窗口容量：极老窗口的 fetch 会远大于窗里实际存在的点数，
+	// 不夹就等于「读全窗」（24h 窗 8640 点 × 288 个桶不可接受）。
 	if s.opts.MaxPoints > 0 && fetch > s.opts.MaxPoints {
 		fetch = s.opts.MaxPoints
 	}
 
-	raws, err := s.rdb.LRange(ctx, historyKey(deviceID), 0, fetch-1).Result()
+	raws, err := s.rdb.LRange(ctx, key, 0, fetch-1).Result()
 	if err != nil {
 		return nil, err
 	}
