@@ -52,7 +52,9 @@ type RollupStats struct {
 	HoursWritten int
 	// HoursRepaired 是本轮从 repair 集合里重算并成功写出的小时数（HoursWritten 的子集）。
 	HoursRepaired int
-	// HoursSkipped 是没有 5m 行、故不写行的小时数（照常推进游标）。
+	// HoursSkipped 是没有 5m 行、故不写行的小时数。其中**仍处在等待窗口内**的空小时
+	// （见 emptyHourGrace）会让水位停在它之前、下一轮重试它；已超出窗口的空小时
+	// 才照常让水位越过（否则一台离线设备会把水位永久卡死）。
 	HoursSkipped int
 	// Errors 是本轮失败次数（每台失败设备 +1）。
 	Errors int
@@ -78,6 +80,8 @@ type AgentMetricsRollupService struct {
 	now func() time.Time
 	// maxRepairHours 是 repair 集合的上限（默认 defaultMaxRepairHours）。
 	maxRepairHours int
+	// emptyHourGrace 是「空小时」的等待窗口（默认 defaultEmptyHourGrace，见 emptyHourWithinGrace）。
+	emptyHourGrace time.Duration
 }
 
 // defaultMaxRepairHours 是 repair 集合的上限（720 = 30 天的小时数，与计划一致）。
@@ -85,6 +89,24 @@ type AgentMetricsRollupService struct {
 // 为什么必须有上限：repair 成员是「修不完就留着」的，一台长期缺行的设备（例如每天只上报
 // 半天）会持续产生不完整小时；没有上限时集合会无限增长，每轮的重算代价也跟着无限增长。
 const defaultMaxRepairHours = 720
+
+// defaultEmptyHourGrace 是空小时的等待窗口（2 小时）。
+//
+// **它的存在是为了闭合「5m 迟到 → 1h 永久空洞」这个缺口**：没有它时，一个「一行 5m 都没有」
+// 的小时会被当成「确实没有数据」，于是水位**越过**它；等该小时的 5m 行稍后落库
+// （服务重启后 flush 从 24h 前补齐、而 rollup 从自己的游标继续；或 flush 落后 rollup 一轮），
+// 普通区间（下界恒为 cursor+3600）永远不会再回头看它 —— 而 >30 天的窗口**只有 1h 表可查**
+// （5m 只留 30 天），那就是一个静默的、不可回填的数据空洞。
+//
+// 为什么恰好是 2 小时：flush 是每 5 分钟一轮的定时任务（`0 */5 * * * *`），服务重启后的补齐
+// 从 24h 前开始；故「5m 迟到」的正常上界是「一轮 5 分钟 + 一个小时的闭桶宽限（CloseGrace）」，
+// 满打满算十几分钟。2 小时是它的约 10 倍余量（够覆盖一次慢查询、一次 Redis 抖动、一次
+// 部署重启），同时又是**有界**的：设备真的离线时，水位最多推迟 2 小时才越过那个空小时，
+// 不会让游标永久卡死在第一个空小时上（那是「等一下」与「永久等待」的区别）。
+//
+// 必须 > closeGrace（2×reportInterval，默认 20 秒），否则等待窗口比「小时什么时候算闭」
+// 还短，等于没等 —— 默认值之间差了三个数量级，不存在这个风险。
+const defaultEmptyHourGrace = 2 * time.Hour
 
 // NewAgentMetricsRollupService 装配回滚服务。
 //
@@ -96,6 +118,7 @@ func NewAgentMetricsRollupService(metrics RollupMetricRepo, raw RollupDeviceSour
 	return &AgentMetricsRollupService{
 		metrics: metrics, devices: raw, cfg: cfg, log: log,
 		now: time.Now, maxRepairHours: defaultMaxRepairHours,
+		emptyHourGrace: defaultEmptyHourGrace,
 	}
 }
 
@@ -120,6 +143,16 @@ func (s *AgentMetricsRollupService) WithClock(now func() time.Time) *AgentMetric
 func (s *AgentMetricsRollupService) WithMaxRepairHours(n int) *AgentMetricsRollupService {
 	if n > 0 {
 		s.maxRepairHours = n
+	}
+	return s
+}
+
+// WithEmptyHourGrace 覆盖空小时的等待窗口（非正数 = 保持默认，同 WithMaxRepairHours 的先例：
+// 「传 0」最可能的意思是「忘了填」，静默把窗口关掉会让本服务退回到「1h 永久空洞」的老缺陷，
+// 故只接受正数）。
+func (s *AgentMetricsRollupService) WithEmptyHourGrace(d time.Duration) *AgentMetricsRollupService {
+	if d > 0 {
+		s.emptyHourGrace = d
 	}
 	return s
 }
@@ -172,8 +205,11 @@ func (s *AgentMetricsRollupService) RollupOnce(ctx context.Context) (RollupStats
 //
 // **水位只在「本轮所有（普通区间内的）小时都成功」后才前移**：任一步失败 → 水位留在
 // 轮初的值，下轮从同一个小时重来；因此一旦出错就立即返回、绝不继续往后写（继续写只会让
-// 后面那些小时在下一轮被重复写一遍，而水位又停在轮初）。空小时算「处理成功」
-// （它确实没有数据）：把空小时当失败会让一台长期空闲的设备永远卡在第一个空小时上。
+// 后面那些小时在下一轮被重复写一遍，而水位又停在轮初）。空小时分两种（这是本修复的核心）：
+//   - 仍在等待窗口内（emptyHourWithinGrace）→ 水位**不越过它**，下一轮重试同一小时
+//     （它的 5m 行可能只是迟到，越过它就等于制造 1h 表的永久空洞）；
+//   - 已超出等待窗口 → 视为确实没有数据（设备离线等），照常让水位越过它，
+//     否则一台离线设备会把水位永久卡死在第一个空小时上。
 func (s *AgentMetricsRollupService) rollupDevice(ctx context.Context, deviceID uint64,
 	upper int64) (RollupStats, error) {
 
@@ -186,6 +222,10 @@ func (s *AgentMetricsRollupService) rollupDevice(ctx context.Context, deviceID u
 	}
 
 	// 1) repair 优先：这些小时的水位已经在游标之前，不主动重算就永远不会被更新。
+	//
+	// 空小时的等待窗口（emptyHourGrace）在这里**不适用**：repair 里的小时都在游标之前，
+	// 普通区间已经越过它们，扣住它们拦不住任何东西（水位不会再前移）；而那条路径上的
+	// 「空」有另一种明确含义 —— 该小时的 5m 行已被保留期回收，再也修不好了。
 	repairs, err := s.repairHours(ctx, deviceID, upper)
 	if err != nil {
 		return stats, err
@@ -207,7 +247,18 @@ func (s *AgentMetricsRollupService) rollupDevice(ctx context.Context, deviceID u
 	}
 
 	// 2) 普通游标区间 [cursor+3600, upper)
+	//
+	// 水位是**单一**游标，语义是「已成功回滚到（含）的小时」，因此它只能落在一个
+	// **连续成功前缀**的末尾：一旦遇到「没有 5m 行、但还没过等待窗口」的小时
+	// （emptyHourWithinGrace），水位就停在它之前，绝不越过它。
+	//
+	// 被扣住之后**仍然继续处理后续小时**（不是 break）：后续小时若已有 5m 行就照常写出
+	// 1h 行 —— 同一取向「宁可先有残缺值也不要空着」，且写路径是 UPSERT，下一轮重扫到
+	// 它们只是重写一遍（代价 ≤ 等待窗口，即最多几个 1h 行）。若在这里 break，设备离线
+	// 一小时的期间，后面那些**有数据**的小时也要陪着空等满 2 小时才写出 1h 行。
+	// 唯一的差别是：被扣住之后的小时**不再带动水位**（`last` 冻结）。
 	last := cursor
+	blockedAt := int64(-1) // 本轮第一个被扣住的小时（-1 = 没有）
 	for h := cursor + hourSec; h < upper; h += hourSec {
 		stats.HoursScanned++
 		written, skipped, herr := s.rollupHour(ctx, deviceID, h, false)
@@ -217,10 +268,24 @@ func (s *AgentMetricsRollupService) rollupDevice(ctx context.Context, deviceID u
 		switch {
 		case written:
 			stats.HoursWritten++
+			if blockedAt < 0 {
+				last = h
+			}
 		case skipped:
 			stats.HoursSkipped++
+			if s.emptyHourWithinGrace(h) {
+				if blockedAt < 0 {
+					blockedAt = h
+					s.log.Debug("agentmetrics rollup: 空小时仍在等待窗口内，水位停在它之前待下轮重试",
+						zap.Uint64("deviceId", deviceID), zap.Int64("hour", h),
+						zap.Duration("grace", s.emptyHourGrace))
+				}
+				continue
+			}
+			if blockedAt < 0 {
+				last = h
+			}
 		}
-		last = h
 	}
 
 	// 走到这里说明普通区间里每个小时都成功（空小时也算成功），才前移水位。
@@ -230,6 +295,21 @@ func (s *AgentMetricsRollupService) rollupDevice(ctx context.Context, deviceID u
 		}
 	}
 	return stats, nil
+}
+
+// emptyHourWithinGrace 判断一个「一行 5m 都没有」的小时是否还处在等待窗口内
+// （true = 数据可能还没到齐，水位不得越过它）。
+//
+// 判据用「小时**结束**时刻距今多久」（age = now − (hour+3600)）而不是「小时开始时刻」：
+// 小时是**闭**的（h < upper = alignDown(now − CloseGrace)），所以从「小时结束」算起才是
+// 「这一小时的数据已经等多久了」—— 迟到的那部分正是发生在它关闭**之后**。
+//
+// 边界取严格小于（age < emptyHourGrace）：恰好等于窗口时**不再等**。这样 grace 只有一个
+// 含义（「最多等这么久」），且不会出现「grace 是 2h 却等了 2h+1s」这种说不清的值。
+func (s *AgentMetricsRollupService) emptyHourWithinGrace(hour int64) bool {
+	end := hour + resolutionSeconds(agentmetrics.Resolution1h)
+	age := time.Duration(s.now().Unix()-end) * time.Second
+	return age < s.emptyHourGrace
 }
 
 // rollupHour 回滚单个小时：读 5m 行 → RollupToHour → 写 1h 行（+ 维护 repair 集合）。

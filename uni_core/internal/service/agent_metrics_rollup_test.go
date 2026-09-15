@@ -373,10 +373,19 @@ func TestRollupWholeHourWeightedBySamples(t *testing.T) {
 		t.Fatal("Σsamples 低于完整小时应有值时必须 log.Warn（可观测性：样本偏薄不能被静默吞掉）")
 	}
 
-	// 水位前移到最后一个已处理的小时：区间是 [base, base+10800)，故最后一个小时是
-	// base+7200（base+3600 / base+7200 是空小时，空小时照常推进）。
-	if cur, ok := f.cursor(t); !ok || cur != rollupBaseTS+2*rollupHourSec {
-		t.Fatalf("cursor_1h = %d(ok=%v), want %d", cur, ok, rollupBaseTS+2*rollupHourSec)
+	// 水位前移到「连续成功前缀」的末尾 = base（本轮唯一写出的小时）。
+	//
+	// base+3600 / base+7200 都是空小时，但它们的**结束**时刻距 now 分别只有 3660s / 60s，
+	// 都落在 emptyHourGrace（默认 2h）的等待窗口内 → 判定为「数据可能还没到齐」，
+	// 水位不得越过它们。
+	//
+	// 旧断言 `cursor_1h == base+7200`（"空小时照常推进"）编码的正是本修复要闭合的缺陷：
+	// 把「空」当成「确实没有数据」越过去，等该小时的 5m 行稍后落库（flush 重启补齐、
+	// 或 flush 落后 rollup 一轮）时，普通区间（下界恒为 cursor+3600）再也不会回头看它，
+	// 那个小时在 1h 表里**永久缺失** —— 而 >30 天的窗口只有 1h 表可查。
+	if cur, ok := f.cursor(t); !ok || cur != rollupBaseTS {
+		t.Fatalf("cursor_1h = %d(ok=%v), want %d（空小时仍在等待窗口内，水位不得越过它）",
+			cur, ok, rollupBaseTS)
 	}
 }
 
@@ -470,8 +479,12 @@ func TestRollupIncompleteHourWrittenThenRepaired(t *testing.T) {
 			f.repairMembers(t), rollupBaseTS)
 	}
 	cursorAfterFirst, ok := f.cursor(t)
-	if !ok || cursorAfterFirst != rollupBaseTS+2*rollupHourSec {
-		t.Fatalf("cursor_1h = %d(ok=%v), want %d", cursorAfterFirst, ok, rollupBaseTS+2*rollupHourSec)
+	// 水位只前移到 base（本轮写出的小时），**不**越过紧随其后的两个空小时：
+	// 它们的等待窗口还没过（见 emptyHourGrace），越过它们就等于放弃「迟到的小时」。
+	// 旧断言（base+7200）编码的是修复前的缺陷行为。
+	if !ok || cursorAfterFirst != rollupBaseTS {
+		t.Fatalf("cursor_1h = %d(ok=%v), want %d（空小时仍在等待窗口内，水位不得越过）",
+			cursorAfterFirst, ok, rollupBaseTS)
 	}
 
 	// 补上缺失的 5 行（i=7..11，samples=30、cpu=50）→ 12 行齐，正确加权值 = 30
@@ -486,10 +499,15 @@ func TestRollupIncompleteHourWrittenThenRepaired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RollupOnce(2): %v", err)
 	}
-	// repair 优先：这个小时的水位已经在游标**之后**，普通区间 [cursor+3600, upper) 是空的，
-	// 故本轮扫到的那 1 个小时只可能来自 repair 集合。
-	if stats2.HoursScanned != 1 || stats2.HoursRepaired != 1 || stats2.HoursWritten != 1 {
-		t.Fatalf("stats(2) = %+v, want 1 scanned / 1 repaired / 1 written（repair 必须被优先重算）", stats2)
+	// repair 优先：这个小时的水位在游标**之后**，普通区间永远碰不到它，
+	// 故本轮唯一被写出的小时只可能来自 repair 集合。
+	//
+	// 另外 2 个被扫到的小时是 base+3600 / base+7200 两个空小时（水位停在 base 之后，
+	// 普通区间仍会扫过它们）：它们的结束时刻距 now 只有 3660s / 60s，都在等待窗口内，
+	// 故只计数、不写行、也不带动水位（旧断言 `HoursScanned == 1` 是按「空小时照常
+	// 推进游标、水位已到 base+7200」写的，新契约下这三个小时每轮都会被扫到）。
+	if stats2.HoursScanned != 3 || stats2.HoursRepaired != 1 || stats2.HoursWritten != 1 {
+		t.Fatalf("stats(2) = %+v, want 3 scanned / 1 repaired / 1 written（repair 必须被优先重算）", stats2)
 	}
 	row2 := f.hourRow(t, rollupBaseTS)
 	if row2 == nil {
@@ -530,8 +548,13 @@ func TestRollupRepairHourWithVanishedRowsIsDroppedFromSet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RollupOnce(2): %v", err)
 	}
-	if stats.HoursSkipped != 1 || stats.HoursWritten != 0 {
-		t.Fatalf("stats(2) = %+v, want 1 skipped / 0 written（无 5m 行 → 不写空行）", stats)
+	// repair 路径上「没有 5m 行」= 已被保留期回收（不可修，摘掉成员）；
+	// 普通区间上那个空小时 base+3600 仍在等待窗口内（结束距 now 仅 3660s），
+	// 故也计入 skipped 且不让水位越过 —— 两处 skipped 合计 2。
+	// 旧断言（1 skipped）是按「空小时照常推进游标」写的：新契约下同一个空小时
+	// 会被**每一轮**重新扫到，直到它过了等待窗口。
+	if stats.HoursSkipped != 2 || stats.HoursWritten != 0 {
+		t.Fatalf("stats(2) = %+v, want 2 skipped / 0 written（无 5m 行 → 不写空行）", stats)
 	}
 	if f.inRepair(t, rollupBaseTS) {
 		t.Fatal("5m 行已消失的小时留在 repair 集合里 = 永久占位（集合被不可修项填满）")
@@ -598,17 +621,22 @@ func TestRollupCursorAdvancesOnlyAfterSuccess(t *testing.T) {
 	if !ok {
 		t.Fatal("cursor_1h 键不存在：游标必须落回 Redis")
 	}
-	if cur != rollupBaseTS+rollupHourSec {
-		t.Fatalf("cursor_1h = %d, want %d（最后一个已处理的小时，空小时照常推进）",
-			cur, rollupBaseTS+rollupHourSec)
+	// 水位落在**写出的小时** base 上，而不是它后面那个空小时 base+3600：
+	// 后者距 now 结束仅 3660s，仍在等待窗口内（emptyHourGrace）→ 不得越过。
+	// 旧断言（base+3600）编码的是修复前的缺陷行为。
+	if cur != rollupBaseTS {
+		t.Fatalf("cursor_1h = %d, want %d（只前移到已处理前缀的末尾，不越过等待窗口内的空小时）",
+			cur, rollupBaseTS)
 	}
 
 	stats2, err := f.svc.RollupOnce(context.Background())
 	if err != nil {
 		t.Fatalf("RollupOnce(2): %v", err)
 	}
-	if stats2.HoursScanned != 0 || stats2.HoursWritten != 0 {
-		t.Fatalf("stats(2) = %+v, want 0/0（水位已前移，不得重复回滚）", stats2)
+	// 第二轮仍然会扫到那个空小时（水位停着没动），但它同样不写行、不推进水位：
+	// 「扫到」与「重复回滚」是两件事 —— 写出的小时数必须仍是 0。
+	if stats2.HoursScanned != 1 || stats2.HoursWritten != 0 {
+		t.Fatalf("stats(2) = %+v, want 1 scanned / 0 written（已被扣住的空小时重扫但不得重复回滚）", stats2)
 	}
 	if f.count1h(t) != 1 {
 		t.Fatalf("1h 行数 = %d, want 1", f.count1h(t))
@@ -658,8 +686,9 @@ func TestRollupWriteFailureKeepsCursorAndRetries(t *testing.T) {
 	if len(f.writer.written) != 1 || f.writer.written[0].BucketTS != rollupBaseTS {
 		t.Fatalf("重试写入的行 = %+v, want bucket_ts=%d", f.writer.written, rollupBaseTS)
 	}
-	if cur2, _ := f.cursor(t); cur2 != rollupBaseTS+rollupHourSec {
-		t.Fatalf("cursor_1h = %d, want %d（成功后前移）", cur2, rollupBaseTS+rollupHourSec)
+	if cur2, _ := f.cursor(t); cur2 != rollupBaseTS {
+		t.Fatalf("cursor_1h = %d, want %d（成功后前移，但不得越过等待窗口内的空小时 base+3600）",
+			cur2, rollupBaseTS)
 	}
 }
 
@@ -704,9 +733,15 @@ func TestRollupBootstrapCursorStartsAtEarliestFiveMinuteRow(t *testing.T) {
 	}
 }
 
-// 7. 空小时：不写空行，但照常推进游标（否则长期空闲的设备会卡在第一个空小时）。
+// 7. 空小时：不写空行；**已过等待窗口**的空小时让水位越过（不永久卡死），
+// **仍在窗口内**的空小时则扣住水位（本修复的核心，见 TestRollupYoungEmptyHourHoldsCursor）。
 func TestRollupSkipsEmptyHourWithoutRow(t *testing.T) {
-	now := rollupBaseTS + 2*rollupHourSec + 60
+	// now = base+4h+60 → 已闭小时区间是 [base, base+4h)：
+	//   base        有 12 行 5m → 写出 1h 行；
+	//   base+3600   空，结束距 now 7260s ≥ 2h(7200s) → **已过窗口** → 水位越过它；
+	//   base+7200   空，结束距 now 3660s < 2h          → 仍在窗口内 → 水位停住；
+	//   base+10800  空，结束距 now 60s                 → 仍在窗口内（已被前者拦住）。
+	now := rollupBaseTS + 4*rollupHourSec + 60
 	f := newRollupFixture(t, now, false, 0)
 	f.seed5m(t, fullHourRows(rollupBaseTS, func(int) fiveMin {
 		return fiveMin{samples: 30, cpu: 20}
@@ -716,8 +751,8 @@ func TestRollupSkipsEmptyHourWithoutRow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RollupOnce: %v", err)
 	}
-	if stats.HoursSkipped != 1 || stats.HoursWritten != 1 {
-		t.Fatalf("stats = %+v, want 1 skipped / 1 written", stats)
+	if stats.HoursSkipped != 3 || stats.HoursWritten != 1 || stats.HoursScanned != 4 {
+		t.Fatalf("stats = %+v, want 4 scanned / 1 written / 3 skipped（空小时一律不写行）", stats)
 	}
 	if f.count1h(t) != 1 {
 		t.Fatalf("1h 行数 = %d, want 1（空小时绝不写空行）", f.count1h(t))
@@ -725,8 +760,145 @@ func TestRollupSkipsEmptyHourWithoutRow(t *testing.T) {
 	if f.hourRow(t, rollupBaseTS+rollupHourSec) != nil {
 		t.Fatal("空小时产出了 1h 行")
 	}
+	// 水位 = base+3600：**越过**了已过窗口的空小时（证明设备离线不会把游标永久卡死），
+	// 但停在第一个仍在等待窗口内的空小时（base+7200）之前（证明迟到的小时还留着机会）。
+	// 旧断言恰为 base+3600，但当时的理由是「空小时照常推进」—— 这条测试现在同时
+	// 钉住两个方向的边界，理由必须按新契约写清楚。
 	if cur, _ := f.cursor(t); cur != rollupBaseTS+rollupHourSec {
-		t.Fatalf("cursor_1h = %d, want %d（空小时照常推进）", cur, rollupBaseTS+rollupHourSec)
+		t.Fatalf("cursor_1h = %d, want %d（越过已过窗口的空小时、停在窗口内的空小时之前）",
+			cur, rollupBaseTS+rollupHourSec)
+	}
+}
+
+// 7a. **本修复的核心断言**：空小时且**新**（距今 < emptyHourGrace）→ `cursor_1h` 不推进、
+// 下一轮重试同一个小时；随后补上该小时的 5m 行 → 下一轮能写出 1h 行。
+//
+// 这证明的是「迟到的小时最终会被补上」：修复前，空小时会被当作「确实没有数据」越过去，
+// 于是该小时的 5m 行稍后落库时，1h 表里那一行永久缺失（>30 天窗口只有 1h 表可查）。
+func TestRollupYoungEmptyHourHoldsCursorUntilRowsArrive(t *testing.T) {
+	if defaultEmptyHourGrace != 2*time.Hour {
+		t.Fatalf("defaultEmptyHourGrace = %v, want 2h（计划给定：flush 每 5 分钟一轮，2h 是极宽余量）",
+			defaultEmptyHourGrace)
+	}
+	now := rollupBaseTS + 3*rollupHourSec + 60
+	const lateHour = rollupBaseTS + rollupHourSec // 这个小时的 5m 行「迟到」
+	f := newRollupFixture(t, now, false, 0)
+	// 显式把水位放在 base：这一轮只处理 base+3600 起的小时，断言不被 bootstrap 干扰。
+	f.setCursor(t, rollupBaseTS)
+
+	// ── 第 1 轮：lateHour 一行 5m 都没有，且它刚结束 3660s（< 2h 等待窗口）──
+	stats1, err := f.svc.RollupOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RollupOnce(1): %v", err)
+	}
+	if stats1.HoursSkipped != 2 || stats1.HoursWritten != 0 || stats1.HoursScanned != 2 {
+		t.Fatalf("stats(1) = %+v, want 2 scanned / 0 written / 2 skipped", stats1)
+	}
+	if f.count1h(t) != 0 {
+		t.Fatalf("1h 行数 = %d, want 0（空小时不写行）", f.count1h(t))
+	}
+	if cur, ok := f.cursor(t); !ok || cur != rollupBaseTS {
+		t.Fatalf("cursor_1h = %d(ok=%v), want %d：空小时仍在等待窗口内，水位**不得推进**",
+			cur, ok, rollupBaseTS)
+	}
+	if f.hourRow(t, lateHour) != nil {
+		t.Fatal("lateHour 还没有 5m 行，却写出了 1h 行")
+	}
+
+	// ─ 第 2 轮（数据仍未到）：必须**重试同一个小时**，水位依旧不动 ──
+	stats2, err := f.svc.RollupOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RollupOnce(2): %v", err)
+	}
+	if stats2.HoursScanned != 2 || stats2.HoursSkipped != 2 {
+		t.Fatalf("stats(2) = %+v, want 2 scanned / 2 skipped（下一轮必须重试同一批小时）", stats2)
+	}
+	if cur, _ := f.cursor(t); cur != rollupBaseTS {
+		t.Fatalf("cursor_1h = %d, want %d（等待窗口内不得推进）", cur, rollupBaseTS)
+	}
+
+	// ── 第 3 轮：5m 行终于落库（flush 补齐 / 落后一轮恢复）→ 必须写出 1h 行 ──
+	f.seed5m(t, fullHourRows(lateHour, func(int) fiveMin {
+		return fiveMin{samples: 30, cpu: 42}
+	})...)
+	stats3, err := f.svc.RollupOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RollupOnce(3): %v", err)
+	}
+	if stats3.HoursWritten != 1 {
+		t.Fatalf("stats(3) = %+v, want 1 written（迟到的 5m 行必须被回滚出来）", stats3)
+	}
+	row := f.hourRow(t, lateHour)
+	if row == nil {
+		t.Fatal("迟到的小时最终没有写出 1h 行：正是本修复要闭合的永久空洞")
+	}
+	if row.Samples != 360 || row.CPUUsedPercent == nil || *row.CPUUsedPercent != 42 {
+		t.Fatalf("补出来的 1h 行 = samples %d / cpu %v, want 360 / 42", row.Samples, row.CPUUsedPercent)
+	}
+	// 水位前移到 lateHour（它已被写出），但仍不越过它后面那个仍在窗口内的空小时。
+	if cur, _ := f.cursor(t); cur != lateHour {
+		t.Fatalf("cursor_1h = %d, want %d（补上后水位前移到该小时）", cur, lateHour)
+	}
+}
+
+// 7b. 边界：恰好等于 emptyHourGrace 时的行为必须**明确**并钉住 ——
+// 取值约定是 `age < grace` 才算「还在等」，故 age == grace 的那一秒视为**已过窗口** → 推进游标；
+// age == grace−1s 则仍在窗口内 → 扣住游标。两条相邻断言把不等号方向钉死。
+func TestRollupEmptyHourGraceBoundary(t *testing.T) {
+	const hour = rollupBaseTS + rollupHourSec // 被测的空小时
+	// hour 的结束时刻 = base+7200；让 now 恰为「结束 + grace」→ age == grace。
+	atBoundary := hour + rollupHourSec + int64(defaultEmptyHourGrace/time.Second)
+
+	// （a）age == grace → 不再等，水位越过这个空小时。
+	f := newRollupFixture(t, atBoundary, false, 0)
+	f.setCursor(t, rollupBaseTS)
+	stats, err := f.svc.RollupOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RollupOnce(边界): %v", err)
+	}
+	// upper = alignDown(now−CloseGrace) = base+10800，故区间里有两个小时：
+	// hour（age == grace → 越过）与 base+7200（age = 3600s < grace → 仍在窗口内，扣住水位）。
+	if stats.HoursScanned != 2 || stats.HoursSkipped != 2 || stats.HoursWritten != 0 {
+		t.Fatalf("stats = %+v, want 2 scanned / 2 skipped / 0 written", stats)
+	}
+	if cur, _ := f.cursor(t); cur != hour {
+		t.Fatalf("cursor_1h = %d, want %d：age(%ds) == grace(%v) 视为**已过窗口**（约定 age < grace 才等待）",
+			cur, hour, defaultEmptyHourGrace/time.Second, defaultEmptyHourGrace)
+	}
+
+	// （b）age == grace − 1s → 仍在窗口内，水位不得推进。
+	f2 := newRollupFixture(t, atBoundary-1, false, 0)
+	f2.setCursor(t, rollupBaseTS)
+	if _, err := f2.svc.RollupOnce(context.Background()); err != nil {
+		t.Fatalf("RollupOnce(边界-1s): %v", err)
+	}
+	if cur, _ := f2.cursor(t); cur != rollupBaseTS {
+		t.Fatalf("cursor_1h = %d, want %d：age 比 grace 少 1 秒，仍须等待（不等号方向被改反了）",
+			cur, rollupBaseTS)
+	}
+
+	// （c）WithEmptyHourGrace 只接受正数：传 0/负数必须保持默认，不得静默关掉等待窗口
+	//（关掉它就等于退回「1h 永久空洞」的老缺陷）。
+	if got := f.svc.WithEmptyHourGrace(0).emptyHourGrace; got != defaultEmptyHourGrace {
+		t.Fatalf("WithEmptyHourGrace(0) 后 grace = %v, want 默认 %v（非正数不得静默生效）",
+			got, defaultEmptyHourGrace)
+	}
+	if got := f.svc.WithEmptyHourGrace(-time.Hour).emptyHourGrace; got != defaultEmptyHourGrace {
+		t.Fatalf("WithEmptyHourGrace(-1h) 后 grace = %v, want 默认 %v", got, defaultEmptyHourGrace)
+	}
+
+	// （d）可注入：把窗口收到 30 分钟，同一个空小时（结束于 base+7200，now = base+10860 → age 3660s
+	// > 1800s）就变成「已过窗口」→ 水位越过它。（默认 2h 窗口下同一个小时是扣住的，
+	// 见 TestRollupYoungEmptyHourHoldsCursorUntilRowsArrive。）
+	f3 := newRollupFixture(t, rollupBaseTS+3*rollupHourSec+60, false, 0)
+	f3.svc = f3.svc.WithEmptyHourGrace(30 * time.Minute)
+	f3.setCursor(t, rollupBaseTS)
+	if _, err := f3.svc.RollupOnce(context.Background()); err != nil {
+		t.Fatalf("RollupOnce(注入 30m): %v", err)
+	}
+	if cur, _ := f3.cursor(t); cur != hour {
+		t.Fatalf("cursor_1h = %d, want %d：窗口注入为 30m 后，age 3660s 的空小时应视为已过窗口",
+			cur, hour)
 	}
 }
 
