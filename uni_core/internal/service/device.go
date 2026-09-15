@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/request"
@@ -11,6 +12,7 @@ import (
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/app"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/apperror"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/repository"
 )
 
 // 设备状态与在线判定用到的配置键。
@@ -151,16 +153,27 @@ func (s *DeviceService) Resources(ctx context.Context, id uint64, kind string) (
 }
 
 // Enable / Disable 切换管理侧启停态（与在线状态正交）。
+//
+// 错误映射**必须分辨未命中与故障**（Task 9 上报的观察点）：
+//   - `repository.ErrNotFound`（仓储未命中哨兵）→ 404 设备不存在；
+//   - 其它任何错误（连接断开、超时、约束冲突…）→ 500 Internal。
+//
+// 曾把**任何**错误都映射成 NotFound，于是 DB 故障会伪装成 404 ——
+// 运营看到「设备不存在」去排查设备，真正的问题却在数据库。
 func (s *DeviceService) Enable(ctx context.Context, id uint64) error {
-	if err := s.repo.SetStatus(ctx, id, entity.DeviceStatusEnabled); err != nil {
-		return apperror.NotFound("设备不存在")
-	}
-	return nil
+	return s.setStatus(ctx, id, entity.DeviceStatusEnabled)
 }
 
 func (s *DeviceService) Disable(ctx context.Context, id uint64) error {
-	if err := s.repo.SetStatus(ctx, id, entity.DeviceStatusDisabled); err != nil {
-		return apperror.NotFound("设备不存在")
+	return s.setStatus(ctx, id, entity.DeviceStatusDisabled)
+}
+
+func (s *DeviceService) setStatus(ctx context.Context, id uint64, status int8) error {
+	if err := s.repo.SetStatus(ctx, id, status); err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return apperror.NotFound("设备不存在")
+		}
+		return apperror.Internal("内部错误", err)
 	}
 	return nil
 }

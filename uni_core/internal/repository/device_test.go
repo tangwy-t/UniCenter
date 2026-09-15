@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -11,6 +12,9 @@ import (
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/database"
 	"gorm.io/gorm"
 )
+
+// errOtherRepoFailure 是「非未命中」错误样本：用于证明哨兵不会与任意错误混淆。
+var errOtherRepoFailure = errors.New("repository: db unavailable")
 
 func newDeviceTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
@@ -285,5 +289,44 @@ func TestDeviceUpdateEnrollWritesZeroValuesAndMissingRowErrors(t *testing.T) {
 		BaseEntity: entity.BaseEntity{ID: 9999}, TokenHash: "hash-x",
 	}); err == nil {
 		t.Fatal("更新不存在的设备必须返回错误")
+	}
+}
+
+// TestDeviceSetStatusAndDeleteReturnNotFoundSentinel 锁定「未命中」的契约：
+// SetStatus / Delete 在 RowsAffected==0 时必须返回 ErrNotFound 哨兵，
+// 且该哨兵**同时**兼容既有的 gorm.ErrRecordNotFound 判定（错误链包装）。
+//
+// 这是 service 层「未命中 → 404、其它错误 → 500」判别的基础：
+// 一旦有人把哨兵换成普通错误或直接改成 nil，这条测试必须红。
+func TestDeviceSetStatusAndDeleteReturnNotFoundSentinel(t *testing.T) {
+	db := newDeviceTestDB(t)
+	seedDevice(t, db, 1001, "inst-a", "hash-a", "web-01", nil)
+	repo := NewDeviceRepository(db)
+	ctx := context.Background()
+
+	// 命中：不得报错
+	if err := repo.SetStatus(ctx, 1001, entity.DeviceStatusDisabled); err != nil {
+		t.Fatalf("命中时 SetStatus 不应报错: %v", err)
+	}
+
+	// 未命中：ErrNotFound 哨兵（errors.Is 判定）
+	err := repo.SetStatus(ctx, 9999, entity.DeviceStatusDisabled)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("SetStatus 未命中必须返回 ErrNotFound 哨兵, got %v", err)
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("哨兵必须兼容既有 gorm.ErrRecordNotFound 判定（否则是对既有契约的破坏）, got %v", err)
+	}
+	if errors.Is(err, errOtherRepoFailure) {
+		t.Fatal("哨兵不得与无关错误混淆")
+	}
+
+	// 未命中：Delete 同契约
+	if err := repo.Delete(ctx, 9999); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Delete 未命中必须返回 ErrNotFound 哨兵, got %v", err)
+	}
+	// 命中：Delete 走软删，不报错
+	if err := repo.Delete(ctx, 1001); err != nil {
+		t.Fatalf("命中时 Delete 不应报错: %v", err)
 	}
 }

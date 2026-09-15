@@ -127,6 +127,9 @@ func (r *DeviceRepo) FindPage(ctx context.Context, q *request.DeviceQuery, onlin
 }
 
 // SetStatus 设置启停态（管理侧属性，与在线状态正交）。
+//
+// 未命中返回 ErrNotFound 哨兵（而非任意错误）：调用方据此回 404，
+// 同时把「DB 故障」留给 500 —— 见 errors.go 的说明。
 func (r *DeviceRepo) SetStatus(ctx context.Context, id uint64, status int8) error {
 	res := r.db.WithContext(ctx).Model(&entity.Device{}).
 		Where("id = ?", id).Update("status", status)
@@ -134,20 +137,21 @@ func (r *DeviceRepo) SetStatus(ctx context.Context, id uint64, status int8) erro
 		return res.Error
 	}
 	if res.RowsAffected == 0 {
-		return gorm.ErrRecordNotFound
+		return ErrNotFound
 	}
 	return nil
 }
 
 // Delete 软删（BaseEntity 带 gorm.DeletedAt）。
 // 指标行与 Redis 键的清理由 service 层负责编排（见 spec §7.3）。
+// 未命中返回 ErrNotFound 哨兵（语义同 SetStatus）。
 func (r *DeviceRepo) Delete(ctx context.Context, id uint64) error {
 	res := r.db.WithContext(ctx).Delete(&entity.Device{}, id)
 	if res.Error != nil {
 		return res.Error
 	}
 	if res.RowsAffected == 0 {
-		return gorm.ErrRecordNotFound
+		return ErrNotFound
 	}
 	return nil
 }

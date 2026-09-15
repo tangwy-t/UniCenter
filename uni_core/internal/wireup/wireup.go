@@ -5,8 +5,12 @@ package wireup
 import (
 	"context"
 	"fmt"
+	"math"
+	"time"
+
 	"github.com/tangwy-t/UniCenter/uni_core/internal/handler"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/middleware"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/agentmetrics"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/captcha"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/config"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/database"
@@ -69,6 +73,9 @@ func Init(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalClien
 	jobRepo := repository.NewJobRepository(db)
 	jobLogRepo := repository.NewJobLogRepository(db)
 	fileRepo := repository.NewFileRepository(db)
+	deviceRepo := repository.NewDeviceRepository(db)
+	deviceResourceRepo := repository.NewDeviceResourceRepository(db)
+	deviceMetricRepo := repository.NewDeviceMetricRepository(db)
 
 	// ── DictService ────────────────────────────────────────────────────
 	dictSvc := service.NewDictService(dictTypeRepo, dictDataRepo, cacheStore, log)
@@ -162,6 +169,34 @@ func Init(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalClien
 	// ── Job Service ────────────────────────────────────────────────────
 	jobSvc := service.NewJobService(jobRepo, jobLogRepo, jobScheduler, taskRegistry, log)
 
+	// ── Agent 指标热层（每设备原始滚动窗 + 水位投影）─────────────────────
+	// Step 取 sys.agent.reportInterval（秒，默认 10）——它与 agent 的上报节奏同源；
+	// 窗口容量按 24h/Step 再放 1.2 倍余量（滚动窗只保留 24h，更长区间走 DB 冷层）。
+	// wireup 里没有请求 ctx，用 context.Background()（与上方 RotateDefaultJWTSecret 同款）。
+	agentStepSec := configSvc.GetInt(context.Background(), "sys.agent.reportInterval", 10)
+	if agentStepSec <= 0 {
+		agentStepSec = 10
+	}
+	agentStep := time.Duration(agentStepSec) * time.Second
+	// ceil(24h/Step × 1.2)：MaxPoints 是条数上限，向上取整避免窗口略短于 24h。
+	agentMaxPoints := int64(math.Ceil(24 * time.Hour.Seconds() / agentStep.Seconds() * 1.2))
+	// QueryTTL = 0 → 交给 metricshistory 取默认 1s（趋势图连点时的短时缓存）。
+	rawStore := agentmetrics.NewRawStore(redis, agentmetrics.RawOptions{
+		Step: agentStep, MaxPoints: agentMaxPoints, QueryTTL: 0,
+	})
+	latestStore := agentmetrics.NewLatestStore(redis)
+
+	// ── Agent 服务（入湖写路径 + 趋势/下钻查询 + 设备管理）──────────────
+	// 同一个 rawStore 分别以写入面与读取面注入：*agentmetrics.RawStore 同时具备
+	// Append（入湖）/ Query+Bucket（查询）/ Purge（删除连带清理）三面，
+	// 各消费方只声明自己需要的窄接口（接口定义在消费方）。
+	// configSvc 直接满足 AgentConfigGetter（GetString + GetInt）—— 无需适配器。
+	// 入湖服务由 2C 的 AgentHub（WS）消费：此处**先完成构造**（装配集中在一处，
+	// 2C 只需接线，不必回头翻 repo/hot-layer 的构造参数），当前尚无调用方。
+	_ = service.NewAgentIngestService(deviceRepo, rawStore, latestStore, configSvc, log)
+	agentQuerySvc := service.NewAgentMetricsQueryService(rawStore, deviceMetricRepo, deviceResourceRepo, log)
+	deviceSvc := service.NewDeviceService(deviceRepo, deviceResourceRepo, rawStore, latestStore, configSvc, log)
+
 	// ── Handlers ───────────────────────────────────────────────────────
 	userHdl := handler.NewUserHandler(userSvc, captchaPkg)
 	roleHdl := handler.NewRoleHandler(roleSvc)
@@ -177,6 +212,9 @@ func Init(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalClien
 	configHdl := handler.NewConfigHandler(configSvc)
 	jobHdl := handler.NewJobHandler(jobSvc)
 	fileHdl := handler.NewFileHandler(fileSvc)
+	// 设备 handler 注入两个依赖：管理域 deviceSvc + 查询域 agentQuerySvc。
+	// 两者不能混用（管理域不查指标表，查询域不查设备表），故不合并成一个大接口。
+	deviceHdl := handler.NewDeviceHandler(deviceSvc, agentQuerySvc)
 	serverMonitorHdl := handler.NewServerMonitorHandler(log, serverstats.NewHistoryStore(redis))
 
 	// 服务器监控的采样协程随进程退出:drain 阶段优雅停止(幂等 Close)。
@@ -259,6 +297,9 @@ func Init(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalClien
 		},
 		File: router.FileDeps{
 			FileHdl: fileHdl,
+		},
+		Device: router.DeviceDeps{
+			DeviceHdl: deviceHdl,
 		},
 	}, nil
 }

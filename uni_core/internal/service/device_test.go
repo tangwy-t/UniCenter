@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/response"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/entity"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/agentmetrics"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/apperror"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/database"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/snowflake"
@@ -177,5 +180,120 @@ func TestDeviceResourcesStaleMarking(t *testing.T) {
 	}
 	if !byName["/old"] {
 		t.Fatal("120 天未出现的资源必须标 stale（spec §8：消失资源要看得到）")
+	}
+}
+
+// ── 错误遮蔽回归（Task 9 上报的观察点）────────────────────────────────
+//
+// 背景：Enable/Disable 曾把 SetStatus 的**任何**错误都映射成 NotFound，
+// 于是「DB 故障 / 连接断开 / 约束冲突」也会回给前端 404 —— 运营看到
+// 「设备不存在」去排查设备，而真正的问题在数据库。下面两条测试把
+// 「未命中 → 404」与「其它错误 → 500」钉死成两个不同的结果。
+
+// stubDeviceRepo 是可注入错误的 DeviceRepository 桩（只为触发错误分支）。
+type stubDeviceRepo struct {
+	findErr      error
+	findDevice   *entity.Device
+	setStatusErr error
+	deleteErr    error
+}
+
+func (s *stubDeviceRepo) FindByID(context.Context, uint64) (*entity.Device, error) {
+	return s.findDevice, s.findErr
+}
+
+func (s *stubDeviceRepo) FindPage(context.Context, *request.DeviceQuery, time.Time) ([]entity.Device, int64, error) {
+	return nil, 0, s.findErr
+}
+
+func (s *stubDeviceRepo) SetStatus(context.Context, uint64, int8) error { return s.setStatusErr }
+func (s *stubDeviceRepo) Delete(context.Context, uint64) error          { return s.deleteErr }
+
+// stubResourceRepo 是 DeviceResourceRepository 的最小桩。
+type stubResourceRepo struct {
+	deleteErr error
+}
+
+func (s *stubResourceRepo) ListByDevice(context.Context, uint64, string, time.Time) ([]entity.DeviceResource, error) {
+	return nil, nil
+}
+func (s *stubResourceRepo) DeleteByDevice(context.Context, uint64) error { return s.deleteErr }
+
+// stubPurger 是 DeviceRedisPurger 的最小桩。
+type stubPurger struct{ err error }
+
+func (s stubPurger) Purge(context.Context, uint64) error { return s.err }
+
+// stubLatestReader 是 DeviceLatestReader 的最小桩（未命中一律 nil）。
+type stubLatestReader struct{ err error }
+
+func (s stubLatestReader) GetMany(context.Context, []uint64) (map[uint64]*agentmetrics.LatestSummary, error) {
+	return nil, s.err
+}
+
+// appErrStatus 把 service 返回的错误归一成 HTTP 状态；非 AppError 记为 0。
+func appErrStatus(err error) int {
+	var ae *apperror.AppError
+	if errors.As(err, &ae) {
+		return ae.HTTPStatus
+	}
+	return 0
+}
+
+func TestDeviceEnableDisableMapsRepositoryMissToNotFound(t *testing.T) {
+	svc, db, _, _ := newDeviceTestEnv(t)
+	ctx := context.Background()
+	if err := db.Create(&entity.Device{
+		BaseEntity: entity.BaseEntity{ID: 1001}, InstanceID: "i1", Status: entity.DeviceStatusEnabled,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	// 未命中（设备不存在）：仓储返回 repository.ErrNotFound 哨兵 → 必须是 404
+	miss := &stubDeviceRepo{setStatusErr: repository.ErrNotFound}
+	svcMiss := NewDeviceService(miss, &stubResourceRepo{}, stubPurger{}, stubLatestReader{}, stubCfg{}, logger.NewNop())
+	if err := svcMiss.Enable(ctx, 999999); appErrStatus(err) != 404 {
+		t.Fatalf("未命中必须映射为 404 NotFound, got status=%d err=%v", appErrStatus(err), err)
+	}
+	if err := svcMiss.Disable(ctx, 999999); appErrStatus(err) != 404 {
+		t.Fatalf("未命中必须映射为 404 NotFound, got status=%d err=%v", appErrStatus(err), err)
+	}
+
+	// 真仓储路径同样必须是 404（证明仓储确实返回哨兵，而不是靠桩伪造）
+	if err := svc.Enable(ctx, 999999); appErrStatus(err) != 404 {
+		t.Fatalf("真仓储未命中必须 404, got status=%d err=%v", appErrStatus(err), err)
+	}
+}
+
+func TestDeviceEnableDisableMapsRepositoryFailureToInternal(t *testing.T) {
+	ctx := context.Background()
+	dbDown := fmt.Errorf("db: connection refused")
+
+	for _, tc := range []struct {
+		name string
+		call func(svc *DeviceService) error
+	}{
+		{"Enable", func(svc *DeviceService) error { return svc.Enable(ctx, 1001) }},
+		{"Disable", func(svc *DeviceService) error { return svc.Disable(ctx, 1001) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := &stubDeviceRepo{setStatusErr: dbDown}
+			svc := NewDeviceService(repo, &stubResourceRepo{}, stubPurger{}, stubLatestReader{}, stubCfg{}, logger.NewNop())
+
+			err := tc.call(svc)
+			if err == nil {
+				t.Fatal("仓储报错时 service 必须返回错误，不得静默成功")
+			}
+			status := appErrStatus(err)
+			if status == 404 {
+				t.Fatalf("DB 故障被伪装成 404（错误遮蔽回归）: %v", err)
+			}
+			if status != 500 {
+				t.Fatalf("非未命中的仓储错误必须映射为 500 Internal, got status=%d err=%v", status, err)
+			}
+			if !errors.Is(err, dbDown) {
+				t.Fatalf("Internal 必须携带原始 cause（便于日志定位）: %v", err)
+			}
+		})
 	}
 }

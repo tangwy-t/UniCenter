@@ -102,6 +102,11 @@ type FileDeps struct {
 	FileHdl *handler.FileHandler
 }
 
+// DeviceDeps holds device management handler dependencies.
+type DeviceDeps struct {
+	DeviceHdl *handler.DeviceHandler
+}
+
 // Dependencies holds all injected dependencies for router setup, grouped by module.
 type Dependencies struct {
 	Infra   InfraDeps
@@ -112,6 +117,7 @@ type Dependencies struct {
 	Job     JobDeps
 	Config  ConfigDeps
 	File    FileDeps
+	Device  DeviceDeps
 }
 
 // Setup registers all middleware and routes on a new gin.Engine.
@@ -442,6 +448,23 @@ func Setup(deps Dependencies) *gin.Engine {
 			files.GET("/:id/thumbnail", perm(permission.PermFileList), deps.File.FileHdl.Thumbnail)
 			files.GET("/:id/download", perm(permission.PermFileDownload), deps.File.FileHdl.Download)
 			files.GET("/:id/preview", perm(permission.PermFileDownload), deps.File.FileHdl.Preview)
+		}
+
+		// 设备管理
+		devices := auth.Group("/devices")
+		devices.Use(middleware.SetModuleName("设备管理"))
+		{
+			// 权限码按「读取面 / 查询面 / 命令面」分档：列表用 device:list，
+			// 详情与指标查询（趋势、下钻、资源枚举）都属查询面 → device:query，
+			// 启停/删除各自独立成码（与 users 分组同形）。
+			devices.GET("", perm(permission.PermDeviceList), deps.Device.DeviceHdl.List)
+			devices.GET("/:id", perm(permission.PermDeviceQuery), deps.Device.DeviceHdl.GetByID)
+			// 一个端点两种语义：kind+name 同时存在 → 资源下钻，否则 → 整机趋势（见 handler）。
+			devices.GET("/:id/metrics", perm(permission.PermDeviceQuery), deps.Device.DeviceHdl.Metrics)
+			devices.GET("/:id/resources", perm(permission.PermDeviceQuery), deps.Device.DeviceHdl.Resources)
+			devices.POST("/:id/enable", perm(permission.PermDeviceEnable), deps.Device.DeviceHdl.Enable)
+			devices.POST("/:id/disable", perm(permission.PermDeviceDisable), deps.Device.DeviceHdl.Disable)
+			devices.DELETE("/:id", perm(permission.PermDeviceDelete), deps.Device.DeviceHdl.Delete)
 		}
 	}
 
