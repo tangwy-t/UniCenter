@@ -76,3 +76,57 @@ func TableSpecs() []Spec {
 		{Table: "device_metric_sensor", Granularity: GranularityWeek, Retention: 30 * day},
 	}
 }
+
+// TrendPoint 是**宽表趋势点**：热层（Redis 原始）与冷层（DB 5min/1h）产出的查询结果
+// 必须形状一致，前端才能无感切换数据源。字段与 spec §5.5 的 MetricsSample 同名，
+// 但语义是「桶内聚合结果」而非单次采样。
+//
+// 可空列一律指针：nil = 该桶未采集到该指标（图表显示「—」），与 0 区分。
+type TrendPoint struct {
+	T int64 `json:"t"` // 桶起始 unix 秒
+
+	CPUUsedPercent  *float64 `json:"cpu_used_percent,omitempty"`
+	CPUIOWait       *float64 `json:"cpu_iowait,omitempty"`
+	Load1           *float64 `json:"load1,omitempty"`
+	Load5           *float64 `json:"load5,omitempty"`
+	Load15          *float64 `json:"load15,omitempty"`
+	MemUsedPercent  *float64 `json:"mem_used_percent,omitempty"`
+	MemUsedMB       *float64 `json:"mem_used_mb,omitempty"`
+	MemAvailableMB  *float64 `json:"mem_available_mb,omitempty"`
+	SwapUsedPercent *float64 `json:"swap_used_percent,omitempty"`
+	SwapUsedMB      *float64 `json:"swap_used_mb,omitempty"`
+
+	TCPTotal       *int64 `json:"tcp_total,omitempty"`
+	TCPEstablished *int64 `json:"tcp_established,omitempty"`
+	TCPListen      *int64 `json:"tcp_listen,omitempty"`
+	ProcCount      *int64 `json:"proc_count,omitempty"`
+	UptimeSec      *int64 `json:"uptime_sec,omitempty"`
+
+	DiskTotalGB         *float64 `json:"disk_total_gb,omitempty"`
+	DiskUsedGB          *float64 `json:"disk_used_gb,omitempty"`
+	DiskUsedPercent     *float64 `json:"disk_used_percent,omitempty"`
+	DiskIOReadBytesSec  *float64 `json:"disk_io_read_bytes_sec,omitempty"`
+	DiskIOWriteBytesSec *float64 `json:"disk_io_write_bytes_sec,omitempty"`
+	NICRXBytesSec       *float64 `json:"nic_rx_bytes_sec,omitempty"`
+	NICTXBytesSec       *float64 `json:"nic_tx_bytes_sec,omitempty"`
+	MaxTemperatureC     *float64 `json:"max_temperature_c,omitempty"`
+
+	Samples int `json:"samples"`
+}
+
+// RawSnapshot 是热层查询结果。字段名与 spec §8 的响应契约一致。
+type RawSnapshot struct {
+	WindowSeconds int64        `json:"range_seconds"`
+	StepSeconds   int64        `json:"resolution_seconds"`
+	Buckets       []TrendPoint `json:"buckets"`
+}
+
+// RawOptions 装配每设备原始滚动窗。
+type RawOptions struct {
+	// Step 是采样节奏，用于 metricshistory 的取点启发式（= agent 的 reportInterval）。
+	Step time.Duration
+	// MaxPoints 是窗口容量（条数）；24h / Step × 1.2 的余量。
+	MaxPoints int64
+	// QueryTTL 是查询结果缓存 TTL；<=0 时取 metricshistory 默认 1s。
+	QueryTTL time.Duration
+}
