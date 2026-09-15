@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"slices"
 	"strconv"
@@ -33,6 +34,7 @@ type fakeSocket struct {
 	deadline    time.Time
 	readLimit   int64
 	pongHandler func(string) error
+	remote      net.Addr
 	closed      bool
 	dataFrames  [][]byte
 	closes      []ctrlFrame
@@ -46,7 +48,13 @@ type ctrlFrame struct {
 }
 
 func newFakeSocket() *fakeSocket {
-	return &fakeSocket{in: make(chan []byte, 16)}
+	return &fakeSocket{
+		in: make(chan []byte, 16),
+		// 远端地址**故意带端口**：未鉴权限流键必须只含 host 部分，而这条规则唯一的
+		// 失效方式就是端口被带进键（每连接一个新键 ⇒ 限流形同虚设）—— 夹具要能暴露它，
+		// 所以这里给的就是真实的 host:port 形态（与 net.TCPAddr.String() 同型）。
+		remote: &net.TCPAddr{IP: net.ParseIP("10.0.0.1"), Port: 54321},
+	}
 }
 
 // ReadMessage 是入站通路：有帧就返回帧，读期限到了就返回超时错误。
@@ -115,6 +123,22 @@ func (f *fakeSocket) SetPongHandler(h func(string) error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.pongHandler = h
+}
+
+// RemoteAddr 是 socket 窄接口的远端地址面：**未鉴权阶段的限流键身份只有它**
+// （见 ratelimit.go 的 FrameLimitKey）。测试态由 newFakeSocket 给一个带端口的
+// TCP 地址，于是「键里不得出现端口」这条规则可以在不起真实 TCP 的前提下被驱动。
+func (f *fakeSocket) RemoteAddr() net.Addr {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.remote
+}
+
+// setRemoteAddr 换一个远端地址（用于驱动「IP 变了 → 键也变」）。
+func (f *fakeSocket) setRemoteAddr(a net.Addr) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.remote = a
 }
 
 func (f *fakeSocket) Close() error {
@@ -364,6 +388,56 @@ func (s *stubDeps) touchedIDs() []uint64 {
 	out := make([]uint64, len(s.touched))
 	copy(out, s.touched)
 	return out
+}
+
+// ─ 限流器替身 ──────────────────────────────────────────────
+//
+// stubLimiter 是 agenthub.RateLimiter 的账本替身：按调用次序放行前 allowN 次，
+// 之后一律拒绝；每次调用都记下 (deviceID, remoteIP) ——「键身份随阶段变化」
+// （hello 前按 IP、hello 后按设备）是本任务的核心契约，必须逐次可断言。
+type stubLimiter struct {
+	mu     sync.Mutex
+	allowN int   // 放行前 N 次调用（0 = 全部拒绝）
+	err    error // 非 nil → 每次调用都返回错误（驱动 fail-open 的报错路径）
+	calls  []limiterCall
+}
+
+// limiterCall 是一次 Allow 调用的入参快照。
+type limiterCall struct {
+	deviceID uint64
+	remoteIP string
+}
+
+func (s *stubLimiter) Allow(_ context.Context, deviceID uint64, remoteIP string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, limiterCall{deviceID: deviceID, remoteIP: remoteIP})
+	if s.err != nil {
+		// 报错时 bool 无意义（消费方必须走 fail-open 分支，不得看它）——刻意返回 false，
+		// 这样「实现把 err 当成拒绝」就会被断言抓住。
+		return false, s.err
+	}
+	return len(s.calls) <= s.allowN, nil
+}
+
+func (s *stubLimiter) callCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.calls)
+}
+
+func (s *stubLimiter) callsSnapshot() []limiterCall {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]limiterCall, len(s.calls))
+	copy(out, s.calls)
+	return out
+}
+
+func (s *stubLimiter) setError(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.err = err
 }
 
 // ── 夹具 ───────────────────────────────────────────────────
@@ -1344,6 +1418,241 @@ func TestConnNilDepsFailClosedWithoutPanic(t *testing.T) {
 	})
 }
 
+// ─ 测试 14：入站帧级限流（CloseRateLimited 4006）────────────
+//
+// 缺口本体：协议登记了 CloseRateLimited(4006)「限流」，但仓库里**没有任何**限流
+// 实现 —— 一条失控的 agent（bug 或被攻陷）可以无限量刷帧，把 core 的 CPU 与 Redis
+// 带宽吃满。这组断言钉住四件事：
+//  1. 超限 → 4006 关闭（而不是静默放行）；
+//  2. 超限的那一帧**在任何写路径之前**就被拦下（Ingestor / Touch 调用次数不增）；
+//  3. **未鉴权阶段同样受限**，且键只含 IP 的 host 部分（不带端口）；
+//  4. 限流器不可用（nil 或报错）→ **fail-open**（放行 + 不关连接）。
+
+// newRateLimitFixture 造一个「六个能力面指向同一个替身 + 限流器由入参给」的夹具。
+// lim 传 nil 即「Limiter 未装配」的形态（fail-open 的另一条路径）。
+func newRateLimitFixture(t *testing.T, lim RateLimiter) (*fixture, *stubDeps) {
+	t.Helper()
+	stub := newStubDeps()
+	stub.setEnroll(1001, "agent-token-1", nil)
+	deps := Deps{
+		Enroller:      stub,
+		Authenticator: stub,
+		Ingestor:      stub,
+		Toucher:       stub,
+		Decider:       stub,
+		Policy:        stub,
+		Limiter:       lim,
+	}
+	return newFixtureWithDeps(t, Options{SendQueue: 8}, deps, stub), stub
+}
+
+// TestConnRateLimitClosesWith4006BeforeDispatch 钉住「超限关闭」与「分派前拦下」，
+// 并逐次断言限流键的**身份**随阶段变化（hello 前按 IP，hello 后按设备）。
+func TestConnRateLimitClosesWith4006BeforeDispatch(t *testing.T) {
+	// 放行前 2 帧：hello（未鉴权身份）+ 第 1 条上报（设备身份）；第 3 帧拒绝。
+	lim := &stubLimiter{allowN: 2}
+	f, stub := newRateLimitFixture(t, lim)
+	served := f.serve()
+
+	h := testHello()
+	h.EnrollToken = "enroll-token"
+	f.push(helloFrame(t, h))
+	f.waitState(t, StateActive)
+
+	now := time.Now().UnixMilli()
+	f.push(metricsFrame(t, now, now, nil))
+	waitFor(t, "第 1 条上报入湖", func() bool { return stub.ingestCount() == 1 })
+	waitFor(t, "上报后的 Touch", func() bool { return len(stub.touchedIDs()) == 2 })
+
+	// 第 3 帧：超限。它必须**不**进入分派（否则照样入湖、照样刷 last_seen_at，
+	// 限流就只是「关连接」而不是「停止消耗」）。
+	f.push(metricsFrame(t, now, now, nil))
+	f.waitClose(t, agentproto.CloseRateLimited)
+	f.expectState(t, StateClosed)
+
+	if got := stub.ingestCount(); got != 1 {
+		t.Fatalf("超限帧仍被分派入湖（Ingestor 调用 %d 次, want 1）—— 限流必须生效在分派之前", got)
+	}
+	if got := len(stub.touchedIDs()); got != 2 {
+		t.Fatalf("超限帧仍刷新了 last_seen_at（Touch %d 次, want 2）—— 限流必须生效在任何写路径之前", got)
+	}
+	if got := f.conn.RateLimitedCount(); got != 1 {
+		t.Fatalf("RateLimitedCount = %d, want 1（超限必须记账，否则「限流真的触发过」无证据）", got)
+	}
+	if !served(2 * time.Second) {
+		t.Fatal("超限后读循环必须终止（否则这条连接会继续读帧，只是不再分派）")
+	}
+
+	calls := lim.callsSnapshot()
+	if len(calls) != 3 {
+		t.Fatalf("Allow 调用 %d 次, want 3（每帧一次）", len(calls))
+	}
+	if calls[0].deviceID != 0 {
+		t.Fatalf("hello 帧的身份 deviceID = %d, want 0（此刻尚未鉴权，键必须按 IP）", calls[0].deviceID)
+	}
+	for i, c := range calls[1:] {
+		if c.deviceID != 1001 {
+			t.Fatalf("鉴权后的第 %d 帧身份 deviceID = %d, want 1001（键必须按设备）", i+1, c.deviceID)
+		}
+	}
+	if got, want := FrameLimitKey(calls[0].deviceID, calls[0].remoteIP), "agent:ws:preauth:10.0.0.1"; got != want {
+		t.Fatalf("未鉴权帧的限流键 = %q, want %q（远端 IP 只取 host 部分）", got, want)
+	}
+	if got, want := FrameLimitKey(calls[1].deviceID, calls[1].remoteIP), "agent:device:1001:frames"; got != want {
+		t.Fatalf("已鉴权帧的限流键 = %q, want %q（按设备计数，重连不重置额度）", got, want)
+	}
+}
+
+// TestConnRateLimitSmokeFrames 钉住未鉴权阶段的两条边界：
+//   - 首帧就被限流 → 4006（**不是** 4008）：未鉴权阶段同样受限，
+//     否则攻击者只要不发 hello 就能把握手之前的 CPU 刷满；
+//   - 解码都过不去的帧**不询问**限流器 → 4002：限流的生效时机是
+//     「已解码并校验过的消息之后」，不是「收到字节之后」。
+func TestConnRateLimitSmokeFrames(t *testing.T) {
+	t.Run("未鉴权首帧超限 → 4006（键按远端 IP，不含端口）", func(t *testing.T) {
+		lim := &stubLimiter{allowN: 0} // 一律拒绝
+		f, stub := newRateLimitFixture(t, lim)
+		f.serve()
+
+		f.push(heartbeatFrame(t))
+		f.waitClose(t, agentproto.CloseRateLimited)
+		f.expectState(t, StateClosed)
+		if got := f.conn.RateLimitedCount(); got != 1 {
+			t.Fatalf("RateLimitedCount = %d, want 1", got)
+		}
+		calls := lim.callsSnapshot()
+		if len(calls) != 1 {
+			t.Fatalf("Allow 调用 %d 次, want 1", len(calls))
+		}
+		if calls[0].deviceID != 0 {
+			t.Fatalf("未鉴权阶段必须以 deviceID=0 上报身份, got %d", calls[0].deviceID)
+		}
+		if calls[0].remoteIP != "10.0.0.1" {
+			t.Fatalf("远端 IP = %q, want %q（**只取 host 部分**：带端口＝每条 TCP 连接一个键，限流形同虚设）",
+				calls[0].remoteIP, "10.0.0.1")
+		}
+		// 首帧就被拦下 ⇒ 连 hello 都没进：鉴权与入湖路径一次都没碰。
+		if n := stub.enrollCallCount() + stub.authCallCount(); n != 0 {
+			t.Fatalf("被限流的首帧仍进入了鉴权路径（调用 %d 次）", n)
+		}
+		if n := stub.ingestCount(); n != 0 {
+			t.Fatalf("被限流的帧仍入湖 %d 条", n)
+		}
+	})
+
+	t.Run("解码失败的帧 → 4002 且不询问限流器", func(t *testing.T) {
+		lim := &stubLimiter{allowN: 0}
+		f, _ := newRateLimitFixture(t, lim)
+		f.serve()
+
+		f.push([]byte("{not-json"))
+		f.waitClose(t, agentproto.CloseMalformedMessage)
+		if got := lim.callCount(); got != 0 {
+			t.Fatalf("解码失败的帧询问了限流器 %d 次 —— 生效时机必须是「已解码并校验过」之后", got)
+		}
+	})
+}
+
+// TestConnRateLimitFailsOpen 钉住 fail-open 的**两条**路径：限流器未装配（nil）
+// 与限流器报错，都必须**放行 + 不关连接**。
+//
+// 取向的理由：限流器守的是 CPU / Redis 带宽这类容量资源，而它自己依赖 Redis ——
+// 把它当权威会让「Redis 抖一下」放大成全体 agent 的关闭与重连风暴（重连要查库、
+// 要重新 enroll），代价高于挺过这段抖动。这与 accept()（设备启停）的 fail-closed
+// 是两个方向，理由也不同：那条守卫管的是安全。
+func TestConnRateLimitFailsOpen(t *testing.T) {
+	t.Run("Limiter 未装配（nil）→ 照常放行", func(t *testing.T) {
+		f, stub := newRateLimitFixture(t, nil)
+		f.serve()
+
+		h := testHello()
+		h.EnrollToken = "enroll-token"
+		f.push(helloFrame(t, h))
+		f.waitState(t, StateActive)
+
+		now := time.Now().UnixMilli()
+		f.push(metricsFrame(t, now, now, nil))
+		waitFor(t, "样本入湖（限流器缺失不得拒绝服务）", func() bool { return stub.ingestCount() == 1 })
+
+		f.expectState(t, StateActive)
+		f.expectNoClose(t, 80*time.Millisecond)
+		if got := f.conn.RateLimitedCount(); got != 0 {
+			t.Fatalf("RateLimitedCount = %d, want 0（fail-open 路径不得记成「被限流」）", got)
+		}
+	})
+
+	t.Run("Allow 返回错误 → 照常放行且不关连接", func(t *testing.T) {
+		lim := &stubLimiter{allowN: 1 << 30} // 若实现改去看 bool（报错时恒 false），握手当场就会断
+		lim.setError(errors.New("redis down"))
+		f, stub := newRateLimitFixture(t, lim)
+		f.serve()
+
+		h := testHello()
+		h.EnrollToken = "enroll-token"
+		f.push(helloFrame(t, h))
+		// hello 也是「一帧」：限流器报错时握手必须照常完成（否则 Redis 抖动 = 全通道不可用）。
+		f.waitState(t, StateActive)
+
+		now := time.Now().UnixMilli()
+		f.push(metricsFrame(t, now, now, nil))
+		waitFor(t, "样本入湖（限流器故障不得拒绝服务）", func() bool { return stub.ingestCount() == 1 })
+
+		f.expectState(t, StateActive)
+		f.expectNoClose(t, 80*time.Millisecond)
+		if got := lim.callCount(); got < 2 {
+			t.Fatalf("Allow 调用 %d 次, want ≥2（hello 与上报各一次）", got)
+		}
+		if got := f.conn.RateLimitedCount(); got != 0 {
+			t.Fatalf("RateLimitedCount = %d, want 0（报错路径不得记成「被限流」）", got)
+		}
+	})
+}
+
+// bareAddr 是「String() 不含 host:port」的 net.Addr（unix socket 等同型），
+// 用来驱动 remoteIPOf 的兜底分支。
+type bareAddr string
+
+func (a bareAddr) Network() string { return "bare" }
+func (a bareAddr) String() string  { return string(a) }
+
+// TestFrameLimitKeyRules 钉住键规则本身（纯函数层，与读循环无关）：
+// 二选一形态定死，且**端口绝不进入键**。
+func TestFrameLimitKeyRules(t *testing.T) {
+	if got, want := FrameLimitKey(0, "192.0.2.7"), "agent:ws:preauth:192.0.2.7"; got != want {
+		t.Fatalf("未鉴权键 = %q, want %q", got, want)
+	}
+	if got, want := FrameLimitKey(1001, "192.0.2.7"), "agent:device:1001:frames"; got != want {
+		t.Fatalf("已鉴权键 = %q, want %q（IP 不参与：额度必须跟着设备走，重连不重置）", got, want)
+	}
+	// 同一 IP 的不同源端口必须落到**同一个**键上 —— 这正是「不带端口」的目的：
+	// 带端口等于每条 TCP 连接一个计数器，攻击者开 N 条连接就拿到 N 倍额度。
+	fromPort := func(p int) string {
+		return FrameLimitKey(0, remoteIPOf(&net.TCPAddr{IP: net.ParseIP("192.0.2.7"), Port: p}))
+	}
+	if p1, p2 := fromPort(1111), fromPort(2222); p1 != p2 {
+		t.Fatalf("同一 IP 的两个源端口算出不同键（%q vs %q）—— 端口进了键，限流形同虚设", p1, p2)
+	}
+	if got, want := fromPort(1111), "agent:ws:preauth:192.0.2.7"; got != want {
+		t.Fatalf("带端口地址的键 = %q, want %q", got, want)
+	}
+
+	// remoteIPOf 的提取分支（含兜底）。
+	for _, tc := range []struct {
+		name string
+		addr net.Addr
+		want string
+	}{
+		{"IPv4 host:port", &net.TCPAddr{IP: net.ParseIP("192.0.2.7"), Port: 54321}, "192.0.2.7"},
+		{"IPv6 host:port", &net.TCPAddr{IP: net.ParseIP("2001:db8::1"), Port: 443}, "2001:db8::1"},
+		{"无端口可解析 → 原样返回", bareAddr("unix-socket"), "unix-socket"},
+		{"addr 为 nil → 空串（所有这类连接共用一个键，方向与限流一致）", nil, ""},
+	} {
+		if got := remoteIPOf(tc.addr); got != tc.want {
+			t.Fatalf("%s: remoteIPOf = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
 // ─ 守卫：关闭码登记集与分派完备性 ──────────────────────────
 
 // TestConnUsesRegisteredCloseCodes 钉住状态机用到的每个码都在协议登记集内，
@@ -1358,6 +1667,7 @@ func TestConnUsesRegisteredCloseCodes(t *testing.T) {
 		agentproto.CloseHeartbeatTimeout,
 		agentproto.CloseProtocolViolation,
 		agentproto.CloseDuplicateInstance, // hub 顶替路径（Task 1）
+		agentproto.CloseRateLimited,       // 入站帧级限流（本任务：超限关闭）
 	} {
 		if !isRegisteredCloseCode(code) {
 			t.Fatalf("关闭码 %d 未在协议登记集 %v", code, agentproto.AllCloseCodes())

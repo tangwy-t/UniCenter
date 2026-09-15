@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strconv"
 	"time"
 
 	"github.com/tangwy-t/UniCenter/uni_core/internal/handler"
@@ -51,6 +52,17 @@ const (
 	defaultAgentReportIntervalSec = 10
 	// defaultAgentHeartbeatIntervalSec 与 v008 种子同值。
 	defaultAgentHeartbeatIntervalSec = 30
+
+	// configAgentMaxFramesPerMin / defaultAgentMaxFramesPerMin 是 agent **入站帧级**
+	// 限流的阈值（种子键由 v011 种下；缺省 900 在种子缺失时兜底）。口径：
+	// 10s 上报 = 6 帧/分 + 心跳 2 帧/分 → 正常设备约 8 帧/分，900 留 ~100× 余量 ——
+	// 这条限流要拦的是「失控刷帧」（bug 或被攻陷的 agent），不是上报节奏的正常抖动；
+	// 阈值贴住正常值会让一次重连补齐（agent 本地待发队列一次性排空）就被误杀。
+	configAgentMaxFramesPerMin  = "sys.agent.maxFramesPerMin"
+	defaultAgentMaxFramesPerMin = 900
+	// agentFrameWindowSecs 是帧预算的窗口长度：配置键名即 maxFramesPer**Min**，
+	// 窗口必须与它同源（改窗口而不改键名会让「每分钟 900 帧」变成别的东西）。
+	agentFrameWindowSecs = 60
 
 	// agentDrainPollInterval 是 drain 相位里「等连接收尾」的轮询间隔。
 	// 连接收尾的正常耗时是「读循环从 SetReadDeadline(now) 返回 + handler 的
@@ -270,6 +282,10 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 		Decider:       agentIngestSvc,
 		// Policy 只负责「下发/校准上报与心跳节奏」，由两个配置键包成小适配器。
 		Policy: agentPolicy,
+		// Limiter 是**入站帧级**限流（协议登记的 CloseRateLimited=4006 至此有了实现）：
+		// 阈值取 sys.agent.maxFramesPerMin（缺省 900），计数走与上方 rateLimiter 同一个
+		// cacheStore（同一个 Redis 客户端）。未注入 = fail-open，所以这里必须接上。
+		Limiter: newAgentFrameLimiter(cacheStore, configSvc),
 	}
 
 	// ── 启动期分区 reconcile（**必须**在 scheduler.NewScheduler 之前）─────
@@ -497,8 +513,9 @@ type agentIntervalPolicy struct {
 // 名字或签名一旦漂移，这里编译失败 —— 而不是靠「构造参数恰好能塞进去」蒙对。
 var _ service.RedisIntervalPolicy = agentIntervalPolicy{}
 
-// agentIntervalConfig 是适配器需要的配置能力面；*service.ConfigService 直接满足
-// （接口定义在消费方，与仓库既有约定一致）。
+// agentIntervalConfig 是适配器需要的配置能力面（`GetInt`）；*service.ConfigService
+// 直接满足（接口定义在消费方，与仓库既有约定一致）。**两个**适配器共用它：
+// agentIntervalPolicy（节奏）与 agentFrameLimiter（帧限流阈值）都只读 int 配置。
 type agentIntervalConfig interface {
 	GetInt(ctx context.Context, key string, defaultVal int) int
 }
@@ -531,4 +548,92 @@ func (p agentIntervalPolicy) seconds(key string, fallback int) time.Duration {
 		secs = fallback
 	}
 	return time.Duration(secs) * time.Second
+}
+
+// ── agent 入站帧级限流适配器 ────────────────────────────────────────────
+
+// agentFrameLimiter 用 limiter 包**既有的滑动窗口原语**实现 agenthub.RateLimiter：
+// 超限的帧由连接以 CloseRateLimited(4006) 关闭（关闭与 fail-open 的取向都在连接侧，
+// 见 agenthub 的 allowFrame）。
+//
+// 为什么直接用底层原语（CacheStoreInterface.SlidingWindowIncr）而不是
+// limiter.RateLimiter 的 gin 中间件：中间件绑死在 *gin.Context 上 —— 身份从
+// Authorization 头 / JWT 里取、拒绝时写 HTTP 429；而这里计数的对象是 **WS 帧**、
+// 身份是 hello 之后的 deviceID 或 hello 之前的远端 IP。两者除了「都用 Redis 记一个
+// 窗口内的计数」之外没有一处可复用，硬套中间件只会得到一个假的 gin.Context。
+type agentFrameLimiter struct {
+	store limiter.CacheStoreInterface
+	cfg   agentIntervalConfig
+}
+
+// 编译期断言：适配器必须满足连接侧的窄接口 —— 名字或签名漂移时红灯落在**这里**，
+// 而不是靠「构造参数恰好能塞进 Deps.Limiter」蒙对。
+var _ agenthub.RateLimiter = agentFrameLimiter{}
+
+func newAgentFrameLimiter(store limiter.CacheStoreInterface, cfg agentIntervalConfig) agentFrameLimiter {
+	return agentFrameLimiter{store: store, cfg: cfg}
+}
+
+// Allow 判定这一帧是否放行；键由 agenthub.FrameLimitKey 按身份选出
+// （已鉴权 → agent:device:{id}:frames；未鉴权 → agent:ws:preauth:{远端 IP}）。
+//
+// 原语语义（已用 miniredis 实测核对）：`SlidingWindowIncr(ctx, keys, ttl)` 返回
+// `[]any` 的两个 int64 —— `{prevCount, currCount}`，其中 currCount **已包含本次调用**
+// （Lua 脚本内先 `INCR` 再返回），`ttl` 单位是**秒**且只在窗口键首次自增时设置
+// （固定窗口：不随每次调用续期，故持续刷帧不会把窗口越推越远）。原语自己**不做**
+// 任何判定（超限时它照常返回计数），阈值比较在下面。
+//
+// 为什么 keys 传**同一个键两次**，而不是「上一窗 + 当前窗」两个键：这里要的是
+// 帧级预算（键名 `maxFramesPerMin` 就是「每分钟」），只关心「本窗口内的第几帧」；
+// 让 prev 与 curr 指向同一个键后，脚本的 `GET` 先于 `INCR` 执行，返回的 prevCount
+// 即「本帧之前的计数」、currCount 即「含本帧的计数」，而且 Redis 里的键名**正好**
+// 是 FrameLimitKey 给出的那个（可直接检索、TTL 即窗口长度）。
+// **不能**只传一个键：Lua 脚本无条件读 KEYS[2]，少给一个键会让脚本编译失败、
+// 每次调用都返回错误 —— 于是 fail-open 会把限流悄悄关成「永远放行」（正是本任务
+// 要消除的形态）。这一条已用一次性探针实测（见任务回报）。
+func (l agentFrameLimiter) Allow(ctx context.Context, deviceID uint64, remoteIP string) (bool, error) {
+	limit := l.cfg.GetInt(ctx, configAgentMaxFramesPerMin, defaultAgentMaxFramesPerMin)
+	if limit <= 0 {
+		// 非正数按缺省处理，**不**解释成「不限流」：一个手滑的 0 会让防护静默失效，
+		// 而防护失效之后没有任何可观测症状（帧照常被处理、日志里也不会有异常），
+		// 属于最难发现的一类失效。
+		limit = defaultAgentMaxFramesPerMin
+	}
+
+	key := agenthub.FrameLimitKey(deviceID, remoteIP)
+	res, err := l.store.SlidingWindowIncr(ctx, []string{key, key}, agentFrameWindowSecs)
+	if err != nil {
+		// 原样上抛：fail-open 的取向由**消费方**（conn.allowFrame）决定，
+		// 实现擅自猜一个放行/拒绝会让那条取向变成两处实现。
+		return false, err
+	}
+	arr, ok := res.([]any)
+	if !ok || len(arr) < 2 {
+		// 形状不符也走「报错 → 消费方 fail-open」，绝不猜成拒绝：限流器读不懂自己的
+		// 返回值是服务端故障，不该把它转成「踢掉 agent」。
+		return false, fmt.Errorf("agentFrameLimiter: SlidingWindowIncr 返回了意外形状 %T", res)
+	}
+	if frameCountOf(arr[1]) > int64(limit) {
+		return false, nil
+	}
+	return true, nil
+}
+
+// frameCountOf 把滑动窗口原语返回的计数元素折算成 int64。
+//
+// 与 limiter 包未导出的 toInt 同口径（Lua 的 INCR/tonumber 经 go-redis 解码为
+// int64；字符串是防御性分支）：两处要改口径必须同改，否则同一个 Redis 计数在
+// HTTP 侧与 WS 侧会算出不同的结果。
+func frameCountOf(v any) int64 {
+	switch n := v.(type) {
+	case int64:
+		return n
+	case int:
+		return int64(n)
+	case string:
+		parsed, _ := strconv.ParseInt(n, 10, 64)
+		return parsed
+	default:
+		return 0
+	}
 }

@@ -27,7 +27,9 @@ import (
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/config"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/database"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/lifecycle"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/limiter"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/redis/cache"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/snowflake"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/repository"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/router"
@@ -599,4 +601,221 @@ func queryTrendResolution(t *testing.T, hdl *handler.DeviceHandler, deviceID uin
 		t.Fatalf("range=%d 趋势查询业务码 = %d（%s）", rangeSec, env.Code, env.Msg)
 	}
 	return env.Data
+}
+
+// ─ 入站帧级限流适配器（agentFrameLimiter）────────────────────────────────
+//
+// 为什么装配层也要有自己的断言：agenthub 侧的断言只证明「连接按窄接口工作」，
+// 而限流是否真的生效取决于**装配进去的那个实现**——阈值有没有读配置键、键名是不是
+// agenthub 定的那两个、计数有没有真落 Redis、原语会不会因为参数给错而每次报错
+// （报错 = fail-open = 限流静默失效）。这些只有打到真实 Redis（miniredis 真跑 Lua）
+// 才看得见。
+
+// newFrameLimitFixture 建一个 miniredis 支撑的帧限流适配器 + 可改的配置替身。
+func newFrameLimitFixture(t *testing.T, values map[string]string) (agentFrameLimiter, *miniredis.Miniredis) {
+	t.Helper()
+	mr := miniredis.RunT(t)
+	rdb := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	return newAgentFrameLimiter(cache.NewStore(rdb), fakeIntervalConfig{values: values}), mr
+}
+
+// TestAgentFrameLimiter_EnforcesConfiguredThresholdOnPinnedKeys 钉住四件事：
+// 阈值来自 sys.agent.maxFramesPerMin、键名与 agenthub 的规则逐字一致（含 TTL=窗口）、
+// 已鉴权额度跟着设备走（换 IP 不重置）、未鉴权走 IP 键且与设备额度互不干扰。
+func TestAgentFrameLimiter_EnforcesConfiguredThresholdOnPinnedKeys(t *testing.T) {
+	ctx := context.Background()
+	lim, mr := newFrameLimitFixture(t, map[string]string{configAgentMaxFramesPerMin: "3"})
+
+	for i := 1; i <= 3; i++ {
+		ok, err := lim.Allow(ctx, 1001, "192.0.2.7")
+		if err != nil || !ok {
+			t.Fatalf("第 %d 帧（额度 3）应放行: ok=%v err=%v", i, ok, err)
+		}
+	}
+	if ok, err := lim.Allow(ctx, 1001, "192.0.2.7"); err != nil {
+		t.Fatalf("第 4 帧: %v", err)
+	} else if ok {
+		t.Fatal("第 4 帧在 maxFramesPerMin=3 下仍被放行 —— 阈值没有被消费（配置键读错了？）")
+	}
+
+	// 键名与 TTL：键必须是 agenthub.FrameLimitKey 给出的那一个（可直接在 Redis 检索），
+	// TTL 必须等于窗口长度（固定窗口，不随每次调用续期）。
+	if keys := mr.Keys(); len(keys) != 1 || keys[0] != "agent:device:1001:frames" {
+		t.Fatalf("Redis 键 = %v, want [agent:device:1001:frames]", keys)
+	}
+	if ttl := mr.TTL("agent:device:1001:frames"); ttl != agentFrameWindowSecs*time.Second {
+		t.Fatalf("窗口键 TTL = %v, want %v（窗口长度即 maxFramesPerMin 的分母）", ttl, agentFrameWindowSecs*time.Second)
+	}
+
+	// 已鉴权 → 额度跟着**设备**走：同一个设备的另一个源 IP 共用同一份额度
+	//（否则「同一个 agent 换 IP」就等于重置额度）。
+	if ok, _ := lim.Allow(ctx, 1001, "198.51.100.9"); ok {
+		t.Fatal("已鉴权帧的额度必须按设备计：换远端 IP 不得重置（键里不该出现 IP）")
+	}
+	// 另一台设备有独立的额度。
+	if ok, err := lim.Allow(ctx, 1002, "192.0.2.7"); err != nil || !ok {
+		t.Fatalf("另一台设备必须有自己的额度: ok=%v err=%v", ok, err)
+	}
+
+	// 未鉴权 → 键是 agent:ws:preauth:{IP}（**不含端口**），且与设备键是两份额度。
+	if ok, err := lim.Allow(ctx, 0, "192.0.2.7"); err != nil || !ok {
+		t.Fatalf("未鉴权帧必须同样受限（且此处是它的第 1 帧，应放行）: ok=%v err=%v", ok, err)
+	}
+	found := false
+	for _, k := range mr.Keys() {
+		if k == "agent:ws:preauth:192.0.2.7" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("未鉴权帧的键必须是 agent:ws:preauth:192.0.2.7（实际键 %v）", mr.Keys())
+	}
+}
+
+// TestAgentFrameLimiter_DefaultThresholdAndNonPositiveClamp 钉住缺省 900 与
+// 「非正数按缺省处理」（0 不得被解释成「不限流」：那会让防护静默失效且无任何症状）。
+func TestAgentFrameLimiter_DefaultThresholdAndNonPositiveClamp(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name   string
+		values map[string]string
+	}{
+		{"配置缺失 → 缺省 900", map[string]string{}},
+		{"配置为 0 → 按缺省 900（不得解释成不限流）", map[string]string{configAgentMaxFramesPerMin: "0"}},
+		{"配置为负 → 按缺省 900", map[string]string{configAgentMaxFramesPerMin: "-5"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lim, _ := newFrameLimitFixture(t, tc.values)
+			for i := 1; i <= defaultAgentMaxFramesPerMin; i++ {
+				if ok, err := lim.Allow(ctx, 1001, "192.0.2.7"); err != nil || !ok {
+					t.Fatalf("第 %d 帧应放行（缺省额度 %d）: ok=%v err=%v", i, defaultAgentMaxFramesPerMin, ok, err)
+				}
+			}
+			if ok, err := lim.Allow(ctx, 1001, "192.0.2.7"); err != nil {
+				t.Fatalf("第 %d 帧: %v", defaultAgentMaxFramesPerMin+1, err)
+			} else if ok {
+				t.Fatalf("第 %d 帧仍被放行 —— 缺省阈值不是 %d（或非正数被当成了「不限流」）",
+					defaultAgentMaxFramesPerMin+1, defaultAgentMaxFramesPerMin)
+			}
+		})
+	}
+}
+
+// errFrameStore / badShapeFrameStore 驱动适配器的两条故障分支：报错必须**原样上抛**
+// （fail-open 的取向在消费方，实现不得自己猜），返回形状不符同样按错误处理。
+type errFrameStore struct{}
+
+func (errFrameStore) SlidingWindowIncr(context.Context, []string, int) (any, error) {
+	return nil, errors.New("redis down")
+}
+
+type badShapeFrameStore struct{}
+
+func (badShapeFrameStore) SlidingWindowIncr(context.Context, []string, int) (any, error) {
+	return "not-an-array", nil
+}
+
+func TestAgentFrameLimiter_PropagatesFailureInsteadOfGuessing(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name  string
+		store limiter.CacheStoreInterface
+	}{
+		{"存储报错", errFrameStore{}},
+		{"原语返回形状不符", badShapeFrameStore{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lim := newAgentFrameLimiter(tc.store, fakeIntervalConfig{})
+			ok, err := lim.Allow(ctx, 1001, "192.0.2.7")
+			if err == nil {
+				t.Fatalf("应把故障上抛（消费方据此 fail-open）：ok=%v err=%v", ok, err)
+			}
+		})
+	}
+}
+
+// TestInit_AgentFrameRateLimitClosesWith4006 是**装配真的接了线**的端到端证据：
+// 真实 Init（含真实注入）+ 真实 HTTP + 真实 WS + 真实 Redis。
+//
+// 阈值改成 3（正常约 8 帧/分远在 900 之下，只有调小才可触发），然后逐帧发上报：
+// hello 帧以**未鉴权身份**（IP 键）计 1 帧，之后每帧计在**设备键**上，额度 3 →
+// 第 4 条上报触发 4006。同时断言 Redis 里的未鉴权键**只含 host、不含源端口**——
+// 那是这条规则唯一的失效方式，而真实 TCP 的源端口是随机的，只有走到真连接才测得到。
+func TestInit_AgentFrameRateLimitClosesWith4006(t *testing.T) {
+	f := newInitFixture(t)
+	seedConfig(t, f.db, configAgentMaxFramesPerMin, "3")
+
+	deps, err := f.initWith(t, initHooks{})
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	srv := httptest.NewServer(router.Setup(*deps))
+	defer srv.Close()
+
+	client, deviceID := dialAndEnroll(t, srv.URL, f)
+	ctx := context.Background()
+	now := time.Now().UnixMilli()
+
+	// 3 帧上报 = 设备键上的第 1/2/3 帧，全部放行。
+	for i := 0; i < 3; i++ {
+		client.send(strconv.Itoa(2+i), agentproto.TypeAgentReportMetrics, metricsSample(now))
+	}
+	devKey := fmt.Sprintf("agent:device:%d:frames", deviceID)
+	waitRedisValue(t, f.rdb, devKey, "3")
+
+	// 第 4 帧：超限 → 4006。
+	client.send("9", agentproto.TypeAgentReportMetrics, metricsSample(now))
+	code, reason := readCloseCode(t, client)
+	if code != agentproto.CloseRateLimited {
+		t.Fatalf("超限关闭码 = %d (%s)，期望 CloseRateLimited=%d —— "+
+			"限流未装配/阈值未生效/键算错都会落到这里", code, reason, agentproto.CloseRateLimited)
+	}
+
+	// 未鉴权键只含 host：带端口的话这里会是 127.0.0.1:<随机端口>，
+	// 于是每建一条 TCP 连接就换一个键，限流形同虚设。
+	preKeys, err := f.rdb.Keys(ctx, "agent:ws:preauth:*").Result()
+	if err != nil {
+		t.Fatalf("列 preauth 键: %v", err)
+	}
+	if len(preKeys) != 1 || preKeys[0] != "agent:ws:preauth:127.0.0.1" {
+		t.Fatalf("preauth 键 = %v, want [agent:ws:preauth:127.0.0.1]（**不得带源端口**）", preKeys)
+	}
+	t.Logf("device_id=%d 超限收到 %d（%s）；preauth 键=%v", deviceID, code, reason, preKeys)
+}
+
+// metricsSample 造一条必填字段齐全的合法样本（限流集成用例只需要它过契约校验）。
+func metricsSample(ts int64) *agentproto.MetricsSample {
+	return &agentproto.MetricsSample{
+		T:              ts,
+		CPUUsedPercent: 12.5,
+		Load1:          0.5,
+		Load5:          0.4,
+		Load15:         0.3,
+		MemUsedPercent: 32.0,
+		MemUsedMB:      1024,
+		MemAvailableMB: 2048,
+		TCPTotal:       10,
+		TCPEstablished: 4,
+		TCPListen:      3,
+		UDPTotal:       2,
+		ProcCount:      120,
+		UptimeSec:      3600,
+	}
+}
+
+// waitRedisValue 有界等待某个 Redis 键等于期望值（读循环是异步的，不能立即断言）。
+func waitRedisValue(t *testing.T, rdb goredis.UniversalClient, key, want string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var last string
+	var lastErr error
+	for time.Now().Before(deadline) {
+		last, lastErr = rdb.Get(context.Background(), key).Result()
+		if lastErr == nil && last == want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("等待 %s = %q 超时（实际 %q, err=%v）—— 帧没有被计数到 Redis", key, want, last, lastErr)
 }

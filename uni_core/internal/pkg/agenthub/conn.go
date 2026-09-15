@@ -57,6 +57,16 @@ type Deps struct {
 	Toucher       Toucher
 	Decider       Decider
 	Policy        Policy
+	// Limiter 是**入站帧级**限流器（窄接口见 ratelimit.go，实现由 wireup 注入）。
+	//
+	// 它是 Deps 里唯一「故障时放行」的依赖，这不是笔误：其余五个守的是**安全**
+	// （谁能上报、上报归谁），故障时必须失败关闭；它守的是 **CPU / Redis 带宽**
+	// 这类容量资源，故障时断连会把「Redis 抖一下」放大成全体 agent 的重连风暴
+	// （一次重连要查库、要重新 enroll），代价高于挺过这段抖动。
+	// 取向落在 allowFrame，且有断言钉住（nil 与报错两条路径各一条）。
+	//
+	// nil = 未装配：同样放行 + Warn（限流器缺失不得让整条通道停摆）。
+	Limiter RateLimiter
 }
 
 // socket 是连接的入站/控制通路。生产态就是 `*websocket.Conn`（NewConn 收它），
@@ -70,6 +80,10 @@ type socket interface {
 	SetReadLimit(limit int64)
 	SetReadDeadline(t time.Time) error
 	SetPongHandler(h func(appData string) error)
+	// RemoteAddr 是远端地址：**未鉴权阶段的限流键身份**只有它（见 ratelimit.go 的
+	// FrameLimitKey）。放进窄接口而不是让连接持有具体 *websocket.Conn，是为了让
+	// 「IP 不含端口」这条规则能在不起真实 TCP 的测试里被驱动。
+	RemoteAddr() net.Addr
 	Close() error
 }
 
@@ -132,6 +146,9 @@ func (s realSocket) SetReadDeadline(t time.Time) error   { return s.c.SetReadDea
 func (s realSocket) SetPongHandler(h func(string) error) { s.c.SetPongHandler(h) }
 func (s realSocket) Close() error                        { return s.c.Close() }
 
+// RemoteAddr 转发真实连接的远端地址；host 部分的提取在 remoteIPOf（构造时做一次）。
+func (s realSocket) RemoteAddr() net.Addr { return s.c.RemoteAddr() }
+
 // 编译期断言：适配器必须真的满足读循环要的窄接口 —— 漏一个方法在这里就红。
 var _ socket = realSocket{}
 
@@ -155,6 +172,9 @@ func newConn(hub SelfUnregisterer, ws socket, deps Deps, log logger.LoggerInterf
 		state: StateAwaitHello,
 	}
 	if ws != nil {
+		// 远端 IP 在这里算**一次**（而非每帧从 socket 取）：它只在未鉴权阶段的限流键上
+		// 用到，而每帧解析一次地址串是白付的开销。host 部分不含端口 —— 理由见 remoteIPOf。
+		c.remoteIP = remoteIPOf(ws.RemoteAddr())
 		c.sendFn = func(b []byte) error {
 			return ws.WriteMessage(websocket.TextMessage, b)
 		}
@@ -193,6 +213,15 @@ func (c *Conn) SkewCount() int64 {
 	return c.skew
 }
 
+// RateLimitedCount 返回被入站帧级限流拦下的消息数（超限即为 0 或 1：拦下即关闭，
+// 读循环随即终止）。它是「限流真的触发了」的唯一服务端账目 —— 关闭码 4006 只能
+// 证明这条连接被关，证明不了它是被限流关的（关闭帧的码对日志不可检索）。
+func (c *Conn) RateLimitedCount() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.rateLimited
+}
+
 func (c *Conn) setState(s ConnState) {
 	c.mu.Lock()
 	c.state = s
@@ -208,6 +237,13 @@ func (c *Conn) bindDevice(id uint64) {
 func (c *Conn) countSkew() {
 	c.mu.Lock()
 	c.skew++
+	c.mu.Unlock()
+}
+
+// countRateLimited 记一次「因限流被拦下」。
+func (c *Conn) countRateLimited() {
+	c.mu.Lock()
+	c.rateLimited++
 	c.mu.Unlock()
 }
 
@@ -358,16 +394,17 @@ func (c *Conn) enqueue(b []byte) error {
 //     （契约层的 Decode = Unmarshal + Message.Validate，所以「解码」与「信封校验」
 //     是同一次调用；版本必须按 ErrUnsupportedVersion 哨兵单独摘出来，
 //     否则旧版 agent 只会收到「报文损坏」，一直重试同一个版本）
-//  3. LookupType 未登记 → 4003
-//  4. 方向不符（收到 core.* 或回环）→ 4003
-//  5. hello 之前收到非 hello → 4008
-//  6. 时钟偏移超限 → 拒绝该条并计数，**不断连**（**hello 除外**：握手帧的 TS
+//  3. 入站**帧级限流**：超限 → 4006（见 handleFrame 里该分支对位置的说明）
+//  4. LookupType 未登记 → 4003
+//  5. 方向不符（收到 core.* 或回环）→ 4003
+//  6. hello 之前收到非 hello → 4008
+//  7. 时钟偏移超限 → 拒绝该条并计数，**不断连**（**hello 除外**：握手帧的 TS
 //     偏移无语义价值，而对首帧应用「拒绝但不断连」会让连接永久停在 StateAwaitHello，
 //     详见 handleFrame 里该分支的说明）
-//  7. 按类型分派（表见 agentHandlers）
-//  8. 每条成功处理的消息后 Touch（刷新 last_seen_at）
+//  8. 按类型分派（表见 agentHandlers）
+//  9. 每条成功处理的消息后 Touch（刷新 last_seen_at）
 //
-// 为什么第 5 步（hello 之前）排在方向校验之后：一条 core.hello_ack 作为首帧
+// 为什么第 6 步（hello 之前）排在方向校验之后：一条 core.hello_ack 作为首帧
 // 同时满足「非 hello」与「方向错误」，两者必须归到**方向**这个码上
 // （它是伪造/回环信号，客户端据此应加载新协议而不是先去发 hello 再等超时）；
 // 只有「方向正确、但 hello 之前发」的帧才归到 4008。
@@ -442,6 +479,30 @@ func (c *Conn) handleFrame(ctx context.Context, raw []byte) bool {
 		return false
 	}
 
+	// 步骤 3：入站帧级限流。位置**不可**再往后挪，理由有两条：
+	//
+	//  1. 「分派之前」是硬要求：限流若落在分派之后（或落在任何写路径里），超限的帧
+	//     照样会入湖 / 刷 last_seen_at —— 那正是要防的「CPU 与 Redis 带宽被吃满」。
+	//  2. 为什么选「解码一成功就判」而不是「过了方向/状态守卫再判」：**解码本身**
+	//     就是最主要的 CPU 开销，而方向错误/未登记类型/hello 之前这几类帧同样会
+	//     被刷（刷它们不需要任何凭据）。若把限流排在这些守卫之后，一个攻击者只要
+	//     一直发「会被软拒绝的帧」（例如时钟偏移超限的帧 —— 那条路径是「拒绝但不断连」）
+	//     就能无限量消耗解码 CPU 而永远不被计数。排在守卫之前，代价只是「已在超限
+	//     连接上的协议错误帧会报 4006 而不是 4002/4003/4008」—— 那些守卫本来就会
+	//     立即关闭连接，两种码都是「你的连接到此为止」，而 4006 更准确地描述了
+	//     此刻的事实（这条连接正在刷帧）。
+	if !c.allowFrame(ctx) {
+		c.countRateLimited()
+		c.log.Warn("agent inbound frame rate limited, closing",
+			zap.Uint64("device_id", c.deviceID()),
+			zap.String("remote_ip", c.remoteIP),
+			zap.Int("close_code", agentproto.CloseRateLimited))
+		// reason 传空串：线上 reason 一律由 finish 取 agentproto.CloseReason(code)
+		// （协议规范话术，见 types.go 的说明），触发细节已由上面那条 Warn 带出。
+		c.CloseWith(agentproto.CloseRateLimited, "")
+		return false
+	}
+
 	if _, ok := agentproto.LookupType(m.Type); !ok {
 		c.CloseWith(agentproto.CloseUnsupportedType, "未登记的消息类型")
 		return false
@@ -508,7 +569,7 @@ func (c *Conn) handleFrame(ctx context.Context, raw []byte) bool {
 		return false
 	}
 
-	// 步骤 8：每条成功处理的消息后刷新 last_seen_at（而不是只在心跳时）——
+	// 步骤 9：每条成功处理的消息后刷新 last_seen_at（而不是只在心跳时）——
 	// online 由 last_seen_at 推导（不落库），只在心跳时刷新会把「只上报不心跳」
 	// 的实现误判成离线。
 	c.touch(ctx)
@@ -523,6 +584,44 @@ var agentHandlers = map[string]func(*Conn, context.Context, *agentproto.Message)
 	agentproto.TypeAgentHello:         (*Conn).handleHello,
 	agentproto.TypeAgentHeartbeat:     (*Conn).handleHeartbeat,
 	agentproto.TypeAgentReportMetrics: (*Conn).handleMetrics,
+}
+
+// allowFrame 询问限流器是否放行这一帧。
+//
+// **fail-open 定死**：Limiter 未装配（nil）或 Allow 返回错误 → **放行** + Warn。
+// 理由：限流器守的是 CPU / Redis 带宽这类容量资源，而它自己依赖 Redis ——
+// Redis 抖动时若把它当权威，整个 agent 通道会跟着 Redis 一起停摆（全体 agent 收到
+// 关闭帧后重连，重连风暴本身要查库、要重新 enroll，比挺过抖动贵得多）。
+// 这与 accept()（设备启停）的 fail-closed 并不矛盾：那条守卫管的是**安全**。
+//
+// 两个身份都如实上报（deviceID + remoteIP），由实现按 deviceID != 0 选键 ——
+// 于是**未鉴权阶段同样受限**（hello 之前键是 agent:ws:preauth:{IP}），
+// 攻击者无法靠「不发 hello」把握手前的 CPU 刷满。
+func (c *Conn) allowFrame(ctx context.Context) bool {
+	if c.deps.Limiter == nil {
+		c.warnLimiterUnavailable("Limiter 未装配", nil)
+		return true
+	}
+	ok, err := c.deps.Limiter.Allow(ctx, c.deviceID(), c.remoteIP)
+	if err != nil {
+		c.warnLimiterUnavailable("Allow 返回错误", err)
+		return true
+	}
+	return ok
+}
+
+// warnLimiterUnavailable 记一条「限流器不可用，已 fail-open」的 Warn。
+//
+// 每条连接**只记一次**：限流器故障（Redis 抖动）会持续到恢复为止，而帧速率是
+// 每分钟数百量级 —— 按帧记 Warn 会把故障期的日志刷成噪声，反而盖住真正的原因。
+func (c *Conn) warnLimiterUnavailable(reason string, err error) {
+	c.limiterWarnOnce.Do(func() {
+		c.log.Warn("agenthub: 限流器不可用，入站帧限流停用（fail-open：全部放行）",
+			zap.Uint64("device_id", c.deviceID()),
+			zap.String("remote_ip", c.remoteIP),
+			zap.String("reason", reason),
+			zap.Error(err))
+	})
 }
 
 // handleHello 完成 enroll 或重连鉴权，并回 core.hello_ack。

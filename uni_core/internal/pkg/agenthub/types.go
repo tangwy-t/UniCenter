@@ -60,6 +60,11 @@ type Conn struct {
 	// nil 表示未接管真实 socket（测试态）。
 	ws socket
 
+	// remoteIP 是远端地址的 **host 部分**（不含端口，见 conn.go 里 remoteIPOf 的说明），
+	// 在 newConn 里算**一次**：它是**未鉴权阶段**的限流键身份（FrameLimitKey），
+	// 每帧从 socket 重算一次地址串是白付的开销。未接管 socket（测试态）时为空串。
+	remoteIP string
+
 	// sendFn/writeCloseFn 是**唯一**的出站通路；nil 表示未接管真实 socket（测试态）。
 	sendFn       func(b []byte) error
 	writeCloseFn func(code int, reason string) error
@@ -78,6 +83,12 @@ type Conn struct {
 	devID   uint64
 	dropped int64
 	skew    int64
+	// rateLimited 是因入站帧级限流被拦下的消息数（超限即关闭，故最多为 1）。
+	rateLimited int64
+
+	// limiterWarnOnce 保证「限流器不可用 → fail-open」的 Warn 每连接只记一次
+	// （见 conn.go 的 warnLimiterUnavailable）：故障按帧刷日志会盖住真正的原因。
+	limiterWarnOnce sync.Once
 }
 
 // deviceID 返回该连接当前绑定的设备 ID；尚未鉴权时为 0。
