@@ -30,7 +30,9 @@
 package migration
 
 import (
+	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -50,9 +52,59 @@ type Migration struct {
 	Up func(tx *gorm.DB) error
 }
 
+// PreMigrateFunc 在 AutoMigrate **之前**同步执行，用于表达 AutoMigrate 无法表达的
+// 结构 —— 典型是分区表：AutoMigrate 只能建普通表，而 MySQL 事后转分区是整表 COPY
+// 重建、PostgreSQL 官方明确不允许把普通表转成分区表。
+//
+// 注册者必须自证幂等：本函数**每次启动都会执行**，不参与版本号跳过机制。
+// 原因：恢复旧备份会一并把旧的 sys_migration 记录带回来，版本驱动的「只跑一次」
+// 在那时不会重跑，只有「每次都 reconcile」才能自愈。
+type PreMigrateFunc func(ctx context.Context, db *gorm.DB, dialect string) error
+
+type namedPreMigrate struct {
+	name string
+	fn   PreMigrateFunc
+}
+
+var (
+	preMigrateMu sync.Mutex
+	preMigrates  []namedPreMigrate
+)
+
+// RegisterPreMigrate 注册一个 pre-migrate 钩子，按注册顺序执行。
+func RegisterPreMigrate(name string, fn PreMigrateFunc) {
+	preMigrateMu.Lock()
+	defer preMigrateMu.Unlock()
+	preMigrates = append(preMigrates, namedPreMigrate{name: name, fn: fn})
+}
+
+// RunPreMigrate 顺序执行全部已注册的 pre-migrate 钩子；任一步失败即返回。
+func RunPreMigrate(ctx context.Context, db *gorm.DB) error {
+	preMigrateMu.Lock()
+	hooks := make([]namedPreMigrate, len(preMigrates))
+	copy(hooks, preMigrates)
+	preMigrateMu.Unlock()
+
+	dialect := db.Dialector.Name()
+	for _, h := range hooks {
+		if err := h.fn(ctx, db, dialect); err != nil {
+			return fmt.Errorf("pre-migrate %q: %w", h.name, err)
+		}
+	}
+	return nil
+}
+
 // Run 执行所有未应用的迁移。已在其他实例执行的迁移通过主键冲突跳过，
 // 单个迁移在事务中执行，失败时自动回滚。
 func Run(db *gorm.DB, log logger.LoggerInterface) error {
+
+	// ── Pre-AutoMigrate 钩子 ────────────────────────────────────────
+	// 必须早于 AutoMigrate：分区表要「以分区形态建表」，而 AutoMigrate
+	// 只会建普通表，且 PG 不允许事后把普通表转成分区表。
+	if err := RunPreMigrate(context.Background(), db); err != nil {
+		log.Error("failed to run pre-migrate hooks", zap.Error(err))
+		return fmt.Errorf("failed to run pre-migrate hooks: %w", err)
+	}
 
 	// ── AutoMigrate ────────────────────────────────────────────────
 	if err := MigrateAll(db); err != nil {
