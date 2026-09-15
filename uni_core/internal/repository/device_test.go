@@ -172,3 +172,118 @@ func TestDeviceFindPageFiltersAndPagination(t *testing.T) {
 		t.Fatalf("status=停用 应命中 0 台, got %d", total)
 	}
 }
+
+func TestDeviceFindByIDHitAndMiss(t *testing.T) {
+	db := newDeviceTestDB(t)
+	seedDevice(t, db, 1001, "inst-a", "hash-a", "web-01", nil)
+	repo := NewDeviceRepository(db)
+	ctx := context.Background()
+
+	got, err := repo.FindByID(ctx, 1001)
+	if err != nil {
+		t.Fatalf("FindByID: %v", err)
+	}
+	if got.ID != 1001 || got.InstanceID != "inst-a" {
+		t.Fatalf("FindByID 返回不符: id=%d instance=%q", got.ID, got.InstanceID)
+	}
+	// 未命中必须是 NotFound 级别错误（IsAccepting 依赖它判定「设备不存在」）
+	if _, err := repo.FindByID(ctx, 9999); err == nil {
+		t.Fatal("未命中必须返回错误")
+	}
+}
+
+func TestDeviceUpdateEnrollOnlyTouchesInventoryAndTokenHash(t *testing.T) {
+	db := newDeviceTestDB(t)
+	seen := time.Date(2026, 9, 14, 9, 0, 0, 0, time.UTC)
+	seedDevice(t, db, 1001, "inst-a", "hash-old", "web-01", &seen)
+	// 停用态：重新 enroll **不得**把它自动启用
+	if err := db.Model(&entity.Device{}).Where("id = ?", 1001).
+		Update("status", entity.DeviceStatusDisabled).Error; err != nil {
+		t.Fatal(err)
+	}
+	repo := NewDeviceRepository(db)
+	ctx := context.Background()
+
+	before, err := repo.FindByID(ctx, 1001)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := repo.UpdateEnroll(ctx, &entity.Device{
+		BaseEntity: entity.BaseEntity{ID: 1001},
+		Hostname:   "web-01-new", OS: "linux", Arch: "arm64", Kernel: "6.1.0",
+		AgentVersion: "0.2.0", Platform: "ubuntu", PlatformVer: "22.04",
+		CPUModel: "EPYC 7B13", CPUCores: 32, MemTotalMB: 65536, BootTime: 1_700_000_000,
+		TokenHash: "hash-new",
+		Status:    entity.DeviceStatusEnabled, // 故意传入启用态，断言它被忽略
+	}); err != nil {
+		t.Fatalf("UpdateEnroll: %v", err)
+	}
+
+	after, err := repo.FindByID(ctx, 1001)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 库存字段 + token_hash 必须更新
+	if after.TokenHash != "hash-new" {
+		t.Fatalf("token_hash = %q, want hash-new（轮换必须生效）", after.TokenHash)
+	}
+	if after.Hostname != "web-01-new" || after.Arch != "arm64" || after.Kernel != "6.1.0" {
+		t.Fatalf("库存字段未更新: hostname=%q arch=%q kernel=%q", after.Hostname, after.Arch, after.Kernel)
+	}
+	if after.AgentVersion != "0.2.0" || after.Platform != "ubuntu" || after.PlatformVer != "22.04" {
+		t.Fatalf("库存字段未更新: agentVersion=%q platform=%q platformVer=%q",
+			after.AgentVersion, after.Platform, after.PlatformVer)
+	}
+	if after.CPUModel != "EPYC 7B13" || after.CPUCores != 32 || after.MemTotalMB != 65536 || after.BootTime != 1_700_000_000 {
+		t.Fatalf("库存字段未更新: cpuModel=%q cores=%d mem=%v boot=%d",
+			after.CPUModel, after.CPUCores, after.MemTotalMB, after.BootTime)
+	}
+	// status 不得被改动（停用机器重新 enroll 不自动启用）
+	if after.Status != entity.DeviceStatusDisabled {
+		t.Fatalf("status = %d, want %d（停用态不被 enroll 自动启用）",
+			after.Status, entity.DeviceStatusDisabled)
+	}
+	// last_seen_at 不得被改动（那是 Touch 的职责）
+	if after.LastSeenAt == nil || !after.LastSeenAt.UTC().Equal(seen) {
+		t.Fatalf("last_seen_at = %v, want 保持 %v", after.LastSeenAt, seen)
+	}
+	if before.LastSeenAt == nil || !before.LastSeenAt.UTC().Equal(after.LastSeenAt.UTC()) {
+		t.Fatal("last_seen_at 在 UpdateEnroll 前后必须一致")
+	}
+}
+
+func TestDeviceUpdateEnrollWritesZeroValuesAndMissingRowErrors(t *testing.T) {
+	db := newDeviceTestDB(t)
+	seedDevice(t, db, 1001, "inst-a", "hash-old", "web-01", nil)
+	repo := NewDeviceRepository(db)
+	ctx := context.Background()
+
+	// map 形式的 Updates 必须让零值也落库（hostname 变空是合法上报）
+	if err := repo.UpdateEnroll(ctx, &entity.Device{
+		BaseEntity: entity.BaseEntity{ID: 1001},
+		TokenHash:  "hash-empty",
+	}); err != nil {
+		t.Fatalf("UpdateEnroll: %v", err)
+	}
+	got, err := repo.FindByID(ctx, 1001)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Hostname != "" {
+		t.Fatalf("零值必须被写入（struct 形式 Updates 会跳过零值）: hostname = %q", got.Hostname)
+	}
+	if got.CPUCores != 0 || got.MemTotalMB != 0 {
+		t.Fatalf("零值必须被写入: cores=%d mem=%v", got.CPUCores, got.MemTotalMB)
+	}
+	if got.TokenHash != "hash-empty" {
+		t.Fatalf("token_hash = %q", got.TokenHash)
+	}
+
+	// 不存在的行必须报 NotFound，而不是静默成功
+	if err := repo.UpdateEnroll(ctx, &entity.Device{
+		BaseEntity: entity.BaseEntity{ID: 9999}, TokenHash: "hash-x",
+	}); err == nil {
+		t.Fatal("更新不存在的设备必须返回错误")
+	}
+}

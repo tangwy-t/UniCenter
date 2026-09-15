@@ -23,6 +23,47 @@ func (r *DeviceRepo) Create(ctx context.Context, d *entity.Device) error {
 	return r.db.WithContext(ctx).Create(d).Error
 }
 
+// FindByID 按主键查设备（未命中返回 gorm.ErrRecordNotFound）。
+func (r *DeviceRepo) FindByID(ctx context.Context, id uint64) (*entity.Device, error) {
+	var d entity.Device
+	if err := r.db.WithContext(ctx).First(&d, id).Error; err != nil {
+		return nil, err
+	}
+	return &d, nil
+}
+
+// UpdateEnroll 按主键更新「注册时上报的库存字段 + 轮换后的 token_hash」。
+//
+// 只更新列出的列：**不动 status**（停用机器重新 enroll 不自动启用，
+// 否则会绕过后台的管理意图），也不动 last_seen_at（那是 Touch 的职责）。
+// 用 map 形式的 Updates 是为了让「零值也要写入」（如 hostname 变空）也生效 ——
+// struct 形式的 Updates 会跳过零值字段。
+func (r *DeviceRepo) UpdateEnroll(ctx context.Context, d *entity.Device) error {
+	res := r.db.WithContext(ctx).Model(&entity.Device{}).
+		Where("id = ?", d.ID).
+		Updates(map[string]any{
+			"hostname":      d.Hostname,
+			"os":            d.OS,
+			"arch":          d.Arch,
+			"kernel":        d.Kernel,
+			"agent_version": d.AgentVersion,
+			"platform":      d.Platform,
+			"platform_ver":  d.PlatformVer,
+			"cpu_model":     d.CPUModel,
+			"cpu_cores":     d.CPUCores,
+			"mem_total_mb":  d.MemTotalMB,
+			"boot_time":     d.BootTime,
+			"token_hash":    d.TokenHash,
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
+}
+
 // FindByInstanceID 按 agent 落盘指纹查设备（enroll 幂等键）。
 func (r *DeviceRepo) FindByInstanceID(ctx context.Context, instanceID string) (*entity.Device, error) {
 	var d entity.Device
