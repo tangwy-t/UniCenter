@@ -12,6 +12,8 @@ import (
 
 	agentproto "github.com/tangwy-t/UniCenter/uni_protocol"
 
+	"go.uber.org/zap"
+
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/request"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/response"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/entity"
@@ -34,16 +36,18 @@ const (
 	// MaxBuckets 是响应桶数上限；超过时按整数倍升 step（不跨档、不混档）。
 	MaxBuckets int64 = 4000
 
-	// RedisNativeResolutionSec 是 Redis 档的**原生**桶宽（秒）。
+	// RedisNativeResolutionSec 是 Redis 档原生栅格的**缺省值**（秒）—— 仅当
+	// RedisIntervalPolicy 缺失（装配漏参）时使用；**实际栅格以 policy 为准**
+	// （policy 的值来自配置项 sys.agent.reportInterval，与 RawStore 的 Step 同源）。
 	//
-	// Redis 原始层的采样节奏 = agent 的 reportInterval（配置项
-	// sys.agent.reportInterval，默认 10s；wireup 用它装配 RawStore 的 Step）。
-	// 此处**当前没有**从配置取值：计划 Task 8b 已裁定「以 4 参构造为准，cfg 在 2C
-	// 接入用配置覆盖 reportInterval 时再加」（H4）。所以本常量是「按 10s 上报节奏
-	// 的假设」，不是「已被配置覆盖的值」——旧注释写成后者是不实的。
-	// 影响面：把 reportInterval 改成非 10s 时，本档的栅格与升档倍数会与数据错位
-	// （桶变稀疏，不报错），2C 换成构造参数即可消除。
+	// 本常量**不得**再被 SelectTier 直接读取：SelectTier 的原生栅格是入参，
+	// 读常量会让「改配置」对查询侧无效 —— 那正是本任务修掉的缺陷（运维把
+	// reportInterval 改成 5s/30s 后桶变稀疏且不报错）。
 	RedisNativeResolutionSec int64 = 10
+
+	// minRedisNativeResolutionSec 是 spec 规定的上报间隔下限（秒）。
+	// 低于它的配置值（含 0/负值）一律夹到这里：栅格 0 会让 BucketCount 除零/Inf。
+	minRedisNativeResolutionSec int64 = 2
 )
 
 // TierSelection 是「range → 数据源 + 表 + 分辨率」的选档结果。
@@ -74,13 +78,17 @@ func (t TierSelection) BucketCount() int64 {
 // SelectTier 把 range（秒）映射到单档数据源。
 //
 // 规则（spec §7.2）：
-//   - range ≤ 24h          → Redis 原始（10s）
+//   - range ≤ 24h          → Redis 原始（原生栅格 = redisNativeSec，即配置的上报间隔）
 //   - 24h < range ≤ 30d    → device_metric_5m（300s）
 //   - 30d < range ≤ 180d   → device_metric_1h（3600s）
 //   - 越界                  → BadRequest
 //
 // 跨档**绝不混用**：40d 整体走 1h 档，而不是「前 30d 用 5min + 后 10d 用 1h」。
-func SelectTier(rangeSec int64) (TierSelection, error) {
+//
+// redisNativeSec 只影响 Redis 档：DB 两档的栅格由**表结构**决定（5min 表一行就是
+// 5 分钟、1h 表一行就是 1 小时），把配置值渗进 DB 档会把冷层的真实栅格也报错 ——
+// 不可查询却可校验的值。
+func SelectTier(rangeSec int64, redisNativeSec int64) (TierSelection, error) {
 	if rangeSec < request.DeviceRangeMin || rangeSec > request.DeviceRangeMax {
 		return TierSelection{}, apperror.BadRequest(fmt.Sprintf("range 必须在 [%d, %d] 秒之间",
 			request.DeviceRangeMin, request.DeviceRangeMax))
@@ -92,7 +100,7 @@ func SelectTier(rangeSec int64) (TierSelection, error) {
 	switch {
 	case rangeSec <= day:
 		sel.Source = SourceRedis
-		sel.Resolution = RedisNativeResolutionSec
+		sel.Resolution = clampRedisNativeResolution(redisNativeSec, rangeSec)
 	case rangeSec <= 30*day:
 		sel.Source = SourceDB
 		sel.Table = entity.TableNameMetric5m
@@ -122,6 +130,35 @@ func ceilDiv(a, b int64) int64 {
 	return (a + b - 1) / b
 }
 
+// clampRedisNativeResolution 把「配置来的上报间隔」夹到可用的原生栅格区间。
+//
+// 两条夹取规则的理由（均来自**实测可验证的后果**，不是风格偏好）：
+//
+//  1. `< 2 → 2`：spec 规定上报间隔最小 2s。低于它的值（0、负值、以及被截成 0 的
+//     亚秒配置）必须夹到 2 —— 栅格 0 会让 `BucketCount()` 的 `step <= 0` 分支直接
+//     返回 0 桶，热层也会按 0 步长分桶：响应是一条恒空的曲线，而整条链路上没有
+//     任何报错。
+//
+//  2. `> rangeSec → rangeSec`：栅格不得大于时间窗。热层的分桶器
+//     `metricshistory.AlignBuckets(window, step)` **明确拒绝** `step > window`
+//     （buckets.go：「metricshistory: step 不得超过 window」），而趋势查询正是把
+//     `step = Resolution×Scale`、`window = RangeSeconds` 交给它。所以不夹取时，
+//     「配置间隔 > 查询窗口」会以 `apperror.Internal` 变成一条 **500 内部错误**
+//     （实测：`AlignBuckets(1h, 2h)` 返回的正是上面那条错误），整条趋势查询直接
+//     不可用 —— 不是「0 桶」。夹到窗口长度后 `Resolution == RangeSeconds` →
+//     恰好 1 个桶：查询正常返回，且 `BucketCount() >= 1` 恒成立。
+//
+// 两条规则都**只**作用于 Redis 档：DB 档的 300/3600 由表结构决定，不走本函数。
+func clampRedisNativeResolution(redisNativeSec, rangeSec int64) int64 {
+	if redisNativeSec < minRedisNativeResolutionSec {
+		return minRedisNativeResolutionSec
+	}
+	if redisNativeSec > rangeSec {
+		return rangeSec
+	}
+	return redisNativeSec
+}
+
 // AgentMetricsQueryService 提供趋势与下钻查询。
 type AgentMetricsQueryService struct {
 	// raw 是整机趋势用的热层能力面（聚合查询）。
@@ -131,7 +168,23 @@ type AgentMetricsQueryService struct {
 	rawBucket AgentRawBucketReader
 	metrics   DeviceMetricReader
 	resources DeviceResourceResolver
-	log       logger.LoggerInterface
+	// policy 提供 Redis 档的原生栅格（= agent 的上报节奏）。可为 nil：装配漏参时
+	// 退化成 RedisNativeResolutionSec 并记 Warn（见 redisIntervalSec）。
+	policy RedisIntervalPolicy
+	log    logger.LoggerInterface
+}
+
+// RedisIntervalPolicy 是本服务需要的上报节奏能力面（接口定义在**消费方**）。
+//
+// 为什么只声明 ReportInterval：Redis 档的原生栅格就是 agent 的上报间隔本身
+// —— RawStore 的 Step 也取自同一配置（sys.agent.reportInterval）。查询侧按别的
+// 粒度聚合就是「栅格与数据错位」：桶变稀疏、且不报错。
+//
+// 为什么不直接收 AgentConfigGetter：那会把配置**键名与缺省值**的知识复制到查询
+// 服务里（还有「非正值怎么退化」的第二套规则）。键名/缺省/退化是适配器的职责，
+// 查询服务只需要「秒数」这一个事实。
+type RedisIntervalPolicy interface {
+	ReportInterval() time.Duration
 }
 
 // AgentRawQuerier 是本服务用到的热层聚合能力面。
@@ -169,11 +222,34 @@ type DeviceResourceResolver interface {
 }
 
 func NewAgentMetricsQueryService(raw AgentRawReader, metrics DeviceMetricReader,
-	resources DeviceResourceResolver, log logger.LoggerInterface) *AgentMetricsQueryService {
+	resources DeviceResourceResolver, policy RedisIntervalPolicy,
+	log logger.LoggerInterface) *AgentMetricsQueryService {
 	// 同一实现拆成两个窄面（raw 为 nil 时两面都为 nil）。
 	var q AgentRawQuerier = raw
 	var b AgentRawBucketReader = raw
-	return &AgentMetricsQueryService{raw: q, rawBucket: b, metrics: metrics, resources: resources, log: log}
+	return &AgentMetricsQueryService{
+		raw: q, rawBucket: b, metrics: metrics, resources: resources, policy: policy, log: log,
+	}
+}
+
+// redisIntervalSec 返回 Redis 档的原生栅格（秒）—— 来源是**配置**的上报间隔
+// （policy.ReportInterval()），不再是硬编码。
+//
+// policy 为 nil（装配漏参）时退化成 RedisNativeResolutionSec 并记一条 Warn：
+// 少接一个构造参数不该把接口打成 500（不 panic），但也绝不能静默 ——
+// 「配置改了、栅格没变」正是本任务要消灭的那种无迹可查的错位。
+//
+// 非法值在此**不**夹取：夹取统一在 SelectTier（clampRedisNativeResolution）里做，
+// 这样「什么值算合法栅格」只有一个定义点，本函数只负责「取到配置的秒数」。
+func (s *AgentMetricsQueryService) redisIntervalSec() int64 {
+	if s.policy == nil {
+		if s.log != nil {
+			s.log.Warn("agent metrics query: RedisIntervalPolicy 未注入，Redis 档栅格退化为默认值",
+				zap.Int64("defaultResolutionSec", RedisNativeResolutionSec))
+		}
+		return RedisNativeResolutionSec
+	}
+	return int64(s.policy.ReportInterval() / time.Second)
 }
 
 // defaultMetricColumns 是趋势默认投影列（图表默认系列，约 10 列）。
@@ -199,7 +275,7 @@ func (s *AgentMetricsQueryService) Metrics(ctx context.Context, deviceID uint64,
 	if rangeSec == 0 {
 		rangeSec = 24 * 3600
 	}
-	sel, err := SelectTier(rangeSec)
+	sel, err := SelectTier(rangeSec, s.redisIntervalSec())
 	if err != nil {
 		return nil, err
 	}
@@ -453,7 +529,7 @@ func (s *AgentMetricsQueryService) ResourceMetrics(ctx context.Context, deviceID
 	if rangeSec == 0 {
 		rangeSec = 24 * 3600
 	}
-	sel, err := SelectTier(rangeSec)
+	sel, err := SelectTier(rangeSec, s.redisIntervalSec())
 	if err != nil {
 		return nil, err
 	}

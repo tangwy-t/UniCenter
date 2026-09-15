@@ -223,7 +223,15 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 	// 这就是 Plan 2B 留下的那条「2C 交接说明」的落点：这个服务至此有了真实
 	// 消费者，不再需要「构造出来只能赋给 `_`」的将就写法。
 	agentIngestSvc := service.NewAgentIngestService(deviceRepo, rawStore, latestStore, configSvc, log)
-	agentQuerySvc := service.NewAgentMetricsQueryService(rawStore, deviceMetricRepo, deviceResourceRepo, log)
+	// agentPolicy 是 sys.agent.* 节奏配置（reportInterval / heartbeatInterval）的
+	// 适配器（定义见文末 agentIntervalPolicy），**一个实例喂两处**：
+	//   - 查询服务：Redis 档的原生栅格 = reportInterval（上方的 rawStore Step 也取自
+	//     同一个配置）—— 两处读到不同的值就是「栅格与数据错位」；
+	//   - hub：ping/pong 节奏由 heartbeatInterval 推导。
+	// 适配器每次调用都读配置（热更即时可见），所以这里取一次实例不会把值冻结。
+	agentPolicy := newAgentIntervalPolicy(configSvc)
+	agentQuerySvc := service.NewAgentMetricsQueryService(
+		rawStore, deviceMetricRepo, deviceResourceRepo, agentPolicy, log)
 	deviceSvc := service.NewDeviceService(deviceRepo, deviceResourceRepo, rawStore, latestStore, configSvc, log)
 
 	// ── Agent 后台服务（5m 落库 / 1h 回滚 / 6 张表分区对账）─────────────
@@ -245,7 +253,7 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 	// 收到任何消息即判死」取 3×hb —— 够一次丢包 + 一轮重传，同时保证 PingInterval
 	// 明显小于 PongWait（否则连接会被自己的心跳判超时）。MaxMessageBytes / SendQueue
 	// 不在此覆盖：零值由 agenthub 的 withDefaults 填成协议上限与 64。
-	agentPolicy := newAgentIntervalPolicy(configSvc)
+	// agentPolicy 在「Agent 服务」段已构造（查询侧与 hub 共用同一个实例）。
 	agentHeartbeat := agentPolicy.HeartbeatInterval()
 	agentHub := agenthub.NewHub(agenthub.Options{
 		PingInterval: agentHeartbeat,
@@ -473,7 +481,8 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 
 // ── agent 运行参数适配器 ────────────────────────────────────────────────
 
-// agentIntervalPolicy 把 sys.agent.* 两个节奏配置键适配成 agenthub.Policy。
+// agentIntervalPolicy 把 sys.agent.* 两个节奏配置键适配成 agenthub.Policy，
+// 同时满足查询侧的 service.RedisIntervalPolicy（两个窄接口都只要事实，见下方断言）。
 //
 // 为什么每次调用都读配置（而不是在 Init 里取一次快照）：sys.agent.* 支持热更，
 // agent 下一轮 ping 与新连接的 hello_ack 就该用新值。读一次快照会把「改配置」
@@ -482,6 +491,11 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 type agentIntervalPolicy struct {
 	cfg agentIntervalConfig
 }
+
+// 编译期断言：agentIntervalPolicy 满足查询侧的 service.RedisIntervalPolicy
+// （该窄接口定义在消费方 internal/service，只要求 ReportInterval() time.Duration）。
+// 名字或签名一旦漂移，这里编译失败 —— 而不是靠「构造参数恰好能塞进去」蒙对。
+var _ service.RedisIntervalPolicy = agentIntervalPolicy{}
 
 // agentIntervalConfig 是适配器需要的配置能力面；*service.ConfigService 直接满足
 // （接口定义在消费方，与仓库既有约定一致）。

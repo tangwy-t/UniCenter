@@ -9,10 +9,12 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/glebarez/sqlite"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 
 	agentproto "github.com/tangwy-t/UniCenter/uni_protocol"
@@ -24,6 +26,7 @@ import (
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/apperror"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/database"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/metricshistory"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/snowflake"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/repository"
 )
@@ -69,7 +72,9 @@ func TestSelectTierBoundaries(t *testing.T) {
 		{0, "", "", 0, true},                              // 缺省 → 由 service 填默认值，此处视为越界
 	}
 	for _, c := range cases {
-		got, err := SelectTier(c.rangeSec)
+		// 第二参显式传**默认值常量**：本用例表只验「range → 档位/表/原生栅格」的
+		// 边界，与 RedisIntervalPolicy 无关；传默认值使期望值（10）与旧行为逐字相同。
+		got, err := SelectTier(c.rangeSec, RedisNativeResolutionSec)
 		if c.wantErr {
 			assertBadRequest(t, "range="+itoa(c.rangeSec), err)
 			continue
@@ -102,14 +107,15 @@ func itoa(v int64) string { return strconv.FormatInt(v, 10) }
 
 func TestSelectTierRejectsOutOfRange(t *testing.T) {
 	for _, r := range []int64{-1, 0, 1, 3599, request.DeviceRangeMin - 1, request.DeviceRangeMax + 1} {
-		_, err := SelectTier(r)
+		// 越界必须在**读 redisNativeSec 之前**就拒掉：传一个非法间隔（0）也不得改变错误口径。
+		_, err := SelectTier(r, 0)
 		assertBadRequest(t, "越界 range="+itoa(r), err)
 	}
 }
 
 func TestSelectTierNeverMixesTiers(t *testing.T) {
 	// 40 天必须整体走 1h 档（不允许前 30 天 5min + 后 10 天 1h 拼接）
-	got, err := SelectTier(40 * 24 * 3600)
+	got, err := SelectTier(40*24*3600, RedisNativeResolutionSec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +132,7 @@ func TestSelectTierNeverMixesTiers(t *testing.T) {
 
 func TestStepLiftForBucketCap(t *testing.T) {
 	// 180d @1h = 4320 桶 > 4000 → 升 step 到 2h（Scale=2），桶数 2160
-	got, err := SelectTier(15552000)
+	got, err := SelectTier(15552000, RedisNativeResolutionSec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +146,7 @@ func TestStepLiftForBucketCap(t *testing.T) {
 		t.Fatalf("升档后桶数 %d 仍超过 %d 上限", n, maxBucketsForTest)
 	}
 	// 30d @300s = 8640 桶 → Scale=3 → 2880
-	got30, err := SelectTier(2592000)
+	got30, err := SelectTier(2592000, RedisNativeResolutionSec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +165,7 @@ func TestStepLiftKeepsNativeMultiplesWithinCap(t *testing.T) {
 	// 升 step 仍是**原生桶宽的整数倍**（桶边界仍对齐）；且每个合法 range 都不越上限。
 	ranges := []int64{3600, 7200, 86400, 86401, 604800, 2592000, 2592001, 7776000, 15552000}
 	for _, r := range ranges {
-		got, err := SelectTier(r)
+		got, err := SelectTier(r, RedisNativeResolutionSec)
 		if err != nil {
 			t.Fatalf("range=%d: %v", r, err)
 		}
@@ -176,13 +182,16 @@ func TestStepLiftKeepsNativeMultiplesWithinCap(t *testing.T) {
 func TestStepLiftAppliesToRedisTier(t *testing.T) {
 	// 24h @10s = 8640 桶 > 4000 → Scale=3 → 2880 桶（有效桶宽 30s）；
 	// 但 Resolution 报的是**原生** 10s，前端只信 response.resolution_seconds。
-	got, err := SelectTier(86400)
+	got, err := SelectTier(86400, RedisNativeResolutionSec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// H4：Redis 档的原生分辨率必须是**具名常量**（RedisNativeResolutionSec），
-	// 而不是散落的魔法数 10 —— 它当前的语义是「按 10s 上报节奏的假设」，
-	// 不是「已被配置覆盖」（2C 才接配置）。
+	// H4 的两半现在分开成立：
+	//  ① 「Redis 档的原生栅格是一个**具名默认值**而不是散落的魔法数 10」——
+	//     由本断言保持：显式传入该常量，Resolution 必须原样回它；
+	//  ② 「10 只是缺省、不是唯一取值」—— 由
+	//     TestSelectTierRedisResolutionFollowsConfiguredInterval 断言（传 5/30 就必须回 5/30）。
+	// 常量本身已不再被 SelectTier 直接读取，缺省由调用方（query 服务）在 policy 为 nil 时传入。
 	if got.Resolution != RedisNativeResolutionSec {
 		t.Fatalf("Redis 档原生分辨率 = %d, want %d（RedisNativeResolutionSec）",
 			got.Resolution, RedisNativeResolutionSec)
@@ -192,6 +201,326 @@ func TestStepLiftAppliesToRedisTier(t *testing.T) {
 	}
 	if n := got.BucketCount(); n > maxBucketsForTest {
 		t.Fatalf("24h 升档后桶数 %d 超过上限", n)
+	}
+}
+
+// ── Task 1：Redis 档的栅格必须由 sys.agent.reportInterval 驱动 ────────────
+//
+// 缺陷背景：Redis 档的 Resolution 此前恒为 RedisNativeResolutionSec = 10，而查询
+// 服务**不接配置**。运维把 sys.agent.reportInterval 改成 5s 或 30s 后，Redis 档的
+// 栅格与升档倍数仍按 10s 推导 —— 桶变稀疏（每桶只装到实际样本的一部分）、
+// 且**不报错**：一条静默的错误曲线。
+//
+// 下面 4 组断言共同把「配置驱动」钉住（任何一条都能单独击穿硬编码 10）：
+//   1) SelectTier 的 Resolution 跟随入参间隔；
+//   2) 非法/缺失间隔夹到 spec 下限 2s（不得退化成 0：0 会让 BucketCount 除零/Inf）；
+//   3) 间隔大于时间窗时夹到 rangeSec（否则 Resolution > RangeSeconds ⇒ 0 桶）；
+//   4) service 全链路（含下钻）把 policy 的秒数带进响应与热层入参。
+
+// stubRedisIntervalPolicy 是 RedisIntervalPolicy 的替身：回一个固定间隔。
+type stubRedisIntervalPolicy struct{ d time.Duration }
+
+func (p stubRedisIntervalPolicy) ReportInterval() time.Duration { return p.d }
+
+// queryLogSpy 记录 Warn 文案。
+//
+// 为什么不能用 logger.NewNop()：那会把「policy 缺失时记了一条 Warn」判成**永真**
+// （无日志器也「不报错」）。这条断言要看得见日志本身。
+type queryLogSpy struct {
+	mu    sync.Mutex
+	warns []string
+}
+
+func (l *queryLogSpy) Debug(string, ...zap.Field) {}
+func (l *queryLogSpy) Info(string, ...zap.Field)  {}
+func (l *queryLogSpy) Error(string, ...zap.Field) {}
+func (l *queryLogSpy) IsDebug() bool              { return false }
+func (l *queryLogSpy) Warn(msg string, _ ...zap.Field) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.warns = append(l.warns, msg)
+}
+
+func (l *queryLogSpy) warnCount() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.warns)
+}
+
+// TestSelectTierRedisResolutionFollowsConfiguredInterval：配置驱动 —— Redis 档的
+// 原生栅格必须来自 policy，而不是硬编码 10。
+func TestSelectTierRedisResolutionFollowsConfiguredInterval(t *testing.T) {
+	cases := []struct {
+		intervalSec int64
+		rangeSec    int64
+		wantRes     int64
+	}{
+		{10, 3600, 10}, // 默认 10s → 原生 10s
+		{5, 3600, 5},   // 改 5s → 原生 5s
+		{30, 3600, 30}, // 改 30s → 原生 30s
+		{2, 86400, 2},  // spec 下限 2s
+	}
+	for _, c := range cases {
+		got, err := SelectTier(c.rangeSec, c.intervalSec)
+		if err != nil {
+			t.Fatalf("interval=%d range=%d: %v", c.intervalSec, c.rangeSec, err)
+		}
+		if got.Source != SourceRedis {
+			t.Fatalf("interval=%d range=%d 应走 Redis 档, got %s", c.intervalSec, c.rangeSec, got.Source)
+		}
+		if got.Resolution != c.wantRes {
+			// Errorf 而不是 Fatalf：本表里 5 与 30 两条必须各自暴露（红灯原文里两条
+			// 都出现）——「只跟了其中一条」的实现藏不住。
+			t.Errorf("interval=%d: Resolution=%d, want %d（硬编码 10 会在此暴露）",
+				c.intervalSec, got.Resolution, c.wantRes)
+		}
+		// 升档必须是**原生栅格的整数倍**：栅格换了而 Scale 还按 10s 算，
+		// 就是「桶与数据错位」的另一种形态。
+		if step := got.Resolution * got.Scale; step%got.Resolution != 0 {
+			t.Fatalf("interval=%d: 有效桶宽 %d 不是原生 %d 的整数倍", c.intervalSec, step, got.Resolution)
+		}
+		// 有效桶宽推出来的桶数必须是「每桶至少一个上报间隔」，不得比上限还多。
+		if n := got.BucketCount(); n == 0 || n > maxBucketsForTest {
+			t.Fatalf("interval=%d range=%d: 桶数 %d 越界（0 桶或超过上限 %d）",
+				c.intervalSec, c.rangeSec, n, maxBucketsForTest)
+		}
+	}
+}
+
+// TestRedisNativeResolutionClampsToSpecFloor：非法/缺失的上报间隔必须夹到 spec
+// 下限 2s，不得退化成 0（0 会让桶数计算除零/Inf）。
+func TestRedisNativeResolutionClampsToSpecFloor(t *testing.T) {
+	for _, bad := range []int64{0, -1, 1} {
+		got, err := SelectTier(3600, bad)
+		if err != nil {
+			t.Fatalf("bad=%d 不应报错（应夹取）: %v", bad, err)
+		}
+		if got.Resolution != 2 {
+			t.Fatalf("bad=%d → Resolution=%d, want 2（spec：最小 2s）", bad, got.Resolution)
+		}
+		if got.BucketCount() != 1800 { // 3600/2
+			t.Fatalf("bad=%d → 桶数 = %d, want 1800（3600s / 2s）", bad, got.BucketCount())
+		}
+	}
+}
+
+// TestRedisNativeResolutionClampsToRangeWindow：上界夹取 —— 间隔大于时间窗时
+// Resolution 必须夹到 rangeSec。
+//
+// 不加夹取的后果**实测**是热层拒绝分桶（`metricshistory.AlignBuckets` 不接受
+// `step > window`）→ 服务包成 500「内部错误」，整条趋势查询不可用（见
+// TestMetricsRedisTierClampsIntervalLargerThanWindow 的红灯依据）。这里同时钉住
+// 「至少 1 个桶」这条契约面（BucketCount() >= 1）。
+func TestRedisNativeResolutionClampsToRangeWindow(t *testing.T) {
+	// 1h 窗口 + 2h 上报间隔（运维把间隔调得比最小窗口还大）：真实场景下这是错配，
+	// 但契约不能因此产出 500 或 0 桶。
+	cases := []struct {
+		rangeSec    int64
+		intervalSec int64
+		wantRes     int64
+	}{
+		{3600, 7200, 3600},
+		{3600, 3601, 3600},
+		{3600, 3600, 3600}, // 恰好相等：不夹（仍是 1 桶）
+		{86400, 200000, 86400},
+	}
+	for _, c := range cases {
+		got, err := SelectTier(c.rangeSec, c.intervalSec)
+		if err != nil {
+			t.Fatalf("range=%d interval=%d: %v", c.rangeSec, c.intervalSec, err)
+		}
+		if got.Resolution != c.wantRes {
+			t.Fatalf("range=%d interval=%d → Resolution=%d, want %d（上界夹取到窗口长度）",
+				c.rangeSec, c.intervalSec, got.Resolution, c.wantRes)
+		}
+		if n := got.BucketCount(); n < 1 {
+			t.Fatalf("range=%d interval=%d → 桶数 = %d，必须 ≥ 1", c.rangeSec, c.intervalSec, n)
+		}
+		if got.Scale != 1 {
+			t.Fatalf("range=%d interval=%d → Scale=%d, want 1（本身已 ≤ 1 桶，无需升档）",
+				c.rangeSec, c.intervalSec, got.Scale)
+		}
+	}
+}
+
+// TestSelectTierDBTiersIgnoreRedisNativeSec：DB 两档（300/3600）由**表结构**决定，
+// 不受 reportInterval 影响 —— 把 policy 的值渗进 DB 档会把冷层的真实栅格也改错，
+// 那是比原缺陷更隐蔽的错误（DB 行确实是 5min/1h 一行，报成别的值就是撒谎）。
+func TestSelectTierDBTiersIgnoreRedisNativeSec(t *testing.T) {
+	cases := []struct {
+		rangeSec int64
+		table    string
+		wantRes  int64
+	}{
+		{86401, entity.TableNameMetric5m, 300},
+		{604800, entity.TableNameMetric5m, 300},
+		{2592000, entity.TableNameMetric5m, 300},
+		{2592001, entity.TableNameMetric1h, 3600},
+		{15552000, entity.TableNameMetric1h, 3600},
+	}
+	for _, c := range cases {
+		// 合法但与 10 不同的间隔、以及非法间隔，都不得改变 DB 档
+		for _, interval := range []int64{0, 2, 5, 30, 300, 99999} {
+			got, err := SelectTier(c.rangeSec, interval)
+			if err != nil {
+				t.Fatalf("range=%d interval=%d: %v", c.rangeSec, interval, err)
+			}
+			if got.Source != SourceDB || got.Table != c.table || got.Resolution != c.wantRes {
+				t.Fatalf("range=%d interval=%d → source=%s table=%s resolution=%d, want db/%s/%d",
+					c.rangeSec, interval, got.Source, got.Table, got.Resolution, c.table, c.wantRes)
+			}
+		}
+	}
+}
+
+// TestMetricsRedisTierReportsConfiguredResolution：端到端（service → 响应）——
+// policy 的值必须带进响应与热层入参，且桶数上限仍成立。
+func TestMetricsRedisTierReportsConfiguredResolution(t *testing.T) {
+	ctx := context.Background()
+
+	// 5s 间隔 + 24h：86400/5 = 17280 桶 > 4000 → 必然升档（k=5 → 有效桶宽 25s）。
+	// 硬编码 10s 会给 k=3 → 30s，两个值不同，因此这条断言能击穿硬编码。
+	raw5 := &stubRawQuerier{snap: &agentmetrics.RawSnapshot{}}
+	svc5 := NewAgentMetricsQueryService(raw5, nil, nil,
+		stubRedisIntervalPolicy{5 * time.Second}, logger.NewNop())
+	resp5, err := svc5.Metrics(ctx, 1001, &request.DeviceMetricsQuery{Range: 86400})
+	if err != nil {
+		t.Fatalf("5s policy 的 24h 查询: %v", err)
+	}
+	if resp5.Source != SourceRedis {
+		t.Fatalf("24h 必须走 Redis 档, got %q", resp5.Source)
+	}
+	if resp5.ResolutionSeconds != 25 {
+		t.Fatalf("policy=5s → resolution_seconds = %d, want 25（5×Scale=5，8640→17280 桶需升 5 倍）",
+			resp5.ResolutionSeconds)
+	}
+	if raw5.gotStep != 25*time.Second {
+		t.Fatalf("热层 step = %v, want 25s —— 响应栅格与热层入参必须同源", raw5.gotStep)
+	}
+	if n := int64(len(resp5.Buckets)); n > maxBucketsForTest {
+		t.Fatalf("桶数 %d 超过上限 %d", n, maxBucketsForTest)
+	}
+
+	// 同一档位、同一 range，换成 30s 间隔 → 2880 桶、有效桶宽 30s（不升档）。
+	// 两段放在一起，断言的是「栅格跟着 policy 走」而不是「某个固定值」。
+	raw30 := &stubRawQuerier{snap: &agentmetrics.RawSnapshot{}}
+	svc30 := NewAgentMetricsQueryService(raw30, nil, nil,
+		stubRedisIntervalPolicy{30 * time.Second}, logger.NewNop())
+	resp30, err := svc30.Metrics(ctx, 1001, &request.DeviceMetricsQuery{Range: 86400})
+	if err != nil {
+		t.Fatalf("30s policy 的 24h 查询: %v", err)
+	}
+	if resp30.ResolutionSeconds != 30 {
+		t.Fatalf("policy=30s → resolution_seconds = %d, want 30（2880 桶 ≤ 4000，不升档）",
+			resp30.ResolutionSeconds)
+	}
+	if raw30.gotStep != 30*time.Second {
+		t.Fatalf("热层 step = %v, want 30s", raw30.gotStep)
+	}
+	if n := int64(len(resp30.Buckets)); n > maxBucketsForTest {
+		t.Fatalf("桶数 %d 超过上限 %d", n, maxBucketsForTest)
+	}
+}
+
+// TestMetricsRedisTierFallsBackToDefaultWhenPolicyMissing：policy 为 nil（装配漏参）
+// 时必须退化成默认栅格并**留一条 Warn**，且**不得 panic** —— 少接一个装配参数不该
+// 变成接口 500，但也绝不能静默（静默退化正是本任务要消除的故障形态）。
+func TestMetricsRedisTierFallsBackToDefaultWhenPolicyMissing(t *testing.T) {
+	ctx := context.Background()
+	raw := &stubRawQuerier{snap: &agentmetrics.RawSnapshot{}}
+	log := &queryLogSpy{}
+	svc := NewAgentMetricsQueryService(raw, nil, nil, nil, log)
+
+	resp, err := svc.Metrics(ctx, 1001, &request.DeviceMetricsQuery{Range: 86400})
+	if err != nil {
+		t.Fatalf("policy 缺失不得报错（应退化成默认栅格）: %v", err)
+	}
+	// 8640 桶 → k=3 → 30s（与 nil policy 之前的旧行为逐字相同）
+	if resp.ResolutionSeconds != RedisNativeResolutionSec*3 {
+		t.Fatalf("nil policy → resolution_seconds = %d, want %d（默认 10s × Scale=3）",
+			resp.ResolutionSeconds, RedisNativeResolutionSec*3)
+	}
+	if raw.gotStep != time.Duration(RedisNativeResolutionSec*3)*time.Second {
+		t.Fatalf("nil policy → 热层 step = %v, want %ds", raw.gotStep, RedisNativeResolutionSec*3)
+	}
+	if got := log.warnCount(); got != 1 {
+		t.Fatalf("nil policy 必须记**一条** Warn（实际 %d 条）：静默退化会让「为什么栅格是 10s」无迹可查", got)
+	}
+	// 有 policy 时不得误报 Warn（否则这条断言退化成永真）
+	raw2 := &stubRawQuerier{snap: &agentmetrics.RawSnapshot{}}
+	log2 := &queryLogSpy{}
+	svc2 := NewAgentMetricsQueryService(raw2, nil, nil,
+		stubRedisIntervalPolicy{10 * time.Second}, log2)
+	if _, err := svc2.Metrics(ctx, 1001, &request.DeviceMetricsQuery{Range: 86400}); err != nil {
+		t.Fatal(err)
+	}
+	if got := log2.warnCount(); got != 0 {
+		t.Fatalf("policy 已注入时不得记 Warn, got %d 条: %v", got, log2.warns)
+	}
+}
+
+// TestResourceDrillRedisBucketWidthFollowsConfiguredInterval：下钻走的是**同一个**
+// 选档函数，因此栅格也必须跟着 policy 走：reportInterval=30 时，≤24h 下钻的两个
+// 样本必须合进同一个 30s 桶（按 10s 会分成两个桶）—— 桶宽取错时下钻曲线同样会与
+// 数据错位，且与趋势图用同一条曲线上的两个不同分辨率。
+func TestResourceDrillRedisBucketWidthFollowsConfiguredInterval(t *testing.T) {
+	ctx := context.Background()
+	// 1700000011s 与 1700000021s：10s 桶下分别是 1700000010 与 1700000020，
+	// 30s 桶下都是 1700000010（30×56666667 = 1700000010）。
+	const t0 = int64(1_700_000_011_000)
+	raw := &stubRawQuerier{bucketPts: []agentproto.MetricsSample{
+		{T: t0, Disks: []agentproto.DiskMetric{{Mountpoint: "/data", UsedPercent: 10, UsedGB: 10, TotalGB: 100}}},
+		{T: t0 + 10_000, Disks: []agentproto.DiskMetric{{Mountpoint: "/data", UsedPercent: 20, UsedGB: 20, TotalGB: 100}}},
+	}}
+	svc := NewAgentMetricsQueryService(raw, nil, nil,
+		stubRedisIntervalPolicy{30 * time.Second}, logger.NewNop())
+
+	resp, err := svc.ResourceMetrics(ctx, 1001, &request.DeviceMetricsQuery{
+		Range: 3600, Kind: "disk", Name: "/data"})
+	if err != nil {
+		t.Fatalf("1h 下钻必须走热层: %v", err)
+	}
+	if resp.Source != SourceRedis || resp.ResolutionSeconds != 30 {
+		t.Fatalf("source=%q resolution=%d, want redis/30（配置 30s 上报）", resp.Source, resp.ResolutionSeconds)
+	}
+	if len(resp.Buckets) != 1 {
+		t.Fatalf("桶数 = %d, want 1（相差 10s 的两个样本在 30s 桶内同桶；按 10s 会分成 2 个）",
+			len(resp.Buckets))
+	}
+	if b := resp.Buckets[0]; b.T != 1700000010 || b.Samples != 2 {
+		t.Fatalf("桶 = {t:%d samples:%d}, want {t:1700000010 samples:2}", b.T, b.Samples)
+	}
+}
+
+// TestMetricsRedisTierClampsIntervalLargerThanWindow：上界夹取的**真实后果**。
+//
+// 热层的分桶器 metricshistory.AlignBuckets 明确拒绝 `step > window`
+// （「metricshistory: step 不得超过 window」），而趋势查询正是把
+// step = Resolution×Scale、window = RangeSeconds 交给它。所以「间隔大于窗口」若不
+// 加夹取，得到的是一条 **500 内部错误**（不是 0 桶）—— 运维把
+// sys.agent.reportInterval 调到比最小查询窗口（1h）还大，就直接打挂整条趋势查询。
+//
+// 夹到窗口长度后：Resolution == RangeSeconds → 恰好 1 个桶，查询正常返回。
+func TestMetricsRedisTierClampsIntervalLargerThanWindow(t *testing.T) {
+	ctx := context.Background()
+	raw := &stubRawQuerier{snap: &agentmetrics.RawSnapshot{}}
+	// 2h 上报（与 1h 的最小窗口错配）
+	svc := NewAgentMetricsQueryService(raw, nil, nil,
+		stubRedisIntervalPolicy{2 * time.Hour}, logger.NewNop())
+
+	resp, err := svc.Metrics(ctx, 1001, &request.DeviceMetricsQuery{Range: 3600})
+	if err != nil {
+		t.Fatalf("间隔大于窗口不得让查询失败（热层拒绝 step > window，会变成 500）: %v", err)
+	}
+	if resp.ResolutionSeconds != 3600 {
+		t.Fatalf("resolution_seconds = %d, want 3600（夹到窗口长度）", resp.ResolutionSeconds)
+	}
+	if raw.gotWindow != time.Hour || raw.gotStep > raw.gotWindow {
+		t.Fatalf("热层入参必须满足 step ≤ window, got step=%v window=%v", raw.gotStep, raw.gotWindow)
+	}
+	// 契约面：任何窗口都至少画出 1 个桶（而不是一条无解释的空曲线）
+	if n := SelectTierForTest(t, 3600).BucketCount(); n < 1 {
+		t.Fatalf("1h 窗口的桶数 = %d，必须 ≥ 1", n)
 	}
 }
 
@@ -218,7 +547,7 @@ func TestMetricsRejectsNilQuery(t *testing.T) {
 
 func TestMetricsDefaultsRangeTo24h(t *testing.T) {
 	raw := &stubRawQuerier{snap: &agentmetrics.RawSnapshot{}}
-	svc := NewAgentMetricsQueryService(raw, nil, nil, logger.NewNop())
+	svc := NewAgentMetricsQueryService(raw, nil, nil, nil, logger.NewNop())
 	resp, err := svc.Metrics(context.Background(), 1001, &request.DeviceMetricsQuery{})
 	if err != nil {
 		t.Fatal(err)
@@ -239,7 +568,7 @@ func TestMetricsUsesRawStoreWithin24h(t *testing.T) {
 		WindowSeconds: 86400, StepSeconds: 30,
 		Buckets: []agentmetrics.TrendPoint{{T: 1234, CPUUsedPercent: f64p(11.5)}},
 	}}
-	svc := NewAgentMetricsQueryService(raw, nil, nil, logger.NewNop())
+	svc := NewAgentMetricsQueryService(raw, nil, nil, nil, logger.NewNop())
 	resp, err := svc.Metrics(context.Background(), 1001,
 		&request.DeviceMetricsQuery{Range: 86400, Metrics: "cpu_used_percent"})
 	if err != nil {
@@ -267,7 +596,7 @@ func TestMetricsUsesRawStoreWithin24h(t *testing.T) {
 
 func TestMetricsUsesFiveMinuteTableForSevenDays(t *testing.T) {
 	reader := &stubMetricReader{trend: []agentmetrics.TrendPoint{{T: 300, CPUUsedPercent: f64p(3)}}}
-	svc := NewAgentMetricsQueryService(nil, reader, nil, logger.NewNop())
+	svc := NewAgentMetricsQueryService(nil, reader, nil, nil, logger.NewNop())
 	resp, err := svc.Metrics(context.Background(), 1001, &request.DeviceMetricsQuery{Range: 7 * 24 * 3600})
 	if err != nil {
 		t.Fatal(err)
@@ -294,7 +623,7 @@ func TestMetricsUsesFiveMinuteTableForSevenDays(t *testing.T) {
 
 func TestMetricsUsesHourlyTableBeyondThirtyDays(t *testing.T) {
 	reader := &stubMetricReader{}
-	svc := NewAgentMetricsQueryService(nil, reader, nil, logger.NewNop())
+	svc := NewAgentMetricsQueryService(nil, reader, nil, nil, logger.NewNop())
 	resp, err := svc.Metrics(context.Background(), 1001, &request.DeviceMetricsQuery{Range: 40 * 24 * 3600})
 	if err != nil {
 		t.Fatal(err)
@@ -309,7 +638,7 @@ func TestMetricsUsesHourlyTableBeyondThirtyDays(t *testing.T) {
 
 func TestMetricsPropagatesStoreError(t *testing.T) {
 	reader := &stubMetricReader{err: errors.New("db down")}
-	svc := NewAgentMetricsQueryService(nil, reader, nil, logger.NewNop())
+	svc := NewAgentMetricsQueryService(nil, reader, nil, nil, logger.NewNop())
 	_, err := svc.Metrics(context.Background(), 1001, &request.DeviceMetricsQuery{Range: 7 * 24 * 3600})
 	if err == nil {
 		t.Fatal("仓储报错必须向上抛")
@@ -323,7 +652,7 @@ func TestMetricsPropagatesStoreError(t *testing.T) {
 // ---------- 下钻 ----------
 
 func TestResourceMetricsRejectsIncompleteOrUnknownKind(t *testing.T) {
-	svc := NewAgentMetricsQueryService(nil, nil, &stubResourceResolver{}, logger.NewNop())
+	svc := NewAgentMetricsQueryService(nil, nil, &stubResourceResolver{}, nil, logger.NewNop())
 	ctx := context.Background()
 	assertBadRequest(t, "下钻只给 kind",
 		mustErr(svc.ResourceMetrics(ctx, 1001, &request.DeviceMetricsQuery{Range: 86400, Kind: "disk"})))
@@ -340,7 +669,7 @@ func mustErr[T any](_ T, err error) error { return err }
 
 func TestResourceMetricsRejectsRangeBeyondThirtyDays(t *testing.T) {
 	ctx := context.Background()
-	svc := NewAgentMetricsQueryService(nil, nil, &stubResourceResolver{id: 2001}, logger.NewNop())
+	svc := NewAgentMetricsQueryService(nil, nil, &stubResourceResolver{id: 2001}, nil, logger.NewNop())
 	// 子表只有 5min 档：>30d 落到 1h 档 → 400（不得静默返回空曲线）
 	assertBadRequest(t, "40d 资源下钻",
 		mustErr(svc.ResourceMetrics(ctx, 1001, &request.DeviceMetricsQuery{
@@ -352,7 +681,7 @@ func TestResourceMetricsRejectsRangeBeyondThirtyDays(t *testing.T) {
 	// 30d 边界本身合法（仍是 5min 档），且必须解析出 resource_id 后按子表查
 	reader := &stubMetricReader{resourceRows: []map[string]any{{"t": int64(600)}}}
 	resolver := &stubResourceResolver{id: 2001}
-	svc2 := NewAgentMetricsQueryService(nil, reader, resolver, logger.NewNop())
+	svc2 := NewAgentMetricsQueryService(nil, reader, resolver, nil, logger.NewNop())
 	resp, err := svc2.ResourceMetrics(ctx, 1001, &request.DeviceMetricsQuery{
 		Range: 30 * 24 * 3600, Kind: "disk", Name: "/"})
 	if err != nil {
@@ -378,7 +707,7 @@ func TestResourceMetricsMapsEveryKindToItsSubTable(t *testing.T) {
 	}
 	for kind, table := range want {
 		reader := &stubMetricReader{}
-		svc := NewAgentMetricsQueryService(nil, reader, &stubResourceResolver{id: 7}, logger.NewNop())
+		svc := NewAgentMetricsQueryService(nil, reader, &stubResourceResolver{id: 7}, nil, logger.NewNop())
 		if _, err := svc.ResourceMetrics(context.Background(), 1001,
 			&request.DeviceMetricsQuery{Range: 7 * 24 * 3600, Kind: kind, Name: "x"}); err != nil {
 			t.Fatalf("kind=%s 下钻报错: %v", kind, err)
@@ -398,7 +727,7 @@ func TestResourceMetricsUnknownResourceReturnsEmptyNot404(t *testing.T) {
 	resolver := &stubResourceResolver{err: repository.ErrNotFound}
 	reader := &stubMetricReader{err: errors.New("未命中资源时不得查子表")}
 	raw := &stubRawQuerier{} // 热层里没有该资源的样本
-	svc := NewAgentMetricsQueryService(raw, reader, resolver, logger.NewNop())
+	svc := NewAgentMetricsQueryService(raw, reader, resolver, nil, logger.NewNop())
 	resp, err := svc.ResourceMetrics(context.Background(), 1001,
 		&request.DeviceMetricsQuery{Range: 6 * 3600, Kind: "disk", Name: "/data"})
 	if err != nil {
@@ -449,7 +778,7 @@ func newQueryTestRepo(t *testing.T) *repository.DeviceMetricRepo {
 
 func TestMetricsProjectionGoesThroughRepositoryWhitelist(t *testing.T) {
 	repo := newQueryTestRepo(t)
-	svc := NewAgentMetricsQueryService(nil, repo, nil, logger.NewNop())
+	svc := NewAgentMetricsQueryService(nil, repo, nil, nil, logger.NewNop())
 	ctx := context.Background()
 
 	// 非白名单列（内含注入载荷）必须被仓储白名单拦下，不得静默通过
@@ -538,7 +867,7 @@ func TestMetricsAllExpandsToWholeTableColumns(t *testing.T) {
 	}
 
 	reader := &stubMetricReader{}
-	svc := NewAgentMetricsQueryService(nil, reader, nil, logger.NewNop())
+	svc := NewAgentMetricsQueryService(nil, reader, nil, nil, logger.NewNop())
 	resp, err := svc.Metrics(ctx, 1001, &request.DeviceMetricsQuery{
 		Range: 7 * 24 * 3600, Metrics: request.MetricsAll})
 	if err != nil {
@@ -589,7 +918,7 @@ func TestMetricsAllExpandsToWholeTableColumns(t *testing.T) {
 	// 与 agent_* 恒显示 —，被误读成 agent 挂了」的老问题。同时也不得直接把 * 拒成 400
 	// （那会让文档化的 metrics=* 在半年档完全不可用）。
 	reader1h := &stubMetricReader{}
-	svc1h := NewAgentMetricsQueryService(nil, reader1h, nil, logger.NewNop())
+	svc1h := NewAgentMetricsQueryService(nil, reader1h, nil, nil, logger.NewNop())
 	resp1h, err := svc1h.Metrics(ctx, 1001, &request.DeviceMetricsQuery{
 		Range: 40 * 24 * 3600, Metrics: request.MetricsAll})
 	if err != nil {
@@ -610,7 +939,9 @@ func TestMetricsAllExpandsToWholeTableColumns(t *testing.T) {
 // 否则「响应收窄」与「期望收窄」会各写一份、双双漂移。
 func SelectTierForTest(t *testing.T, rangeSec int64) TierSelection {
 	t.Helper()
-	sel, err := SelectTier(rangeSec)
+	// 第二参传**默认值常量**：调用方（表名/列集的结构性断言）只关心档位与表，
+	// 传默认值使「Redis 档的 Resolution」与接配置之前逐字相同。
+	sel, err := SelectTier(rangeSec, RedisNativeResolutionSec)
 	if err != nil {
 		t.Fatalf("SelectTier(%d): %v", rangeSec, err)
 	}
@@ -657,7 +988,7 @@ func TestExplicitMetricsRejectsColumnsTheResponseModelCannotCarry(t *testing.T) 
 		for _, col := range orphans {
 			reader := &stubMetricReader{}
 			raw := &stubRawQuerier{snap: &agentmetrics.RawSnapshot{}}
-			svc := NewAgentMetricsQueryService(raw, reader, nil, logger.NewNop())
+			svc := NewAgentMetricsQueryService(raw, reader, nil, nil, logger.NewNop())
 			_, err := svc.Metrics(ctx, 1001, &request.DeviceMetricsQuery{Range: tc.rangeSec, Metrics: col})
 			assertBadRequest(t, tc.name+"显式请求 "+col, err)
 			if reader.calls != 0 || raw.calls != 0 {
@@ -683,7 +1014,7 @@ func TestExplicitMetricsRejectsColumnsTheResponseModelCannotCarry(t *testing.T) 
 		for _, col := range []string{"cpu_used_percent", "tcp_total", "disk_used_percent", "max_temperature_c", "samples"} {
 			reader := &stubMetricReader{}
 			raw := &stubRawQuerier{snap: &agentmetrics.RawSnapshot{}}
-			svc := NewAgentMetricsQueryService(raw, reader, nil, logger.NewNop())
+			svc := NewAgentMetricsQueryService(raw, reader, nil, nil, logger.NewNop())
 			if _, err := svc.Metrics(ctx, 1001, &request.DeviceMetricsQuery{Range: tc.rangeSec, Metrics: col}); err != nil {
 				t.Fatalf("%s 请求 %q 必须可用: %v", tc.name, col, err)
 			}
@@ -715,7 +1046,7 @@ func TestExplicitMetricsWhitelistOnBothTiers(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			reader := &stubMetricReader{}
 			raw := &stubRawQuerier{snap: &agentmetrics.RawSnapshot{}}
-			svc := NewAgentMetricsQueryService(raw, reader, nil, logger.NewNop())
+			svc := NewAgentMetricsQueryService(raw, reader, nil, nil, logger.NewNop())
 			_, err := svc.Metrics(ctx, 1001, &request.DeviceMetricsQuery{Range: tc.rangeSec, Metrics: tc.metrics})
 			// 统一 400：不得是 200（静默放行）、也不得是 500（把参数错误当服务故障）
 			assertBadRequest(t, tc.name, err)
@@ -724,7 +1055,7 @@ func TestExplicitMetricsWhitelistOnBothTiers(t *testing.T) {
 
 	// Redis 档的 available_metrics **不得**出现任何未被校验的列名
 	raw := &stubRawQuerier{snap: &agentmetrics.RawSnapshot{}}
-	svc := NewAgentMetricsQueryService(raw, nil, nil, logger.NewNop())
+	svc := NewAgentMetricsQueryService(raw, nil, nil, nil, logger.NewNop())
 	resp, err := svc.Metrics(ctx, 1001, &request.DeviceMetricsQuery{
 		Range: 6 * 3600, Metrics: "cpu_used_percent,load1"})
 	if err != nil {
@@ -744,7 +1075,7 @@ func TestBucketTSAlwaysProjectedEvenWhenMetricsNamed(t *testing.T) {
 
 	// 投影列侧：bucket_ts 必须被恒补后下推到仓储
 	reader := &stubMetricReader{}
-	svc := NewAgentMetricsQueryService(nil, reader, nil, logger.NewNop())
+	svc := NewAgentMetricsQueryService(nil, reader, nil, nil, logger.NewNop())
 	if _, err := svc.Metrics(ctx, 1001, &request.DeviceMetricsQuery{
 		Range: 7 * 24 * 3600, Metrics: "cpu_used_percent"}); err != nil {
 		t.Fatal(err)
@@ -761,7 +1092,7 @@ func TestBucketTSAlwaysProjectedEvenWhenMetricsNamed(t *testing.T) {
 	}, repository.MetricSubRows{}); err != nil {
 		t.Fatal(err)
 	}
-	svcDB := NewAgentMetricsQueryService(nil, repo, nil, logger.NewNop())
+	svcDB := NewAgentMetricsQueryService(nil, repo, nil, nil, logger.NewNop())
 	resp, err := svcDB.Metrics(ctx, 1001, &request.DeviceMetricsQuery{
 		Range: 7 * 24 * 3600, Metrics: "cpu_used_percent"})
 	if err != nil {
@@ -790,7 +1121,7 @@ func TestTierRejectsFiveMinOnlyColumnsOnOneHourTier(t *testing.T) {
 	ctx := context.Background()
 	for _, col := range []string{"tcp_time_wait", "tcp_close_wait", "agent_ws_reconnect_count", "agent_last_report_error"} {
 		reader := &stubMetricReader{}
-		svc := NewAgentMetricsQueryService(nil, reader, nil, logger.NewNop())
+		svc := NewAgentMetricsQueryService(nil, reader, nil, nil, logger.NewNop())
 		_, err := svc.Metrics(ctx, 1001, &request.DeviceMetricsQuery{Range: 40 * 24 * 3600, Metrics: col})
 		assertBadRequest(t, "1h 档显式请求 "+col, err)
 		if reader.calls != 0 {
@@ -800,7 +1131,7 @@ func TestTierRejectsFiveMinOnlyColumnsOnOneHourTier(t *testing.T) {
 
 	// 同档位、不含 5min-only 列 → 正常
 	reader := &stubMetricReader{}
-	svc := NewAgentMetricsQueryService(nil, reader, nil, logger.NewNop())
+	svc := NewAgentMetricsQueryService(nil, reader, nil, nil, logger.NewNop())
 	if _, err := svc.Metrics(ctx, 1001, &request.DeviceMetricsQuery{
 		Range: 40 * 24 * 3600, Metrics: "cpu_used_percent,tcp_total"}); err != nil {
 		t.Fatalf("1h 档请求该档存在的列不得报错: %v", err)
@@ -814,12 +1145,12 @@ func TestTierRejectsFiveMinOnlyColumnsOnOneHourTier(t *testing.T) {
 	// 那时它们返回 200 且值恒为 nil（消费方无法与「未采集」区分）。
 	// 现在两档都必须 400 并说明原因（见 TestExplicitMetricsRejectsColumnsTheResponseModelCannotCarry）。
 	reader5m := &stubMetricReader{}
-	svc5m := NewAgentMetricsQueryService(nil, reader5m, nil, logger.NewNop())
+	svc5m := NewAgentMetricsQueryService(nil, reader5m, nil, nil, logger.NewNop())
 	_, err := svc5m.Metrics(ctx, 1001, &request.DeviceMetricsQuery{
 		Range: 30 * 24 * 3600, Metrics: "tcp_time_wait"})
 	assertBadRequest(t, "5min 档显式请求响应装不下的 tcp_time_wait", err)
 	raw := &stubRawQuerier{snap: &agentmetrics.RawSnapshot{}}
-	svcRaw := NewAgentMetricsQueryService(raw, nil, nil, logger.NewNop())
+	svcRaw := NewAgentMetricsQueryService(raw, nil, nil, nil, logger.NewNop())
 	_, err = svcRaw.Metrics(ctx, 1001, &request.DeviceMetricsQuery{
 		Range: 24 * 3600, Metrics: "tcp_time_wait"})
 	assertBadRequest(t, "Redis 档显式请求响应装不下的 tcp_time_wait", err)
@@ -835,7 +1166,7 @@ func TestTierRejectsFiveMinOnlyColumnsOnOneHourTier(t *testing.T) {
 		for _, col := range []string{"tcp_total", "tcp_established", "cpu_iowait", "samples"} {
 			reader := &stubMetricReader{}
 			rawQ := &stubRawQuerier{snap: &agentmetrics.RawSnapshot{}}
-			svc := NewAgentMetricsQueryService(rawQ, reader, nil, logger.NewNop())
+			svc := NewAgentMetricsQueryService(rawQ, reader, nil, nil, logger.NewNop())
 			if _, err := svc.Metrics(ctx, 1001, &request.DeviceMetricsQuery{Range: tc.rangeSec, Metrics: col}); err != nil {
 				t.Fatalf("%s 请求 %q 必须可用: %v", tc.name, col, err)
 			}
@@ -867,7 +1198,7 @@ func TestResourceDrillUsesSubTableColumns(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	svc := NewAgentMetricsQueryService(nil, repo, &stubResourceResolver{id: 2001}, logger.NewNop())
+	svc := NewAgentMetricsQueryService(nil, repo, &stubResourceResolver{id: 2001}, nil, logger.NewNop())
 	resp, err := svc.ResourceMetrics(ctx, 1001, &request.DeviceMetricsQuery{
 		Range: 7 * 24 * 3600, Kind: "disk", Name: "/"})
 	if err != nil {
@@ -921,7 +1252,7 @@ func TestResourceDrillWithin24hUsesHotLayer(t *testing.T) {
 	// DB 侧一律报错：一旦下钻 ≤24h 还去打子表，本测试必红（同时证明「未被调用」）
 	reader := &stubMetricReader{err: errors.New("下钻 ≤24h 不得落 DB 子表")}
 	resolver := &stubResourceResolver{id: 2001}
-	svc := NewAgentMetricsQueryService(raw, reader, resolver, logger.NewNop())
+	svc := NewAgentMetricsQueryService(raw, reader, resolver, nil, logger.NewNop())
 
 	resp, err := svc.ResourceMetrics(ctx, 1001, &request.DeviceMetricsQuery{
 		Range: 3600, Kind: "disk", Name: "/data"})
@@ -981,7 +1312,7 @@ func TestResourceDrillFiltersValuesByExplicitMetrics(t *testing.T) {
 		Disks: []agentproto.DiskMetric{
 			{Mountpoint: "/data", UsedPercent: 10, UsedGB: 10, TotalGB: 100, InodesUsedPercent: 8},
 		}}}}
-	svc := NewAgentMetricsQueryService(raw, nil, nil, logger.NewNop())
+	svc := NewAgentMetricsQueryService(raw, nil, nil, nil, logger.NewNop())
 
 	resp, err := svc.ResourceMetrics(ctx, 1001, &request.DeviceMetricsQuery{
 		Range: 3600, Kind: "disk", Name: "/data", Metrics: "used_percent,used_gb"})
@@ -1024,7 +1355,7 @@ func TestResourceDrillDBPathUnknownResourceReturnsEmpty(t *testing.T) {
 	// repository.ErrNotFound 当「资源不存在 → 空结果」，其它错误一律 500。
 	resolver := &stubResourceResolver{err: repository.ErrNotFound}
 	reader := &stubMetricReader{err: errors.New("未命中资源时不得查子表")}
-	svc := NewAgentMetricsQueryService(nil, reader, resolver, logger.NewNop())
+	svc := NewAgentMetricsQueryService(nil, reader, resolver, nil, logger.NewNop())
 	resp, err := svc.ResourceMetrics(context.Background(), 1001,
 		&request.DeviceMetricsQuery{Range: 7 * 24 * 3600, Kind: "disk", Name: "/gone"})
 	if err != nil {
@@ -1167,6 +1498,13 @@ func (s *stubRawQuerier) Query(_ context.Context, deviceID uint64, window, step 
 	s.gotDevice, s.gotWindow, s.gotStep = deviceID, window, step
 	if s.err != nil {
 		return nil, s.err
+	}
+	// 替身，但**语义是真的**：真实热层（metricshistory.Window.Query）第一件事就是
+	// AlignBuckets(window, step)，而它明确拒绝 step > window（buckets.go）。若替身
+	// 只记录入参不校验，一条「step 大于窗口」的错误会被静默吞掉 —— 那正是本任务
+	// 上界夹取要防的 500（见 TestMetricsRedisTierClampsIntervalLargerThanWindow）。
+	if _, err := metricshistory.AlignBuckets(window, step); err != nil {
+		return nil, err
 	}
 	return s.snap, nil
 }
@@ -1319,7 +1657,7 @@ func TestMetricsTierLiftMergesDbRowsToEffectiveGrid(t *testing.T) {
 	wantSamples := groupSamples[targetKey]
 
 	reader := &stubMetricReader{trend: native}
-	svc := NewAgentMetricsQueryService(nil, reader, nil, logger.NewNop())
+	svc := NewAgentMetricsQueryService(nil, reader, nil, nil, logger.NewNop())
 	resp, err := svc.Metrics(ctx, 1001, &request.DeviceMetricsQuery{Range: rangeSec})
 	if err != nil {
 		t.Fatalf("30d 查询: %v", err)
@@ -1404,7 +1742,7 @@ func TestMetricsTierLiftMergeEndToEnd(t *testing.T) {
 		}
 	}
 
-	svc := NewAgentMetricsQueryService(nil, repo, nil, logger.NewNop())
+	svc := NewAgentMetricsQueryService(nil, repo, nil, nil, logger.NewNop())
 	resp, err := svc.Metrics(ctx, 1001, &request.DeviceMetricsQuery{Range: 30 * 24 * 3600})
 	if err != nil {
 		t.Fatal(err)

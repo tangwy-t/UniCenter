@@ -2,8 +2,10 @@ package wireup
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/gorilla/websocket"
 	goredis "github.com/redis/go-redis/v9"
@@ -18,6 +21,8 @@ import (
 
 	agentproto "github.com/tangwy-t/UniCenter/uni_protocol"
 
+	"github.com/tangwy-t/UniCenter/uni_core/internal/handler"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/response"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/entity"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/config"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/database"
@@ -486,4 +491,112 @@ func dialAndEnroll(t *testing.T, srvURL string, f *initFixture) (*wsClient, uint
 		t.Fatalf("enroll 后 device 表里 id=%d 的行数 = %d，期望 1", deviceID, count)
 	}
 	return client, deviceID
+}
+
+// ─ 断言 4：Redis 档栅格由 sys.agent.reportInterval 驱动（装配真的接了线）────
+//
+// 为什么在 wireup 层还要再断一条：service 层的断言只证明「接口按 policy 工作」，
+// 而本任务要修的缺陷形态恰恰是**装配没接线** —— 服务侧测试可以全绿，生产路径
+// 却仍按硬编码 10s 聚合（栅格与数据错位、且不报错）。
+//
+// 这条断言走真实 Init + 真实 DeviceHandler：若 Init 漏传 policy（或仍用旧的四参
+// 构造），`resolution_seconds` 会是 10（3600/10），与期望的 30 不符而变红。
+func TestInit_QueryRedisGridFollowsConfiguredReportInterval(t *testing.T) {
+	f := newInitFixture(t)
+	// 夹具默认种下 10s；这里改成 30s —— 装配必须看到 30。
+	f.setConfigValue(t, "sys.agent.reportInterval", "30")
+
+	deps, err := f.initWith(t, initHooks{})
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if deps.Device.DeviceHdl == nil {
+		t.Fatal("Deps.Device.DeviceHdl == nil：设备 handler 未装配")
+	}
+
+	// 1h 窗口：30s 上报 → 3600/30 = 120 桶，未触上限 → resolution_seconds = 30。
+	// （按硬编码 10s 会是 3600/10 = 360 桶 → 10，两者不同，故能击穿「没接线」。）
+	const noSuchDevice = uint64(999999)
+	got := queryTrendResolution(t, deps.Device.DeviceHdl, noSuchDevice, 3600)
+	if got.Source != "redis" {
+		t.Fatalf("1h 窗口必须走 Redis 档, got %q", got.Source)
+	}
+	if got.ResolutionSeconds != 30 {
+		t.Fatalf("reportInterval=30 → resolution_seconds = %d, want 30（装配未接 policy 时会是 10）",
+			got.ResolutionSeconds)
+	}
+
+	// 热更：同一个 Init 装配的实例，改配置后**无需重启**就该换栅格（适配器每次调用
+	// 都读配置）。这一条同时否掉了「Init 里取了值快照」的实现方式。
+	f.setConfigValue(t, "sys.agent.reportInterval", "5")
+	got5 := queryTrendResolution(t, deps.Device.DeviceHdl, noSuchDevice, 3600)
+	if got5.ResolutionSeconds != 5 {
+		t.Fatalf("配置热更为 5 后 resolution_seconds = %d, want 5（栅格必须每次读配置）",
+			got5.ResolutionSeconds)
+	}
+
+	// DB 两档由表结构决定，**不受** reportInterval 影响：冷层一行就是 5min/1h 一行，
+	// 把配置值渗进 DB 档会把冷层的真实栅格也报错。
+	for _, c := range []struct {
+		rangeSec int64
+		table    string
+		want     int64
+	}{
+		{604800, entity.TableNameMetric5m, 300}, // 7d → 5min 档
+		{2592001, entity.TableNameMetric1h, 3600},
+	} {
+		gotDB := queryTrendResolution(t, deps.Device.DeviceHdl, noSuchDevice, c.rangeSec)
+		if gotDB.Source != "db" || gotDB.ResolutionSeconds != c.want {
+			t.Fatalf("range=%d（%s）→ source=%q resolution=%d, want db/%d（DB 档不受 policy 影响）",
+				c.rangeSec, c.table, gotDB.Source, gotDB.ResolutionSeconds, c.want)
+		}
+	}
+}
+
+// setConfigValue 改一个已种下的配置值（DB 是真相源），并清掉 Redis 里的读前置缓存。
+//
+// 为什么必须清缓存：ConfigService.getByKey 先 HGET 再回落 DB，只改 DB 不清缓存
+// 会让断言读到旧值 —— 那会让「栅格跟着配置走」这条断言在改配置后变成永真的假绿。
+func (f *initFixture) setConfigValue(t *testing.T, key, value string) {
+	t.Helper()
+	if err := f.db.Model(&entity.SysConfig{}).Where("config_key = ?", key).
+		Update("config_value", value).Error; err != nil {
+		t.Fatalf("update config %s: %v", key, err)
+	}
+	if err := f.rdb.HDel(context.Background(), service.ConfigHashKey, key).Err(); err != nil {
+		t.Fatalf("drop cached config %s: %v", key, err)
+	}
+}
+
+// queryTrendResolution 直接调真实 DeviceHandler 的趋势分支并解出响应体。
+//
+// 为什么不经过 HTTP 路由：本断言只问「装配进去的 policy 有没有被查询服务消费」，
+// 而 /devices/:id/metrics 还挂着 JWT + 权限码中间件（那是另一件事，已由既有断言
+// 覆盖）。直接调 handler 走的仍是生产同一条 handler → service → rawStore 路径，
+// 只有中间件被绕过。
+func queryTrendResolution(t *testing.T, hdl *handler.DeviceHandler, deviceID uint64, rangeSec int64) response.DeviceMetricsResp {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet,
+		"/api/v1/devices/"+strconv.FormatUint(deviceID, 10)+"/metrics?range="+strconv.FormatInt(rangeSec, 10), nil)
+	c.Params = gin.Params{{Key: "id", Value: strconv.FormatUint(deviceID, 10)}}
+
+	hdl.Metrics(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("range=%d 趋势查询 HTTP %d: %s", rangeSec, rec.Code, rec.Body.String())
+	}
+	var env struct {
+		Code int                        `json:"code"`
+		Msg  string                     `json:"msg"`
+		Data response.DeviceMetricsResp `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("解析响应体失败: %v（body=%s）", err, rec.Body.String())
+	}
+	if env.Code != 0 {
+		t.Fatalf("range=%d 趋势查询业务码 = %d（%s）", rangeSec, env.Code, env.Msg)
+	}
+	return env.Data
 }
