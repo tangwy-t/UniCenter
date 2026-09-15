@@ -20,14 +20,16 @@ func TestSeedPermsMatchPermissionRegistry(t *testing.T) {
 	}
 
 	used := make(map[string]int)
-	for _, m := range menuDefinitions {
-		if m.Perms == "" {
-			continue
+	for _, batch := range menuDefBatches {
+		for _, m := range batch {
+			if m.Perms == "" {
+				continue
+			}
+			if !allowed[m.Perms] {
+				t.Errorf("seed Perms %q 未注册进 permission.All():需定义常量并加入 All()", m.Perms)
+			}
+			used[m.Perms]++
 		}
-		if !allowed[m.Perms] {
-			t.Errorf("seed Perms %q 未注册进 permission.All():需定义常量并加入 All()", m.Perms)
-		}
-		used[m.Perms]++
 	}
 
 	for _, code := range permission.All() {

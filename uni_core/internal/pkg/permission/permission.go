@@ -14,6 +14,13 @@ package permission
 // 守卫暴露的唯一枚举;新增常量后若忘记加入本切片,测试会失败。
 func All() []string {
 	return []string{
+		// ── 设备管理 / device:*（非 system: 前缀域，值序上排在 system: 之前）──
+		PermDeviceDelete,
+		PermDeviceDisable,
+		PermDeviceEnable,
+		PermDeviceList,
+		PermDeviceQuery,
+
 		PermCacheDelete,
 		PermCacheList,
 		PermCacheQuery,
@@ -96,6 +103,15 @@ func All() []string {
 		PermUserUnlock,
 	}
 }
+
+// ── 设备管理 / device:* ─────────────────────────────────────────────────
+const (
+	PermDeviceList    = "device:list"
+	PermDeviceQuery   = "device:query"
+	PermDeviceDelete  = "device:delete"
+	PermDeviceEnable  = "device:enable"
+	PermDeviceDisable = "device:disable"
+)
 
 // ── 缓存管理 / system:cache:* ────────────────────────────────────────────
 const (
