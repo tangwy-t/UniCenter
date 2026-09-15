@@ -78,6 +78,15 @@ func NewAgentWSHandler(hub AgentConnRegistrar, deps agenthub.Deps, log logger.Lo
 
 // Serve 升级连接并把它交给单连接状态机。
 //
+// @Summary      agent 上报通道(WebSocket 升级)
+// @Description  未鉴权端点：升级握手阶段不做任何校验，凭据是首帧 agent.hello 里的 enroll/agent token。
+// @Description  升级后的动作/上报/心跳全部走帧协议(agent.report.metrics、agent.heartbeat、agent.resource.*)，不体现在 HTTP 层。
+// @Tags         设备监控
+// @Success      101  "握手成功，协议切换到 WebSocket"
+// @Failure      400  "非 WebSocket 升级请求(缺少 Upgrade 头)"
+// @Failure      403  "Origin 被 CheckOrigin 拒绝(真跨站请求)"
+// @Router       /agent/ws [get]
+//
 // 生命周期（每一步都不可省）：
 //  1. Upgrade —— 失败即返回：gorilla 已经把 HTTP 错误响应写进 c.Writer，
 //     这里再写一次会把状态码覆盖成 200（且 header 已发出，写不进去）。

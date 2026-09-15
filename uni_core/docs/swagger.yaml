@@ -35,80 +35,6 @@ definitions:
       captchaKey:
         type: string
     type: object
-  database.DimSnapshot:
-    properties:
-      avg_ms:
-        type: number
-      count:
-        type: integer
-      max_ms:
-        type: number
-      min_ms:
-        type: number
-      p50_ms:
-        type: number
-      p95_ms:
-        type: number
-      p99_ms:
-        type: number
-    type: object
-  database.GlobalSnapshot:
-    properties:
-      avg_ms:
-        type: number
-      count:
-        type: integer
-      error_count:
-        type: integer
-      max_ms:
-        type: number
-      min_ms:
-        type: number
-      p50_ms:
-        type: number
-      p95_ms:
-        type: number
-      p99_ms:
-        type: number
-      slow_count:
-        type: integer
-      slow_threshold_ms:
-        type: integer
-    type: object
-  database.QueryEntry:
-    properties:
-      duration_ms:
-        type: number
-      is_error:
-        type: boolean
-      is_slow:
-        type: boolean
-      operation:
-        type: string
-      sql:
-        type: string
-      table:
-        type: string
-      timestamp:
-        type: string
-    type: object
-  database.StatsSnapshot:
-    properties:
-      by_operation:
-        additionalProperties:
-          $ref: '#/definitions/database.DimSnapshot'
-        type: object
-      by_table:
-        additionalProperties:
-          $ref: '#/definitions/database.DimSnapshot'
-        type: object
-      global:
-        $ref: '#/definitions/database.GlobalSnapshot'
-      slow_queries:
-        items:
-          $ref: '#/definitions/database.QueryEntry'
-        type: array
-    type: object
   request.AssignRolesReq:
     properties:
       roleIds:
@@ -340,6 +266,10 @@ definitions:
         type: integer
       email:
         type: string
+      gender:
+        type: string
+      nickname:
+        type: string
       password:
         maxLength: 64
         minLength: 6
@@ -383,6 +313,13 @@ definitions:
         type: integer
     required:
     - id
+    type: object
+  request.KickSessionReq:
+    properties:
+      uid:
+        type: integer
+    required:
+    - uid
     type: object
   request.LoginReq:
     properties:
@@ -655,6 +592,11 @@ definitions:
     properties:
       email:
         type: string
+      gender:
+        type: string
+      nickname:
+        maxLength: 64
+        type: string
       phone:
         maxLength: 20
         minLength: 7
@@ -718,6 +660,10 @@ definitions:
       deptId:
         type: integer
       email:
+        type: string
+      gender:
+        type: string
+      nickname:
         type: string
       phone:
         maxLength: 20
@@ -848,6 +794,202 @@ definitions:
       status:
         type: integer
     type: object
+  response.DeviceMetricPoint:
+    properties:
+      cpu_iowait:
+        type: number
+      cpu_used_percent:
+        type: number
+      disk_io_read_bytes_sec:
+        type: number
+      disk_io_write_bytes_sec:
+        type: number
+      disk_total_gb:
+        type: number
+      disk_used_gb:
+        type: number
+      disk_used_percent:
+        type: number
+      load1:
+        type: number
+      load5:
+        type: number
+      load15:
+        type: number
+      max_temperature_c:
+        type: number
+      mem_available_mb:
+        type: number
+      mem_used_mb:
+        type: number
+      mem_used_percent:
+        type: number
+      nic_rx_bytes_sec:
+        type: number
+      nic_tx_bytes_sec:
+        type: number
+      proc_count:
+        type: integer
+      samples:
+        type: integer
+      swap_used_mb:
+        type: number
+      swap_used_percent:
+        type: number
+      t:
+        description: 桶起始 unix 秒
+        type: integer
+      tcp_established:
+        type: integer
+      tcp_listen:
+        type: integer
+      tcp_total:
+        type: integer
+      uptime_sec:
+        type: integer
+    type: object
+  response.DeviceMetricsResp:
+    properties:
+      available_metrics:
+        description: |-
+          AvailableMetrics 是本响应的**可用列集**：用于区分「该列未采集（值为空）」
+          与「该档位不产该列（列不存在）」。半年视图上的 agent_* / tcp_time_wait
+          属于后者，前端应据此显示「该档位无此指标」而不是「—」。
+
+          取值 = **该表的值列 ∩ agentmetrics.TrendPoint 实际承接的列**（再按档位
+          减去 5min-only 列）。为什么不直接给「该表全部列」：表里有约 20 列
+          （tcp_time_wait / udp_total / *_ops_sec / agent_* …）没有任何响应字段去装，
+          把它们声明成「可用」会让消费方继续误读成「agent 挂了」—— 那正是
+          available_metrics 要消除的误读。
+        items:
+          type: string
+        type: array
+      buckets:
+        description: Buckets 稀疏：空桶**不产行**（§7.1），t 有洞；只能用 t 定位，禁止按下标推算。
+        items:
+          $ref: '#/definitions/response.DeviceMetricPoint'
+        type: array
+      range_seconds:
+        description: RangeSeconds 是实际窗口（秒）。前端按它决定轴刻度与 tooltip 粒度。
+        type: integer
+      resolution_seconds:
+        description: |-
+          ResolutionSeconds 是**实际生效**的桶宽（可能因 4000 上限被升档，如 30/900/7200）。
+          前端只信本字段，不得按「1h/24h/7d…」按钮名猜粒度。
+        type: integer
+      source:
+        description: Source 是数据源（redis / db），仅供调试与观测，业务不依赖。
+        type: string
+    type: object
+  response.DeviceResourceItem:
+    properties:
+      kind:
+        type: string
+      lastSeenAt:
+        description: LastSeenAt 是最近一次被观测到的时间（unix 秒）；Stale 为 true 时前端应标注「已消失」。
+        type: integer
+      name:
+        type: string
+      stale:
+        type: boolean
+    type: object
+  response.DeviceResourcePoint:
+    properties:
+      samples:
+        description: |-
+          Samples 是命中该资源的样本数（热层档 = 该桶内出现该资源的样本条数；
+          子表**没有** samples 列，DB 档恒为 0 —— 完整度信号只在整机宽表上）。
+        type: integer
+      t:
+        type: integer
+      values:
+        additionalProperties:
+          format: float64
+          type: number
+        type: object
+    type: object
+  response.DeviceResourceResp:
+    properties:
+      available_metrics:
+        description: |-
+          AvailableMetrics 是**这次响应真实的列集**（= 子表的列，或按 metrics 过滤后的子集）。
+          它不含 bucket_ts：桶时间走 `t`，不是 values 里的一个键。
+        items:
+          type: string
+        type: array
+      buckets:
+        items:
+          $ref: '#/definitions/response.DeviceResourcePoint'
+        type: array
+      name:
+        description: 挂载点 / 设备名 / 网卡名 / 传感器名
+        type: string
+      range_seconds:
+        type: integer
+      resolution_seconds:
+        type: integer
+      resource_kind:
+        description: disk|disk_io|nic|sensor
+        type: string
+      source:
+        type: string
+    type: object
+  response.DeviceResourcesResp:
+    properties:
+      list:
+        items:
+          $ref: '#/definitions/response.DeviceResourceItem'
+        type: array
+    type: object
+  response.DeviceResp:
+    properties:
+      agentVersion:
+        type: string
+      arch:
+        type: string
+      bootTime:
+        type: integer
+      cpuCores:
+        type: integer
+      cpuModel:
+        type: string
+      cpuUsedPercent:
+        description: 以下来自 Redis latest（缺值省略 → 前端显示「—」）
+        type: number
+      createdAt:
+        description: unix 秒
+        type: integer
+      diskUsedPercent:
+        type: number
+      hostname:
+        type: string
+      id:
+        example: "0"
+        type: string
+      kernel:
+        type: string
+      lastSeenAt:
+        description: unix 秒
+        type: integer
+      memTotalMb:
+        type: number
+      memUsedPercent:
+        type: number
+      online:
+        description: Online 由 last_seen_at 与 sys.agent.offlineThreshold 推导（不落库）。
+        type: boolean
+      os:
+        type: string
+      platform:
+        type: string
+      platformVer:
+        type: string
+      status:
+        type: integer
+      watermarkAt:
+        description: WatermarkAt 是水位采样时刻（unix 秒）。
+        type: integer
+    type: object
   response.DictDataResp:
     properties:
       createdAt:
@@ -936,11 +1078,6 @@ definitions:
         example: "0"
         type: string
       mimeType:
-        type: string
-      module:
-        type: string
-      moduleId:
-        example: "0"
         type: string
       name:
         type: string
@@ -1369,6 +1506,46 @@ definitions:
       status:
         type: integer
     type: object
+  response.SQLDimStats:
+    properties:
+      avg_ms:
+        type: number
+      count:
+        type: integer
+      max_ms:
+        type: number
+      min_ms:
+        type: number
+      p50_ms:
+        type: number
+      p95_ms:
+        type: number
+      p99_ms:
+        type: number
+    type: object
+  response.SQLGlobalStats:
+    properties:
+      avg_ms:
+        type: number
+      count:
+        type: integer
+      error_count:
+        type: integer
+      max_ms:
+        type: number
+      min_ms:
+        type: number
+      p50_ms:
+        type: number
+      p95_ms:
+        type: number
+      p99_ms:
+        type: number
+      slow_count:
+        type: integer
+      slow_threshold_ms:
+        type: integer
+    type: object
   response.SQLHistoryPoint:
     properties:
       avg_ms:
@@ -1406,6 +1583,40 @@ definitions:
         type: integer
       window_seconds:
         type: integer
+    type: object
+  response.SQLQueryEntry:
+    properties:
+      duration_ms:
+        type: number
+      is_error:
+        type: boolean
+      is_slow:
+        type: boolean
+      operation:
+        type: string
+      sql:
+        type: string
+      table:
+        type: string
+      timestamp:
+        type: string
+    type: object
+  response.SQLStatsSnapshot:
+    properties:
+      by_operation:
+        additionalProperties:
+          $ref: '#/definitions/response.SQLDimStats'
+        type: object
+      by_table:
+        additionalProperties:
+          $ref: '#/definitions/response.SQLDimStats'
+        type: object
+      global:
+        $ref: '#/definitions/response.SQLGlobalStats'
+      slow_queries:
+        items:
+          $ref: '#/definitions/response.SQLQueryEntry'
+        type: array
     type: object
   response.ServerHistoryPoint:
     properties:
@@ -1519,8 +1730,14 @@ definitions:
         type: string
       email:
         type: string
+      gender:
+        type: string
       id:
         example: "0"
+        type: string
+      mustChangePassword:
+        type: boolean
+      nickname:
         type: string
       permissions:
         items:
@@ -1588,10 +1805,14 @@ definitions:
         type: string
       email:
         type: string
+      gender:
+        type: string
       id:
         example: "0"
         type: string
       lastLoginTime:
+        type: string
+      nickname:
         type: string
       phone:
         type: string
@@ -1624,6 +1845,21 @@ info:
   title: RBAC Admin API
   version: 1.0.0
 paths:
+  /agent/ws:
+    get:
+      description: |-
+        未鉴权端点：升级握手阶段不做任何校验，凭据是首帧 agent.hello 里的 enroll/agent token。
+        升级后的动作/上报/心跳全部走帧协议(agent.report.metrics、agent.heartbeat、agent.resource.*)，不体现在 HTTP 层。
+      responses:
+        "101":
+          description: 握手成功，协议切换到 WebSocket
+        "400":
+          description: 非 WebSocket 升级请求(缺少 Upgrade 头)
+        "403":
+          description: Origin 被 CheckOrigin 拒绝(真跨站请求)
+      summary: agent 上报通道(WebSocket 升级)
+      tags:
+      - 设备监控
   /captcha/generate:
     post:
       consumes:
@@ -2135,6 +2371,312 @@ paths:
       summary: 保存排序
       tags:
       - 部门管理
+  /devices:
+    get:
+      consumes:
+      - application/json
+      description: 分页查询设备列表，支持按主机名、启停态、在线状态筛选；每行附带 Redis 水位
+      parameters:
+      - default: 1
+        description: 页码
+        in: query
+        name: page
+        type: integer
+      - default: 10
+        description: 每页条数
+        in: query
+        name: pageSize
+        type: integer
+      - description: 主机名(模糊查询)
+        in: query
+        name: hostname
+        type: string
+      - description: 启停态(0=停用 1=启用)
+        in: query
+        name: status
+        type: integer
+      - description: 在线状态(true=在线 false=离线)
+        in: query
+        name: online
+        type: boolean
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 查询成功
+          schema:
+            allOf:
+            - $ref: '#/definitions/app.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/app.PageResponse'
+              type: object
+        "401":
+          description: 未登录
+          schema:
+            $ref: '#/definitions/app.Response'
+        "403":
+          description: 无权限
+          schema:
+            $ref: '#/definitions/app.Response'
+      security:
+      - BearerAuth: []
+      summary: 设备列表
+      tags:
+      - 设备监控
+  /devices/{id}:
+    delete:
+      consumes:
+      - application/json
+      description: 软删设备，并连带清理 Redis 原始窗/水位键/资源维度行与子表行（spec §7.3）
+      parameters:
+      - description: 设备ID
+        format: int64
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 删除成功
+          schema:
+            $ref: '#/definitions/app.Response'
+        "401":
+          description: 未登录
+          schema:
+            $ref: '#/definitions/app.Response'
+        "403":
+          description: 无权限
+          schema:
+            $ref: '#/definitions/app.Response'
+        "404":
+          description: 设备不存在
+          schema:
+            $ref: '#/definitions/app.Response'
+      security:
+      - BearerAuth: []
+      summary: 删除设备
+      tags:
+      - 设备监控
+    get:
+      consumes:
+      - application/json
+      description: 按设备 ID 查询详情（含 Redis 最新水位与在线状态）
+      parameters:
+      - description: 设备ID
+        format: int64
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 查询成功
+          schema:
+            allOf:
+            - $ref: '#/definitions/app.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/response.DeviceResp'
+              type: object
+        "401":
+          description: 未登录
+          schema:
+            $ref: '#/definitions/app.Response'
+        "403":
+          description: 无权限
+          schema:
+            $ref: '#/definitions/app.Response'
+        "404":
+          description: 设备不存在
+          schema:
+            $ref: '#/definitions/app.Response'
+      security:
+      - BearerAuth: []
+      summary: 设备详情
+      tags:
+      - 设备监控
+  /devices/{id}/disable:
+    post:
+      consumes:
+      - application/json
+      description: 把设备的启停态置为停用(0)；停用后 agent 上报不再被接受，且重新 enroll 不会自动启用
+      parameters:
+      - description: 设备ID
+        format: int64
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 停用成功
+          schema:
+            $ref: '#/definitions/app.Response'
+        "401":
+          description: 未登录
+          schema:
+            $ref: '#/definitions/app.Response'
+        "403":
+          description: 无权限
+          schema:
+            $ref: '#/definitions/app.Response'
+        "404":
+          description: 设备不存在
+          schema:
+            $ref: '#/definitions/app.Response'
+      security:
+      - BearerAuth: []
+      summary: 停用设备
+      tags:
+      - 设备监控
+  /devices/{id}/enable:
+    post:
+      consumes:
+      - application/json
+      description: 把设备的启停态置为启用(1)；与在线状态正交
+      parameters:
+      - description: 设备ID
+        format: int64
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 启用成功
+          schema:
+            $ref: '#/definitions/app.Response'
+        "401":
+          description: 未登录
+          schema:
+            $ref: '#/definitions/app.Response'
+        "403":
+          description: 无权限
+          schema:
+            $ref: '#/definitions/app.Response'
+        "404":
+          description: 设备不存在
+          schema:
+            $ref: '#/definitions/app.Response'
+      security:
+      - BearerAuth: []
+      summary: 启用设备
+      tags:
+      - 设备监控
+  /devices/{id}/metrics:
+    get:
+      consumes:
+      - application/json
+      description: |-
+        整机趋势：range 选档（≤24h Redis 原始 / ≤30d 5min 表 / >30d 1h 表），metrics 为逗号白名单（* 表示该档全部可用列）
+        资源下钻：kind+name 成对出现（kind ∈ disk/disk_io/nic/sensor，name 为挂载点/设备名/网卡名/传感器名）
+      parameters:
+      - description: 设备ID
+        format: int64
+        in: path
+        name: id
+        required: true
+        type: integer
+      - default: 86400
+        description: 时间窗口(秒)
+        in: query
+        name: range
+        type: integer
+      - description: 逗号分隔的指标列白名单，* 表示该档全部可用列
+        in: query
+        name: metrics
+        type: string
+      - description: 资源种类(disk/disk_io/nic/sensor)，与 name 成对
+        in: query
+        name: kind
+        type: string
+      - description: 资源名(挂载点/设备名/网卡名/传感器名)，与 kind 成对
+        in: query
+        name: name
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 资源下钻
+          schema:
+            allOf:
+            - $ref: '#/definitions/app.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/response.DeviceResourceResp'
+              type: object
+        "400":
+          description: 参数错误(range 越界 / kind+name 不配对 / 列不在该档可用列集)
+          schema:
+            $ref: '#/definitions/app.Response'
+        "401":
+          description: 未登录
+          schema:
+            $ref: '#/definitions/app.Response'
+        "403":
+          description: 无权限
+          schema:
+            $ref: '#/definitions/app.Response'
+      security:
+      - BearerAuth: []
+      summary: 设备指标趋势 / 资源下钻
+      tags:
+      - 设备监控
+  /devices/{id}/resources:
+    get:
+      consumes:
+      - application/json
+      description: 枚举该设备的资源（drill 下拉数据源），含 last_seen_at 与 stale（超过 90 天未出现不再枚举）
+      parameters:
+      - description: 设备ID
+        format: int64
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: 资源种类(disk/disk_io/nic/sensor)，空表示全部
+        in: query
+        name: kind
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 查询成功
+          schema:
+            allOf:
+            - $ref: '#/definitions/app.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/response.DeviceResourcesResp'
+              type: object
+        "401":
+          description: 未登录
+          schema:
+            $ref: '#/definitions/app.Response'
+        "403":
+          description: 无权限
+          schema:
+            $ref: '#/definitions/app.Response'
+        "404":
+          description: 设备不存在
+          schema:
+            $ref: '#/definitions/app.Response'
+      security:
+      - BearerAuth: []
+      summary: 设备资源清单
+      tags:
+      - 设备监控
   /dict/codes:
     get:
       consumes:
@@ -3983,6 +4525,86 @@ paths:
       summary: 缓存统计
       tags:
       - 缓存管理
+  /monitor/online:
+    get:
+      consumes:
+      - application/json
+      description: 聚合当前在线会话(按用户+设备),支持关键字过滤与分页,受 DataScope 约束
+      parameters:
+      - in: query
+        name: keyword
+        type: string
+      - in: query
+        maximum: 10000
+        minimum: 1
+        name: page
+        type: integer
+      - in: query
+        maximum: 100
+        minimum: 1
+        name: pageSize
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 查询成功
+          schema:
+            allOf:
+            - $ref: '#/definitions/app.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/app.PageResponse'
+              type: object
+        "500":
+          description: 服务内部错误
+          schema:
+            $ref: '#/definitions/app.Response'
+      security:
+      - BearerAuth: []
+      summary: 在线用户列表
+      tags:
+      - 在线用户
+  /monitor/online/kick:
+    post:
+      consumes:
+      - application/json
+      description: 强制下线一个在线会话(吊销其访问令牌并注销刷新令牌,禁止踢当前会话)
+      parameters:
+      - description: 下线参数
+        in: body
+        name: req
+        required: true
+        schema:
+          $ref: '#/definitions/request.KickSessionReq'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 下线成功
+          schema:
+            $ref: '#/definitions/app.Response'
+        "400":
+          description: 参数错误/不能下线当前会话
+          schema:
+            $ref: '#/definitions/app.Response'
+        "403":
+          description: 无权操作该用户会话
+          schema:
+            $ref: '#/definitions/app.Response'
+        "404":
+          description: 会话不存在或已下线
+          schema:
+            $ref: '#/definitions/app.Response'
+        "500":
+          description: 服务内部错误
+          schema:
+            $ref: '#/definitions/app.Response'
+      security:
+      - BearerAuth: []
+      summary: 强制下线
+      tags:
+      - 在线用户
   /monitor/pprof/disable:
     post:
       consumes:
@@ -4260,7 +4882,7 @@ paths:
             - $ref: '#/definitions/app.Response'
             - properties:
                 data:
-                  $ref: '#/definitions/database.StatsSnapshot'
+                  $ref: '#/definitions/response.SQLStatsSnapshot'
               type: object
         "400":
           description: window 格式无效
