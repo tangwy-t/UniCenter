@@ -130,3 +130,108 @@ type RawOptions struct {
 	// QueryTTL 是查询结果缓存 TTL；<=0 时取 metricshistory 默认 1s。
 	QueryTTL time.Duration
 }
+
+// Wide 是宽表一行的**纯数据形状**（不含 GORM 语义）。
+//
+// **json tag 必须与 entity.DeviceMetricWide 逐字一致** —— 两级保障：
+//  1. device_metric_convert_test.go 的 TestWideAndEntityFieldsMirror 守卫「字段名/类型逐一对应」；
+//  2. TestEntityFromWideRoundTrip 把**每一个字段都设成互不相同的非零值**做 JSON 往返，
+//     任何 tag 拼写错误都会让该字段在往返中丢失，被 DeepEqual 抓住。
+//     （只设部分字段的往返测试抓不到 tag 错误，故那条测试必须覆盖全字段。）
+type Wide struct {
+	DeviceID uint64 `json:"deviceId,string"`
+	BucketTS int64  `json:"bucketTs"`
+
+	CPUUsedPercent  *float64 `json:"cpuUsedPercent,omitempty"`
+	CPUIOWait       *float64 `json:"cpuIowait,omitempty"`
+	Load1           *float64 `json:"load1,omitempty"`
+	Load5           *float64 `json:"load5,omitempty"`
+	Load15          *float64 `json:"load15,omitempty"`
+	MemUsedPercent  *float64 `json:"memUsedPercent,omitempty"`
+	MemUsedMB       *float64 `json:"memUsedMb,omitempty"`
+	MemAvailableMB  *float64 `json:"memAvailableMb,omitempty"`
+	SwapUsedPercent *float64 `json:"swapUsedPercent,omitempty"`
+	SwapUsedMB      *float64 `json:"swapUsedMb,omitempty"`
+
+	TCPTotal       *int64 `json:"tcpTotal,omitempty"`
+	TCPEstablished *int64 `json:"tcpEstablished,omitempty"`
+	TCPListen      *int64 `json:"tcpListen,omitempty"`
+	TCPTimeWait    *int64 `json:"tcpTimeWait,omitempty"`
+	TCPCloseWait   *int64 `json:"tcpCloseWait,omitempty"`
+	UDPTotal       *int64 `json:"udpTotal,omitempty"`
+	ProcCount      *int64 `json:"procCount,omitempty"`
+	UptimeSec      *int64 `json:"uptimeSec,omitempty"`
+
+	Samples int `json:"samples"`
+
+	DiskTotalGB         *float64 `json:"diskTotalGb,omitempty"`
+	DiskUsedGB          *float64 `json:"diskUsedGb,omitempty"`
+	DiskUsedPercent     *float64 `json:"diskUsedPercent,omitempty"`
+	DiskIOReadBytesSec  *float64 `json:"diskIoReadBytesSec,omitempty"`
+	DiskIOWriteBytesSec *float64 `json:"diskIoWriteBytesSec,omitempty"`
+	DiskIOReadOpsSec    *float64 `json:"diskIoReadOpsSec,omitempty"`
+	DiskIOWriteOpsSec   *float64 `json:"diskIoWriteOpsSec,omitempty"`
+	NICRXBytesSec       *float64 `json:"nicRxBytesSec,omitempty"`
+	NICTXBytesSec       *float64 `json:"nicTxBytesSec,omitempty"`
+	NICRXPacketsSec     *float64 `json:"nicRxPacketsSec,omitempty"`
+	NICTXPacketsSec     *float64 `json:"nicTxPacketsSec,omitempty"`
+	NICRXErrorsSec      *float64 `json:"nicRxErrorsSec,omitempty"`
+	NICTXErrorsSec      *float64 `json:"nicTxErrorsSec,omitempty"`
+	NICRXDroppedSec     *float64 `json:"nicRxDroppedSec,omitempty"`
+	MaxTemperatureC     *float64 `json:"maxTemperatureC,omitempty"`
+
+	AgentCollectDurationMs   *float64 `json:"agentCollectDurationMs,omitempty"`
+	AgentReportSuccessCount  *int64   `json:"agentReportSuccessCount,omitempty"`
+	AgentReportErrorCount    *int64   `json:"agentReportErrorCount,omitempty"`
+	AgentWSReconnectCount    *int64   `json:"agentWsReconnectCount,omitempty"`
+	AgentLastReportError     *string  `json:"agentLastReportError,omitempty"`
+	AgentMemResidentMB       *float64 `json:"agentMemResidentMb,omitempty"`
+	AgentPendingBacklog      *int64   `json:"agentPendingBacklog,omitempty"`
+	AgentLastReportLatencyMs *float64 `json:"agentLastReportLatencyMs,omitempty"`
+	AgentReportDropCount     *int64   `json:"agentReportDropCount,omitempty"`
+	AgentUptimeSec           *int64   `json:"agentUptimeSec,omitempty"`
+}
+
+// 资源明细行按 **name** 键（挂载点 / 磁盘设备名 / 网卡名 / 传感器名）——
+// 纯逻辑层不认识 resource_id，name→id 的解析由写路径（2C 的 flush）负责。
+type SubRowDisk struct {
+	Name              string
+	FSType            string
+	UsedPercent       *float64
+	UsedGB            *float64
+	TotalGB           *float64
+	InodesUsedPercent *float64
+}
+
+type SubRowDiskIO struct {
+	Name             string
+	ReadBytesPerSec  *float64
+	WriteBytesPerSec *float64
+	ReadOpsPerSec    *float64
+	WriteOpsPerSec   *float64
+	IOTimePercent    *float64
+}
+
+type SubRowNIC struct {
+	Name            string
+	RXBytesPerSec   *float64
+	TXBytesPerSec   *float64
+	RXPacketsPerSec *float64
+	TXPacketsPerSec *float64
+	RXErrorsPerSec  *float64
+	TXErrorsPerSec  *float64
+	RXDroppedPerSec *float64
+}
+
+type SubRowSensor struct {
+	Name         string
+	TemperatureC *float64
+}
+
+// Subs 是 4 张子表的待写行（按 name 键）。
+type Subs struct {
+	Disks   []SubRowDisk
+	DiskIO  []SubRowDiskIO
+	NICs    []SubRowNIC
+	Sensors []SubRowSensor
+}
