@@ -688,3 +688,68 @@ func TestReadResourceRowsAndCountWide(t *testing.T) {
 		t.Fatalf("CountWide = %d, want 1", n)
 	}
 }
+
+// TestReadWideRows 覆盖 1h 回滚的读取入口：闭区间、按 bucket_ts 升序、
+// 设备隔离、未知宽表名硬失败。
+//
+// 为什么必须钉住「升序」：rollup 的加权回滚按行序消费（uptime 取 LAST 依赖
+// 「最后一行」，1h 的 samples 完整性判定也按序累加），乱序会让 LAST/完整性
+// 悄悄取到中间某一行 —— 不报错、数值只是「有点不对」。
+func TestReadWideRows(t *testing.T) {
+	db := newMetricTestDB(t)
+	repo := NewDeviceMetricRepository(db)
+	ctx := context.Background()
+
+	// 刻意乱序写入，让「升序」来自 ORDER BY 而不是写入顺序。
+	for _, ts := range []int64{1300, 1000, 1600} {
+		if err := repo.WriteBucket(ctx, sampleWide(ts, float64(ts)/100), MetricSubRows{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 另一台设备同区间：不得串进来
+	other := &entity.DeviceMetricWide{DeviceID: 2002, BucketTS: 1000, Samples: 1}
+	if err := repo.WriteBucket(ctx, other, MetricSubRows{}); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := repo.ReadWideRows(ctx, entity.TableNameMetric5m, 1001, 1000, 1600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("宽行数 = %d, want 3（且不得串到 2002）", len(rows))
+	}
+	for i, want := range []int64{1000, 1300, 1600} {
+		if rows[i].BucketTS != want {
+			t.Fatalf("rows[%d].bucket_ts = %d, want %d（必须按 bucket_ts 升序）", i, rows[i].BucketTS, want)
+		}
+		if rows[i].DeviceID != 1001 {
+			t.Fatalf("rows[%d].device_id = %d, want 1001", i, rows[i].DeviceID)
+		}
+	}
+	if rows[0].CPUUsedPercent == nil || *rows[0].CPUUsedPercent != 10 {
+		t.Fatalf("值列未读回: cpu_used_percent = %v, want 10", rows[0].CPUUsedPercent)
+	}
+
+	// 闭区间：端点必须含在内（回滚一整小时要拿到 12 行 5m 行的首尾）
+	edge, err := repo.ReadWideRows(ctx, entity.TableNameMetric5m, 1001, 1300, 1300)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(edge) != 1 {
+		t.Fatalf("单点区间 [1300,1300] 行数 = %d, want 1（闭区间）", len(edge))
+	}
+
+	// 1h 表同样可读（同一结构两处表名，必须靠显式表名切换）
+	if _, err := repo.ReadWideRows(ctx, entity.TableNameMetric1h, 1001, 0, 9999); err != nil {
+		t.Fatalf("读 _1h 失败: %v", err)
+	}
+
+	// 未登记的宽表名硬失败：静默返回空切片会被上游当成「该小时没有数据」
+	if _, err := repo.ReadWideRows(ctx, entity.TableNameMetricDisk, 1001, 0, 9999); err == nil {
+		t.Fatal("明细子表名必须被拒绝（ReadWideRows 只读两张宽表）")
+	}
+	if _, err := repo.ReadWideRows(ctx, "device_metric_5m_typo", 1001, 0, 9999); err == nil {
+		t.Fatal("未知表名必须硬失败，不得静默返回空")
+	}
+}

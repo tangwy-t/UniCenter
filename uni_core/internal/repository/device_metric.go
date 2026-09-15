@@ -269,6 +269,43 @@ func (r *DeviceMetricRepo) ReadResourceRows(ctx context.Context, table string, r
 	return out, nil
 }
 
+// ReadWideRows 读回宽表行（1h 回滚的输入），按 bucket_ts 升序。
+//
+// 为什么放在仓储而不是让 service 自己查库：`internal/repository` 是**唯一**对
+// 6 张指标表执行 DML/查询的地方（见 DeviceMetricRepo 的包注释），service 直接查库会让
+// 「表名 → 结构体 → 列名」这层映射在 service 里长出第二份拷贝。
+//
+// 为什么返回 []entity.DeviceMetricWide 而不是 []agentmetrics.Wide：与 ReadTrendPoints
+// 一样，查询结果先落到 GORM 实体（列名 → 字段由 GORM 负责），互转交给
+// WideFromEntity —— 直接扫进 agentmetrics.Wide 会绕过 device_metric_convert_test.go
+// 里那条「字段与 json tag 逐一镜像」的守卫，字段漂移就变成静默丢值。
+//
+// 区间是**闭区间** [from, to]（与 WriteBucket 的幂等键、CountWide 的语义一致）：
+// 回滚一个整小时时要拿到 [h, h+3300] 的 12 行 5m 行，端点必须含在内。
+//
+// table 必须显式给出（_5m 与 _1h 是「一套结构两处表名」，见 upsertWide 的注释）；
+// 未登记的宽表名**硬失败**，避免拼错表名后查出一片空值再被当成「该小时没有数据」。
+func (r *DeviceMetricRepo) ReadWideRows(ctx context.Context, table string, deviceID uint64,
+	from, to int64) ([]entity.DeviceMetricWide, error) {
+	if !isWideTable(table) {
+		return nil, fmt.Errorf("agentmetrics: %q 不是宽表（选表即选档，必须在 6 张表内）", table)
+	}
+	var out []entity.DeviceMetricWide
+	err := r.db.WithContext(ctx).Table(table).
+		Where("device_id = ? AND bucket_ts BETWEEN ? AND ?", deviceID, from, to).
+		Order("bucket_ts ASC").
+		Find(&out).Error
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// isWideTable 判定表名是否是两张宽表之一（_5m / _1h）。
+func isWideTable(table string) bool {
+	return table == entity.TableNameMetric5m || table == entity.TableNameMetric1h
+}
+
 // CountWide 统计某设备在某时间范围内的宽表行数（回滚时用于判断「5m 行数是否为 12」）。
 func (r *DeviceMetricRepo) CountWide(ctx context.Context, table string, deviceID uint64, from, to int64) (int64, error) {
 	var n int64
