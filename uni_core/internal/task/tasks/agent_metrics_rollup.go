@@ -1,0 +1,56 @@
+package tasks
+
+import (
+	"context"
+	"encoding/json"
+
+	"go.uber.org/zap"
+
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
+)
+
+// AgentMetricsRollupTask 把 5min 行回滚成 1h 行，并重算 repair 集合里的小时。
+//
+// 与 flush 的关系（写在这里是为了让改动任务层的人一眼看到边界）：flush 写事务 A
+// （唯一真值），本任务写事务 B（可推导数据）。1h 失败绝不能回滚 5m，故两者是
+// **两个独立任务**而不是一个任务里的两步。
+type AgentMetricsRollupTask struct {
+	svc AgentRollupService
+	log logger.LoggerInterface
+}
+
+// NewAgentMetricsRollupTask 创建任务实例（log 为 nil 时退化成 Nop）。
+func NewAgentMetricsRollupTask(svc AgentRollupService, log logger.LoggerInterface) *AgentMetricsRollupTask {
+	if log == nil {
+		log = logger.NewNop()
+	}
+	return &AgentMetricsRollupTask{svc: svc, log: log}
+}
+
+func (t *AgentMetricsRollupTask) Name() string        { return "agent-metrics-rollup" }
+func (t *AgentMetricsRollupTask) DisplayName() string { return "设备指标1h回滚" }
+
+// Execute 跑一轮回滚，忽略 invoke_params（同 flush：只有一个全量入口，
+// 半量入口会让「哪些小时算过」这件事出现第二个真相来源）。非空 params 记 Warn。
+func (t *AgentMetricsRollupTask) Execute(ctx context.Context, params json.RawMessage) error {
+	if len(params) > 0 {
+		t.log.Warn("agent-metrics-rollup: 忽略 params（回滚恒为全量一轮：普通游标区间 + repair 集合）",
+			zap.String("params", string(params)))
+	}
+
+	stats, err := t.svc.RollupOnce(ctx)
+	fields := []zap.Field{
+		zap.Int("hoursScanned", stats.HoursScanned),
+		zap.Int("hoursWritten", stats.HoursWritten),
+		zap.Int("hoursRepaired", stats.HoursRepaired),
+		zap.Int("hoursSkipped", stats.HoursSkipped),
+		zap.Int("errors", stats.Errors),
+	}
+	if err != nil {
+		t.log.Error("agent-metrics-rollup: 本轮部分失败（1h 行缺失不阻塞 5m，下轮重试）",
+			append(fields, zap.Error(err))...)
+		return err
+	}
+	t.log.Info("agent-metrics-rollup: 本轮完成", fields...)
+	return nil
+}

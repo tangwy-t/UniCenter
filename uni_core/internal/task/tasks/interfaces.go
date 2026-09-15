@@ -3,6 +3,7 @@ package tasks
 import (
 	"context"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/entity"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/service"
 	"time"
 )
 
@@ -33,4 +34,28 @@ type DeleteBeforeRepo interface {
 // ConfigProvider 配置提供者接口，用于获取配置值。
 type ConfigProvider interface {
 	GetInt(ctx context.Context, key string, defaultVal int) int
+}
+
+// AgentFlushService 是 flush（落库）与 backfill（回溯重放）两个任务共用的窄接口。
+//
+// 为什么两个任务共用一个接口：它们消费的是**同一个服务实例**的两个入口
+// （落库 / 回退水位后落库），拆成两份只会让 wireup 把同一个实例填两次。
+// 方法只列任务真正会调的三个 —— 消费方定义接口是仓库既有约定（同 DeleteBeforeRepo）。
+type AgentFlushService interface {
+	// Bootstrap 只为**缺失**的水位写起点（now−raw 保留期），不覆写已有水位。
+	Bootstrap(ctx context.Context) error
+	// FlushOnce 跑一轮全量落库（只向前推进水位）。
+	FlushOnce(ctx context.Context) (service.FlushStats, error)
+	// BackfillOnce 先把窗口内的水位回退到 now−hours，再跑一轮全量落库。
+	BackfillOnce(ctx context.Context, deviceIDs []uint64, hours int) (service.BackfillStats, error)
+}
+
+// AgentRollupService 是 rollup（5m → 1h 回滚 + repair 重算）任务的窄接口。
+type AgentRollupService interface {
+	RollupOnce(ctx context.Context) (service.RollupStats, error)
+}
+
+// AgentPartitionService 是 partition（6 张指标表的分区对账）任务的窄接口。
+type AgentPartitionService interface {
+	Reconcile(ctx context.Context) (service.PartitionStats, error)
 }

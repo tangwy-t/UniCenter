@@ -17,11 +17,17 @@ func init() {
 }
 
 // jobDef 描述一个定时任务；Startup 表示是否开机立即执行一次。
+//
+// Params 是 invoke_params 的 JSON 原文（空串 = 不写该列）。v007 的 5 个任务
+// 都不带参数，故该字段在 v007 的清单里全为空；v009 的 backfill 用它种下
+// 显式回溯窗口（`{"hours":24}`）。**v007 的 seedJob 保持原样不读它** ——
+// 那个迁移在真实库上早已执行过，改它的行为没有任何效果，只会制造两套语义。
 type jobDef struct {
 	Name    string
 	Cron    string
 	Invoke  string
 	Startup bool
+	Params  string
 }
 
 // jobDefinitions 是全部系统内置定时任务的唯一来源（历史 v005 + v008 合并）。
