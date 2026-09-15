@@ -73,6 +73,18 @@ func boundFromName(name string, g Granularity) (Bound, bool) {
 	return Bound{Name: name, Lower: start.Unix(), Upper: addPeriod(start, g, 1).Unix()}, true
 }
 
+// BoundFromName 导出 boundFromName：把确定性分区名反解为时间区间。
+//
+// 为什么需要导出（Plan 2D Task 3）：分区维护审计表（spec §7.3）要记下被回收分区的
+// `lower / upper`，而回收计划里只有**分区名**（Plan.Truncate/Drop 是名字，不是区间）。
+// 若在 service 侧另写一份名字解析，就会出现「回收判定用一份、审计留痕用另一份」的
+// 双真相 —— 两份一旦漂移，审计表记的区间就不再是当时删掉的那个区间，而审计的全部
+// 价值恰恰建立在「它记的就是当时发生的事」上。
+//
+// 语义与 boundFromName 逐字相同：往返一致（PartitionName 回写比对）才认，
+// 不认识的命名一律 ok=false（调用方**不得**为它编造区间）。
+func BoundFromName(name string, g Granularity) (Bound, bool) { return boundFromName(name, g) }
+
 // periodsFor 返回覆盖 d 至少需要多少个 g 粒度的周期。
 func periodsFor(d time.Duration, g Granularity) int {
 	if g == GranularityMonth {

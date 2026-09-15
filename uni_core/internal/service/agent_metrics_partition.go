@@ -47,6 +47,18 @@ type PartitionLocker interface {
 	Unlock(ctx context.Context, key string, owner string) error
 }
 
+// PartitionAuditor 是分区维护审计流水（spec §7.3 的 `agent_metric_partition_log`）
+// 的写入能力面。生产传 `*repository.AgentPartitionLogRepo`。
+//
+// 为什么接口上只有 `Insert`、**没有**任何事务或批量能力（它刻意不是「仓储接口的镜像」）：
+// spec §7.3 明文「ADD 与 DROP 分两次提交，永不合并」。DDL 是隐式提交语句，把审计写入
+// 包进 DDL 的事务既不可能（DDL 早已提交）、又会造成「审计失败能回滚 DDL」的错觉。
+// 接口上不给事务句柄，是为了让「审计与 DDL 共事务」这条错路在**类型层面**就不存在
+// —— 同 PartitionSchemaRepo 不给事务句柄的理由。
+type PartitionAuditor interface {
+	Insert(ctx context.Context, row *entity.AgentPartitionLog) error
+}
+
 // ── 配置与常量 ─────────────────────────────────────────
 
 const (
@@ -124,6 +136,13 @@ type PartitionStats struct {
 	// TablesScanned 等一律为 0。它不是「跳过的表数」—— 表级失败由返回的 error 表达，
 	// 一个字段兼两种读法会让两个调用方各自理解成不同的东西。
 	Skipped int
+	// AuditFailures 是本轮**审计流水写入失败**的条数（spec §7.3 的留痕没写成）。
+	//
+	// 它与「回收失败」刻意分开计：回收失败在降级方言（sqlite 等）上是**常态**
+	// （ReclaimDDL 明确拒绝生成无界 DELETE，见 reconcileTable），只记日志、不进 error；
+	// 而审计写入失败意味着「分区被改了、却没有任何留痕」，是必须被看见的故障 ——
+	// 它既计数（本字段）、又记 log.Error、还会并进返回的 ErrPartitionPartial。
+	AuditFailures int
 }
 
 // AgentMetricsPartitionService 是 6 张指标表的分区协调器：建表 → 逐表对账（补缺 + 回收）。
@@ -139,7 +158,10 @@ type AgentMetricsPartitionService struct {
 	schema PartitionSchemaRepo
 	cfg    AgentConfigGetter
 	locker PartitionLocker
-	log    logger.LoggerInterface
+	// auditor 是审计流水写入面（spec §7.3）。nil = 装配错误，按审计失败处理而不是
+	// 静默跳过（见 auditPartitionChange）。
+	auditor PartitionAuditor
+	log     logger.LoggerInterface
 	// now 可注入（测试用固定时钟：分区边界与回收判定都由它推导）。
 	now func() time.Time
 	// owner 是锁的持有者标识：Unlock 是「比对持有者再删」的语义，
@@ -149,11 +171,18 @@ type AgentMetricsPartitionService struct {
 
 // NewAgentMetricsPartitionService 装配分区协调器。
 //
-// schema 生产传 `*repository.DeviceMetricSchemaRepo`，locker 传 `*lock.RedisLocker`；
+// schema 生产传 `*repository.DeviceMetricSchemaRepo`，locker 传 `*lock.RedisLocker`，
+// auditor 传 `*repository.AgentPartitionLogRepo`（spec §7.3 的审计表写入）；
 // cfg 用于读本服务**自己的**两个超时键与两把保留期覆盖键（键缺失时一律回落默认值，
 // 故不依赖任何迁移种子）。log 只用于记录，不参与任何判断。
+//
+// auditor 是**必填**参数而不是 `WithAuditor` 那样的可选注入：漏注入的症状是
+// 「分区照常维护、审计表永远是空的」——一个不会自己冒出来的静默缺口，而它恰恰是
+// spec §7.3 用整张审计表要消灭的东西。放进构造签名，至少让漏注入在装配处可见；
+// 运行期再兜一层（nil → 记 log.Error + 计入 AuditFailures + 并进 ErrPartitionPartial）。
 func NewAgentMetricsPartitionService(schema PartitionSchemaRepo, cfg AgentConfigGetter,
-	locker PartitionLocker, log logger.LoggerInterface) *AgentMetricsPartitionService {
+	locker PartitionLocker, auditor PartitionAuditor,
+	log logger.LoggerInterface) *AgentMetricsPartitionService {
 
 	hostname, err := os.Hostname()
 	if err != nil || hostname == "" {
@@ -162,7 +191,7 @@ func NewAgentMetricsPartitionService(schema PartitionSchemaRepo, cfg AgentConfig
 		hostname = "unknown"
 	}
 	return &AgentMetricsPartitionService{
-		schema: schema, cfg: cfg, locker: locker, log: log,
+		schema: schema, cfg: cfg, locker: locker, auditor: auditor, log: log,
 		now:   time.Now,
 		owner: fmt.Sprintf("%s:%d", hostname, os.Getpid()),
 	}
@@ -262,6 +291,10 @@ func (s *AgentMetricsPartitionService) reconcileTable(ctx context.Context, spec 
 	// 保留期允许运行期覆盖（sys.agent.*）：改小保留期后，滑出窗口的老分区会在同一轮
 	// 被 PlanFrom 的 boundFromName 路径捞出来回收，不需要重启。
 	spec = s.withConfiguredRetention(spec)
+	// 保留期的**快照**：审计行记的是本轮实际用来算窗口的那个值（见下方 auditPartitionChange）。
+	// 它是「当时的保留期配置」，不是「审计写入那一刻再查一次的配置」——
+	// 两者在配置被改过之后就不同了，而后者会让审计表事后跟着配置漂移、失去归因能力。
+	retentionDays := int32(spec.Retention / (24 * time.Hour))
 
 	existing, err := s.schema.ExistingPartitions(tctx, spec.Table)
 	if err != nil {
@@ -279,17 +312,32 @@ func (s *AgentMetricsPartitionService) reconcileTable(ctx context.Context, spec 
 		}
 	}
 
+	// auditErrs 累积本表的审计写入失败（每条都已 log.Error + 计入 stats.AuditFailures，
+	// 见 auditPartitionChange），最后并进本表返回的 error 里，让 Reconcile 汇总成
+	// ErrPartitionPartial —— 「分区被改了、却没有留痕」必须能被看见。
+	var auditErrs []string
+
 	// 1) 补缺。plan.Create 按上界升序，故多条 REORGANIZE 的顺序是正确的：
 	//    每条都把「当时最新的哨兵」拆成「一个新分区 + 一个新哨兵」，下一条继续拆新哨兵。
 	addStmts, err := agentmetrics.AddPartitionDDL(dialect, spec, plan.Create, hasSentinel)
 	if err != nil {
 		return fmt.Errorf("生成建分区语句失败: %w", err)
 	}
-	for _, stmt := range addStmts {
+	for i, stmt := range addStmts {
 		if eerr := s.schema.ExecDDL(tctx, stmt); eerr != nil {
 			return fmt.Errorf("执行建分区 DDL 失败: %w", eerr)
 		}
 		stats.PartitionsCreated++
+		// 审计：**DDL 成功之后**单独写一条 `action=add`（spec §7.3 的「分两次提交」）。
+		// 区间直接取计划里的 Bound（与下发那条 DDL 的是同一个值，不是另算一份）。
+		// addStmts 与 plan.Create 一一对应（两个方言分支都按 missing 逐条生成），
+		// 这里的下标守卫只是防御：对应不上时宁可不写，也不编造一个区间。
+		if i < len(plan.Create) {
+			if aerr := s.auditPartitionChange(tctx, stats, spec.Table, entity.PartitionActionAdd,
+				plan.Create[i], retentionDays, now, nil); aerr != nil {
+				auditErrs = append(auditErrs, aerr.Error())
+			}
+		}
 	}
 
 	// 2) 回收。ReclaimDDL 的输出顺序是「先 truncate 后 drop」（partition.go 的两个方言
@@ -299,21 +347,140 @@ func (s *AgentMetricsPartitionService) reconcileTable(ctx context.Context, spec 
 		s.log.Warn("agentmetrics partition: 该方言无法生成分区回收语句，跳过回收（不中断本轮）",
 			zap.String("table", spec.Table), zap.String("dialect", dialect),
 			zap.Strings("truncate", plan.Truncate), zap.Strings("drop", plan.Drop), zap.Error(rerr))
-		return nil
+		// 降级方言（sqlite / 未知）：**一条语句都没下发**，也就**没有**任何回收发生。
+		// 故这里绝不写 `action=drop` 的审计行 —— 写了就等于审计表声称「某分区在此时
+		// 被清空了」，而事实是数据一行没动。审计表最不能犯的错就是这个方向：
+		// 缺口归因会据此把「数据仍在」误读成「数据已丢」，而它是排查时的**唯一**依据。
+		return auditErrOrNil("降级方言未回收任何分区", auditErrs)
 	}
 	for i, stmt := range reclaimStmts {
 		if eerr := s.schema.ExecDDL(tctx, stmt); eerr != nil {
 			s.log.Warn("agentmetrics partition: 回收 DDL 执行失败，跳过该表回收（不中断本轮）",
 				zap.String("table", spec.Table), zap.String("stmt", stmt), zap.Error(eerr))
-			return nil
+			return auditErrOrNil("回收 DDL 执行失败", auditErrs)
 		}
+		// 回收语句的顺序是「先 truncate 后 drop」，故下标 < len(plan.Truncate) 的那几条
+		// 对应 plan.Truncate[i]，其余对应 plan.Drop[i-len(plan.Truncate)]。
+		name := reclaimNameAt(plan, i)
 		if i < len(plan.Truncate) {
 			stats.PartitionsTruncated++
 		} else {
 			stats.PartitionsDropped++
 		}
+		// 审计：同一条 DDL 成功之后单独写一条 `action=drop`。
+		// TRUNCATE 与 DROP 都记 drop（对缺口归因是同一件事：该分区的数据在这一刻没了），
+		// 两者的差别见 entity.PartitionActionDrop 的说明。
+		// 区间由**回收判定用的同一个反解函数**得出（agentmetrics.BoundFromName）：
+		// 另写一份名字解析会让审计表记的区间与当时真正删掉的那个区间漂移。
+		b, ok := agentmetrics.BoundFromName(name, spec.Granularity)
+		if !ok {
+			// 走到这里说明 PlanFrom 给出了一个本包不认识的分区名 —— 理论上不会发生
+			// （计划的两条来源都要往返一致才认）。此时**不写**区间不明的审计行：
+			// 编一个 lower/upper 会污染缺口归因，比少一条留痕更糟；但也不能静默，
+			// 故按审计失败计（log.Error + 计数 + 并进本表 error）。
+			s.auditFailure(stats, spec.Table, name,
+				fmt.Errorf("分区名 %q 无法反解为时间区间，拒绝写审计行（不得编造区间）", name))
+			auditErrs = append(auditErrs, "分区名 "+name+" 无法反解为时间区间")
+			continue
+		}
+		at := now
+		if aerr := s.auditPartitionChange(tctx, stats, spec.Table, entity.PartitionActionDrop,
+			b, retentionDays, now, &at); aerr != nil {
+			auditErrs = append(auditErrs, aerr.Error())
+		}
+	}
+	return auditErrOrNil("", auditErrs)
+}
+
+// reclaimNameAt 取第 i 条回收语句对应的分区名（ReclaimDDL 的输出顺序：先 truncate 后 drop）。
+// 两个参数切片同源（plan.Truncate 与 plan.Drop 都来自 PlanFrom），下标不会越界。
+func reclaimNameAt(plan agentmetrics.Plan, i int) string {
+	if i < len(plan.Truncate) {
+		return plan.Truncate[i]
+	}
+	return plan.Drop[i-len(plan.Truncate)]
+}
+
+// auditErrOrNil 把本表累积的审计写入失败折成一条可识别的 error（无失败时返回 nil）。
+//
+// reason 是本表**已经**失败的另一件事（降级方言不回收 / 回收 DDL 失败）：它只影响措辞，
+// 让这条 error 读起来是完整的一句话。两件事写进**同一条**消息（早退路径本来就只有一次
+// 返回机会）：审计失败若在早退时被丢掉，症状就会退化成「明明有分区改动、error 里却只有
+// 回收的问题」——那正是本任务要消灭的静默缺口。
+func auditErrOrNil(reason string, auditErrs []string) error {
+	if len(auditErrs) == 0 {
+		return nil
+	}
+	msg := "审计流水写入失败（DDL 已提交，不因审计失败回滚）: " + strings.Join(auditErrs, "; ")
+	if reason != "" {
+		msg = reason + "；另有 " + msg
+	}
+	return errors.New(msg)
+}
+
+// auditPartitionChange 写一条分区审计流水（spec §7.3 的 `agent_metric_partition_log`）。
+//
+// 三条硬约束（spec §7.3 与计划 Task 3 都明文要求），逐条落在这里：
+//
+//  1. **不与 DDL 共事务、分两次提交**：本方法在 ExecDDL **返回之后**才被调用；
+//     而且 PartitionAuditor 接口上根本没有事务句柄 —— 想共事务也没有途径。
+//     （DDL 是隐式提交语句，见 PartitionSchemaRepo 的说明。）
+//  2. **审计失败不得回滚 DDL**（也回滚不了）：本方法**不产生任何撤销动作**，
+//     调用方拿到 error 后继续处理后续分区与后续表。反过来做（审计写不进去就停掉
+//     剩下的建分区）会让一次审计故障升级成「未来的分区没建出来 → 写入报 1526」，
+//     那比缺一条留痕严重得多。DDL 的效应由 DB 保证（隐式提交）。
+//  3. **不得静默**：失败走 auditFailure —— log.Error + stats.AuditFailures++ +
+//     并进本表 error → Reconcile 汇总为 ErrPartitionPartial（体例与「该表对账失败」一致）。
+//
+// ctx 用**每表**超时的那个（不是整轮的 ctx）：审计写入服务的是这一张表的这一次改动，
+// 它的预算应该与这张表的 DDL 共用一个上界（一张表卡住不得拖垮其余 5 张）。
+//
+// now 同时用于 CreatedAt 与 DroppedAt：两个时间戳必须来自**同一个时钟**（生产都是
+// time.Now，测试是注入的固定时钟）。若让 CreatedAt 走 DB 的 autoCreateTime，
+// 同一条流水就会出现「写入时刻」与「回收时刻」来自两个时钟的裂口。
+func (s *AgentMetricsPartitionService) auditPartitionChange(ctx context.Context, stats *PartitionStats,
+	table, action string, b agentmetrics.Bound, retentionDays int32, now time.Time,
+	droppedAt *time.Time) error {
+
+	row := &entity.AgentPartitionLog{
+		Table:         table,
+		PartitionName: b.Name,
+		Action:        action,
+		LowerBound:    b.Lower,
+		UpperBound:    b.Upper,
+		// RowCount 一律 NULL：TRUNCATE/DROP PARTITION 是 O(1) 元数据操作，
+		// 为记行数去 COUNT(*) 会把回收变成全分区扫描（理由详见实体字段注释）。
+		RowCount:      nil,
+		RetentionDays: &retentionDays,
+		CreatedAt:     now,
+		DroppedAt:     droppedAt,
+	}
+	if s.auditor == nil {
+		s.auditFailure(stats, table, b.Name, errors.New("审计仓储未注入"))
+		return fmt.Errorf("%s %s: 审计仓储未注入（装配错误）", table, b.Name)
+	}
+	if err := s.auditor.Insert(ctx, row); err != nil {
+		s.auditFailure(stats, table, b.Name, err)
+		return fmt.Errorf("%s %s: %w", table, b.Name, err)
 	}
 	return nil
+}
+
+// auditFailure 统一处理「审计写入没成功」这件事：log.Error + 计数。绝不碰 DDL。
+//
+// 为什么 nil 审计仓储（装配漏注入）也走这里：静默跳过的症状是「分区照常维护、
+// 审计表永远是空的」，而 §7.3 用整张审计表要消灭的就是这种「排障时无据可查」；
+// 之所以不 panic：一次装配错误不该把分区维护（写入侧的护栏）整个打挂。
+func (s *AgentMetricsPartitionService) auditFailure(stats *PartitionStats, table, partition string, err error) {
+	stats.AuditFailures++
+	if s.auditor == nil {
+		s.log.Error("agentmetrics partition: 审计仓储未注入，分区改动没有留痕（装配错误）",
+			zap.String("table", table), zap.String("partition", partition),
+			zap.String("hint", "wireup 必须注入 repository.NewAgentPartitionLogRepository(db)"))
+		return
+	}
+	s.log.Error("agentmetrics partition: 审计流水写入失败（分区改动已生效，DDL 不回滚）",
+		zap.String("table", table), zap.String("partition", partition), zap.Error(err))
 }
 
 // withConfiguredRetention 用现有配置覆盖 `TableSpecs` 的保留期默认值。

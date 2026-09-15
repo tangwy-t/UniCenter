@@ -256,8 +256,16 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 		deviceMetricRepo, rawStore, configSvc, log).WithCursorStore(redis)
 	// 分区协调器自带锁键、锁租约与每表超时（**不复用** SysJob 的 job 锁，见其
 	// PartitionLocker 说明），锁走同一个 Redis。
+	//
+	// 第四个参数是**审计流水仓储**（spec §7.3 的 agent_metric_partition_log）：
+	// 分区被补/被回收之后各写一行，供「图上少了一块」的缺口归因倒查。
+	// 审计表是**普通表**、由 AutoMigrate 清单建（migration/autoMigrateEntities），
+	// 不经过指标表那条分区建表钩子 —— 这里只注入仓储，不建表。
+	// 漏注入不是无声的：协调器会把「审计仓储缺失」记成审计失败（log.Error +
+	// AuditFailures + ErrPartitionPartial），见 auditFailure 的说明。
 	agentPartitionSvc := service.NewAgentMetricsPartitionService(
-		repository.NewDeviceMetricSchemaRepository(db), configSvc, locker, log)
+		repository.NewDeviceMetricSchemaRepository(db), configSvc, locker,
+		repository.NewAgentPartitionLogRepository(db), log)
 
 	// ── Agent Hub（agent 侧 WS 注册表 + 单连接状态机的依赖束）───────────
 	// PingInterval/PongWait 由 sys.agent.heartbeatInterval 推导：服务端 ping 必须

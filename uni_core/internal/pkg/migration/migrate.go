@@ -84,6 +84,12 @@ var autoMigrateEntities = []any{
 	// ── 设备监控（业务域实体）────────────────────────────────
 	&entity.Device{},
 	&entity.DeviceResource{},
+	// 分区维护审计表（spec §7.3）：它是**普通表**（spec 明文「不分区、不清理」），
+	// 故这里是唯一能建它的地方 —— 指标表那条路（pre-migrate 钩子）只会建出分区表，
+	// 而版本化迁移的 Up 跑在 AutoMigrate **之后**，在它里面手写 DDL 会多出第二份
+	// 列定义（与实体字段永久有漂移风险）。
+	// 由 auto_migrate_guard_test.go 的 TestAutoMigrateIncludesPartitionLogTable 守卫。
+	&entity.AgentPartitionLog{},
 	// 指标 6 表**刻意缺席**，见上方说明。
 }
 
