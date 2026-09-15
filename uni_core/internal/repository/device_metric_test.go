@@ -3,12 +3,16 @@ package repository
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/glebarez/sqlite"
-	"github.com/tangwy-t/UniCenter/uni_core/internal/model/entity"
-	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/database"
 	"gorm.io/gorm"
+	"gorm.io/gorm/schema"
+
+	"github.com/tangwy-t/UniCenter/uni_core/internal/model/entity"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/agentmetrics"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/database"
 )
 
 func newMetricTestDB(t *testing.T) *gorm.DB {
@@ -292,24 +296,177 @@ func TestReadTrendProjectsOnlyWhitelistedColumns(t *testing.T) {
 		}
 	}
 
-	rows, err := repo.ReadTrend(ctx, entity.TableNameMetric5m, 1001, 1000, 1600,
+	points, err := repo.ReadTrendPoints(ctx, entity.TableNameMetric5m, 1001, 1000, 1600,
 		[]string{"bucket_ts", "cpu_used_percent"})
 	if err != nil {
-		t.Fatalf("ReadTrend: %v", err)
+		t.Fatalf("ReadTrendPoints: %v", err)
 	}
-	if len(rows) != 3 {
-		t.Fatalf("趋势点数 = %d, want 3", len(rows))
+	if len(points) != 3 {
+		t.Fatalf("趋势点数 = %d, want 3", len(points))
 	}
-	for _, row := range rows {
-		if len(row) != 2 {
-			t.Fatalf("白名单只允许 2 列, got %d (%v)", len(row), row)
+	for i, p := range points {
+		wantTS := int64(1000 + i*300)
+		if p.T != wantTS {
+			t.Fatalf("第 %d 点 t = %d, want %d（bucket_ts 必须经 aliasBucketTS 落到字段 T）", i, p.T, wantTS)
 		}
-		if _, ok := row["cpu_used_percent"]; !ok {
-			t.Fatalf("缺少投影列 cpu_used_percent: %v", row)
+		if p.CPUUsedPercent == nil {
+			t.Fatalf("投影列 cpu_used_percent 必须非 nil（t=%d）", p.T)
 		}
-		if _, ok := row["load1"]; ok {
-			t.Fatalf("未在白名单里的列不得返回: %v", row)
+		// 白名单投影在类型化之后**可测**了：未选中的列是 nil（而不是被填 0）。
+		if p.Load1 != nil || p.MemUsedPercent != nil {
+			t.Fatalf("未在白名单里的列不得返回: %+v", p)
 		}
+		if p.Samples != 0 {
+			t.Fatalf("未选中的 samples 必须保持零值, got %d", p.Samples)
+		}
+	}
+}
+
+// TestReadTrendPointsLocksGORMColumnMapping 锁住 GORM 的「列名 → 字段」映射。
+//
+// 为什么必须单独锁：连续大写缩写（NICRXBytesSec、DiskIOReadBytesSec）能否被
+// snake_case 命名策略映射到 nic_rx_bytes_sec / disk_io_read_bytes_sec **不能靠猜** ——
+// 映射不上时 GORM 不报错，只是字段静默留 nil，曲线永远为空。
+//
+// 关于计划点名的 AgentWSReconnectCount：`agentmetrics.TrendPoint` **没有** agent_* 字段
+// （它只镜像 spec §5.5 MetricsSample 的 25 列），读取侧不存在该列，无法在此断言；
+// 它在写入侧的列名由 entity.DeviceMetricWide 的显式 `gorm:"column:..."` tag 保证，
+// 与本方法的映射无关。详见本任务回报中的缺陷条目。
+func TestReadTrendPointsLocksGORMColumnMapping(t *testing.T) {
+	db := newMetricTestDB(t)
+	repo := NewDeviceMetricRepository(db)
+	ctx := context.Background()
+	if err := repo.WriteBucket(ctx, &entity.DeviceMetricWide{
+		DeviceID: 1001, BucketTS: 1000,
+		CPUUsedPercent: ptr(12.5), CPUIOWait: ptr(1.5),
+		MemUsedMB: ptr(2048), MemAvailableMB: ptr(1024),
+		TCPEstablished:     iptr(42),
+		DiskIOReadBytesSec: ptr(4096), DiskIOWriteBytesSec: ptr(2048),
+		NICRXBytesSec: ptr(8192), NICTXBytesSec: ptr(4096),
+		MaxTemperatureC: ptr(64.5), UptimeSec: iptr(999),
+		Samples: 30,
+	}, MetricSubRows{}); err != nil {
+		t.Fatal(err)
+	}
+
+	points, err := repo.ReadTrendPoints(ctx, entity.TableNameMetric5m, 1001, 0, 9999, []string{
+		"bucket_ts", "cpu_used_percent", "cpu_iowait", "mem_used_mb", "mem_available_mb",
+		"tcp_established", "disk_io_read_bytes_sec", "disk_io_write_bytes_sec",
+		"nic_rx_bytes_sec", "nic_tx_bytes_sec", "max_temperature_c", "uptime_sec",
+	})
+	if err != nil {
+		t.Fatalf("ReadTrendPoints: %v", err)
+	}
+	if len(points) != 1 {
+		t.Fatalf("点数 = %d, want 1", len(points))
+	}
+	p := points[0]
+	if p.T != 1000 {
+		t.Fatalf("t = %d, want 1000", p.T)
+	}
+	checkF(t, "cpu_used_percent", p.CPUUsedPercent, 12.5)
+	checkF(t, "cpu_iowait", p.CPUIOWait, 1.5)
+	checkF(t, "mem_used_mb", p.MemUsedMB, 2048)
+	checkF(t, "mem_available_mb", p.MemAvailableMB, 1024)
+	checkF(t, "disk_io_read_bytes_sec", p.DiskIOReadBytesSec, 4096)
+	checkF(t, "disk_io_write_bytes_sec", p.DiskIOWriteBytesSec, 2048)
+	checkF(t, "nic_rx_bytes_sec", p.NICRXBytesSec, 8192)
+	checkF(t, "nic_tx_bytes_sec", p.NICTXBytesSec, 4096)
+	checkF(t, "max_temperature_c", p.MaxTemperatureC, 64.5)
+	checkI(t, "tcp_established", p.TCPEstablished, 42)
+	checkI(t, "uptime_sec", p.UptimeSec, 999)
+	// 未请求的列仍必须是 nil（映射成功≠全列返回）
+	if p.Load1 != nil || p.ProcCount != nil {
+		t.Fatalf("未请求的列必须保持 nil: load1=%v proc_count=%v", p.Load1, p.ProcCount)
+	}
+	if p.Samples != 0 {
+		t.Fatalf("samples 不在白名单，必须保持零值, got %d", p.Samples)
+	}
+}
+
+// checkF / checkI 断言某列映射成功且值正确；映射失败会**静默 nil**，故 nil 即失败。
+func checkF(t *testing.T, col string, got *float64, want float64) {
+	t.Helper()
+	if got == nil {
+		t.Fatalf("列名映射失败：%s 未落到结构体字段（nil）——需显式别名或加 gorm:\"column:...\" tag", col)
+	}
+	if *got != want {
+		t.Fatalf("%s = %v, want %v", col, *got, want)
+	}
+}
+
+func checkI(t *testing.T, col string, got *int64, want int64) {
+	t.Helper()
+	if got == nil {
+		t.Fatalf("列名映射失败：%s 未落到结构体字段（nil）——需显式别名或加 gorm:\"column:...\" tag", col)
+	}
+	if *got != want {
+		t.Fatalf("%s = %v, want %v", col, *got, want)
+	}
+}
+
+// TestTrendPointFieldsMatchMetricColumns 是 GORM 列名映射的**全字段守卫**：
+// agentmetrics.TrendPoint 每个字段算出的 DBName 必须等于 _5m 的真实列名
+// （T 例外：它靠 `bucket_ts AS t` 别名承接，不是物理列）。
+//
+// 为什么需要守卫而不只是锁那 3 列：GORM 的 snake_case 推导对「连续大写缩写」会漏下划线
+// （实测 NICRXBytesSec→nicrx_bytes_sec、NICTXBytesSec→nictx_bytes_sec、
+// CPUIOWait→cpu_io_wait），而映射失败时 GORM **不报错**，字段只是静默留 nil →
+// 曲线永远为空。守卫让「加了字段却忘了映射」当场变红，不依赖任何人记得去猜。
+func TestTrendPointFieldsMatchMetricColumns(t *testing.T) {
+	parsed, err := schema.Parse(&agentmetrics.TrendPoint{}, &sync.Map{}, schema.NamingStrategy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ddl := metricColumnDDL[entity.TableNameMetric5m]
+	columns := parseDDLColumnNames(ddl)
+	allowed := map[string]bool{}
+	for _, name := range columns {
+		allowed[name] = true
+	}
+
+	mapped := map[string]bool{}
+	for _, f := range parsed.Fields {
+		if f.Name == "T" {
+			continue // select 里由 aliasBucketTS 显式写成 `bucket_ts AS t`
+		}
+		mapped[f.DBName] = true
+		if !allowed[f.DBName] {
+			t.Errorf("字段 %s 的 GORM 列名 %q 不是 %s 的真实列（映射失败会静默 nil）：需加 gorm:\"column:...\" tag",
+				f.Name, f.DBName, entity.TableNameMetric5m)
+		}
+	}
+
+	// 反向（只记录不断言）：白名单里没有字段承接的列 —— 这些列即使被显式请求，
+	// 扫出来也只会是 nil（TrendPoint 是宽表 45 列的子集）→ available_metrics
+	// 目前会把它报成"可用"，消费方无从区分。这是**已知缺口**，见任务回报。
+	orphan := make([]string, 0, 8)
+	for _, name := range columns {
+		if !mapped[name] {
+			orphan = append(orphan, name)
+		}
+	}
+	t.Logf("%s 中无 TrendPoint 承接列的列（显式请求也只会得到 nil）：%v", entity.TableNameMetric5m, orphan)
+}
+
+func TestReadTrendPointsRejectsUnknownTableAndColumn(t *testing.T) {
+	db := newMetricTestDB(t)
+	repo := NewDeviceMetricRepository(db)
+	ctx := context.Background()
+
+	// 未知表名（选表即选档，多了第七张表就是 bug）
+	if _, err := repo.ReadTrendPoints(ctx, "device_metric_5min", 1001, 0, 9999, []string{"bucket_ts"}); err == nil {
+		t.Fatal("未知指标表必须报错")
+	}
+	// 非白名单列（注入载荷）
+	if _, err := repo.ReadTrendPoints(ctx, entity.TableNameMetric5m, 1001, 0, 9999,
+		[]string{"cpu_used_percent) FROM device_metric_1h WHERE (1=1"}); err == nil {
+		t.Fatal("非白名单列必须报错")
+	}
+	// 白名单按表隔离：宽表列不得出现在子表查询里
+	if _, err := repo.ReadResourceTrendPoints(ctx, entity.TableNameMetricDisk, 2001, 0, 9999,
+		[]string{"cpu_used_percent"}); err == nil {
+		t.Fatal("子表查询不得放行宽表列")
 	}
 }
 
@@ -326,13 +483,19 @@ func TestReadResourceTrendAndCount(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	rows, err := repo.ReadResourceTrend(ctx, entity.TableNameMetricDisk, 2001, 0, 9999,
+	// 注：子表列名（used_percent / rx_bytes_per_sec / temperature_c …）与
+	// agentmetrics.TrendPoint 的字段名（disk_used_percent / nic_rx_bytes_sec /
+	// max_temperature_c …）**不同名**，故这里只能断言 t 与行数（见任务回报的缺陷条目）。
+	points, err := repo.ReadResourceTrendPoints(ctx, entity.TableNameMetricDisk, 2001, 0, 9999,
 		[]string{"bucket_ts", "used_percent"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 2 {
-		t.Fatalf("2001 号的趋势点 = %d, want 2（不得串到 2002）", len(rows))
+	if len(points) != 2 {
+		t.Fatalf("2001 号的趋势点 = %d, want 2（不得串到 2002）", len(points))
+	}
+	if points[0].T != 1000 || points[1].T != 1300 {
+		t.Fatalf("子表趋势点 t = [%d %d], want [1000 1300]（必须按 bucket_ts 升序）", points[0].T, points[1].T)
 	}
 	n, err := repo.CountWide(ctx, entity.TableNameMetric5m, 1001, 0, 9999)
 	if err != nil {

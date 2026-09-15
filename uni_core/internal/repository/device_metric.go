@@ -9,6 +9,7 @@ import (
 	"gorm.io/gorm/clause"
 
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/entity"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/agentmetrics"
 )
 
 // MetricSubRows 是 4 张资源明细子表待写行。
@@ -155,16 +156,22 @@ func sanitizeColumns(table string, columns []string) ([]string, error) {
 	return out, nil
 }
 
-// ReadTrend 按 (device_id, bucket_ts 范围) 读取整机趋势，只投影白名单列。
-// 一条 SQL 取齐（多指标不拆 N 条）。
-func (r *DeviceMetricRepo) ReadTrend(ctx context.Context, table string, deviceID uint64, from, to int64, columns []string) ([]map[string]any, error) {
+// ReadTrendPoints 按 (device_id, bucket_ts 范围) 读取整机趋势，只投影白名单列，
+// 并**直接扫描进 agentmetrics.TrendPoint**。
+//
+// 为什么不再返回 []map[string]any：map 的值类型随驱动而变（sqlite 给
+// int64/float64/string/[]byte），把 40 个字段逐个类型断言既脆弱又冗长。
+// 类型化之后由 GORM 负责「列名 → 字段」，未选中的列保持 nil —— 「白名单投影」
+// 这条契约不但仍然成立，还变得可测（见 TestReadTrendProjectsOnlyWhitelistedColumns）。
+func (r *DeviceMetricRepo) ReadTrendPoints(ctx context.Context, table string, deviceID uint64,
+	from, to int64, columns []string) ([]agentmetrics.TrendPoint, error) {
 	cols, err := sanitizeColumns(table, columns)
 	if err != nil {
 		return nil, err
 	}
-	var out []map[string]any
+	var out []agentmetrics.TrendPoint
 	err = r.db.WithContext(ctx).Table(table).
-		Select(strings.Join(cols, ", ")).
+		Select(aliasBucketTS(cols)).
 		Where("device_id = ? AND bucket_ts BETWEEN ? AND ?", deviceID, from, to).
 		Order("bucket_ts ASC").
 		Find(&out).Error
@@ -174,15 +181,32 @@ func (r *DeviceMetricRepo) ReadTrend(ctx context.Context, table string, deviceID
 	return out, nil
 }
 
-// ReadResourceTrend 按 (resource_id, bucket_ts 范围) 读取明细 drill，只投影白名单列。
-func (r *DeviceMetricRepo) ReadResourceTrend(ctx context.Context, table string, resourceID uint64, from, to int64, columns []string) ([]map[string]any, error) {
+// aliasBucketTS 把 select 列表里的 bucket_ts 改写成 `bucket_ts AS t`：
+// agentmetrics.TrendPoint 的时间字段是 T（响应契约里叫 t），必须显式对齐，
+// 否则扫出来的每一点 t 都是 0，前端按 t 定位时间就全落在 1970。
+func aliasBucketTS(cols []string) string {
+	parts := make([]string, 0, len(cols))
+	for _, c := range cols {
+		if c == "bucket_ts" {
+			parts = append(parts, "bucket_ts AS t")
+			continue
+		}
+		parts = append(parts, c)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// ReadResourceTrendPoints 按 (resource_id, bucket_ts 范围) 读取明细 drill，只投影白名单列。
+// 与 ReadTrendPoints 同形，差别只在过滤键。
+func (r *DeviceMetricRepo) ReadResourceTrendPoints(ctx context.Context, table string, resourceID uint64,
+	from, to int64, columns []string) ([]agentmetrics.TrendPoint, error) {
 	cols, err := sanitizeColumns(table, columns)
 	if err != nil {
 		return nil, err
 	}
-	var out []map[string]any
+	var out []agentmetrics.TrendPoint
 	err = r.db.WithContext(ctx).Table(table).
-		Select(strings.Join(cols, ", ")).
+		Select(aliasBucketTS(cols)).
 		Where("resource_id = ? AND bucket_ts BETWEEN ? AND ?", resourceID, from, to).
 		Order("bucket_ts ASC").
 		Find(&out).Error

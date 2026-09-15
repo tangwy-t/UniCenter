@@ -82,11 +82,19 @@ func TableSpecs() []Spec {
 // 但语义是「桶内聚合结果」而非单次采样。
 //
 // 可空列一律指针：nil = 该桶未采集到该指标（图表显示「—」），与 0 区分。
+//
+// 少数字段带 `gorm:"column:..."`：TrendPoint 现在是仓储的**扫描目标**
+// （repository.ReadTrendPoints 直接 Find 到它）。GORM 的 snake_case 推导对
+// 「连续大写缩写」会漏下划线（实测：NICRXBytesSec→nicrx_bytes_sec、
+// NICTXBytesSec→nictx_bytes_sec、CPUIOWait→cpu_io_wait），而映射失败时 GORM
+// **不报错**，字段只是静默留 nil → 曲线永远为空。故这三列显式给出列名；
+// 全字段守卫见 repository.TestTrendPointFieldsMatchMetricColumns
+// （tag 只是字符串，本包仍不 import gorm）。
 type TrendPoint struct {
 	T int64 `json:"t"` // 桶起始 unix 秒
 
 	CPUUsedPercent  *float64 `json:"cpu_used_percent,omitempty"`
-	CPUIOWait       *float64 `json:"cpu_iowait,omitempty"`
+	CPUIOWait       *float64 `gorm:"column:cpu_iowait" json:"cpu_iowait,omitempty"`
 	Load1           *float64 `json:"load1,omitempty"`
 	Load5           *float64 `json:"load5,omitempty"`
 	Load15          *float64 `json:"load15,omitempty"`
@@ -107,8 +115,8 @@ type TrendPoint struct {
 	DiskUsedPercent     *float64 `json:"disk_used_percent,omitempty"`
 	DiskIOReadBytesSec  *float64 `json:"disk_io_read_bytes_sec,omitempty"`
 	DiskIOWriteBytesSec *float64 `json:"disk_io_write_bytes_sec,omitempty"`
-	NICRXBytesSec       *float64 `json:"nic_rx_bytes_sec,omitempty"`
-	NICTXBytesSec       *float64 `json:"nic_tx_bytes_sec,omitempty"`
+	NICRXBytesSec       *float64 `gorm:"column:nic_rx_bytes_sec" json:"nic_rx_bytes_sec,omitempty"`
+	NICTXBytesSec       *float64 `gorm:"column:nic_tx_bytes_sec" json:"nic_tx_bytes_sec,omitempty"`
 	MaxTemperatureC     *float64 `json:"max_temperature_c,omitempty"`
 
 	Samples int `json:"samples"`
