@@ -244,3 +244,23 @@ func (r *DeviceMetricSchemaRepo) ExistingPartitions(ctx context.Context, table s
 	}
 	return names, nil
 }
+
+// Dialect 返回数据库方言名（= `db.Dialector.Name()`），与迁移侧
+// `migration.Run` 取的方言**同源**：分区协调器要按方言生成建/回收语句，而方言只有
+// 连接本身知道，故由本仓储转出来（协调器不 import gorm，见 AgentMetricsPartitionService）。
+func (r *DeviceMetricSchemaRepo) Dialect() string {
+	return r.db.Dialector.Name()
+}
+
+// ExecDDL 执行**一条**由 `pkg/agentmetrics` 生成的指标表 DDL（分区协调器的唯一执行出口）。
+//
+// 两条硬约束都体现在签名上：
+//  1. 一次只执行一条语句（调用方逐条调用）—— 便于按语句记日志/计数，也避免
+//     「多语句拼接」在 MySQL 上依赖 CLIENT_MULTI_STATEMENTS；
+//  2. 签名里**没有事务**：DDL 是隐式提交语句，包进 `db.Transaction` 会让
+//     「事务 + 版本占坑」这套互斥**静默失效**（MySQL 隐式提交会把占坑记录一起提交；
+//     PG 会把 ACCESS EXCLUSIVE 持到整个迁移提交，见 spec §6.1）—— 故这里直接 Exec，
+//     不提供 Tx 变体。
+func (r *DeviceMetricSchemaRepo) ExecDDL(ctx context.Context, stmt string) error {
+	return r.db.WithContext(ctx).Exec(stmt).Error
+}
