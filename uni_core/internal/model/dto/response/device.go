@@ -72,6 +72,25 @@ type DeviceMetricPoint struct {
 	Samples int `json:"samples"`
 }
 
+// DeviceResourcePoint 是**下钻**的一个桶。
+//
+// 为什么下钻不复用 DeviceMetricPoint（D2）：子表的列名与宽表列名**不同名**
+// （`used_percent` vs `disk_used_percent`），且 `TrendPoint` 只镜像 spec §5.5 的 25 列，
+// 装不下 `inodes_used_percent` / `io_time_percent` / `rx_errors_per_sec` 等 ——
+// 硬套会让这些列**静默消失**（实测：下钻返回的桶值列全为 nil）。
+// 下钻的可用列**就是子表自己的列**，故值用「列名 → 值」的开放形状：
+//
+//   - 键与 `available_metrics` 逐字一致（子表的 snake_case 列名）；
+//   - 值为 nil 的列**不出现**在 map 里（缺 ≠ 0）；
+//   - `t` 是桶起始 unix 秒：`buckets` 稀疏（空桶不产行），必须用 `t` 定位。
+type DeviceResourcePoint struct {
+	T int64 `json:"t"`
+	// Samples 是命中该资源的样本数（热层档 = 该桶内出现该资源的样本条数；
+	// 子表**没有** samples 列，DB 档恒为 0 —— 完整度信号只在整机宽表上）。
+	Samples int                 `json:"samples"`
+	Values  map[string]*float64 `json:"values,omitempty"`
+}
+
 // DeviceMetricsResp 是整机趋势响应（console 图表直接消费）。
 type DeviceMetricsResp struct {
 	// RangeSeconds 是实际窗口（秒）。前端按它决定轴刻度与 tooltip 粒度。
@@ -90,14 +109,19 @@ type DeviceMetricsResp struct {
 }
 
 // DeviceResourceResp 是单资源下钻的趋势（per 磁盘/网卡/设备/传感器）。
+//
+// Buckets 的元素类型是 DeviceResourcePoint（**不是** DeviceMetricPoint）：
+// 下钻的列随 kind 而变，见 DeviceResourcePoint 的说明（D2）。
 type DeviceResourceResp struct {
-	RangeSeconds      int64               `json:"range_seconds"`
-	ResolutionSeconds int64               `json:"resolution_seconds"`
-	Source            string              `json:"source"`
-	ResourceKind      string              `json:"resource_kind"` // disk|disk_io|nic|sensor
-	Name              string              `json:"name"`          // 挂载点 / 设备名 / 网卡名 / 传感器名
-	AvailableMetrics  []string            `json:"available_metrics"`
-	Buckets           []DeviceMetricPoint `json:"buckets"`
+	RangeSeconds      int64  `json:"range_seconds"`
+	ResolutionSeconds int64  `json:"resolution_seconds"`
+	Source            string `json:"source"`
+	ResourceKind      string `json:"resource_kind"` // disk|disk_io|nic|sensor
+	Name              string `json:"name"`          // 挂载点 / 设备名 / 网卡名 / 传感器名
+	// AvailableMetrics 是**这次响应真实的列集**（= 子表的列，或按 metrics 过滤后的子集）。
+	// 它不含 bucket_ts：桶时间走 `t`，不是 values 里的一个键。
+	AvailableMetrics []string              `json:"available_metrics"`
+	Buckets          []DeviceResourcePoint `json:"buckets"`
 }
 
 // DeviceResourceItem 是资源枚举的一项（drill 下拉的数据源）。

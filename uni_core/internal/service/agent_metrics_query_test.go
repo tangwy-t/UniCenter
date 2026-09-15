@@ -3,13 +3,17 @@ package service
 import (
 	"context"
 	"errors"
+	"math"
 	"slices"
+	"sort"
 	"strconv"
 	"testing"
 	"time"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
+
+	agentproto "github.com/tangwy-t/UniCenter/uni_protocol"
 
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/request"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/entity"
@@ -337,7 +341,7 @@ func TestResourceMetricsRejectsRangeBeyondThirtyDays(t *testing.T) {
 			Range: request.DeviceRangeMax, Kind: "nic", Name: "eth0"})))
 
 	// 30d 边界本身合法（仍是 5min 档），且必须解析出 resource_id 后按子表查
-	reader := &stubMetricReader{resTrend: []agentmetrics.TrendPoint{{T: 600}}}
+	reader := &stubMetricReader{resourceRows: []map[string]any{{"t": int64(600)}}}
 	resolver := &stubResourceResolver{id: 2001}
 	svc2 := NewAgentMetricsQueryService(nil, reader, resolver, logger.NewNop())
 	resp, err := svc2.ResourceMetrics(ctx, 1001, &request.DeviceMetricsQuery{
@@ -357,6 +361,8 @@ func TestResourceMetricsRejectsRangeBeyondThirtyDays(t *testing.T) {
 }
 
 func TestResourceMetricsMapsEveryKindToItsSubTable(t *testing.T) {
+	// 注：range 用 7d（DB 档）—— ≤24h 的下钻按 D7 走 Redis 原始，不再碰子表，
+	// 本测试要锁的是「kind → 子表」的映射，故必须落在 DB 档（Task 8b 的夹具修正）。
 	want := map[string]string{
 		"disk": "device_metric_disk", "disk_io": "device_metric_diskio",
 		"nic": "device_metric_nic", "sensor": "device_metric_sensor",
@@ -365,7 +371,7 @@ func TestResourceMetricsMapsEveryKindToItsSubTable(t *testing.T) {
 		reader := &stubMetricReader{}
 		svc := NewAgentMetricsQueryService(nil, reader, &stubResourceResolver{id: 7}, logger.NewNop())
 		if _, err := svc.ResourceMetrics(context.Background(), 1001,
-			&request.DeviceMetricsQuery{Range: 6 * 3600, Kind: kind, Name: "x"}); err != nil {
+			&request.DeviceMetricsQuery{Range: 7 * 24 * 3600, Kind: kind, Name: "x"}); err != nil {
 			t.Fatalf("kind=%s 下钻报错: %v", kind, err)
 		}
 		if reader.gotTable != table {
@@ -376,9 +382,14 @@ func TestResourceMetricsMapsEveryKindToItsSubTable(t *testing.T) {
 
 func TestResourceMetricsUnknownResourceReturnsEmptyNot404(t *testing.T) {
 	// 设备可能刚卸载该资源：ResolveID 未命中必须返回**空结果**，不得 404、不得报错。
+	//
+	// 注：range=6h 属 ≤24h（D7 → Redis 原始），热层下钻**不查 device_resource**
+	// （刚挂载的资源可能还没落库），故「资源不存在」在这里表现为「热层没有该资源的样本」。
+	// DB 档的同一语义由 TestResourceDrillDBPathUnknownResourceReturnsEmpty 覆盖。
 	resolver := &stubResourceResolver{err: errors.New("record not found")}
 	reader := &stubMetricReader{err: errors.New("未命中资源时不得查子表")}
-	svc := NewAgentMetricsQueryService(nil, reader, resolver, logger.NewNop())
+	raw := &stubRawQuerier{} // 热层里没有该资源的样本
+	svc := NewAgentMetricsQueryService(raw, reader, resolver, logger.NewNop())
 	resp, err := svc.ResourceMetrics(context.Background(), 1001,
 		&request.DeviceMetricsQuery{Range: 6 * 3600, Kind: "disk", Name: "/data"})
 	if err != nil {
@@ -498,16 +509,475 @@ func TestToMetricPointsPreservesNil(t *testing.T) {
 	}
 }
 
+// ---------- 契约缺口闭合（Task 8b，逐条对齐 spec §8）----------
+
+// TestMetricsAllExpandsToWholeTableColumns：D4 —— `metrics=*` 回该表**全量值列**。
+//
+// 缺陷背景（实测）：`sanitizeColumns(table, nil)` 的语义是「只要 bucket_ts」，
+// 而 service 把 `*` 直接交给仓储（返回 nil）→ `metrics=*` 只回 bucket_ts、
+// **没有任何值列**，与 spec §8 明文「metrics=* 回全量」相反。
+func TestMetricsAllExpandsToWholeTableColumns(t *testing.T) {
+	ctx := context.Background()
+	want, err := repository.MetricQueryColumns("device_metric_5m")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reader := &stubMetricReader{}
+	svc := NewAgentMetricsQueryService(nil, reader, nil, logger.NewNop())
+	resp, err := svc.Metrics(ctx, 1001, &request.DeviceMetricsQuery{
+		Range: 7 * 24 * 3600, Metrics: request.MetricsAll})
+	if err != nil {
+		t.Fatalf("metrics=* 必须可用: %v", err)
+	}
+	if len(resp.AvailableMetrics) <= 8 {
+		t.Fatalf("metrics=* 的可用列只有 %d 个（%v）—— 修前实测只回 bucket_ts，即 1 个",
+			len(resp.AvailableMetrics), resp.AvailableMetrics)
+	}
+	if !slices.Contains(resp.AvailableMetrics, "nic_rx_bytes_sec") {
+		t.Fatalf("metrics=* 必须含速率列 nic_rx_bytes_sec, got %v", resp.AvailableMetrics)
+	}
+	// 与「该表全部值列 + bucket_ts」逐列相等（不多不少）
+	if len(resp.AvailableMetrics) != len(want)+1 {
+		t.Fatalf("可用列数 = %d, want %d（全量值列 %d + bucket_ts）: %v",
+			len(resp.AvailableMetrics), len(want)+1, len(want), resp.AvailableMetrics)
+	}
+	for _, c := range want {
+		if !slices.Contains(resp.AvailableMetrics, c) {
+			t.Fatalf("metrics=* 漏列 %q（%v）", c, resp.AvailableMetrics)
+		}
+	}
+	// 展开必须**真下推**到仓储投影（只把 available_metrics 写大是假修）
+	if !slices.Equal(reader.gotCols, resp.AvailableMetrics) {
+		t.Fatalf("投影列 = %v, 响应可用列 = %v —— 必须一致", reader.gotCols, resp.AvailableMetrics)
+	}
+
+	// 1h 档：* 只回**该档位产出**的列。
+	// 为什么：spec §8 要求 available_metrics 让前端区分「该档位无此指标」；
+	// 若把 1h 档恒为 nil 的 5min-only 列也报成可用，就退回了「半年视图上 tcp_time_wait
+	// 与 agent_* 恒显示 —，被误读成 agent 挂了」的老问题。同时也不得直接把 * 拒成 400
+	// （那会让文档化的 metrics=* 在半年档完全不可用）。
+	reader1h := &stubMetricReader{}
+	svc1h := NewAgentMetricsQueryService(nil, reader1h, nil, logger.NewNop())
+	resp1h, err := svc1h.Metrics(ctx, 1001, &request.DeviceMetricsQuery{
+		Range: 40 * 24 * 3600, Metrics: request.MetricsAll})
+	if err != nil {
+		t.Fatalf("1h 档的 metrics=* 必须可用（不得 400）: %v", err)
+	}
+	for _, dead := range []string{"tcp_time_wait", "tcp_close_wait", "agent_ws_reconnect_count", "agent_last_report_error"} {
+		if slices.Contains(resp1h.AvailableMetrics, dead) {
+			t.Fatalf("1h 档不产出 %q，不得报成可用列: %v", dead, resp1h.AvailableMetrics)
+		}
+	}
+	if !slices.Contains(resp1h.AvailableMetrics, "nic_rx_bytes_sec") || len(resp1h.AvailableMetrics) <= 8 {
+		t.Fatalf("1h 档的 * 仍必须回该档的值列: %v", resp1h.AvailableMetrics)
+	}
+}
+
+// TestBucketTSAlwaysProjectedEvenWhenMetricsNamed：D5 —— `t` 是契约的一部分。
+//
+// 缺陷背景（实测）：显式 `metrics=cpu_used_percent`（不含 bucket_ts）时投影里没有
+// bucket_ts，扫出来的**每个点 t 都是 0**，前端按 t 定位时间全落在 1970。
+func TestBucketTSAlwaysProjectedEvenWhenMetricsNamed(t *testing.T) {
+	ctx := context.Background()
+
+	// 投影列侧：bucket_ts 必须被恒补后下推到仓储
+	reader := &stubMetricReader{}
+	svc := NewAgentMetricsQueryService(nil, reader, nil, logger.NewNop())
+	if _, err := svc.Metrics(ctx, 1001, &request.DeviceMetricsQuery{
+		Range: 7 * 24 * 3600, Metrics: "cpu_used_percent"}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(reader.gotCols, "bucket_ts") {
+		t.Fatalf("显式 metrics 未含 bucket_ts 时必须恒补（D5）, got 投影列 %v", reader.gotCols)
+	}
+
+	// 端到端侧：真库投影 → 桶里的 t 必须非 0
+	repo := newQueryTestRepo(t)
+	now := time.Now().Unix()
+	if err := repo.WriteBucket(ctx, &entity.DeviceMetricWide{
+		DeviceID: 1001, BucketTS: now - 300, CPUUsedPercent: f64p(7.5), Load1: f64p(0.5), Samples: 30,
+	}, repository.MetricSubRows{}); err != nil {
+		t.Fatal(err)
+	}
+	svcDB := NewAgentMetricsQueryService(nil, repo, nil, logger.NewNop())
+	resp, err := svcDB.Metrics(ctx, 1001, &request.DeviceMetricsQuery{
+		Range: 7 * 24 * 3600, Metrics: "cpu_used_percent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Buckets) != 1 {
+		t.Fatalf("桶数 = %d, want 1", len(resp.Buckets))
+	}
+	if resp.Buckets[0].T != now-300 {
+		t.Fatalf("t = %d, want %d —— 显式 metrics 时投影缺了 bucket_ts（t 恒 0）",
+			resp.Buckets[0].T, now-300)
+	}
+	if resp.Buckets[0].CPUUsedPercent == nil || *resp.Buckets[0].CPUUsedPercent != 7.5 {
+		t.Fatalf("cpu_used_percent = %v, want 7.5", resp.Buckets[0].CPUUsedPercent)
+	}
+	if resp.Buckets[0].Load1 != nil {
+		t.Fatalf("未请求的列必须保持 nil（白名单投影语义不变）, got %v", *resp.Buckets[0].Load1)
+	}
+}
+
+// TestTierRejectsFiveMinOnlyColumnsOnOneHourTier：D6 —— 1h 档不存在的列被**显式请求** → 400。
+//
+// spec §8 明文：「range > 2592000 且 metrics 含 5min-only 列（tcp_time_wait/
+// tcp_close_wait/agent_*）时返回 BadRequest，**不静默剔除**（与 kind+name 的校验同构）」。
+func TestTierRejectsFiveMinOnlyColumnsOnOneHourTier(t *testing.T) {
+	ctx := context.Background()
+	for _, col := range []string{"tcp_time_wait", "tcp_close_wait", "agent_ws_reconnect_count", "agent_last_report_error"} {
+		reader := &stubMetricReader{}
+		svc := NewAgentMetricsQueryService(nil, reader, nil, logger.NewNop())
+		_, err := svc.Metrics(ctx, 1001, &request.DeviceMetricsQuery{Range: 40 * 24 * 3600, Metrics: col})
+		assertBadRequest(t, "1h 档显式请求 "+col, err)
+		if reader.calls != 0 {
+			t.Fatalf("必须在查库之前拒绝（不静默剔除、也不白跑一次查询）: col=%s calls=%d", col, reader.calls)
+		}
+	}
+
+	// 同档位、不含 5min-only 列 → 正常
+	reader := &stubMetricReader{}
+	svc := NewAgentMetricsQueryService(nil, reader, nil, logger.NewNop())
+	if _, err := svc.Metrics(ctx, 1001, &request.DeviceMetricsQuery{
+		Range: 40 * 24 * 3600, Metrics: "cpu_used_percent,tcp_total"}); err != nil {
+		t.Fatalf("1h 档请求该档存在的列不得报错: %v", err)
+	}
+	if reader.gotTable != "device_metric_1h" {
+		t.Fatalf("40d 必须整体走 _1h, got %q", reader.gotTable)
+	}
+
+	// 反向对照：这些列在 5min 档与 Redis 档**真实存在**，不得被误拒
+	reader5m := &stubMetricReader{}
+	svc5m := NewAgentMetricsQueryService(nil, reader5m, nil, logger.NewNop())
+	if _, err := svc5m.Metrics(ctx, 1001, &request.DeviceMetricsQuery{
+		Range: 30 * 24 * 3600, Metrics: "tcp_time_wait"}); err != nil {
+		t.Fatalf("5min 档的 tcp_time_wait 必须可用: %v", err)
+	}
+	raw := &stubRawQuerier{snap: &agentmetrics.RawSnapshot{}}
+	svcRaw := NewAgentMetricsQueryService(raw, nil, nil, logger.NewNop())
+	if _, err := svcRaw.Metrics(ctx, 1001, &request.DeviceMetricsQuery{
+		Range: 24 * 3600, Metrics: "tcp_time_wait"}); err != nil {
+		t.Fatalf("Redis 档的 tcp_time_wait 必须可用: %v", err)
+	}
+}
+
+// TestResourceDrillUsesSubTableColumns：D2+D3 —— 默认下钻（只传 kind+name）必须成功，
+// 且可用列/值列都是**子表自己的列**。
+//
+// 缺陷背景（实测）：不传 metrics 时用的是**宽表**默认列 → 被子表白名单拒绝 → 500
+// （console 的默认下钻必然失败）；即使换了列名，子表列名与 TrendPoint 字段也不同名，
+// 类型化扫描会让桶的**值列全为 nil**（GORM 映射不上不报错）。
+func TestResourceDrillUsesSubTableColumns(t *testing.T) {
+	ctx := context.Background()
+	want, ok := repository.ResourceTableColumns("device_metric_disk")
+	if !ok {
+		t.Fatal("device_metric_disk 必须登记下钻列集")
+	}
+
+	repo := newQueryTestRepo(t)
+	now := time.Now().Unix()
+	if err := repo.WriteBucket(ctx, &entity.DeviceMetricWide{
+		DeviceID: 1001, BucketTS: now - 300, Samples: 30,
+	}, repository.MetricSubRows{Disks: []entity.DeviceMetricDisk{{
+		ResourceID: 2001, BucketTS: now - 300,
+		UsedPercent: f64p(62), UsedGB: f64p(620), TotalGB: f64p(1000), InodesUsedPercent: f64p(12),
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	svc := NewAgentMetricsQueryService(nil, repo, &stubResourceResolver{id: 2001}, logger.NewNop())
+	resp, err := svc.ResourceMetrics(ctx, 1001, &request.DeviceMetricsQuery{
+		Range: 7 * 24 * 3600, Kind: "disk", Name: "/"})
+	if err != nil {
+		t.Fatalf("只传 kind+name 的默认下钻必须成功（console 默认路径）: %v", err)
+	}
+	if len(resp.AvailableMetrics) != len(want) {
+		t.Fatalf("available_metrics = %v, want 子表列 %v", resp.AvailableMetrics, want)
+	}
+	for _, c := range want {
+		if !slices.Contains(resp.AvailableMetrics, c) {
+			t.Fatalf("available_metrics 漏列 %q: %v", c, resp.AvailableMetrics)
+		}
+	}
+	if slices.Contains(resp.AvailableMetrics, "cpu_used_percent") {
+		t.Fatalf("下钻的可用列不得是宽表列: %v", resp.AvailableMetrics)
+	}
+	if len(resp.Buckets) != 1 {
+		t.Fatalf("桶数 = %d, want 1: %+v", len(resp.Buckets), resp.Buckets)
+	}
+	b := resp.Buckets[0]
+	if b.T != now-300 {
+		t.Fatalf("t = %d, want %d", b.T, now-300)
+	}
+	for col, wantVal := range map[string]float64{
+		"used_percent": 62, "used_gb": 620, "total_gb": 1000, "inodes_used_percent": 12,
+	} {
+		v, ok := b.Values[col]
+		if !ok || v == nil {
+			t.Fatalf("values 缺列 %q（修前实测：下钻桶的值列全为 nil）: %v", col, b.Values)
+		}
+		if *v != wantVal {
+			t.Fatalf("values[%q] = %v, want %v", col, *v, wantVal)
+		}
+	}
+}
+
+// TestResourceDrillWithin24hUsesHotLayer：D7 —— ≤24h 走 Redis 原始 + AggregateResource，
+// DB 子表**不得被调用**（spec §7.2 选档表）。
+func TestResourceDrillWithin24hUsesHotLayer(t *testing.T) {
+	ctx := context.Background()
+	const t0 = int64(1_700_000_000_000) // 对齐到 10s 桶（1700000000s 与 1700000004s 同桶）
+	raw := &stubRawQuerier{bucketPts: []agentproto.MetricsSample{
+		{T: t0, Disks: []agentproto.DiskMetric{
+			{Mountpoint: "/data", UsedPercent: 10, UsedGB: 10, TotalGB: 100, InodesUsedPercent: 8},
+		}},
+		{T: t0 + 4000, Disks: []agentproto.DiskMetric{
+			{Mountpoint: "/", UsedPercent: 99, UsedGB: 99, TotalGB: 100}, // 不得串进 "/data"
+			{Mountpoint: "/data", UsedPercent: 20, UsedGB: 20, TotalGB: 100, InodesUsedPercent: 12},
+		}},
+	}}
+	// DB 侧一律报错：一旦下钻 ≤24h 还去打子表，本测试必红（同时证明「未被调用」）
+	reader := &stubMetricReader{err: errors.New("下钻 ≤24h 不得落 DB 子表")}
+	resolver := &stubResourceResolver{id: 2001}
+	svc := NewAgentMetricsQueryService(raw, reader, resolver, logger.NewNop())
+
+	resp, err := svc.ResourceMetrics(ctx, 1001, &request.DeviceMetricsQuery{
+		Range: 3600, Kind: "disk", Name: "/data"})
+	if err != nil {
+		t.Fatalf("1h 下钻必须走热层: %v", err)
+	}
+	if raw.bucketCalls != 1 {
+		t.Fatalf("热层 Bucket 调用次数 = %d, want 1", raw.bucketCalls)
+	}
+	if reader.calls != 0 {
+		t.Fatalf("下钻 ≤24h 不得查 DB 子表（calls=%d）", reader.calls)
+	}
+	if resolver.calls != 0 {
+		t.Fatalf("热层下钻不需要 device_resource 解析（刚挂载的资源可能还没落库）, calls=%d", resolver.calls)
+	}
+	if resp.Source != SourceRedis || resp.ResolutionSeconds != 10 {
+		t.Fatalf("source=%q resolution=%d, want redis/10", resp.Source, resp.ResolutionSeconds)
+	}
+	if raw.gotDevice != 1001 || raw.gotToMs-raw.gotFromMs != 3600*1000 {
+		t.Fatalf("热层入参 device=%d 窗口=[%d, %d]，跨度不是 1h", raw.gotDevice, raw.gotFromMs, raw.gotToMs)
+	}
+	// 两档的可用列集必须逐字一致（前端切档不丢列）
+	wantCols, _ := repository.ResourceTableColumns("device_metric_disk")
+	if len(resp.AvailableMetrics) != len(wantCols) {
+		t.Fatalf("热层 available_metrics = %v, want 子表列 %v", resp.AvailableMetrics, wantCols)
+	}
+	if len(resp.Buckets) != 1 {
+		t.Fatalf("桶数 = %d, want 1（两个样本同 10s 桶）: %+v", len(resp.Buckets), resp.Buckets)
+	}
+	b := resp.Buckets[0]
+	if b.T != t0/1000 {
+		t.Fatalf("桶时间 = %d, want %d（按 bucketSec 对齐）", b.T, t0/1000)
+	}
+	if b.Samples != 2 {
+		t.Fatalf("samples = %d, want 2（命中该资源的样本数）", b.Samples)
+	}
+	for col, wantVal := range map[string]float64{
+		"used_percent": 15, "used_gb": 15, "total_gb": 100, "inodes_used_percent": 10,
+	} {
+		v, ok := b.Values[col]
+		if !ok || v == nil {
+			t.Fatalf("热层 values 缺列 %q: %v", col, b.Values)
+		}
+		if *v != wantVal {
+			t.Fatalf("热层 values[%q] = %v, want %v（只聚合 name 命中的资源）", col, *v, wantVal)
+		}
+	}
+}
+
+// TestResourceDrillFiltersValuesByExplicitMetrics：下钻的显式 metrics 只回该子集；
+// 子表明细列集之外的列 → 400（不得静默回空曲线）。
+func TestResourceDrillFiltersValuesByExplicitMetrics(t *testing.T) {
+	ctx := context.Background()
+	want, _ := repository.ResourceTableColumns("device_metric_disk")
+
+	raw := &stubRawQuerier{bucketPts: []agentproto.MetricsSample{{T: 1_700_000_000_000,
+		Disks: []agentproto.DiskMetric{
+			{Mountpoint: "/data", UsedPercent: 10, UsedGB: 10, TotalGB: 100, InodesUsedPercent: 8},
+		}}}}
+	svc := NewAgentMetricsQueryService(raw, nil, nil, logger.NewNop())
+
+	resp, err := svc.ResourceMetrics(ctx, 1001, &request.DeviceMetricsQuery{
+		Range: 3600, Kind: "disk", Name: "/data", Metrics: "used_percent,used_gb"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(resp.AvailableMetrics, []string{"used_percent", "used_gb"}) {
+		t.Fatalf("available_metrics = %v, want 请求的子集", resp.AvailableMetrics)
+	}
+	if len(resp.Buckets) != 1 || len(resp.Buckets[0].Values) != 2 {
+		t.Fatalf("values 必须过滤到请求的列: %+v", resp.Buckets)
+	}
+	if _, ok := resp.Buckets[0].Values["inodes_used_percent"]; ok {
+		t.Fatal("未请求的列不得出现在 values 里")
+	}
+
+	// "*" → 子表全量列（与趋势路径的语义一致）
+	respAll, err := svc.ResourceMetrics(ctx, 1001, &request.DeviceMetricsQuery{
+		Range: 3600, Kind: "disk", Name: "/data", Metrics: request.MetricsAll})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(respAll.AvailableMetrics) != len(want) {
+		t.Fatalf("下钻的 metrics=* 必须回子表全量列: %v", respAll.AvailableMetrics)
+	}
+
+	// 子表列集之外的列 → 400，且必须在读热层之前拒绝
+	before := raw.bucketCalls
+	assertBadRequest(t, "下钻请求宽表列", mustErr(svc.ResourceMetrics(ctx, 1001,
+		&request.DeviceMetricsQuery{Range: 3600, Kind: "disk", Name: "/data", Metrics: "cpu_used_percent"})))
+	if raw.bucketCalls != before {
+		t.Fatal("非法列必须在读热层之前拒绝")
+	}
+}
+
+// TestResourceDrillDBPathUnknownResourceReturnsEmpty：>24h 的 DB 档保留
+// 「资源解析不到 → 空结果而非 404」的语义（≤24h 热层档没有这一步，见 D7）。
+func TestResourceDrillDBPathUnknownResourceReturnsEmpty(t *testing.T) {
+	resolver := &stubResourceResolver{err: errors.New("record not found")}
+	reader := &stubMetricReader{err: errors.New("未命中资源时不得查子表")}
+	svc := NewAgentMetricsQueryService(nil, reader, resolver, logger.NewNop())
+	resp, err := svc.ResourceMetrics(context.Background(), 1001,
+		&request.DeviceMetricsQuery{Range: 7 * 24 * 3600, Kind: "disk", Name: "/gone"})
+	if err != nil {
+		t.Fatalf("资源不存在必须返回空结果而不是错误: %v", err)
+	}
+	if reader.calls != 0 {
+		t.Fatalf("未命中资源时不得查子表（calls=%d）", reader.calls)
+	}
+	if resp.Buckets == nil || len(resp.Buckets) != 0 {
+		t.Fatalf("buckets 必须是空切片而不是 nil/有值: %#v", resp.Buckets)
+	}
+	if resp.Source != SourceDB {
+		t.Fatalf("7d 下钻 source = %q, want db", resp.Source)
+	}
+	want, _ := repository.ResourceTableColumns("device_metric_disk")
+	if len(resp.AvailableMetrics) != len(want) {
+		t.Fatalf("available_metrics = %v, want 子表列 %v", resp.AvailableMetrics, want)
+	}
+}
+
+// TestResourceDrillColumnsMatchHotLayerAggregation：漂移守卫（D2/D7）。
+//
+// 同一次下钻在 1h（热层聚合）与 7d（子表读取）必须给出**同一套键**：否则前端
+// 在切档的瞬间会丢列（available_metrics 与实际 keys 不一致）。三层必须同源：
+// service 的 kind→表、repository 的子表列集、agentmetrics 的聚合产出。
+func TestResourceDrillColumnsMatchHotLayerAggregation(t *testing.T) {
+	const ts = int64(1_700_000_000_000)
+	names := map[string]string{"disk": "/", "disk_io": "sda", "nic": "eth0", "sensor": "coretemp"}
+	samples := map[string]agentproto.MetricsSample{
+		"disk": {T: ts, Disks: []agentproto.DiskMetric{
+			{Mountpoint: "/", UsedPercent: 1, UsedGB: 1, TotalGB: 1, InodesUsedPercent: 1}}},
+		"disk_io": {T: ts, DiskIO: []agentproto.DiskIOMetric{
+			{Name: "sda", ReadBytesPerSec: 1, WriteBytesPerSec: 1, ReadOpsPerSec: 1, WriteOpsPerSec: 1, IOTimePercent: 1}}},
+		"nic": {T: ts, NICs: []agentproto.NICMetric{
+			{Name: "eth0", RXBytesPerSec: 1, TXBytesPerSec: 1, RXPacketsPerSec: 1, TXPacketsPerSec: 1,
+				RXErrorsPerSec: 1, TXErrorsPerSec: 1, RXDroppedPerSec: 1}}},
+		"sensor": {T: ts, Sensors: []agentproto.SensorMetric{{Name: "coretemp", TemperatureC: f64p(1)}}},
+	}
+
+	for kind, s := range samples {
+		table, ok := resourceTable(kind)
+		if !ok {
+			t.Fatalf("kind %q 未映射到子表", kind)
+		}
+		want, ok := repository.ResourceTableColumns(table)
+		if !ok {
+			t.Fatalf("%s 未登记下钻列集", table)
+		}
+		got := agentmetrics.AggregateResource(kind, names[kind], []agentproto.MetricsSample{s}, 300)
+		if len(got) != 1 {
+			t.Fatalf("%s: 聚合桶数 = %d, want 1", kind, len(got))
+		}
+		keys := make([]string, 0, len(got[0].Values))
+		for k, v := range got[0].Values {
+			if v == nil {
+				t.Fatalf("%s: 键 %q 的值为 nil（缺 ≠ 0 应当不出现）", kind, k)
+			}
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		wantSorted := append([]string(nil), want...)
+		sort.Strings(wantSorted)
+		if !slices.Equal(keys, wantSorted) {
+			t.Fatalf("%s: 热层聚合键集 = %v, 子表登记列集 = %v", kind, keys, wantSorted)
+		}
+		if !slices.Contains(agentmetrics.ResourceKinds(), kind) {
+			t.Fatalf("热层不认识 kind %q（三层枚举必须同源）", kind)
+		}
+	}
+	if len(agentmetrics.ResourceKinds()) != 4 {
+		t.Fatalf("资源种类数 = %d, want 4", len(agentmetrics.ResourceKinds()))
+	}
+	if got := agentmetrics.AggregateResource("gpu", "0", nil, 300); len(got) != 0 {
+		t.Fatalf("未知 kind 必须返回空而不是 panic, got %+v", got)
+	}
+}
+
+// TestToFloat64PtrNormalisesDriverShapes：下钻的列值只有**一个**归一入口。
+//
+// 子表列名没有对应的 Go 结构体（D2），逐字段类型断言是脆弱的主要来源 ——
+// 驱动对同一张表的不同列可能给出 int64 / float64 / []byte / string / nil。
+// 归一必须全部覆盖，且无法解析时返回 nil（**绝不能**当成 0）。
+func TestToFloat64PtrNormalisesDriverShapes(t *testing.T) {
+	cases := []struct {
+		name string
+		in   any
+		want *float64
+	}{
+		{"nil（NULL）", nil, nil},
+		{"float64", 62.5, f64p(62.5)},
+		{"int64", int64(62), f64p(62)},
+		{"int", 62, f64p(62)},
+		{"int32", int32(62), f64p(62)},
+		{"uint64", uint64(62), f64p(62)},
+		{"float32", float32(62.5), f64p(62.5)},
+		{"[]byte（驱动文本形态）", []byte("62.5"), f64p(62.5)},
+		{"string", "62.5", f64p(62.5)},
+		{"*float64", f64p(62.5), f64p(62.5)},
+		{"nil *float64", (*float64)(nil), nil},
+		{"空 []byte（MySQL 空串形态）", []byte(""), nil},
+		{"不可解析的串", []byte("abc"), nil},
+		{"NaN", math.NaN(), nil},
+		{"+Inf", math.Inf(1), nil},
+		{"不支持的类型", true, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := toFloat64Ptr(c.in)
+			if (got == nil) != (c.want == nil) {
+				t.Fatalf("toFloat64Ptr(%#v) = %v, want %v", c.in, got, c.want)
+			}
+			if got != nil && *got != *c.want {
+				t.Fatalf("toFloat64Ptr(%#v) = %v, want %v", c.in, *got, *c.want)
+			}
+		})
+	}
+}
+
 // ---------- 测试替身 ----------
 
 type stubRawQuerier struct {
 	snap *agentmetrics.RawSnapshot
 	err  error
 
-	calls     int
-	gotDevice uint64
-	gotWindow time.Duration
-	gotStep   time.Duration
+	// 下钻热层（RawStore.Bucket）的夹具与调用记录（D7）
+	bucketPts []agentproto.MetricsSample
+	bucketErr error
+
+	calls       int
+	gotDevice   uint64
+	gotWindow   time.Duration
+	gotStep     time.Duration
+	bucketCalls int
+	gotFromMs   int64
+	gotToMs     int64
 }
 
 func (s *stubRawQuerier) Query(_ context.Context, deviceID uint64, window, step time.Duration) (*agentmetrics.RawSnapshot, error) {
@@ -519,10 +989,21 @@ func (s *stubRawQuerier) Query(_ context.Context, deviceID uint64, window, step 
 	return s.snap, nil
 }
 
+// Bucket 实现 AgentRawBucketReader：记录调用次数，供「热层被调用 / DB 未被调用」断言。
+func (s *stubRawQuerier) Bucket(_ context.Context, deviceID uint64, fromMs, toMs int64) ([]agentproto.MetricsSample, error) {
+	s.bucketCalls++
+	s.gotDevice, s.gotFromMs, s.gotToMs = deviceID, fromMs, toMs
+	if s.bucketErr != nil {
+		return nil, s.bucketErr
+	}
+	return s.bucketPts, nil
+}
+
 type stubMetricReader struct {
-	trend    []agentmetrics.TrendPoint
-	resTrend []agentmetrics.TrendPoint
-	err      error
+	trend []agentmetrics.TrendPoint
+	// resourceRows 是下钻的开放形状夹具（SELECT * + t 别名）。
+	resourceRows []map[string]any
+	err          error
 
 	calls         int
 	gotTable      string
@@ -543,14 +1024,14 @@ func (s *stubMetricReader) ReadTrendPoints(_ context.Context, table string, devi
 	return s.trend, nil
 }
 
-func (s *stubMetricReader) ReadResourceTrendPoints(_ context.Context, table string, resourceID uint64,
-	from, to int64, columns []string) ([]agentmetrics.TrendPoint, error) {
+func (s *stubMetricReader) ReadResourceRows(_ context.Context, table string, resourceID uint64,
+	from, to int64) ([]map[string]any, error) {
 	s.calls++
-	s.gotTable, s.gotResourceID, s.gotFrom, s.gotTo, s.gotCols = table, resourceID, from, to, columns
+	s.gotTable, s.gotResourceID, s.gotFrom, s.gotTo = table, resourceID, from, to
 	if s.err != nil {
 		return nil, s.err
 	}
-	return s.resTrend, nil
+	return s.resourceRows, nil
 }
 
 type stubResourceResolver struct {

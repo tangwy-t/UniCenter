@@ -129,6 +129,34 @@ type RawSnapshot struct {
 	Buckets       []TrendPoint `json:"buckets"`
 }
 
+// 下钻支持的资源种类（**唯一枚举源**）。与 device_resource.kind、4 张明细子表、
+// 以及 spec §8 的 `kind ∈ {disk,disk_io,nic,sensor}` 一一对应。
+const (
+	ResourceKindDisk   = "disk"
+	ResourceKindDiskIO = "disk_io"
+	ResourceKindNIC    = "nic"
+	ResourceKindSensor = "sensor"
+)
+
+// ResourceKinds 返回下钻支持的 4 种资源种类（顺序稳定）。
+//
+// 三层的 kind 枚举必须同源：service 的 kind→子表映射、repository 的子表列集、
+// 本包的 kind→列映射。任何一层多/少一种都会被 service 包的守卫测试当场抓住。
+func ResourceKinds() []string {
+	return []string{ResourceKindDisk, ResourceKindDiskIO, ResourceKindNIC, ResourceKindSensor}
+}
+
+// ResourcePoint 是**下钻**的一个桶（形状与 response.DeviceResourcePoint 一致；
+// 本包不 import model/dto，故各自声明）。
+//
+// 列随 kind 而变，故值用「列名 → 值」的开放形状：键是子表的列名（snake_case），
+// 与响应里的 available_metrics 逐字一致。nil 的列**不出现**在 map 里（缺 ≠ 0）。
+type ResourcePoint struct {
+	T       int64               `json:"t"`
+	Samples int                 `json:"samples"`
+	Values  map[string]*float64 `json:"values,omitempty"`
+}
+
 // RawOptions 装配每设备原始滚动窗。
 type RawOptions struct {
 	// Step 是采样节奏，用于 metricshistory 的取点启发式（= agent 的 reportInterval）。

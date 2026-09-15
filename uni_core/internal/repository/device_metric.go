@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"gorm.io/gorm"
@@ -207,6 +208,78 @@ func (r *DeviceMetricRepo) ReadResourceTrendPoints(ctx context.Context, table st
 	var out []agentmetrics.TrendPoint
 	err = r.db.WithContext(ctx).Table(table).
 		Select(aliasBucketTS(cols)).
+		Where("resource_id = ? AND bucket_ts BETWEEN ? AND ?", resourceID, from, to).
+		Order("bucket_ts ASC").
+		Find(&out).Error
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// MetricQueryColumns 返回某张指标表的**全部值列**（不含 bucket_ts）。
+// 供 service 把 `metrics=*` 展开成全量（spec §8 明文：「`metrics=*` 回全量」）。
+//
+// 为什么不能继续用 `sanitizeColumns(table, nil)`：它的语义是「**只要** bucket_ts」，
+// 于是 `metrics=*` 实测只回 bucket_ts、没有任何值列。
+//
+// bucket_ts 被排除是因为它是**键列**而非值列：service 会恒补它（`t` 是契约的一部分），
+// 若这里也返回它就会在投影里出现两次。
+func MetricQueryColumns(table string) ([]string, error) {
+	allowed, ok := metricQueryColumns[table]
+	if !ok {
+		return nil, fmt.Errorf("agentmetrics: 未知指标表 %q", table)
+	}
+	out := make([]string, 0, len(allowed))
+	for c := range allowed {
+		if c == "bucket_ts" {
+			continue
+		}
+		out = append(out, c)
+	}
+	sort.Strings(out) // 顺序稳定，便于测试与前端缓存
+	return out, nil
+}
+
+// resourceTableColumns 声明 4 张明细子表的可查询列（下钻白名单的唯一来源）。
+//
+// 与写侧的 subValueColumnsByTable 是**同一批值列**（写入要覆盖的列 ≡ 下钻要展示的列），
+// 两者的集合相等由 TestResourceTableColumnsMatchesSubValueColumns 守卫：
+// 漂移会让「写得进去但下钻看不到」且不报错。
+var resourceTableColumns = map[string][]string{
+	entity.TableNameMetricDisk: {"used_percent", "used_gb", "total_gb", "inodes_used_percent"},
+	entity.TableNameMetricDiskIO: {"read_bytes_per_sec", "write_bytes_per_sec", "read_ops_per_sec",
+		"write_ops_per_sec", "io_time_percent"},
+	entity.TableNameMetricNIC: {"rx_bytes_per_sec", "tx_bytes_per_sec", "rx_packets_per_sec",
+		"tx_packets_per_sec", "rx_errors_per_sec", "tx_errors_per_sec", "rx_dropped_per_sec"},
+	entity.TableNameMetricSensor: {"temperature_c"},
+}
+
+// ResourceTableColumns 返回某张明细子表的可查询列（下钻默认列集用，D3）。
+// 返回的切片是仓库内部登记表的副本语义（调用方不得修改）—— 列集是常量，
+// 但误改会污染其它查询，故调用方一律拷走。
+func ResourceTableColumns(table string) ([]string, bool) {
+	cols, ok := resourceTableColumns[table]
+	return cols, ok
+}
+
+// ReadResourceRows 是**下钻专用**读取：不投影（子表只有 4~8 列，投影没有收益），
+// 直接 `SELECT *`，并把 bucket_ts 别名为 t 以对齐响应契约。
+//
+// 为什么这里用 []map[string]any，而宽表用类型化扫描进 agentmetrics.TrendPoint：
+//   - 宽表 45 列、列名与 TrendPoint 字段一一对应，类型化扫描既安全又省代码；
+//   - 子表列名**没有**对应的 Go 结构体（下钻的可用列就是子表自己的列），
+//     而且 TrendPoint 只镜像 25 列，装不下 inodes_used_percent / io_time_percent /
+//     *_errors_per_sec —— 硬套会让这些列**静默消失**（实测：值列全为 nil）。
+//     故用开放形状，由 service 用**单一** toFloat64Ptr(any) 统一归一。
+func (r *DeviceMetricRepo) ReadResourceRows(ctx context.Context, table string, resourceID uint64,
+	from, to int64) ([]map[string]any, error) {
+	if _, ok := resourceTableColumns[table]; !ok {
+		return nil, fmt.Errorf("agentmetrics: %q 不是明细子表", table)
+	}
+	var out []map[string]any
+	err := r.db.WithContext(ctx).Table(table).
+		Select("*, bucket_ts AS t").
 		Where("resource_id = ? AND bucket_ts BETWEEN ? AND ?", resourceID, from, to).
 		Order("bucket_ts ASC").
 		Find(&out).Error

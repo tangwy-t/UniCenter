@@ -2,6 +2,8 @@ package repository
 
 import (
 	"context"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -88,6 +90,185 @@ func TestWriteBucketIsIdempotent(t *testing.T) {
 	db.Where("resource_id = ? AND bucket_ts = ?", 2001, 1000).First(&d)
 	if d.UsedPercent == nil || *d.UsedPercent != 63 {
 		t.Fatalf("子表重放应覆盖为 63, got %v", d.UsedPercent)
+	}
+}
+
+// TestMetricQueryColumnsReturnsAllValueColumns 守卫 metrics=* 的展开源（D4）。
+//
+// 缺陷背景：`sanitizeColumns(table, nil)` 的语义是「**只要** bucket_ts」，而
+// `resolveColumns("*")` 原先直接返回 nil 交给仓储 → 实测 `metrics=*` 只回 bucket_ts、
+// **没有任何值列**，与 spec §8 明文「metrics=* 回全量」相反。
+// 展开源必须是「该表全部值列」且顺序稳定（前端缓存/测试可比）。
+func TestMetricQueryColumnsReturnsAllValueColumns(t *testing.T) {
+	for _, table := range MetricTables() {
+		cols, err := MetricQueryColumns(table)
+		if err != nil {
+			t.Fatalf("%s: MetricQueryColumns: %v", table, err)
+		}
+		if len(cols) == 0 {
+			t.Fatalf("%s: 值列集为空（metrics=* 会退化成只回 bucket_ts）", table)
+		}
+		if !sort.StringsAreSorted(cols) {
+			t.Fatalf("%s: 列序必须稳定（排序后返回）, got %v", table, cols)
+		}
+		allowed := metricQueryColumns[table]
+		seen := map[string]bool{}
+		for _, c := range cols {
+			if c == "bucket_ts" {
+				t.Fatalf("%s: 不得包含 bucket_ts（service 侧恒补，且它是键列不是值列）", table)
+			}
+			if !allowed[c] {
+				t.Fatalf("%s: 列 %q 不在该表读白名单内（展开出的列必须可投影）", table, c)
+			}
+			if seen[c] {
+				t.Fatalf("%s: 列 %q 重复", table, c)
+			}
+			seen[c] = true
+		}
+		// 反向：白名单里除 bucket_ts 外的每一列都必须被返回（否则 * 仍是「静默少列」）
+		if len(cols) != len(allowed)-1 {
+			t.Fatalf("%s: 值列数 = %d, 白名单（除 bucket_ts）= %d —— 不得漏列", table, len(cols), len(allowed)-1)
+		}
+	}
+
+	// 最小可观测证据：宽表值列 > 8 且含速率列
+	cols, err := MetricQueryColumns(entity.TableNameMetric5m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cols) <= 8 {
+		t.Fatalf("宽表值列数 = %d, want > 8", len(cols))
+	}
+	if !slices.Contains(cols, "nic_rx_bytes_sec") {
+		t.Fatalf("宽表值列必须含 nic_rx_bytes_sec, got %v", cols)
+	}
+
+	// 未知表必须硬失败（选表即选档，多了第七张表就是 bug）
+	if _, err := MetricQueryColumns("device_metric_nope"); err == nil {
+		t.Fatal("未知指标表必须报错")
+	}
+}
+
+// TestResourceTableColumnsMatchesSubValueColumns 守卫下钻列集的**单一来源**（D2/D3）。
+//
+// 子表的可查询列在仓库里有两处登记：写入侧 subValueColumnsByTable（冲突时要覆盖的列）
+// 与读取侧 resourceTableColumns（下钻的列集）。两者是同一张表的同一批值列，漂移会让
+// 「写得进去但下钻看不到」或反之，且都不会报错 —— 故必须逐表锁死集合相等，
+// 且每一列都在读白名单（metricQueryColumns）里。
+func TestResourceTableColumnsMatchesSubValueColumns(t *testing.T) {
+	if len(resourceTableColumns) != len(subValueColumnsByTable) {
+		t.Fatalf("下钻子表数 = %d, 写侧子表数 = %d", len(resourceTableColumns), len(subValueColumnsByTable))
+	}
+	for table, writeCols := range subValueColumnsByTable {
+		cols, ok := ResourceTableColumns(table)
+		if !ok {
+			t.Fatalf("%s 未登记下钻列集", table)
+		}
+		if len(cols) != len(writeCols) {
+			t.Fatalf("%s: 下钻列数 = %d, 写侧列数 = %d（%v vs %v）", table, len(cols), len(writeCols), cols, writeCols)
+		}
+		set := map[string]bool{}
+		for _, c := range cols {
+			set[c] = true
+			if !metricQueryColumns[table][c] {
+				t.Fatalf("%s: 下钻列 %q 不在该表读白名单内", table, c)
+			}
+			if c == "bucket_ts" {
+				t.Fatalf("%s: 下钻列集不得含 bucket_ts（t 单独走别名）", table)
+			}
+		}
+		for _, c := range writeCols {
+			if !set[c] {
+				t.Fatalf("%s: 写侧列 %q 不在下钻列集里（漂移）", table, c)
+			}
+		}
+	}
+	// 宽表不是明细子表
+	if _, ok := ResourceTableColumns(entity.TableNameMetric5m); ok {
+		t.Fatal("宽表不得被当成明细子表")
+	}
+	if _, ok := ResourceTableColumns("device_metric_nope"); ok {
+		t.Fatal("未知表不得登记下钻列集")
+	}
+}
+
+// TestReadResourceRowsSelectsAllSubTableColumns 锁定下钻读取的形状（D2）。
+//
+// 为什么这条必须锁：下钻子表的列名（used_percent / inodes_used_percent …）
+// 与 TrendPoint 的字段（disk_used_percent …）**不同名**，且子表还有 inodes / io_time /
+// *_errors 等 TrendPoint 装不下的列。实测：走「类型化扫描进 TrendPoint」时，
+// 下钻返回的桶**值列全为 nil**（列名对不上，GORM 不报错只静默留 nil）。
+// 故下钻改为开放形状（[]map[string]any）+ SELECT *，本测试锁住「列齐全 + t 对齐」。
+func TestReadResourceRowsSelectsAllSubTableColumns(t *testing.T) {
+	db := newMetricTestDB(t)
+	repo := NewDeviceMetricRepository(db)
+	ctx := context.Background()
+
+	if err := repo.WriteBucket(ctx, sampleWide(1000, 10), MetricSubRows{
+		Disks: []entity.DeviceMetricDisk{
+			{ResourceID: 2001, BucketTS: 1000, UsedPercent: ptr(60), UsedGB: ptr(600), TotalGB: ptr(1000)},
+			{ResourceID: 2001, BucketTS: 1300, UsedPercent: ptr(61), UsedGB: ptr(610), TotalGB: ptr(1000),
+				InodesUsedPercent: ptr(12)},
+			{ResourceID: 2002, BucketTS: 1000, UsedPercent: ptr(90)},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := repo.ReadResourceRows(ctx, entity.TableNameMetricDisk, 2001, 0, 9999)
+	if err != nil {
+		t.Fatalf("ReadResourceRows: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("行数 = %d, want 2（不得串到 2002）", len(rows))
+	}
+	for i, wantTS := range []int64{1000, 1300} {
+		got, ok := rows[i]["t"]
+		if !ok {
+			t.Fatalf("第 %d 行缺少键 t（bucket_ts 必须别名为 t，否则响应里的 t 全是 0）: %v", i, rows[i])
+		}
+		if n := anyInt64(t, got); n != wantTS {
+			t.Fatalf("第 %d 行 t = %d, want %d（必须按 bucket_ts 升序）", i, n, wantTS)
+		}
+		// 全部值列都必须在行里（不投影 —— 子表只有 4 列，投影没有收益）
+		for _, col := range []string{"used_percent", "used_gb", "total_gb", "inodes_used_percent"} {
+			if _, ok := rows[i][col]; !ok {
+				t.Fatalf("第 %d 行缺少子表列 %q: %v", i, col, rows[i])
+			}
+		}
+	}
+	if rows[0]["inodes_used_percent"] != nil {
+		t.Fatalf("未写入的列必须是 NULL（缺 ≠ 0）, got %v", rows[0]["inodes_used_percent"])
+	}
+	if rows[1]["inodes_used_percent"] == nil {
+		t.Fatal("写入的列必须读得回来（inodes_used_percent）")
+	}
+	if rows[0]["used_percent"] == nil {
+		t.Fatal("写入的列必须读得回来（used_percent）")
+	}
+
+	// 只接受 4 张明细子表
+	if _, err := repo.ReadResourceRows(ctx, entity.TableNameMetric5m, 1001, 0, 9999); err == nil {
+		t.Fatal("宽表不是明细子表，必须报错")
+	}
+	if _, err := repo.ReadResourceRows(ctx, "device_metric_nope", 1, 0, 9999); err == nil {
+		t.Fatal("未知表必须报错")
+	}
+}
+
+// anyInt64 把驱动返回的数值形态归一成 int64（测试侧最小实现，只覆盖本测试的形态）。
+func anyInt64(t *testing.T, v any) int64 {
+	t.Helper()
+	switch n := v.(type) {
+	case int64:
+		return n
+	case int:
+		return int64(n)
+	case float64:
+		return int64(n)
+	default:
+		t.Fatalf("t 的驱动形态 = %T (%v)，无法归一到 int64", v, v)
+		return 0
 	}
 }
 
