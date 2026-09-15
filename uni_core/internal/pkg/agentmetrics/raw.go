@@ -34,8 +34,19 @@ func historyKey(deviceID uint64) string {
 // latestKey 是水位键（内容由 Task 2 的 latest.go 定义与读写）。
 // 定义放在这里而不是 latest.go：RawStore.Purge 必须**同时**删掉原始窗与水位，
 // 两者是同一份 key 约定的两半，放一起才不会漂移。
+//
+// 键名是 **Redis key 契约**，必须与 spec §7 表格逐字一致：
+//
+//	agent:device:{id}:latest
+//
+// 曾经写成 `agent:device:latest:{id}`（latest 在前、设备号在后）。这类偏差
+// 不会让任何测试变红（读写共用本函数，自洽即通过），却会让**别的**消费方
+// —— 2C 的 flush/rollup 任务、每日孤儿键兜底扫描、运维手工 DEL、外部脚本 ——
+// 按 spec 的键名找不到数据，且症状是「静默读不到」而不是报错。
+// 契约守卫见 TestLatestKeyMatchesSpecContract（用字符串字面量钉住键名，
+// 不复用本函数，否则改错了也自洽）。
 func latestKey(deviceID uint64) string {
-	return fmt.Sprintf("%slatest:%d", historyKeyPrefix, deviceID)
+	return fmt.Sprintf("%s%d:latest", historyKeyPrefix, deviceID)
 }
 
 // RawStore 是**每设备一个** Redis 原始滚动窗。

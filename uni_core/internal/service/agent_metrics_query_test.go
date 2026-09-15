@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"math"
+	"os"
 	"slices"
 	"sort"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 	agentproto "github.com/tangwy-t/UniCenter/uni_protocol"
 
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/request"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/response"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/entity"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/agentmetrics"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/apperror"
@@ -26,6 +29,8 @@ import (
 )
 
 func f64p(f float64) *float64 { return &f }
+
+func i64p(v int64) *int64 { return &v }
 
 // maxBucketsForTest 与实现里的上限**同源**（MaxBuckets），避免测试里出现第二个 4000。
 const maxBucketsForTest = MaxBuckets
@@ -175,8 +180,12 @@ func TestStepLiftAppliesToRedisTier(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Resolution != 10 {
-		t.Fatalf("Redis 档原生分辨率 = %d, want 10", got.Resolution)
+	// H4：Redis 档的原生分辨率必须是**具名常量**（RedisNativeResolutionSec），
+	// 而不是散落的魔法数 10 —— 它当前的语义是「按 10s 上报节奏的假设」，
+	// 不是「已被配置覆盖」（2C 才接配置）。
+	if got.Resolution != RedisNativeResolutionSec {
+		t.Fatalf("Redis 档原生分辨率 = %d, want %d（RedisNativeResolutionSec）",
+			got.Resolution, RedisNativeResolutionSec)
 	}
 	if step := got.Resolution * got.Scale; step != 30 {
 		t.Fatalf("24h Redis 档有效桶宽 = %d, want 30（8640 桶需升 k=3）", step)
@@ -386,7 +395,7 @@ func TestResourceMetricsUnknownResourceReturnsEmptyNot404(t *testing.T) {
 	// 注：range=6h 属 ≤24h（D7 → Redis 原始），热层下钻**不查 device_resource**
 	// （刚挂载的资源可能还没落库），故「资源不存在」在这里表现为「热层没有该资源的样本」。
 	// DB 档的同一语义由 TestResourceDrillDBPathUnknownResourceReturnsEmpty 覆盖。
-	resolver := &stubResourceResolver{err: errors.New("record not found")}
+	resolver := &stubResourceResolver{err: repository.ErrNotFound}
 	reader := &stubMetricReader{err: errors.New("未命中资源时不得查子表")}
 	raw := &stubRawQuerier{} // 热层里没有该资源的样本
 	svc := NewAgentMetricsQueryService(raw, reader, resolver, logger.NewNop())
@@ -511,14 +520,19 @@ func TestToMetricPointsPreservesNil(t *testing.T) {
 
 // ---------- 契约缺口闭合（Task 8b，逐条对齐 spec §8）----------
 
-// TestMetricsAllExpandsToWholeTableColumns：D4 —— `metrics=*` 回该表**全量值列**。
+// TestMetricsAllExpandsToWholeTableColumns：D4 —— `metrics=*` 回该档的**可用列集**。
 //
 // 缺陷背景（实测）：`sanitizeColumns(table, nil)` 的语义是「只要 bucket_ts」，
 // 而 service 把 `*` 直接交给仓储（返回 nil）→ `metrics=*` 只回 bucket_ts、
 // **没有任何值列**，与 spec §8 明文「metrics=* 回全量」相反。
+//
+// S3 修正：`*` 的**取值范围**从「该表全部值列（5m 档 46 列）」收窄为
+// 「该表 ∩ TrendPoint 实际承接的列」—— 表里有约 20 列没有任何响应字段去装，
+// 声明成「可用」会让消费方继续把「该档不产该列」误读成「未采集/agent 挂了」，
+// 而 available_metrics 的设立理由正是消除这种误读。
 func TestMetricsAllExpandsToWholeTableColumns(t *testing.T) {
 	ctx := context.Background()
-	want, err := repository.MetricQueryColumns("device_metric_5m")
+	tableCols, err := repository.MetricQueryColumns(entity.TableNameMetric5m)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -537,16 +551,33 @@ func TestMetricsAllExpandsToWholeTableColumns(t *testing.T) {
 	if !slices.Contains(resp.AvailableMetrics, "nic_rx_bytes_sec") {
 		t.Fatalf("metrics=* 必须含速率列 nic_rx_bytes_sec, got %v", resp.AvailableMetrics)
 	}
-	// 与「该表全部值列 + bucket_ts」逐列相等（不多不少）
-	if len(resp.AvailableMetrics) != len(want)+1 {
-		t.Fatalf("可用列数 = %d, want %d（全量值列 %d + bucket_ts）: %v",
-			len(resp.AvailableMetrics), len(want)+1, len(want), resp.AvailableMetrics)
+
+	// 与「该档可用列集 + bucket_ts」逐列相等（不多不少）
+	wantAvail := tierAvailableColumnsForTest(t, SelectTierForTest(t, 7*24*3600))
+	if len(resp.AvailableMetrics) != len(wantAvail)+1 {
+		t.Fatalf("可用列数 = %d, want %d（可用值列 %d + bucket_ts）: %v",
+			len(resp.AvailableMetrics), len(wantAvail)+1, len(wantAvail), resp.AvailableMetrics)
 	}
-	for _, c := range want {
+	for _, c := range wantAvail {
 		if !slices.Contains(resp.AvailableMetrics, c) {
 			t.Fatalf("metrics=* 漏列 %q（%v）", c, resp.AvailableMetrics)
 		}
 	}
+	// S3 的核心：声明出来的列必须**真的装得下** —— 不许再有恒为 nil 的列
+	for _, dead := range []string{"tcp_time_wait", "tcp_close_wait", "udp_total",
+		"disk_io_read_ops_sec", "nic_rx_packets_sec", "nic_rx_errors_sec",
+		"agent_collect_duration_ms", "agent_last_report_error", "agent_uptime_sec"} {
+		if slices.Contains(resp.AvailableMetrics, dead) {
+			t.Fatalf("列 %q 没有任何 TrendPoint 字段承接（恒为 nil），不得声明为可用列: %v",
+				dead, resp.AvailableMetrics)
+		}
+	}
+	// 收窄必须是**真的**收窄：可用列严格少于该表的值列（否则 S3 没生效）
+	if len(wantAvail) >= len(tableCols) {
+		t.Fatalf("可用列 %d 个 vs 该表值列 %d 个 —— 没有收窄，S3 未生效",
+			len(wantAvail), len(tableCols))
+	}
+
 	// 展开必须**真下推**到仓储投影（只把 available_metrics 写大是假修）
 	if !slices.Equal(reader.gotCols, resp.AvailableMetrics) {
 		t.Fatalf("投影列 = %v, 响应可用列 = %v —— 必须一致", reader.gotCols, resp.AvailableMetrics)
@@ -571,6 +602,136 @@ func TestMetricsAllExpandsToWholeTableColumns(t *testing.T) {
 	}
 	if !slices.Contains(resp1h.AvailableMetrics, "nic_rx_bytes_sec") || len(resp1h.AvailableMetrics) <= 8 {
 		t.Fatalf("1h 档的 * 仍必须回该档的值列: %v", resp1h.AvailableMetrics)
+	}
+}
+
+// SelectTierForTest / tierAvailableColumnsForTest 是测试侧的薄封装：
+// 期望值必须来自**被测的同一套档位推导**（而不是测试里第二份表名/列集常量），
+// 否则「响应收窄」与「期望收窄」会各写一份、双双漂移。
+func SelectTierForTest(t *testing.T, rangeSec int64) TierSelection {
+	t.Helper()
+	sel, err := SelectTier(rangeSec)
+	if err != nil {
+		t.Fatalf("SelectTier(%d): %v", rangeSec, err)
+	}
+	return sel
+}
+
+func tierAvailableColumnsForTest(t *testing.T, sel TierSelection) []string {
+	t.Helper()
+	cols, err := tierAvailableColumns(sel)
+	if err != nil {
+		t.Fatalf("tierAvailableColumns: %v", err)
+	}
+	return cols
+}
+
+// TestExplicitMetricsRejectsColumnsTheResponseModelCannotCarry：S3 的另一半 ——
+// 「表里有、响应模型装不下」的列被**显式请求**时必须 400 并说明原因，不得静默给 nil。
+//
+// 为什么必须报错而不是「照常返回 nil」：这类列的取值**恒为空**，与「该桶未采集」
+// 在线上完全不可区分（正是 available_metrics 要消除的误读）。同一参数以前返回
+// 200 + 一条恒空的曲线，消费方会当成 agent 故障去排查。
+func TestExplicitMetricsRejectsColumnsTheResponseModelCannotCarry(t *testing.T) {
+	ctx := context.Background()
+	// 这些列在 _5m（以及 Redis 档的同构 schema）里**存在**，但 TrendPoint 不承接
+	orphans := []string{"tcp_time_wait", "tcp_close_wait", "udp_total",
+		"disk_io_read_ops_sec", "nic_rx_packets_sec", "agent_uptime_sec"}
+	allowed, err := repository.MetricQueryColumns(entity.TableNameMetric5m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, col := range orphans {
+		if !slices.Contains(allowed, col) {
+			t.Fatalf("测试前提失效：%q 应当是 _5m 的真实列", col)
+		}
+	}
+
+	for _, tc := range []struct {
+		name     string
+		rangeSec int64
+	}{
+		{"5min 档", 7 * 24 * 3600},
+		{"Redis 档", 6 * 3600},
+	} {
+		for _, col := range orphans {
+			reader := &stubMetricReader{}
+			raw := &stubRawQuerier{snap: &agentmetrics.RawSnapshot{}}
+			svc := NewAgentMetricsQueryService(raw, reader, nil, logger.NewNop())
+			_, err := svc.Metrics(ctx, 1001, &request.DeviceMetricsQuery{Range: tc.rangeSec, Metrics: col})
+			assertBadRequest(t, tc.name+"显式请求 "+col, err)
+			if reader.calls != 0 || raw.calls != 0 {
+				t.Fatalf("必须在查库/查热层之前拒绝（不白跑一次查询）: col=%s db=%d raw=%d",
+					col, reader.calls, raw.calls)
+			}
+			// 错误信息必须说清「表里有、响应装不下」，而不是含糊的「列非法」
+			var ae *apperror.AppError
+			if errors.As(err, &ae) && !strings.Contains(ae.Message, "不承接") {
+				t.Fatalf("400 的说明必须点明原因（响应模型不承接该列）, got %q", ae.Message)
+			}
+		}
+	}
+
+	// 反向：真正装得下的列在同样两档必须照常可用
+	for _, tc := range []struct {
+		name     string
+		rangeSec int64
+	}{
+		{"5min 档", 7 * 24 * 3600},
+		{"Redis 档", 6 * 3600},
+	} {
+		for _, col := range []string{"cpu_used_percent", "tcp_total", "disk_used_percent", "max_temperature_c", "samples"} {
+			reader := &stubMetricReader{}
+			raw := &stubRawQuerier{snap: &agentmetrics.RawSnapshot{}}
+			svc := NewAgentMetricsQueryService(raw, reader, nil, logger.NewNop())
+			if _, err := svc.Metrics(ctx, 1001, &request.DeviceMetricsQuery{Range: tc.rangeSec, Metrics: col}); err != nil {
+				t.Fatalf("%s 请求 %q 必须可用: %v", tc.name, col, err)
+			}
+		}
+	}
+}
+
+// TestExplicitMetricsWhitelistOnBothTiers：S4 —— 显式 `metrics` 的校验**两档同口径**。
+//
+// 缺陷背景：Redis 档（≤24h）此前完全不校验列 —— 任意列名都返回 200 且被写进
+// `available_metrics`（前端据此画一条恒空曲线）；同一个参数在 DB 档则会撞上仓储
+// 白名单变成 **500**。修后两档都是 **400**（参数错误），与下钻的错误口径一致。
+func TestExplicitMetricsWhitelistOnBothTiers(t *testing.T) {
+	ctx := context.Background()
+
+	cases := []struct {
+		name     string
+		rangeSec int64
+		metrics  string
+	}{
+		{"Redis 档-不存在的列", 6 * 3600, "not_a_column"},
+		{"Redis 档-注入载荷", 6 * 3600, "cpu_used_percent); DROP TABLE device_metric_5m;--"},
+		{"5min 档-不存在的列", 7 * 24 * 3600, "not_a_column"},
+		{"1h 档-不存在的列", 40 * 24 * 3600, "not_a_column"},
+		{"Redis 档-大小写不符", 6 * 3600, "CPU_USED_PERCENT"},
+		{"Redis 档-CSV 里夹带非法列", 6 * 3600, "cpu_used_percent,not_a_column"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reader := &stubMetricReader{}
+			raw := &stubRawQuerier{snap: &agentmetrics.RawSnapshot{}}
+			svc := NewAgentMetricsQueryService(raw, reader, nil, logger.NewNop())
+			_, err := svc.Metrics(ctx, 1001, &request.DeviceMetricsQuery{Range: tc.rangeSec, Metrics: tc.metrics})
+			// 统一 400：不得是 200（静默放行）、也不得是 500（把参数错误当服务故障）
+			assertBadRequest(t, tc.name, err)
+		})
+	}
+
+	// Redis 档的 available_metrics **不得**出现任何未被校验的列名
+	raw := &stubRawQuerier{snap: &agentmetrics.RawSnapshot{}}
+	svc := NewAgentMetricsQueryService(raw, nil, nil, logger.NewNop())
+	resp, err := svc.Metrics(ctx, 1001, &request.DeviceMetricsQuery{
+		Range: 6 * 3600, Metrics: "cpu_used_percent,load1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(resp.AvailableMetrics, []string{"bucket_ts", "cpu_used_percent", "load1"}) {
+		t.Fatalf("Redis 档 available_metrics = %v, want 请求列 + bucket_ts", resp.AvailableMetrics)
 	}
 }
 
@@ -648,18 +809,37 @@ func TestTierRejectsFiveMinOnlyColumnsOnOneHourTier(t *testing.T) {
 		t.Fatalf("40d 必须整体走 _1h, got %q", reader.gotTable)
 	}
 
-	// 反向对照：这些列在 5min 档与 Redis 档**真实存在**，不得被误拒
+	// 反向对照（**S3 修正**）：这些列在 5min 档与 Redis 档的**表里**确实存在，
+	// 但没有任何 TrendPoint 字段承接它们 —— 旧断言要求「必须可用」是错的：
+	// 那时它们返回 200 且值恒为 nil（消费方无法与「未采集」区分）。
+	// 现在两档都必须 400 并说明原因（见 TestExplicitMetricsRejectsColumnsTheResponseModelCannotCarry）。
 	reader5m := &stubMetricReader{}
 	svc5m := NewAgentMetricsQueryService(nil, reader5m, nil, logger.NewNop())
-	if _, err := svc5m.Metrics(ctx, 1001, &request.DeviceMetricsQuery{
-		Range: 30 * 24 * 3600, Metrics: "tcp_time_wait"}); err != nil {
-		t.Fatalf("5min 档的 tcp_time_wait 必须可用: %v", err)
-	}
+	_, err := svc5m.Metrics(ctx, 1001, &request.DeviceMetricsQuery{
+		Range: 30 * 24 * 3600, Metrics: "tcp_time_wait"})
+	assertBadRequest(t, "5min 档显式请求响应装不下的 tcp_time_wait", err)
 	raw := &stubRawQuerier{snap: &agentmetrics.RawSnapshot{}}
 	svcRaw := NewAgentMetricsQueryService(raw, nil, nil, logger.NewNop())
-	if _, err := svcRaw.Metrics(ctx, 1001, &request.DeviceMetricsQuery{
-		Range: 24 * 3600, Metrics: "tcp_time_wait"}); err != nil {
-		t.Fatalf("Redis 档的 tcp_time_wait 必须可用: %v", err)
+	_, err = svcRaw.Metrics(ctx, 1001, &request.DeviceMetricsQuery{
+		Range: 24 * 3600, Metrics: "tcp_time_wait"})
+	assertBadRequest(t, "Redis 档显式请求响应装不下的 tcp_time_wait", err)
+
+	// 而**真正**存在于 5min/Redis 档且装得下的列，两档都不得被误拒
+	for _, tc := range []struct {
+		name     string
+		rangeSec int64
+	}{
+		{"5min 档", 30 * 24 * 3600},
+		{"Redis 档", 24 * 3600},
+	} {
+		for _, col := range []string{"tcp_total", "tcp_established", "cpu_iowait", "samples"} {
+			reader := &stubMetricReader{}
+			rawQ := &stubRawQuerier{snap: &agentmetrics.RawSnapshot{}}
+			svc := NewAgentMetricsQueryService(rawQ, reader, nil, logger.NewNop())
+			if _, err := svc.Metrics(ctx, 1001, &request.DeviceMetricsQuery{Range: tc.rangeSec, Metrics: col}); err != nil {
+				t.Fatalf("%s 请求 %q 必须可用: %v", tc.name, col, err)
+			}
+		}
 	}
 }
 
@@ -840,7 +1020,9 @@ func TestResourceDrillFiltersValuesByExplicitMetrics(t *testing.T) {
 // TestResourceDrillDBPathUnknownResourceReturnsEmpty：>24h 的 DB 档保留
 // 「资源解析不到 → 空结果而非 404」的语义（≤24h 热层档没有这一步，见 D7）。
 func TestResourceDrillDBPathUnknownResourceReturnsEmpty(t *testing.T) {
-	resolver := &stubResourceResolver{err: errors.New("record not found")}
+	// 未命中用**仓储哨兵**（真仓储的 ResolveID 就返回它）：service 只把
+	// repository.ErrNotFound 当「资源不存在 → 空结果」，其它错误一律 500。
+	resolver := &stubResourceResolver{err: repository.ErrNotFound}
 	reader := &stubMetricReader{err: errors.New("未命中资源时不得查子表")}
 	svc := NewAgentMetricsQueryService(nil, reader, resolver, logger.NewNop())
 	resp, err := svc.ResourceMetrics(context.Background(), 1001,
@@ -1051,4 +1233,314 @@ func (s *stubResourceResolver) ResolveID(_ context.Context, deviceID uint64, kin
 		return 0, s.err
 	}
 	return s.id, nil
+}
+
+// ---------- S2：升档必须落到查询栅格上 ----------
+
+// TestMetricsTierLiftMergesDbRowsToEffectiveGrid：S2 —— `Scale > 1` 时响应必须
+// **真的**归并到有效栅格上。
+//
+// 缺陷背景（实测）：`SelectTier` 算了 Scale（30d → 3），但 `ReadTrendPoints`
+// 既没有 step 参数也没有 GROUP BY —— 30d 请求照样返回 **8640 行**，而
+// `resolution_seconds` 报 900。消费方按 `t` 定位时看到的步长与声明不符，
+// 4000 桶上限也形同虚设。
+//
+// 这里用桩返回「数据库里的原生 300s 栅格行」（8640 行），断言响应被收敛到
+// ≤ MaxBuckets、每桶 t 对齐 900s、且值按 samples **加权**（不是简单平均）。
+func TestMetricsTierLiftMergesDbRowsToEffectiveGrid(t *testing.T) {
+	ctx := context.Background()
+	const rangeSec = 30 * 24 * 3600
+	sel := SelectTierForTest(t, rangeSec)
+	if sel.Scale != 3 || sel.Resolution*sel.Scale != 900 {
+		t.Fatalf("测试前提失效：30d 应为 Scale=3 / 有效桶宽 900, got Scale=%d step=%d",
+			sel.Scale, sel.Resolution*sel.Scale)
+	}
+
+	// 造「DB 行」：30 天里每 300s 一行（8640 行），t 对齐原生栅格。
+	now := time.Now().Unix()
+	native := make([]agentmetrics.TrendPoint, 0, 9000)
+	for i := int64(0); i < rangeSec/sel.Resolution; i++ {
+		ts := now - rangeSec + i*sel.Resolution
+		ts = ts / sel.Resolution * sel.Resolution
+		// cpu 与 samples 都刻意不规律：等权时「加权平均 == 简单平均」，
+		// 无法证明加权语义（fixture 必须让两者可区分）。
+		cpu := float64((i * 37) % 100)
+		samples := 30
+		if i%3 == 1 {
+			samples = 90
+		}
+		native = append(native, agentmetrics.TrendPoint{
+			T: ts, Samples: samples, CPUUsedPercent: f64p(cpu), UptimeSec: i64p(i),
+			MaxTemperatureC: f64p(cpu / 2),
+		})
+	}
+	if len(native) < int(maxBucketsForTest) {
+		t.Fatalf("测试前提失效：原生行数 %d 必须超过 %d 才能证明升档生效", len(native), maxBucketsForTest)
+	}
+
+	// 期望值**由数据算出**（不假设「最后一组恰好 3 行」或「range 末尾整除步长」：
+	// 那类假设会让测试随取数时刻漂移）。分组只由 t 决定，与实现同一条规则。
+	stepWant := sel.Resolution * sel.Scale
+	groupSum := map[int64]float64{}
+	groupPlain := map[int64]float64{} // 简单平均的分子（用于证明加权 ≠ 简单平均）
+	groupWeight := map[int64]float64{}
+	groupSamples := map[int64]int{}
+	groupRows := map[int64]int{}
+	for _, p := range native {
+		k := p.T / stepWant * stepWant
+		w := float64(p.Samples)
+		if w <= 0 {
+			w = 1
+		}
+		groupSum[k] += *p.CPUUsedPercent * w
+		groupPlain[k] += *p.CPUUsedPercent
+		groupWeight[k] += w
+		groupSamples[k] += p.Samples
+		groupRows[k]++
+	}
+	// 选目标组：必须**稳在窗口内**（range 两端各有一个可能被 from/to 裁掉的残缺组）
+	// 且「加权 ≠ 简单平均」（否则断言无法区分两种语义）。选差值最大的一组，
+	// 断言因此不随取数时刻漂移。
+	var targetKey int64
+	var bestGap float64 = -1
+	for k, rows := range groupRows {
+		if rows < 2 || k < now-rangeSec+2*stepWant || k > now-2*stepWant {
+			continue
+		}
+		gap := math.Abs(groupSum[k]/groupWeight[k] - groupPlain[k]/float64(rows))
+		if gap > bestGap {
+			bestGap, targetKey = gap, k
+		}
+	}
+	if bestGap <= 1e-9 {
+		t.Fatalf("测试前提失效：窗口内没有任何「加权 ≠ 简单平均」的组（bestGap=%v）", bestGap)
+	}
+	wantCPU := groupSum[targetKey] / groupWeight[targetKey]
+	wantSamples := groupSamples[targetKey]
+
+	reader := &stubMetricReader{trend: native}
+	svc := NewAgentMetricsQueryService(nil, reader, nil, logger.NewNop())
+	resp, err := svc.Metrics(ctx, 1001, &request.DeviceMetricsQuery{Range: rangeSec})
+	if err != nil {
+		t.Fatalf("30d 查询: %v", err)
+	}
+
+	if resp.ResolutionSeconds != 900 {
+		t.Fatalf("resolution_seconds = %d, want 900", resp.ResolutionSeconds)
+	}
+	step := resp.ResolutionSeconds
+	if len(resp.Buckets) > int(maxBucketsForTest) {
+		t.Fatalf("30d 返回 %d 个桶，超过上限 %d（升档没落到数据上）", len(resp.Buckets), maxBucketsForTest)
+	}
+	if len(resp.Buckets) >= len(native) {
+		t.Fatalf("返回桶数 %d 与原生行数 %d 相同 —— 根本没有归并", len(resp.Buckets), len(native))
+	}
+	for i, b := range resp.Buckets {
+		if b.T%step != 0 {
+			t.Fatalf("第 %d 桶 t=%d 未对齐到 %d 栅格（resolution_seconds 与数据必须一致）", i, b.T, step)
+		}
+	}
+	// 加权语义：该 900s 组内全部原生行按 samples 加权
+	var target *response.DeviceMetricPoint
+	for i := range resp.Buckets {
+		if resp.Buckets[i].T == targetKey {
+			target = &resp.Buckets[i]
+			break
+		}
+	}
+	if target == nil {
+		t.Fatalf("必须产出对齐 %d 的归并桶（归并到同一 900s 组的行落进同一个桶）", targetKey)
+	}
+	if target.CPUUsedPercent == nil {
+		t.Fatal("目标桶的 cpu 不得为 nil")
+	}
+	if math.Abs(*target.CPUUsedPercent-wantCPU) > 0.01 {
+		t.Fatalf("桶 t=%d 的 cpu = %v, want %v（该组 %d 行按 samples 加权）",
+			targetKey, *target.CPUUsedPercent, wantCPU, groupRows[targetKey])
+	}
+	if target.Samples != wantSamples {
+		t.Fatalf("桶 t=%d 的 samples = %d, want %d（组内求和）", targetKey, target.Samples, wantSamples)
+	}
+	// 反向对照：本组的**简单平均**与期望值不同（证明上面比的是加权平均，
+	// 而不是碰巧等于简单平均）。若实现退化成简单平均，这条会立刻红灯。
+	plain := groupPlain[targetKey] / float64(groupRows[targetKey])
+	if math.Abs(wantCPU-plain) <= 1e-9 {
+		t.Fatal("测试前提失效：本组的加权均值与简单均值相同")
+	}
+	if math.Abs(*target.CPUUsedPercent-plain) <= 1e-9 {
+		t.Fatalf("桶 t=%d 的 cpu = %v 等于**简单平均**（差值 %v 的那一版才是加权）",
+			targetKey, *target.CPUUsedPercent, bestGap)
+	}
+	// 加权只有在 samples 进了投影时才成立：默认列集不含 samples（它是完整度信号，
+	// 不是图表系列），故升档时 service 必须**隐式补投影** samples；
+	// 而 available_metrics 仍只回请求的那套列（不得把内部补的列谎报成响应可用列）。
+	if !slices.Contains(reader.gotCols, "samples") {
+		t.Fatalf("升档时必须隐式补投影 samples（否则加权退化成等权）: got %v", reader.gotCols)
+	}
+	if slices.Contains(resp.AvailableMetrics, "samples") {
+		t.Fatalf("available_metrics 只回请求列（默认列集不含 samples）: %v", resp.AvailableMetrics)
+	}
+}
+
+// TestMetricsTierLiftMergeEndToEnd：S2 的端到端版（真库 → 服务 → 响应）。
+// 与上一条互补：这条证明「投影列 → GORM 扫描 → Go 侧归并 → 响应」整条链路
+// 的栅格与语义一致（桩测不到列投影与扫描阶段的偏差）。
+func TestMetricsTierLiftMergeEndToEnd(t *testing.T) {
+	ctx := context.Background()
+	repo := newQueryTestRepo(t)
+	now := time.Now().Unix()
+	// 三个原生 300s 桶，落在**同一个** 900s 有效桶里；cpu 10/20/30、samples 30/30/60
+	base := (now - 600) / 900 * 900
+	for i, cpu := range []float64{10, 20, 30} {
+		samples := 30
+		if i == 2 {
+			samples = 60
+		}
+		if err := repo.WriteBucket(ctx, &entity.DeviceMetricWide{
+			DeviceID: 1001, BucketTS: base + int64(i)*300,
+			CPUUsedPercent: f64p(cpu), Samples: samples,
+		}, repository.MetricSubRows{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	svc := NewAgentMetricsQueryService(nil, repo, nil, logger.NewNop())
+	resp, err := svc.Metrics(ctx, 1001, &request.DeviceMetricsQuery{Range: 30 * 24 * 3600})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.ResolutionSeconds != 900 {
+		t.Fatalf("resolution_seconds = %d, want 900", resp.ResolutionSeconds)
+	}
+	var merged *response.DeviceMetricPoint
+	for i := range resp.Buckets {
+		if resp.Buckets[i].T == base {
+			merged = &resp.Buckets[i]
+		}
+	}
+	if merged == nil {
+		t.Fatalf("必须产出对齐 %d 的归并桶, got %+v", base, resp.Buckets)
+	}
+	if merged.T%900 != 0 {
+		t.Fatalf("归并桶 t=%d 未对齐 900", merged.T)
+	}
+	// (10*30 + 20*30 + 30*60) / 120 = 22.5（简单平均会是 20）
+	if merged.CPUUsedPercent == nil {
+		t.Fatal("归并桶的 cpu 不得为 nil")
+	}
+	if math.Abs(*merged.CPUUsedPercent-22.5) > 0.01 {
+		t.Fatalf("归并 cpu = %v, want 22.5（(300+600+1800)/120 加权；简单平均 20 是错的）",
+			*merged.CPUUsedPercent)
+	}
+	if merged.Samples != 120 {
+		t.Fatalf("归并 samples = %d, want 120", merged.Samples)
+	}
+}
+
+// TestStepLiftScaleIsMinimal：H5 —— 升档倍数必须是**最小**的整数倍
+// （既不越上限，也不多升一档把数据抹平）。
+func TestStepLiftScaleIsMinimal(t *testing.T) {
+	for _, r := range []int64{3600, 86400, 86401, 604800, 2592000, 2592001, 7776000, 15552000} {
+		sel := SelectTierForTest(t, r)
+		if n := sel.BucketCount(); n > maxBucketsForTest {
+			t.Fatalf("range=%d: 桶数 %d 超过上限 %d", r, n, maxBucketsForTest)
+		}
+		if sel.Scale <= 1 {
+			continue
+		}
+		// 少升一档就必须越上限，否则本可以返回更细的栅格
+		prev := sel
+		prev.Scale--
+		if prev.BucketCount() <= maxBucketsForTest {
+			t.Fatalf("range=%d: Scale=%d 不是最小整数倍（Scale=%d 时桶数 %d 已在上限 %d 内）",
+				r, sel.Scale, prev.Scale, prev.BucketCount(), maxBucketsForTest)
+		}
+	}
+}
+
+// ---------- C3：表名的单一枚举源 ----------
+
+// TestServiceTableNamesMatchEntityConstants：C3 —— service 用到的表名必须**等于**
+// entity.TableNameMetric* 常量集合（不是「看起来一样」，是同一个值）。
+func TestServiceTableNamesMatchEntityConstants(t *testing.T) {
+	want := map[string]bool{
+		entity.TableNameMetric5m:     true,
+		entity.TableNameMetric1h:     true,
+		entity.TableNameMetricDisk:   true,
+		entity.TableNameMetricDiskIO: true,
+		entity.TableNameMetricNIC:    true,
+		entity.TableNameMetricSensor: true,
+	}
+
+	got := map[string]bool{}
+	// 选档：三档的表名
+	for _, r := range []int64{3600, 86401, 2592001} {
+		sel := SelectTierForTest(t, r)
+		if sel.Table == "" {
+			continue // Redis 档没有表
+		}
+		got[sel.Table] = true
+		if !want[sel.Table] {
+			t.Fatalf("SelectTier(%d).Table = %q 不是 entity 的指标表常量", r, sel.Table)
+		}
+	}
+	// 列集解析用的表（含 Redis 档回落到 _5m）
+	if tb := trendColumnsTable(SelectTierForTest(t, 3600)); tb != entity.TableNameMetric5m {
+		t.Fatalf("Redis 档的列集表名 = %q, want %q", tb, entity.TableNameMetric5m)
+	}
+	// 下钻：4 张子表
+	for _, kind := range agentmetrics.ResourceKinds() {
+		tb, ok := resourceTable(kind)
+		if !ok {
+			t.Fatalf("kind %q 未映射到子表", kind)
+		}
+		got[tb] = true
+		if !want[tb] {
+			t.Fatalf("resourceTable(%q) = %q 不是 entity 的指标表常量", kind, tb)
+		}
+	}
+	// 集合相等：6 张表全部被 service 用到（少一张说明映射漏了，多一张说明越界）
+	if len(got) != len(want) {
+		t.Fatalf("service 用到的表名集合 = %v（%d 个）, want %v（%d 个）", got, len(got), want, len(want))
+	}
+}
+
+// TestServiceHasNoHardcodedMetricTableNames：C3 —— service 的**生产文件**里不得再
+// 出现引号包裹的表名字面量（注释与测试文件不算：注释里引用表名是文档，测试里
+// 出现表名是夹具）。
+//
+// 为什么值得一条守卫：本文件原来自称「表名常量（唯一枚举源，禁止在别处硬编码
+// 表名）」，却在同一文件里硬编码了 6 张表、约 10 处 —— 注释与代码互相矛盾，
+// 且任何表名变更都会漏改。守卫扫描的是**同一目录下的生产 .go 文件**，
+// 针（needle）由 entity 常量现算，故守卫自身也不含表名字面量。
+func TestServiceHasNoHardcodedMetricTableNames(t *testing.T) {
+	tables := []string{
+		entity.TableNameMetric5m, entity.TableNameMetric1h, entity.TableNameMetricDisk,
+		entity.TableNameMetricDiskIO, entity.TableNameMetricNIC, entity.TableNameMetricSensor,
+	}
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("读取包目录: %v", err)
+	}
+	scanned := 0
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("读取 %s: %v", name, err)
+		}
+		scanned++
+		for _, tb := range tables {
+			if strings.Contains(string(b), `"`+tb+`"`) {
+				t.Fatalf("%s 里出现硬编码表名 %q —— 必须改用 entity 常量（C3）", name, tb)
+			}
+		}
+	}
+	if scanned == 0 {
+		t.Fatal("没有扫描到任何生产文件，守卫会空转通过（vacuous）")
+	}
+	t.Logf("已扫描 %d 个生产文件，无硬编码表名", scanned)
 }

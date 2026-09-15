@@ -20,9 +20,24 @@ const (
 	ConfigOfflineThreshold = "sys.agent.offlineThreshold"
 )
 
-// resourceStaleDays 是资源「消失」的判定天数：超过它未再被观测到的资源，
-// 枚举时标记 Stale（前端显示「已消失」）但**不删除**（spec §8）。
-const resourceStaleDays = 90
+// 资源「消失」判定的**两个**阈值（spec §8 的两条要求是两条，不是一个数）。
+//
+//	① 「`/resources` 用 `last_seen_at` 给出 `stale` 标记」——让前端看出「已消失」；
+//	② 「设过期（如 90d 未出现即不再枚举）」——不再堆在 drill 下拉里。
+//
+// 为什么必须分成两个（S1，spec 明文）：若两者共用一个阈值，② 的 SQL 过滤
+// 会把所有该标记的行先滤掉，① 的 `Stale` 就恒为 false、彻底失去信息量。
+// 实测的旧行为更糟：① 与 ② 都没实现——过滤被忽略（staleBefore 传了不用），
+// 200 天前的挂载点照样枚举。
+const (
+	// resourceEnumWindowDays 是**枚举窗口**：超过它未再被观测到的资源不再枚举。
+	resourceEnumWindowDays = 90
+	// resourceStaleMarkDays 是 Stale 标记阈值：仍在枚举窗口内、但已超过它未再
+	// 出现的资源标 Stale（前端显示「可能已消失」）。
+	// 取 1 天：flush 每 5min 一轮，仍存在的资源每轮都会刷新 last_seen_at，
+	// 连续一天没刷新基本等于已卸载；同时容忍设备最长一天的离线。
+	resourceStaleMarkDays = 1
+)
 
 // DeviceService 是设备域的读写服务。
 type DeviceService struct {
@@ -110,11 +125,36 @@ func (s *DeviceService) List(ctx context.Context, q *request.DeviceQuery) (*app.
 	return app.NewPageResponse(items, total, page, size), nil
 }
 
+// findDevice 读设备并把仓储错误映射成 AppError。
+//
+// **必须分辨未命中与故障**（S5）：`errors.Is(err, repository.ErrNotFound)`（仓储
+// 未命中哨兵）→ 404 设备不存在；其它任何错误（连接断开、超时、约束冲突…）→
+// 500 Internal 且**带上 cause**。曾把任何错误都映射成 NotFound，于是 DB 故障会
+// 伪装成 404 —— 运营看到「设备不存在」去排查设备，真正的问题却在数据库。
+//
+// 三处存在性检查（GetByID / Resources / Delete）共用本函数，避免再出现
+// 「其中一处改了口径、另一处没改」的漂移（S5 的现状正是只有 SetStatus/Delete
+// 用了哨兵，其余是 `err != nil → NotFound`）。
+func (s *DeviceService) findDevice(ctx context.Context, id uint64) (*entity.Device, error) {
+	d, err := s.repo.FindByID(ctx, id)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, apperror.NotFound("设备不存在")
+		}
+		return nil, apperror.Internal("内部错误", err)
+	}
+	if d == nil {
+		// 桩/异常实现返回 (nil, nil)：语义上就是未命中（真仓储用哨兵表达）。
+		return nil, apperror.NotFound("设备不存在")
+	}
+	return d, nil
+}
+
 // GetByID 返回设备详情（含水位）。
 func (s *DeviceService) GetByID(ctx context.Context, id uint64) (*response.DeviceResp, error) {
-	d, err := s.repo.FindByID(ctx, id)
-	if err != nil || d == nil {
-		return nil, apperror.NotFound("设备不存在")
+	d, err := s.findDevice(ctx, id)
+	if err != nil {
+		return nil, err
 	}
 	watermarks, _ := s.latest.GetMany(ctx, []uint64{id})
 	item := s.toListItem(d, watermarks[id], s.onlineSince(ctx))
@@ -129,15 +169,19 @@ func (s *DeviceService) GetByID(ctx context.Context, id uint64) (*response.Devic
 
 // Resources 枚举某设备的资源（drill 下拉数据源），按 last_seen_at 标记 stale。
 //
-// 超过 resourceStaleDays 未再被观测到的资源只标 Stale、**不删除**（spec §8：
-// 已卸载的挂载点要能看出来），是否展示由调用方/前端按 stale 过滤。
+// 两个阈值分别生效（spec §8，见上方常量说明）：
+//   - 超过 resourceEnumWindowDays 未出现的资源**不再枚举**（由仓储的 SQL 过滤执行）；
+//   - 枚举出来的行里，超过 resourceStaleMarkDays 未出现的标 Stale=true，
+//     前端据此标注「已消失」——不删除行，历史仍可追溯。
 func (s *DeviceService) Resources(ctx context.Context, id uint64, kind string) (*response.DeviceResourcesResp, error) {
-	if _, err := s.repo.FindByID(ctx, id); err != nil {
-		return nil, apperror.NotFound("设备不存在")
+	if _, err := s.findDevice(ctx, id); err != nil {
+		return nil, err
 	}
-	// staleBefore 只算一次：仓储与逐行 Stale 判定必须用同一个时间点。
-	staleBefore := time.Now().AddDate(0, 0, -resourceStaleDays)
-	rows, err := s.resources.ListByDevice(ctx, id, kind, staleBefore)
+	// 两个阈值都只算一次：仓储过滤与逐行 Stale 判定必须用同一组时间点。
+	now := time.Now()
+	enumSince := now.AddDate(0, 0, -resourceEnumWindowDays)
+	staleBefore := now.AddDate(0, 0, -resourceStaleMarkDays)
+	rows, err := s.resources.ListByDevice(ctx, id, kind, enumSince)
 	if err != nil {
 		return nil, apperror.Internal("内部错误", err)
 	}
@@ -182,9 +226,11 @@ func (s *DeviceService) setStatus(ctx context.Context, id uint64, status int8) e
 //
 // 顺序很重要：先确认设备存在（否则 404），再清 Redis/资源，最后软删 ——
 // 这样即使中途失败，设备仍在（可重试），不会出现「设备没了但 key 还在」的孤儿状态。
+//
+// 存在性检查走 findDevice：未命中 → 404，其它错误 → 500（不得伪装成 404）。
 func (s *DeviceService) Delete(ctx context.Context, id uint64) error {
-	if _, err := s.repo.FindByID(ctx, id); err != nil {
-		return apperror.NotFound("设备不存在")
+	if _, err := s.findDevice(ctx, id); err != nil {
+		return err
 	}
 	if err := s.raw.Purge(ctx, id); err != nil {
 		s.log.Warn("device redis purge failed")

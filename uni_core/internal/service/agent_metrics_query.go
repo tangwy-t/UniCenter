@@ -2,8 +2,10 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -12,19 +14,36 @@ import (
 
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/request"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/response"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/model/entity"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/agentmetrics"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/apperror"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/repository"
 )
 
-// 数据源与表名常量（**唯一枚举源**，禁止在别处硬编码表名）。
+// 数据源与档位常量。
+//
+// 表名**不在本文件里字面量出现**（C3）：单一枚举源是 model/entity 的
+// entity.TableNameMetric*（Plan 2A 建立，与 DDL、分区策略同源）。
+// 守卫见 TestServiceHasNoHardcodedMetricTableNames（扫描本包生产文件里
+// 是否还有引号包裹的表名字面量）以及 TestServiceTableNamesMatchEntityConstants。
 const (
 	SourceRedis = "redis"
 	SourceDB    = "db"
 
 	// MaxBuckets 是响应桶数上限；超过时按整数倍升 step（不跨档、不混档）。
 	MaxBuckets int64 = 4000
+
+	// RedisNativeResolutionSec 是 Redis 档的**原生**桶宽（秒）。
+	//
+	// Redis 原始层的采样节奏 = agent 的 reportInterval（配置项
+	// sys.agent.reportInterval，默认 10s；wireup 用它装配 RawStore 的 Step）。
+	// 此处**当前没有**从配置取值：计划 Task 8b 已裁定「以 4 参构造为准，cfg 在 2C
+	// 接入用配置覆盖 reportInterval 时再加」（H4）。所以本常量是「按 10s 上报节奏
+	// 的假设」，不是「已被配置覆盖的值」——旧注释写成后者是不实的。
+	// 影响面：把 reportInterval 改成非 10s 时，本档的栅格与升档倍数会与数据错位
+	// （桶变稀疏，不报错），2C 换成构造参数即可消除。
+	RedisNativeResolutionSec int64 = 10
 )
 
 // TierSelection 是「range → 数据源 + 表 + 分辨率」的选档结果。
@@ -73,22 +92,34 @@ func SelectTier(rangeSec int64) (TierSelection, error) {
 	switch {
 	case rangeSec <= day:
 		sel.Source = SourceRedis
-		sel.Resolution = 10 // Redis 原始层按 10s 上报节奏取点；service 会用配置覆盖
+		sel.Resolution = RedisNativeResolutionSec
 	case rangeSec <= 30*day:
 		sel.Source = SourceDB
-		sel.Table = "device_metric_5m"
+		sel.Table = entity.TableNameMetric5m
 		sel.Resolution = 300
 	default:
 		sel.Source = SourceDB
-		sel.Table = "device_metric_1h"
+		sel.Table = entity.TableNameMetric1h
 		sel.Resolution = 3600
 	}
 
-	// 桶数超上限 → 整数倍升 step（仍是原生 step 的整数倍，桶边界仍对齐）
-	for sel.BucketCount() > MaxBuckets {
-		sel.Scale++
+	// 桶数超上限 → 整数倍升 step（仍是原生 step 的整数倍，桶边界仍对齐）。
+	//
+	// 直算而非 while 自增（H5）：满足 ceil(Range/(Resolution×Scale)) ≤ MaxBuckets
+	// 的最小整数倍就是 ceil(Range / (Resolution × MaxBuckets)) —— 与原来的循环
+	// 等价（对整数上限 M：ceil(x) > M ⟺ x > M），但边界一眼可见、无循环。
+	if k := ceilDiv(sel.RangeSeconds, sel.Resolution*MaxBuckets); k > 1 {
+		sel.Scale = k
 	}
 	return sel, nil
+}
+
+// ceilDiv 是正整数的向上取整除法（a、b 均 > 0）。
+func ceilDiv(a, b int64) int64 {
+	if b <= 0 {
+		return 1
+	}
+	return (a + b - 1) / b
 }
 
 // AgentMetricsQueryService 提供趋势与下钻查询。
@@ -125,7 +156,8 @@ type AgentRawReader interface {
 //
 // 下钻只保留 ReadResourceRows（开放形状）：子表列名与 TrendPoint 字段不同名，
 // 类型化扫描会让下钻的值列静默全为 nil（D2）。仓储里旧的 ReadResourceTrendPoints
-// 已无生产调用方，见任务回报。
+// 已删除（H2）：它在下钻改用 ReadResourceRows 后没有任何生产调用方，
+// 留着只会让「下钻该走哪条读取路径」出现两个似是而非的答案。
 type DeviceMetricReader interface {
 	ReadTrendPoints(ctx context.Context, table string, deviceID uint64, from, to int64, columns []string) ([]agentmetrics.TrendPoint, error)
 	ReadResourceRows(ctx context.Context, table string, resourceID uint64, from, to int64) ([]map[string]any, error)
@@ -175,12 +207,8 @@ func (s *AgentMetricsQueryService) Metrics(ctx context.Context, deviceID uint64,
 	now := time.Now().Unix()
 	from := now - sel.RangeSeconds
 
-	cols, err := s.resolveTrendColumns(trendColumnsTable(sel), q.Metrics)
+	cols, err := s.resolveTrendColumns(sel, q.Metrics)
 	if err != nil {
-		return nil, err
-	}
-	// D6：1h 档不存在的列被**显式请求** → 400，不静默剔除（spec §8 明文）。
-	if err := validateTierColumns(sel, cols); err != nil {
 		return nil, err
 	}
 
@@ -199,6 +227,36 @@ func (s *AgentMetricsQueryService) Metrics(ctx context.Context, deviceID uint64,
 		}, nil
 	}
 
+	// 升档（Scale > 1）必须在 Go 侧**真正落到数据栅格上**（S2）：
+	// DB 里的行是**原生**步长（30d@5min = 8640 行），若原样返回，响应就同时
+	// 违反了两条契约 —— resolution_seconds 报 900 而数据是 300 的栅格，
+	// 且 4000 桶上限形同虚设。逐列聚合语义不同（加权均值 / LAST / MAX），
+	// 故不在 SQL 里 GROUP BY，而是用纯函数归并（见 agentmetrics.MergeTrendPoints）。
+	if sel.Scale > 1 {
+		// samples 是加权平均的权重来源，但它是**完整度信号**而不是图表系列：
+		// 默认列集（趋势图默认系列）不含它，消费方通常也不请求它。若投影里没有
+		// samples，Samples 一律扫成 0 → 归并只能退化成等权平均（与「按 samples
+		// 加权」的契约不符）。故升档时**隐式补投影** samples：它是白名单内的真实
+		// 列，投影不越界；而 available_metrics 仍只回请求的那套列（samples 不是
+		// 本次响应的「可用指标」语义，除非调用方显式请求了它）。
+		readCols := cols
+		if !slices.Contains(cols, "samples") {
+			readCols = append(append([]string(nil), cols...), "samples")
+		}
+		rows, err := s.metrics.ReadTrendPoints(ctx, sel.Table, deviceID, from, now, readCols)
+		if err != nil {
+			return nil, apperror.Internal("内部错误", err)
+		}
+		rows = agentmetrics.MergeTrendPoints(rows, sel.Resolution*sel.Scale)
+		return &response.DeviceMetricsResp{
+			RangeSeconds:      sel.RangeSeconds,
+			ResolutionSeconds: sel.Resolution * sel.Scale,
+			Source:            SourceDB,
+			AvailableMetrics:  cols,
+			Buckets:           toMetricPoints(rows),
+		}, nil
+	}
+
 	rows, err := s.metrics.ReadTrendPoints(ctx, sel.Table, deviceID, from, now, cols)
 	if err != nil {
 		return nil, apperror.Internal("内部错误", err)
@@ -213,26 +271,102 @@ func (s *AgentMetricsQueryService) Metrics(ctx context.Context, deviceID uint64,
 }
 
 // resolveTrendColumns 解析整机趋势的投影列（spec §8）。
-//   - 空   → 该档位的默认列集
-//   - "*"  → 该表的**全部值列**（D4：spec §8 明文「metrics=* 回全量」）
-//   - CSV  → 逐列（白名单校验由仓储兜底）
+//   - 空   → 该档位的默认列集（defaultMetricColumns）
+//   - "*"  → 该档位的**可用列集**（`tierAvailableColumns`，D4 的收窄版）
+//   - CSV  → 逐列白名单校验，非法列一律 **400**（**两档同口径**，S4）
 //
 // **恒补 bucket_ts**（D5）：`t` 是契约的一部分（spec §8「必须用 t 定位」），
 // 不是可选列 —— 显式只请求 cpu_used_percent 时若不补 bucket_ts，投影里就没有
 // bucket_ts，扫出来的每个点 t 都是 0（实测），前端按 t 定位时间全落在 1970。
-func (s *AgentMetricsQueryService) resolveTrendColumns(table, metrics string) ([]string, error) {
+//
+// 为什么显式列也必须在此校验（S4）：Redis 档此前**完全不校验**——任意列名都返回
+// 200 并写进 `available_metrics`，前端会据此画一条恒为空的曲线；同一参数在 DB 档
+// 则被仓储白名单拒成 **500**。两档口径必须一致，且都是**400（参数错误）**——
+// 与下钻（`resolveDrillColumns`）的错误口径相同。
+func (s *AgentMetricsQueryService) resolveTrendColumns(sel TierSelection, metrics string) ([]string, error) {
 	switch metrics {
 	case "":
 		return withBucketTS(defaultMetricColumns), nil
 	case request.MetricsAll:
-		all, err := repository.MetricQueryColumns(table)
+		available, err := tierAvailableColumns(sel)
 		if err != nil {
-			return nil, apperror.Internal("内部错误", err)
+			return nil, err
 		}
-		return withBucketTS(tierValueColumns(table, all)), nil
+		return withBucketTS(available), nil
 	default:
-		return withBucketTS(splitCSV(metrics)), nil
+		cols := splitCSV(metrics)
+		available, err := tierAvailableColumns(sel)
+		if err != nil {
+			return nil, err
+		}
+		for _, c := range cols {
+			if c == "bucket_ts" {
+				continue // 键列：t 是契约的一部分，恒补且总是合法
+			}
+			if slices.Contains(available, c) {
+				continue
+			}
+			return nil, apperror.BadRequest(unavailableColumnReason(sel, c))
+		}
+		return withBucketTS(cols), nil
 	}
+}
+
+// tierAvailableColumns 返回该档位**真正产得出值**的值列集：
+//
+//	该表的可查询列（repository.MetricQueryColumns）
+//	  ∩ TrendPoint 实际承接的列（agentmetrics.TrendPointColumns）
+//	  − 该档位刻意留 NULL 的 5min-only 列（1h 档）
+//
+// 收窄到 TrendPoint 承接列这一步是 S3 的核心：`available_metrics` 的设立理由
+// （spec §8）就是消除「该列未采集」与「该档位根本不产该列」的误读，而此前它被
+// 直接取成「该表的全部列」（5m 档 46 列），其中约 20 列（`tcp_time_wait`、
+// `udp_total`、`*_ops_sec`、`nic_*_errors_sec`、9 个 `agent_*` …）**没有任何
+// TrendPoint 字段去装**，恒为 nil —— 消费方仍然分不清两者，声明反而成了误导源。
+//
+// Redis 档按 _5m 解析（两者本就是「一套 schema 两处表名」）。
+func tierAvailableColumns(sel TierSelection) ([]string, error) {
+	table := trendColumnsTable(sel)
+	all, err := repository.MetricQueryColumns(table)
+	if err != nil {
+		return nil, apperror.Internal("内部错误", err)
+	}
+	carried := make(map[string]bool, len(agentmetrics.TrendPointColumns()))
+	for _, c := range agentmetrics.TrendPointColumns() {
+		carried[c] = true
+	}
+	out := make([]string, 0, len(all))
+	for _, c := range all {
+		if !carried[c] {
+			continue
+		}
+		out = append(out, c)
+	}
+	return tierValueColumns(table, out), nil
+}
+
+// unavailableColumnReason 解释某列为何不可用（S3/S4/D6），返回给客户端的 400 说明。
+//
+// 三种不可用的原因各自说清楚，**绝不静默给 nil、也绝不静默剔除**：
+//  1. 该列只存在于 5min 档而被 1h 档请求（D6，spec §8 明文要求 400）；
+//  2. 表里有该列、但响应模型（TrendPoint/DeviceMetricPoint）装不下它 —— 此前
+//     显式请求它会得到一条**恒为空**的曲线，消费方无法与「未采集」区分（S3）；
+//  3. 该表根本没有这个列（列名写错）——两档同口径 400（S4）。
+func unavailableColumnReason(sel TierSelection, col string) string {
+	table := trendColumnsTable(sel)
+	if allowed, err := repository.MetricQueryColumns(table); err == nil {
+		if sel.Source == SourceDB && sel.Table == entity.TableNameMetric1h && isFiveMinOnlyColumn(col) {
+			return fmt.Sprintf(
+				"列 %q 只存在于 5min 档（range > 30d 走 1h 档，该档不产出此列），请把 range 缩短到 30 天以内", col)
+		}
+		if slices.Contains(allowed, col) {
+			return fmt.Sprintf(
+				"列 %q 在 %s 中存在，但响应模型（agentmetrics.TrendPoint / DeviceMetricPoint）不承接该列，"+
+					"显式请求只会得到恒为空的曲线 —— 本接口按 spec §8 的口径返回 400 而不是静默给 nil；"+
+					"请从 metrics 中移除该列", col, table)
+		}
+	}
+	return fmt.Sprintf("列 %q 不在 %s 的白名单内（列名非法或该表无此列）", col, table)
 }
 
 // trendColumnsTable 返回该档位用来解析列集的表名。
@@ -241,7 +375,7 @@ func (s *AgentMetricsQueryService) resolveTrendColumns(table, metrics string) ([
 // 「一套 schema 两处表名」，见 MetricColumnDDL），故一律按 _5m 解析。
 func trendColumnsTable(sel TierSelection) string {
 	if sel.Table == "" {
-		return "device_metric_5m"
+		return entity.TableNameMetric5m
 	}
 	return sel.Table
 }
@@ -275,9 +409,13 @@ func isFiveMinOnlyColumn(col string) bool {
 // 若把 1h 档恒为 nil 的 tcp_time_wait / agent_* 也报成「可用」，就退回了
 // 「半年视图上这些列恒显示 —，被误读成 agent 挂了」的老问题。
 // 而把 `*` 整个拒成 400 会让文档化的 metrics=* 在半年档完全不可用。
-// 显式**点名**这些列仍然是 400（见 validateTierColumns）—— 这正是 D6 的语义。
+// 显式**点名**这些列仍然是 400（见 unavailableColumnReason）—— 这正是 D6 的语义。
+//
+// 注：经 S3 收窄后（可用列 = 表 ∩ TrendPoint 承接列），5min-only 列本就都不在
+// TrendPoint 里，故这一层在当前 schema 下是**冗余的安全网** —— 保留它，
+// 是为了 TrendPoint 未来承接这些列时「1h 档不产出」的口径不会失守。
 func tierValueColumns(table string, cols []string) []string {
-	if table != "device_metric_1h" {
+	if table != entity.TableNameMetric1h {
 		return cols
 	}
 	out := make([]string, 0, len(cols))
@@ -288,23 +426,6 @@ func tierValueColumns(table string, cols []string) []string {
 		out = append(out, c)
 	}
 	return out
-}
-
-// validateTierColumns 校验「1h 档 + 显式请求 5min-only 列」→ 400，**不静默剔除**。
-//
-// 与 `kind`+`name` 的校验同构（spec §8 明文）：参数非法就报错，不返回一条
-// 恒为空、看起来像「agent 挂了」的曲线。
-func validateTierColumns(sel TierSelection, cols []string) error {
-	if sel.Source != SourceDB || sel.Table != "device_metric_1h" {
-		return nil
-	}
-	for _, c := range cols {
-		if isFiveMinOnlyColumn(c) {
-			return apperror.BadRequest(fmt.Sprintf(
-				"列 %q 只存在于 5min 档（range > 30d 走 1h 档，该档不产出此列），请把 range 缩短到 30 天以内", c))
-		}
-	}
-	return nil
 }
 
 // ResourceMetrics 返回单资源（磁盘/网卡/IO 设备/传感器）的下钻趋势。
@@ -336,7 +457,7 @@ func (s *AgentMetricsQueryService) ResourceMetrics(ctx context.Context, deviceID
 	if err != nil {
 		return nil, err
 	}
-	if sel.Source == SourceDB && sel.Table != "device_metric_5m" {
+	if sel.Source == SourceDB && sel.Table != entity.TableNameMetric5m {
 		// 子表只有 5min 档；>30d 没有明细可查
 		return nil, apperror.BadRequest("资源明细只保留 30 天（5min 档），请把 range 缩短到 30 天以内")
 	}
@@ -365,8 +486,13 @@ func (s *AgentMetricsQueryService) ResourceMetrics(ctx context.Context, deviceID
 
 	resourceID, err := s.resources.ResolveID(ctx, deviceID, q.Kind, q.Name)
 	if err != nil {
-		// 资源不存在 → 返回空结果而不是 404：设备可能刚被卸载该资源
-		return resp, nil
+		// 未命中 → 返回空结果而不是 404：设备可能刚被卸载该资源。
+		// 其它错误（DB 故障）必须上抛 500 —— 否则一次数据库抖动会显示成
+		// 「该资源没有数据」，与 S5 是同一类错误遮蔽（静默的空曲线最难排查）。
+		if errors.Is(err, repository.ErrNotFound) {
+			return resp, nil
+		}
+		return nil, apperror.Internal("内部错误", err)
 	}
 
 	rows, err := s.metrics.ReadResourceRows(ctx, table, resourceID, now-sel.RangeSeconds, now)
@@ -542,17 +668,21 @@ func parseF64(s string) *float64 {
 	return finiteF64(f)
 }
 
-// resourceTable 把资源种类映射到明细子表（**唯一枚举源**）。
+// resourceTable 把资源种类映射到明细子表。
+//
+// 表名取自 entity 的单一枚举源（C3）：本包任何地方都不得再出现表名字面量
+// （包括本文件的注释之外的字符串），漂移由 TestServiceHasNoHardcodedMetricTableNames
+// 与 TestServiceTableNamesMatchEntityConstants 守卫。
 func resourceTable(kind string) (string, bool) {
 	switch kind {
 	case agentmetrics.ResourceKindDisk:
-		return "device_metric_disk", true
+		return entity.TableNameMetricDisk, true
 	case agentmetrics.ResourceKindDiskIO:
-		return "device_metric_diskio", true
+		return entity.TableNameMetricDiskIO, true
 	case agentmetrics.ResourceKindNIC:
-		return "device_metric_nic", true
+		return entity.TableNameMetricNIC, true
 	case agentmetrics.ResourceKindSensor:
-		return "device_metric_sensor", true
+		return entity.TableNameMetricSensor, true
 	default:
 		return "", false
 	}

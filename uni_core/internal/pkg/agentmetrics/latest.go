@@ -33,7 +33,7 @@ type LatestSummary struct {
 	MaxTemperatureC *float64 `json:"max_temperature_c,omitempty"`
 }
 
-// LatestStore 读写「最新水位」单键（agent:device:latest:{id}）。
+// LatestStore 读写「最新水位」单键（`agent:device:{id}:latest`，见 raw.go 的 latestKey）。
 //
 // 不设 TTL：设备离线时列表页仍应显示最后一次水位（配合 online 标记），
 // key 的生命周期由设备删除时的 Purge 负责。

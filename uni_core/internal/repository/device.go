@@ -23,11 +23,14 @@ func (r *DeviceRepo) Create(ctx context.Context, d *entity.Device) error {
 	return r.db.WithContext(ctx).Create(d).Error
 }
 
-// FindByID 按主键查设备（未命中返回 gorm.ErrRecordNotFound）。
+// FindByID 按主键查设备。未命中返回 ErrNotFound 哨兵（而非裸的
+// gorm.ErrRecordNotFound）：service 层必须能分辨「设备不存在」（404）与
+// 「DB 故障」（500），而哨兵与原始错误之间 errors.Is 是**单向**的
+// （见 errors.go 的 notFoundOr）。errors.Is(err, gorm.ErrRecordNotFound) 仍然成立。
 func (r *DeviceRepo) FindByID(ctx context.Context, id uint64) (*entity.Device, error) {
 	var d entity.Device
 	if err := r.db.WithContext(ctx).First(&d, id).Error; err != nil {
-		return nil, err
+		return nil, notFoundOr(err)
 	}
 	return &d, nil
 }
@@ -59,25 +62,28 @@ func (r *DeviceRepo) UpdateEnroll(ctx context.Context, d *entity.Device) error {
 		return res.Error
 	}
 	if res.RowsAffected == 0 {
-		return gorm.ErrRecordNotFound
+		return ErrNotFound
 	}
 	return nil
 }
 
 // FindByInstanceID 按 agent 落盘指纹查设备（enroll 幂等键）。
+// 未命中返回 ErrNotFound 哨兵（语义与 FindByID 一致）。
 func (r *DeviceRepo) FindByInstanceID(ctx context.Context, instanceID string) (*entity.Device, error) {
 	var d entity.Device
 	if err := r.db.WithContext(ctx).Where("instance_id = ?", instanceID).First(&d).Error; err != nil {
-		return nil, err
+		return nil, notFoundOr(err)
 	}
 	return &d, nil
 }
 
 // FindByTokenHash 按 sha256(agent_token) 查设备（鉴权路径）。
+// 未命中返回 ErrNotFound 哨兵：鉴权把它映射成「token 无效」，而 DB 故障必须
+// 留成 500 —— 否则一次数据库抖动会伪装成「所有 agent 的 token 都失效」。
 func (r *DeviceRepo) FindByTokenHash(ctx context.Context, hash string) (*entity.Device, error) {
 	var d entity.Device
 	if err := r.db.WithContext(ctx).Where("token_hash = ?", hash).First(&d).Error; err != nil {
-		return nil, err
+		return nil, notFoundOr(err)
 	}
 	return &d, nil
 }

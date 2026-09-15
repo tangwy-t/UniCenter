@@ -197,26 +197,6 @@ func aliasBucketTS(cols []string) string {
 	return strings.Join(parts, ", ")
 }
 
-// ReadResourceTrendPoints 按 (resource_id, bucket_ts 范围) 读取明细 drill，只投影白名单列。
-// 与 ReadTrendPoints 同形，差别只在过滤键。
-func (r *DeviceMetricRepo) ReadResourceTrendPoints(ctx context.Context, table string, resourceID uint64,
-	from, to int64, columns []string) ([]agentmetrics.TrendPoint, error) {
-	cols, err := sanitizeColumns(table, columns)
-	if err != nil {
-		return nil, err
-	}
-	var out []agentmetrics.TrendPoint
-	err = r.db.WithContext(ctx).Table(table).
-		Select(aliasBucketTS(cols)).
-		Where("resource_id = ? AND bucket_ts BETWEEN ? AND ?", resourceID, from, to).
-		Order("bucket_ts ASC").
-		Find(&out).Error
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
 // MetricQueryColumns 返回某张指标表的**全部值列**（不含 bucket_ts）。
 // 供 service 把 `metrics=*` 展开成全量（spec §8 明文：「`metrics=*` 回全量」）。
 //

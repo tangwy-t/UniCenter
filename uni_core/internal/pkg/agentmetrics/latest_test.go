@@ -95,3 +95,35 @@ func TestLatestStorePurgedByRawStore(t *testing.T) {
 		t.Fatalf("Purge 必须连带删除水位键, got %+v", got)
 	}
 }
+
+// TestLatestKeyMatchesSpecContract 是 **Redis key 契约守卫**（S6）。
+//
+// 期望值**刻意写成字符串字面量**，不复用 latestKey：拿被测函数去算期望值的话，
+// 键名改错也照样自洽通过（这正是「latest 与 id 顺序写反」能活下来的原因）。
+// spec §7 表格与计划注释都写 `agent:device:{id}:latest`，手改 key 名会让
+// 2C 的 flush/rollup、孤儿键扫描与运维脚本静默读不到数据。
+func TestLatestKeyMatchesSpecContract(t *testing.T) {
+	if got := latestKey(1001); got != "agent:device:1001:latest" {
+		t.Fatalf("latestKey = %q, want %q（spec §7 表格的键名契约）", got, "agent:device:1001:latest")
+	}
+	if got := historyKey(1001); got != "agent:device:1001:history" {
+		t.Fatalf("historyKey = %q, want %q", got, "agent:device:1001:history")
+	}
+	if DeviceIndexKey != "agent:device:index" {
+		t.Fatalf("DeviceIndexKey = %q, want %q", DeviceIndexKey, "agent:device:index")
+	}
+
+	// 端到端：真写进 Redis 的键名必须是契约里的那一个（用 miniredis 的 key 空间核对）
+	mr, rdb := newTestRedis(t)
+	store := NewLatestStore(rdb)
+	ctx := context.Background()
+	if err := store.Set(ctx, 1001, sample(t, 1_700_000_000_000, 42.5)); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if !mr.Exists("agent:device:1001:latest") {
+		t.Fatalf("Set 之后 Redis 里必须存在 agent:device:1001:latest, 实际键空间 = %v", mr.Keys())
+	}
+	if mr.Exists("agent:device:latest:1001") {
+		t.Fatal("旧键名 agent:device:latest:1001 不得再被写入（契约已统一）")
+	}
+}

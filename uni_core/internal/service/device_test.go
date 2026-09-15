@@ -160,30 +160,119 @@ func TestDeviceResourcesStaleMarking(t *testing.T) {
 	d := &entity.Device{BaseEntity: entity.BaseEntity{ID: 1001}, InstanceID: "i1"}
 	db.Create(d)
 
-	// 一个新鲜、一个久未出现
+	// 三个资源：刚出现、久未出现但仍在枚举窗口内、超过枚举窗口
 	db.Create(&entity.DeviceResource{ID: 2001, DeviceID: 1001, Kind: "disk", Name: "/", LastSeenAt: time.Now()})
-	db.Create(&entity.DeviceResource{ID: 2002, DeviceID: 1001, Kind: "disk", Name: "/old", LastSeenAt: time.Now().AddDate(0, 0, -120)})
+	db.Create(&entity.DeviceResource{ID: 2002, DeviceID: 1001, Kind: "disk", Name: "/old",
+		LastSeenAt: time.Now().AddDate(0, 0, -30)})
+	db.Create(&entity.DeviceResource{ID: 2003, DeviceID: 1001, Kind: "disk", Name: "/gone",
+		LastSeenAt: time.Now().AddDate(0, 0, -120)})
 
 	resp, err := svc.Resources(ctx, 1001, "disk")
 	if err != nil {
 		t.Fatalf("Resources: %v", err)
 	}
+	// S1 修正：**超过枚举窗口（90d）的资源不再枚举**。
+	// 旧断言要求 120 天的资源必须返回（且被标 stale）——那是错的：spec §8 明文
+	// 「设过期（如 90d 未出现即不再枚举）」，否则已卸载的挂载点永久堆在 drill 下拉里。
+	// 现在 90d 是过滤下界，Stale 标记改用**另一个更短的阈值**（1 天，见
+	// service/device.go 的 resourceStaleMarkDays），用于标出「窗口内但久未出现」。
 	if len(resp.List) != 2 {
-		t.Fatalf("资源数 = %d, want 2", len(resp.List))
+		t.Fatalf("资源数 = %d, want 2（120 天未出现的必须不再枚举）: %+v", len(resp.List), resp.List)
 	}
 	byName := map[string]bool{}
 	for _, r := range resp.List {
 		byName[r.Name] = r.Stale
 	}
+	if _, enumerated := byName["/gone"]; enumerated {
+		t.Fatal("超过 90 天未出现的资源不得再出现在枚举结果里")
+	}
 	if byName["/"] {
 		t.Fatal("刚出现的资源不应标 stale")
 	}
 	if !byName["/old"] {
-		t.Fatal("120 天未出现的资源必须标 stale（spec §8：消失资源要看得到）")
+		t.Fatal("窗口内但久未出现（30 天）的资源必须 Stale=true 且**仍枚举**（spec §8：消失资源要看得到）")
+	}
+	// last_seen_at 必须照常返回（窗口内的行一个字段都不少）
+	for _, r := range resp.List {
+		if r.LastSeenAt <= 0 {
+			t.Fatalf("行必须带 last_seen_at（unix 秒）: %+v", r)
+		}
 	}
 }
 
-// ── 错误遮蔽回归（Task 9 上报的观察点）────────────────────────────────
+// TestDeviceReadPathsMapRepositoryFailureToInternal：S5 —— 除 SetStatus 外，
+// **读取路径**的存在性检查同样必须分辨「未命中」与「故障」。
+//
+// 回归价值：GetByID / Resources / Delete 曾写 `if err != nil → NotFound`，
+// 于是 DB 故障（连接断开、超时、约束冲突）全部伪装成 404「设备不存在」。
+func TestDeviceReadPathsMapRepositoryFailureToInternal(t *testing.T) {
+	ctx := context.Background()
+	dbDown := fmt.Errorf("db: connection refused")
+
+	calls := []struct {
+		name string
+		call func(svc *DeviceService) error
+	}{
+		{"GetByID", func(svc *DeviceService) error { _, err := svc.GetByID(ctx, 1001); return err }},
+		{"Resources", func(svc *DeviceService) error { _, err := svc.Resources(ctx, 1001, "disk"); return err }},
+		{"Delete", func(svc *DeviceService) error { return svc.Delete(ctx, 1001) }},
+	}
+
+	for _, tc := range calls {
+		t.Run(tc.name+"_故障→500", func(t *testing.T) {
+			repo := &stubDeviceRepo{findErr: dbDown}
+			svc := NewDeviceService(repo, &stubResourceRepo{}, stubPurger{}, stubLatestReader{}, stubCfg{}, logger.NewNop())
+
+			err := tc.call(svc)
+			if err == nil {
+				t.Fatal("仓储报错时必须返回错误，不得静默成功")
+			}
+			if status := appErrStatus(err); status != 500 {
+				t.Fatalf("非未命中的仓储错误必须映射为 500 Internal, got status=%d err=%v", status, err)
+			}
+			if !errors.Is(err, dbDown) {
+				t.Fatalf("Internal 必须携带原始 cause: %v", err)
+			}
+		})
+
+		t.Run(tc.name+"_未命中→404", func(t *testing.T) {
+			repo := &stubDeviceRepo{findErr: repository.ErrNotFound}
+			svc := NewDeviceService(repo, &stubResourceRepo{}, stubPurger{}, stubLatestReader{}, stubCfg{}, logger.NewNop())
+
+			if status := appErrStatus(tc.call(svc)); status != 404 {
+				t.Fatalf("仓储未命中必须映射为 404 NotFound, got status=%d", status)
+			}
+		})
+	}
+
+	// 真仓储路径：不存在的设备必须是 404（证明仓储确实返回哨兵，而不是靠桩伪造）。
+	// 这条同时守卫 FindByID 的错误映射：查询路径若抛裸的 gorm.ErrRecordNotFound，
+	// errors.Is(err, repository.ErrNotFound) 为假 → 会退化成 500。
+	svc, db, _, _ := newDeviceTestEnv(t)
+	if status := appErrStatus(mustErr2(svc.GetByID(ctx, 999999))); status != 404 {
+		t.Fatalf("真仓储未命中必须 404, got status=%d", status)
+	}
+	if status := appErrStatus(mustErr2(svc.Resources(ctx, 999999, "disk"))); status != 404 {
+		t.Fatalf("Resources 真仓储未命中必须 404, got status=%d", status)
+	}
+	if status := appErrStatus(svc.Delete(ctx, 999999)); status != 404 {
+		t.Fatalf("Delete 真仓储未命中必须 404, got status=%d", status)
+	}
+	// 存在的设备走通（保证上面的 404 不是因为整条路径都报错）
+	if err := db.Create(&entity.Device{
+		BaseEntity: entity.BaseEntity{ID: 2001}, InstanceID: "i2", Status: entity.DeviceStatusEnabled,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.GetByID(ctx, 2001); err != nil {
+		t.Fatalf("存在的设备必须能取到详情: %v", err)
+	}
+}
+
+// mustErr2 把 (resp, err) 折成 err（局部工具，避免与查询测试的 mustErr 重名）。
+func mustErr2[T any](_ T, err error) error { return err }
+
+// ─ 错误遮蔽回归（Task 9 上报的观察点）────────────────────────────────
 //
 // 背景：Enable/Disable 曾把 SetStatus 的**任何**错误都映射成 NotFound，
 // 于是「DB 故障 / 连接断开 / 约束冲突」也会回给前端 404 —— 运营看到

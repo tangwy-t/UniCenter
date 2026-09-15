@@ -2,7 +2,6 @@ package handler
 
 import (
 	"context"
-	"strconv"
 
 	"github.com/gin-gonic/gin"
 
@@ -46,17 +45,30 @@ func NewDeviceHandler(svc DeviceServiceInterface, metrics DeviceMetricsServiceIn
 	return &DeviceHandler{svc: svc, metrics: metrics}
 }
 
-// deviceID 解析路径参数 :id（雪花 id 是 uint64，路径上按十进制字符串传）。
-func deviceID(c *gin.Context) (uint64, error) {
-	raw := c.Param("id")
-	id, err := strconv.ParseUint(raw, 10, 64)
-	if err != nil || id == 0 {
-		return 0, apperror.BadRequest("设备 ID 非法")
-	}
-	return id, nil
-}
+// 路径参数 :id 的解析统一走 app.Uint64Param（C2）。
+//
+// 原先这里自造了一个 deviceID()（strconv.ParseUint + "设备 ID 非法"），而
+// internal/pkg/app/param.go 的 app.Uint64Param 已被 11 个 handler、50 处使用：
+// 两套解析的失败信息与行为必然漂移（自造版额外把 id==0 也判成 400）。
+// 以既有工具为准 ⇒ id=0 不再在 handler 层挡住，而是交给 service 走「设备不存在」
+// 的正常路径（雪花 id 永不为 0，故这只是一个语义更一致的边界，不是能力缺失）。
 
-// List GET /devices
+// List handles GET /api/v1/devices — paginated device listing.
+// @Summary      设备列表
+// @Description  分页查询设备列表，支持按主机名、启停态、在线状态筛选；每行附带 Redis 水位
+// @Tags         设备监控
+// @Accept       json
+// @Produce      json
+// @Param        page      query  int     false  "页码"           default(1)
+// @Param        pageSize  query  int     false  "每页条数"       default(10)
+// @Param        hostname  query  string  false  "主机名(模糊查询)"
+// @Param        status    query  int     false  "启停态(0=停用 1=启用)"
+// @Param        online    query  bool    false  "在线状态(true=在线 false=离线)"
+// @Security     BearerAuth
+// @Success      200  {object}  app.Response{data=app.PageResponse}  "查询成功"
+// @Failure      401  {object}  app.Response  "未登录"
+// @Failure      403  {object}  app.Response  "无权限"
+// @Router       /devices [get]
 func (h *DeviceHandler) List(c *gin.Context) {
 	var query request.DeviceQuery
 	if err := c.ShouldBindQuery(&query); err != nil {
@@ -71,11 +83,22 @@ func (h *DeviceHandler) List(c *gin.Context) {
 	app.Success(c, resp)
 }
 
-// GetByID GET /devices/:id
+// GetByID handles GET /api/v1/devices/:id — device detail with the latest watermark.
+// @Summary      设备详情
+// @Description  按设备 ID 查询详情（含 Redis 最新水位与在线状态）
+// @Tags         设备监控
+// @Accept       json
+// @Produce      json
+// @Param        id   path      uint64  true  "设备ID"
+// @Security     BearerAuth
+// @Success      200  {object}  app.Response{data=response.DeviceResp}  "查询成功"
+// @Failure      401  {object}  app.Response  "未登录"
+// @Failure      403  {object}  app.Response  "无权限"
+// @Failure      404  {object}  app.Response  "设备不存在"
+// @Router       /devices/{id} [get]
 func (h *DeviceHandler) GetByID(c *gin.Context) {
-	id, err := deviceID(c)
-	if err != nil {
-		app.Error(c, err)
+	id, ok := app.Uint64Param(c, "id")
+	if !ok {
 		return
 	}
 	resp, err := h.svc.GetByID(c.Request.Context(), id)
@@ -86,7 +109,26 @@ func (h *DeviceHandler) GetByID(c *gin.Context) {
 	app.Success(c, resp)
 }
 
-// Metrics GET /devices/:id/metrics?range=&metrics=&kind=&name=
+// Metrics handles GET /api/v1/devices/:id/metrics — whole-machine trend or per-resource drill.
+//
+// @Summary      设备指标趋势 / 资源下钻
+// @Description  整机趋势：range 选档（≤24h Redis 原始 / ≤30d 5min 表 / >30d 1h 表），metrics 为逗号白名单（* 表示该档全部可用列）
+// @Description  资源下钻：kind+name 成对出现（kind ∈ disk/disk_io/nic/sensor，name 为挂载点/设备名/网卡名/传感器名）
+// @Tags         设备监控
+// @Accept       json
+// @Produce      json
+// @Param        id      path   uint64  true   "设备ID"
+// @Param        range   query  int     false  "时间窗口(秒)"        default(86400)
+// @Param        metrics query  string  false  "逗号分隔的指标列白名单，* 表示该档全部可用列"
+// @Param        kind    query  string  false  "资源种类(disk/disk_io/nic/sensor)，与 name 成对"
+// @Param        name    query  string  false  "资源名(挂载点/设备名/网卡名/传感器名)，与 kind 成对"
+// @Security     BearerAuth
+// @Success      200  {object}  app.Response{data=response.DeviceMetricsResp}  "整机趋势"
+// @Success      200  {object}  app.Response{data=response.DeviceResourceResp}  "资源下钻"
+// @Failure      400  {object}  app.Response  "参数错误(range 越界 / kind+name 不配对 / 列不在该档可用列集)"
+// @Failure      401  {object}  app.Response  "未登录"
+// @Failure      403  {object}  app.Response  "无权限"
+// @Router       /devices/{id}/metrics [get]
 //
 // 一个端点两种语义：kind+name 同时存在 → 资源下钻；否则 → 整机趋势。
 // 两条分支各自 return，**不做**「先调一次再调一次」的兜底（那是死代码：
@@ -95,9 +137,8 @@ func (h *DeviceHandler) GetByID(c *gin.Context) {
 // 为什么下钻复用同一端点：挂载点含 "/"、网卡名含 "."/" "，做 path segment
 // 需要双重转义，且根挂载点 "/" 会撞上 Gin 的尾斜杠路由（spec §8）。
 func (h *DeviceHandler) Metrics(c *gin.Context) {
-	id, err := deviceID(c)
-	if err != nil {
-		app.Error(c, err)
+	id, ok := app.Uint64Param(c, "id")
+	if !ok {
 		return
 	}
 	var q request.DeviceMetricsQuery
@@ -125,11 +166,23 @@ func (h *DeviceHandler) Metrics(c *gin.Context) {
 	app.Success(c, resp)
 }
 
-// Resources GET /devices/:id/resources?kind=
+// Resources handles GET /api/v1/devices/:id/resources — the device's resource inventory.
+// @Summary      设备资源清单
+// @Description  枚举该设备的资源（drill 下拉数据源），含 last_seen_at 与 stale（超过 90 天未出现不再枚举）
+// @Tags         设备监控
+// @Accept       json
+// @Produce      json
+// @Param        id    path   uint64  true   "设备ID"
+// @Param        kind  query  string  false  "资源种类(disk/disk_io/nic/sensor)，空表示全部"
+// @Security     BearerAuth
+// @Success      200  {object}  app.Response{data=response.DeviceResourcesResp}  "查询成功"
+// @Failure      401  {object}  app.Response  "未登录"
+// @Failure      403  {object}  app.Response  "无权限"
+// @Failure      404  {object}  app.Response  "设备不存在"
+// @Router       /devices/{id}/resources [get]
 func (h *DeviceHandler) Resources(c *gin.Context) {
-	id, err := deviceID(c)
-	if err != nil {
-		app.Error(c, err)
+	id, ok := app.Uint64Param(c, "id")
+	if !ok {
 		return
 	}
 	resp, err := h.svc.Resources(c.Request.Context(), id, c.Query("kind"))
@@ -140,11 +193,22 @@ func (h *DeviceHandler) Resources(c *gin.Context) {
 	app.Success(c, resp)
 }
 
-// Enable POST /devices/:id/enable
+// Enable handles POST /api/v1/devices/:id/enable — enable a device.
+// @Summary      启用设备
+// @Description  把设备的启停态置为启用(1)；与在线状态正交
+// @Tags         设备监控
+// @Accept       json
+// @Produce      json
+// @Param        id   path      uint64  true  "设备ID"
+// @Security     BearerAuth
+// @Success      200  {object}  app.Response  "启用成功"
+// @Failure      401  {object}  app.Response  "未登录"
+// @Failure      403  {object}  app.Response  "无权限"
+// @Failure      404  {object}  app.Response  "设备不存在"
+// @Router       /devices/{id}/enable [post]
 func (h *DeviceHandler) Enable(c *gin.Context) {
-	id, err := deviceID(c)
-	if err != nil {
-		app.Error(c, err)
+	id, ok := app.Uint64Param(c, "id")
+	if !ok {
 		return
 	}
 	if err := h.svc.Enable(c.Request.Context(), id); err != nil {
@@ -154,11 +218,22 @@ func (h *DeviceHandler) Enable(c *gin.Context) {
 	app.Success(c, nil)
 }
 
-// Disable POST /devices/:id/disable
+// Disable handles POST /api/v1/devices/:id/disable — disable a device.
+// @Summary      停用设备
+// @Description  把设备的启停态置为停用(0)；停用后 agent 上报不再被接受，且重新 enroll 不会自动启用
+// @Tags         设备监控
+// @Accept       json
+// @Produce      json
+// @Param        id   path      uint64  true  "设备ID"
+// @Security     BearerAuth
+// @Success      200  {object}  app.Response  "停用成功"
+// @Failure      401  {object}  app.Response  "未登录"
+// @Failure      403  {object}  app.Response  "无权限"
+// @Failure      404  {object}  app.Response  "设备不存在"
+// @Router       /devices/{id}/disable [post]
 func (h *DeviceHandler) Disable(c *gin.Context) {
-	id, err := deviceID(c)
-	if err != nil {
-		app.Error(c, err)
+	id, ok := app.Uint64Param(c, "id")
+	if !ok {
 		return
 	}
 	if err := h.svc.Disable(c.Request.Context(), id); err != nil {
@@ -168,11 +243,22 @@ func (h *DeviceHandler) Disable(c *gin.Context) {
 	app.Success(c, nil)
 }
 
-// Delete DELETE /devices/:id
+// Delete handles DELETE /api/v1/devices/:id — soft-delete a device and purge its Redis data.
+// @Summary      删除设备
+// @Description  软删设备，并连带清理 Redis 原始窗/水位键/资源维度行与子表行（spec §7.3）
+// @Tags         设备监控
+// @Accept       json
+// @Produce      json
+// @Param        id   path      uint64  true  "设备ID"
+// @Security     BearerAuth
+// @Success      200  {object}  app.Response  "删除成功"
+// @Failure      401  {object}  app.Response  "未登录"
+// @Failure      403  {object}  app.Response  "无权限"
+// @Failure      404  {object}  app.Response  "设备不存在"
+// @Router       /devices/{id} [delete]
 func (h *DeviceHandler) Delete(c *gin.Context) {
-	id, err := deviceID(c)
-	if err != nil {
-		app.Error(c, err)
+	id, ok := app.Uint64Param(c, "id")
+	if !ok {
 		return
 	}
 	if err := h.svc.Delete(c.Request.Context(), id); err != nil {

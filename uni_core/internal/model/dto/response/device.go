@@ -38,8 +38,9 @@ type DeviceResp struct {
 
 // DeviceMetricPoint 是趋势/下钻的一个桶。
 //
-// 列名与 spec §5.5 一致；**空桶也出现在 buckets 中**（所有列省略），
-// 前端靠 t 定位时间、不得按下标推算（buckets 是稀疏的）。
+// 列名与 spec §5.5 一致；`buckets` 是**稀疏的**：空桶**不出现**在 buckets 中
+// （§7.1「空桶跳过不写行」），因此 `t` 有洞。前端**禁止按「下标 = 时间」推算**，
+// 必须用 `t` 定位（spec §8）。
 type DeviceMetricPoint struct {
 	T int64 `json:"t"` // 桶起始 unix 秒
 
@@ -103,8 +104,14 @@ type DeviceMetricsResp struct {
 	// AvailableMetrics 是本响应的**可用列集**：用于区分「该列未采集（值为空）」
 	// 与「该档位不产该列（列不存在）」。半年视图上的 agent_* / tcp_time_wait
 	// 属于后者，前端应据此显示「该档位无此指标」而不是「—」。
+	//
+	// 取值 = **该表的值列 ∩ agentmetrics.TrendPoint 实际承接的列**（再按档位
+	// 减去 5min-only 列）。为什么不直接给「该表全部列」：表里有约 20 列
+	// （tcp_time_wait / udp_total / *_ops_sec / agent_* …）没有任何响应字段去装，
+	// 把它们声明成「可用」会让消费方继续误读成「agent 挂了」—— 那正是
+	// available_metrics 要消除的误读。
 	AvailableMetrics []string `json:"available_metrics"`
-	// Buckets 稀疏：空桶仍出现但所有列省略。
+	// Buckets 稀疏：空桶**不产行**（§7.1），t 有洞；只能用 t 定位，禁止按下标推算。
 	Buckets []DeviceMetricPoint `json:"buckets"`
 }
 

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"time"
 
 	"go.uber.org/zap"
@@ -15,6 +16,7 @@ import (
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/apperror"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/database"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/repository"
 )
 
 // ── 消费方窄接口（仓库既有约定：接口定义在消费方）──────────────
@@ -150,21 +152,47 @@ func (s *AgentIngestService) Enroll(ctx context.Context, h *agentproto.Hello) (u
 }
 
 // Authenticate 处理带 agent_token 的鉴权。
+//
+// 错误判别必须分辨未命中与故障（S5）：
+//   - `repository.ErrNotFound`（查无此 token_hash）→ 400「agent token 无效」；
+//   - 其它任何错误（DB 故障）→ 500 Internal 且带 cause。
+//
+// 曾把任何错误都当成「token 无效」：一次数据库抖动会让**所有** agent 同时
+// 收到「token 失效」，运维会去逐个排查 agent 凭据，而真正的问题在数据库。
 func (s *AgentIngestService) Authenticate(ctx context.Context, h *agentproto.Hello) (uint64, error) {
 	if h == nil || h.AgentToken == "" {
 		return 0, apperror.BadRequest("缺少 agent token")
 	}
 	d, err := s.repo.FindByTokenHash(ctx, hashToken(h.AgentToken))
-	if err != nil || d == nil {
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return 0, apperror.BadRequest("agent token 无效")
+		}
+		return 0, apperror.Internal("内部错误", err)
+	}
+	if d == nil {
 		return 0, apperror.BadRequest("agent token 无效")
 	}
 	return d.ID, nil
 }
 
 // IsAccepting 报告设备是否处于可接受上报的状态（启用态）。
+//
+// 错误必须**上抛**（S5）：原先 `if err != nil || d == nil { return false, nil }`
+// 把仓储的**任何**错误吞成「不接受上报」——DB 故障时调用方（2C 的 AgentHub）
+// 只看到「设备都被停用了」，无从知道数据库已经不可用，故障被伪装成一个业务结论。
+//
+// 未命中是**合法答案**而不是错误：设备不存在/已删除 → 就是不可接受上报
+// （返回 false, nil），调用方据此拒绝该连接；只有真故障才上抛 500。
 func (s *AgentIngestService) IsAccepting(ctx context.Context, deviceID uint64) (bool, error) {
 	d, err := s.repo.FindByID(ctx, deviceID)
-	if err != nil || d == nil {
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return false, nil
+		}
+		return false, apperror.Internal("内部错误", err)
+	}
+	if d == nil {
 		return false, nil
 	}
 	return d.Status == entity.DeviceStatusEnabled, nil

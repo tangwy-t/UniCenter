@@ -644,14 +644,20 @@ func TestReadTrendPointsRejectsUnknownTableAndColumn(t *testing.T) {
 		[]string{"cpu_used_percent) FROM device_metric_1h WHERE (1=1"}); err == nil {
 		t.Fatal("非白名单列必须报错")
 	}
-	// 白名单按表隔离：宽表列不得出现在子表查询里
-	if _, err := repo.ReadResourceTrendPoints(ctx, entity.TableNameMetricDisk, 2001, 0, 9999,
-		[]string{"cpu_used_percent"}); err == nil {
+	// 白名单按表隔离：宽表列不得出现在子表查询里。
+	// 注：下钻的读取入口已换成 ReadResourceRows（SELECT *，仓储不做投影，H2），
+	// 故这里直接锚定白名单函数本身 —— 断言强度不变（子表查询永远拿不到宽表列）。
+	if _, err := sanitizeColumns(entity.TableNameMetricDisk, []string{"cpu_used_percent"}); err == nil {
 		t.Fatal("子表查询不得放行宽表列")
 	}
 }
 
-func TestReadResourceTrendAndCount(t *testing.T) {
+// TestReadResourceRowsAndCountWide 覆盖下钻的读取入口（ReadResourceRows）与
+// CountWide。原先的另一条断言（ReadResourceTrendPoints 的 t/行数）随该方法的
+// 删除一并移除（H2：它已无生产调用方，且子表列名与 TrendPoint 不同名，
+// 类型化扫描正是「下钻值列全为 nil」的成因）。读取范围/设备隔离的强度由
+// TestReadResourceRowsSelectsAllSubTableColumns 覆盖，此处保留 CountWide 的断言。
+func TestReadResourceRowsAndCountWide(t *testing.T) {
 	db := newMetricTestDB(t)
 	repo := NewDeviceMetricRepository(db)
 	ctx := context.Background()
@@ -664,19 +670,15 @@ func TestReadResourceTrendAndCount(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	// 注：子表列名（used_percent / rx_bytes_per_sec / temperature_c …）与
-	// agentmetrics.TrendPoint 的字段名（disk_used_percent / nic_rx_bytes_sec /
-	// max_temperature_c …）**不同名**，故这里只能断言 t 与行数（见任务回报的缺陷条目）。
-	points, err := repo.ReadResourceTrendPoints(ctx, entity.TableNameMetricDisk, 2001, 0, 9999,
-		[]string{"bucket_ts", "used_percent"})
+	rows, err := repo.ReadResourceRows(ctx, entity.TableNameMetricDisk, 2001, 0, 9999)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(points) != 2 {
-		t.Fatalf("2001 号的趋势点 = %d, want 2（不得串到 2002）", len(points))
+	if len(rows) != 2 {
+		t.Fatalf("2001 号的下钻行 = %d, want 2（不得串到 2002）", len(rows))
 	}
-	if points[0].T != 1000 || points[1].T != 1300 {
-		t.Fatalf("子表趋势点 t = [%d %d], want [1000 1300]（必须按 bucket_ts 升序）", points[0].T, points[1].T)
+	if rows[0]["t"] == nil || rows[1]["t"] == nil {
+		t.Fatalf("下钻行必须带可解析的 t（bucket_ts AS t）: %v", rows)
 	}
 	n, err := repo.CountWide(ctx, entity.TableNameMetric5m, 1001, 0, 9999)
 	if err != nil {

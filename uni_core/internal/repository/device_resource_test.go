@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -96,15 +97,64 @@ func TestResourceListByDeviceFiltersKindAndStaleness(t *testing.T) {
 		t.Fatalf("1001 的 disk 资源 = %d 个, want 2", len(disks))
 	}
 
-	// staleBefore 之后：全部新鲜
-	fresh, _ := repo.ListByDevice(ctx, 1001, entity.ResourceKindDisk, now.Add(-time.Hour))
+	// 枚举窗口下界之后：全部新鲜，两行都在
+	fresh, err := repo.ListByDevice(ctx, 1001, entity.ResourceKindDisk, now.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(fresh) != 2 {
 		t.Fatalf("新鲜过滤应保留 2 个, got %d", len(fresh))
 	}
-	// staleBefore 早于 last_seen_at 的情况：全部过期
-	stale, _ := repo.ListByDevice(ctx, 1001, entity.ResourceKindDisk, now.Add(24*time.Hour))
-	if len(stale) != 2 {
-		t.Fatalf("staleBefore 为未来时仍应返回（由调用方决定是否剔除）, got %d", len(stale))
+
+	// 枚举窗口下界晚于 last_seen_at（即「超过窗口未再被观测到」）→ **不再枚举**。
+	// 这是 S1 的核心断言：旧行为忽略 staleBefore、返回全部行，于是 200 天前的
+	// 挂载点永久堆在 drill 下拉里（spec §8 明文要求「设过期…即不再枚举」）。
+	stale, err := repo.ListByDevice(ctx, 1001, entity.ResourceKindDisk, now.Add(24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stale) != 0 {
+		t.Fatalf("超过枚举窗口的资源必须被 SQL 过滤掉（不得再枚举）, got %d 行: %+v", len(stale), stale)
+	}
+	// 反向：边界本身必须**包含**（last_seen_at >= staleBefore 是闭区间下界）
+	atBoundary, err := repo.ListByDevice(ctx, 1001, entity.ResourceKindDisk, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(atBoundary) != 2 {
+		t.Fatalf("last_seen_at == staleBefore 必须仍枚举（闭区间）, got %d", len(atBoundary))
+	}
+}
+
+// TestResolveIDMissReturnsNotFoundSentinel 守卫 S5 的**判别基础**：
+// service 层用 errors.Is(err, repository.ErrNotFound) 把「未命中」与「DB 故障」
+// 分开（前者空结果/404，后者 500）。若仓储在查询路径上抛裸的
+// gorm.ErrRecordNotFound，这个判别**永远为假**（哨兵包装 gorm 错误，反向不成立），
+// 于是真实的「资源不存在」被当成 DB 故障映射成 500 —— 与「DB 故障伪装 404」
+// 是同一个坑的两面。
+func TestResolveIDMissReturnsNotFoundSentinel(t *testing.T) {
+	db := newResourceTestDB(t)
+	repo := NewDeviceResourceRepository(db)
+	ctx := context.Background()
+
+	_, err := repo.ResolveID(ctx, 1001, entity.ResourceKindDisk, "/nope")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("未命中必须返回 ErrNotFound 哨兵, got %v", err)
+	}
+	// 向后兼容：哨兵包装了 gorm.ErrRecordNotFound，既有判别继续成立
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("哨兵必须仍匹配 gorm.ErrRecordNotFound（既有调用方的契约）, got %v", err)
+	}
+
+	// 命中时不得误报未命中
+	if err := repo.UpsertSeen(ctx, []entity.DeviceResource{
+		{ID: 3001, DeviceID: 1001, Kind: entity.ResourceKindDisk, Name: "/"},
+	}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	id, err := repo.ResolveID(ctx, 1001, entity.ResourceKindDisk, "/")
+	if err != nil || id != 3001 {
+		t.Fatalf("命中时 ResolveID = (%d, %v), want (3001, nil)", id, err)
 	}
 }
 

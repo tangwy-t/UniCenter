@@ -186,6 +186,122 @@ func TestAuthenticateRejectsBadToken(t *testing.T) {
 	}
 }
 
+// stubAgentRepo 是可注入错误的 AgentDeviceRepository 桩（只为触发错误分支）。
+// 其余方法返回零值即可 —— 被测方法只走 FindByID / FindByTokenHash。
+type stubAgentRepo struct {
+	findErr    error
+	findDevice *entity.Device
+}
+
+func (s *stubAgentRepo) Create(context.Context, *entity.Device) error { return nil }
+func (s *stubAgentRepo) FindByID(context.Context, uint64) (*entity.Device, error) {
+	return s.findDevice, s.findErr
+}
+func (s *stubAgentRepo) FindByInstanceID(context.Context, string) (*entity.Device, error) {
+	return s.findDevice, s.findErr
+}
+func (s *stubAgentRepo) FindByTokenHash(context.Context, string) (*entity.Device, error) {
+	return s.findDevice, s.findErr
+}
+func (s *stubAgentRepo) UpdateEnroll(context.Context, *entity.Device) error { return nil }
+func (s *stubAgentRepo) Touch(context.Context, uint64, time.Time) error     { return nil }
+
+// stubAgentRaw / stubAgentLatest 是热层的最小桩（错误分支不写 Redis）。
+type stubAgentRaw struct{}
+
+func (stubAgentRaw) Append(context.Context, uint64, *agentproto.MetricsSample) error { return nil }
+
+type stubAgentLatest struct{}
+
+func (stubAgentLatest) Set(context.Context, uint64, *agentproto.MetricsSample) error { return nil }
+
+// appErrStatusOf 把错误归一成 HTTP 状态（同 device_test.go 的 appErrStatus，
+// 此处的断言跨文件共享同一个语义）。
+func newIngestSvc(repo AgentDeviceRepository) *AgentIngestService {
+	return NewAgentIngestService(repo, stubAgentRaw{}, stubAgentLatest{}, stubCfg{}, logger.NewNop())
+}
+
+// TestIsAcceptingPropagatesRepositoryFailure：S5 —— IsAccepting **不得把错误吞成**
+// (false, nil)。
+//
+// 回归价值：原实现 `if err != nil || d == nil { return false, nil }` 会把 DB 故障
+// 伪装成一个业务结论「该设备不接受上报」。2C 的 AgentHub 会据此拒掉连接，
+// 而运维看到的现象是「所有设备都像被停用了」，真正的问题在数据库。
+func TestIsAcceptingPropagatesRepositoryFailure(t *testing.T) {
+	ctx := context.Background()
+	dbDown := errors.New("db: connection refused")
+	svc := newIngestSvc(&stubAgentRepo{findErr: dbDown})
+
+	ok, err := svc.IsAccepting(ctx, 1001)
+	if err == nil {
+		t.Fatalf("仓储故障必须上抛，不得吞成 (false, nil): ok=%v", ok)
+	}
+	if ok {
+		t.Fatal("故障时不得报告「可接受上报」")
+	}
+	if status := appErrStatus(err); status != 500 {
+		t.Fatalf("仓储故障必须映射为 500 Internal, got status=%d err=%v", status, err)
+	}
+	if !errors.Is(err, dbDown) {
+		t.Fatalf("Internal 必须携带原始 cause: %v", err)
+	}
+}
+
+// TestIsAcceptingMissIsRejectionNotError：未命中是**合法答案**（设备不存在/已删除
+// → 就是不可接受上报），不是错误；只有真故障才上抛（与上一条互补）。
+func TestIsAcceptingMissIsRejectionNotError(t *testing.T) {
+	ctx := context.Background()
+
+	// 桩：未命中哨兵
+	svc := newIngestSvc(&stubAgentRepo{findErr: repository.ErrNotFound})
+	ok, err := svc.IsAccepting(ctx, 1001)
+	if err != nil || ok {
+		t.Fatalf("设备不存在应为 (false, nil), got (%v, %v)", ok, err)
+	}
+
+	// 真仓储：不存在的设备同样必须是 (false, nil) 而不是 500
+	// （守卫 FindByID 的错误映射：查询路径若抛裸的 gorm.ErrRecordNotFound，
+	// errors.Is(err, repository.ErrNotFound) 为假 → 会退化成 500）。
+	real := newIngestTestEnv(t).svc
+	ok, err = real.IsAccepting(ctx, 999999)
+	if err != nil || ok {
+		t.Fatalf("真仓储下不存在的设备应为 (false, nil), got (%v, %v)", ok, err)
+	}
+}
+
+// TestAuthenticatePropagatesRepositoryFailure：S5 —— 鉴权也必须分辨
+// 「查无此 token（400）」与「DB 故障（500）」。原实现把任何错误都当成
+// 「agent token 无效」：一次数据库抖动会让所有 agent 同时以为凭据失效。
+func TestAuthenticatePropagatesRepositoryFailure(t *testing.T) {
+	ctx := context.Background()
+	dbDown := errors.New("db: connection refused")
+	svc := newIngestSvc(&stubAgentRepo{findErr: dbDown})
+
+	h := helloEnroll("inst-1")
+	h.EnrollToken = ""
+	h.AgentToken = "whatever"
+
+	_, err := svc.Authenticate(ctx, h)
+	if err == nil {
+		t.Fatal("仓储故障必须上抛")
+	}
+	if status := appErrStatus(err); status != 500 {
+		t.Fatalf("仓储故障必须映射为 500（不得伪装成 400 token 无效）, got status=%d err=%v", status, err)
+	}
+	if !errors.Is(err, dbDown) {
+		t.Fatalf("Internal 必须携带原始 cause: %v", err)
+	}
+
+	// 反向：真仓储的未命中仍然是 400（token 无效），不得变成 500
+	real := newIngestTestEnv(t).svc
+	h2 := helloEnroll("inst-1")
+	h2.EnrollToken = ""
+	h2.AgentToken = "not-a-real-token"
+	if _, err := real.Authenticate(ctx, h2); appErrStatus(err) != 400 {
+		t.Fatalf("查无此 token 必须仍是 400, got status=%d err=%v", appErrStatus(err), err)
+	}
+}
+
 func TestIngestWritesRawAndLatest(t *testing.T) {
 	env := newIngestTestEnv(t)
 	ctx := context.Background()

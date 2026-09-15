@@ -191,9 +191,18 @@ func Init(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalClien
 	// Append（入湖）/ Query+Bucket（查询）/ Purge（删除连带清理）三面，
 	// 各消费方只声明自己需要的窄接口（接口定义在消费方）。
 	// configSvc 直接满足 AgentConfigGetter（GetString + GetInt）—— 无需适配器。
-	// 入湖服务由 2C 的 AgentHub（WS）消费：此处**先完成构造**（装配集中在一处，
-	// 2C 只需接线，不必回头翻 repo/hot-layer 的构造参数），当前尚无调用方。
-	_ = service.NewAgentIngestService(deviceRepo, rawStore, latestStore, configSvc, log)
+	// 入湖服务（AgentIngestService）**当前故意不构造**（H1）。
+	//
+	// 它唯一的消费者是 2C 的 AgentHub（WS 入站）；本计划范围内没有任何调用方，
+	// 构造出来只能赋给 `_`（死赋值：读代码的人不知道这是「留着给 2C」还是
+	// 「漏了消费者」）。所以这里不留死赋值，只留一条明确的交接说明。
+	//
+	// TODO(2C): AgentHub 落地时在此构造并注入 —— 依赖已全部备齐：
+	//   agentIngestSvc := service.NewAgentIngestService(deviceRepo, rawStore, latestStore, configSvc, log)
+	// deviceRepo 满足 AgentDeviceRepository（Create/FindByID/FindByInstanceID/
+	// FindByTokenHash/UpdateEnroll/Touch），rawStore 满足 AgentRawStore（Append），
+	// latestStore 满足 AgentLatestStore（Set），configSvc 满足 AgentConfigGetter
+	// （GetString + GetInt，无需适配器）。
 	agentQuerySvc := service.NewAgentMetricsQueryService(rawStore, deviceMetricRepo, deviceResourceRepo, log)
 	deviceSvc := service.NewDeviceService(deviceRepo, deviceResourceRepo, rawStore, latestStore, configSvc, log)
 

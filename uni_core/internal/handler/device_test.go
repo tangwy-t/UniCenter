@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -188,5 +190,102 @@ func TestDeviceHandlerDeleteUsesParam(t *testing.T) {
 	h.Delete(c)
 	if w.Code != http.StatusOK {
 		t.Fatalf("Delete 状态 = %d, want 200", w.Code)
+	}
+}
+
+// TestDeviceHandlerBadIDUsesSharedParamHelper：C2 —— 路径参数解析必须走
+// app.Uint64Param（既有工具，11 个 handler、50 处使用），不得自造解析。
+//
+// 断言方式：错误响应里必须出现该工具的固定话术（“无效的参数 id: <原值>”）。
+// 自造解析器（旧的 deviceID()）给的是「设备 ID 非法」，与本仓库其它 50 处
+// 的失败信息不一致 —— 客户端无法按同一套话术定位问题。
+func TestDeviceHandlerBadIDUsesSharedParamHelper(t *testing.T) {
+	stub := &stubDeviceSvc{}
+	h := NewDeviceHandler(stub, stub)
+	for name, raw := range map[string]string{"非数字": "not-a-number", "超出 uint64": "99999999999999999999999"} {
+		c, w := newGinCtx(http.MethodDelete, "/devices/"+raw)
+		c.Params = gin.Params{{Key: "id", Value: raw}}
+		h.Delete(c)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("%s：HTTP 状态 = %d, want 400", name, w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "无效的参数 id") {
+			t.Fatalf("%s：必须复用 app.Uint64Param 的失败话术（证明没有自造解析器）, body=%s",
+				name, w.Body.String())
+		}
+	}
+}
+
+// TestDeviceHandlerHasSwagAnnotations：C1 —— DeviceHandler 的每一个 handler 方法
+// 都必须有 swag 注解块（既有 13 个 handler 文件逐方法都有）。
+//
+// 为什么值得守卫：注解缺失不会让任何编译/测试失败，只会让 docs/swagger.json 里
+// `/devices*` 路径数为 0 —— 前端与外部集成方按文档拿不到接口，且没人会发现。
+// 这里直接扫描源文件：每个 `func (h *DeviceHandler) X(` 上方的注释块必须含
+// @Summary/@Tags/@Param 或 @Success/@Router（合并端点允许两个 @Success）。
+func TestDeviceHandlerHasSwagAnnotations(t *testing.T) {
+	src, err := os.ReadFile("device.go")
+	if err != nil {
+		t.Fatalf("读取 device.go: %v", err)
+	}
+	lines := strings.Split(string(src), "\n")
+
+	methodRe := regexp.MustCompile(`^func \(h \*DeviceHandler\) ([A-Za-z0-9_]+)\(`)
+	routers := map[string]bool{}
+	checked := 0
+	for i, line := range lines {
+		m := methodRe.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		method := m[1]
+		checked++
+		// 收集紧邻上方的注释块（跳过空行与额外的普通注释行直到非注释行）
+		block := make([]string, 0, 24)
+		for j := i - 1; j >= 0; j-- {
+			trimmed := strings.TrimSpace(lines[j])
+			if strings.HasPrefix(trimmed, "//") {
+				block = append([]string{trimmed}, block...)
+				continue
+			}
+			break
+		}
+		joined := strings.Join(block, "\n")
+		for _, must := range []string{"@Summary", "@Tags", "@Success", "@Router", "@Security"} {
+			if !strings.Contains(joined, must) {
+				t.Fatalf("%s 缺少 swag 注解 %s（docs/swagger.json 里就不会有该路径）:\n%s",
+					method, must, joined)
+			}
+		}
+		r := regexp.MustCompile(`@Router\s+(\S+)\s+\[(\w+)\]`).FindStringSubmatch(joined)
+		if r == nil {
+			t.Fatalf("%s 的 @Router 行格式不符（既有格式：`@Router /x/{id} [get]`）:\n%s", method, joined)
+		}
+		if !strings.HasPrefix(r[1], "/devices") {
+			t.Fatalf("%s 的 @Router 路径 = %q, want 以 /devices 开头（既有文件不带 /api/v1 前缀）", method, r[1])
+		}
+		if !strings.EqualFold(r[2], "") {
+			routers[r[1]+" "+strings.ToLower(r[2])] = true
+		}
+	}
+	if checked != 7 {
+		t.Fatalf("扫描到 %d 个 DeviceHandler 方法，want 7（方法增删时本守卫必须同步）", checked)
+	}
+	want := map[string]bool{
+		"/devices get":                true,
+		"/devices/{id} get":           true,
+		"/devices/{id} delete":        true,
+		"/devices/{id}/metrics get":   true,
+		"/devices/{id}/resources get": true,
+		"/devices/{id}/enable post":   true,
+		"/devices/{id}/disable post":  true,
+	}
+	for k := range want {
+		if !routers[k] {
+			t.Fatalf("缺 swag 路由注解 %q（实测 %v）", k, routers)
+		}
+	}
+	if len(routers) != len(want) {
+		t.Fatalf("swag 路由注解 = %v（%d 条）, want %d 条", routers, len(routers), len(want))
 	}
 }
