@@ -508,7 +508,16 @@ func (s *AgentMetricsFlushService) bootstrapStart() int64 {
 }
 
 // bootstrapWindow 是补齐窗口（= raw 点的 Redis 保留期，spec §7.1）。
-const bootstrapWindow = 24 * time.Hour
+//
+// **这里不再有第二份 24h**：值逐字引用 agentmetrics.RawBootstrapWindow（回填/回退
+// 假设的时间跨度的单一来源），与 wireup 的容量推导（agentmetrics.RawMaxPoints）同源；
+// 回填/回退窗口 defaultBackfillHours 也由它推导，不构成第三份「一天」。
+// 交叉守卫：agentmetrics/window_span_test.go 与 TestBootstrapWindowIsSingleSource（本包）。
+//
+// 注意它与「热层实际覆盖多久」（agentmetrics.RawWindowSpan(MaxPoints, Step)）是**两个**
+// 量：后者短于前者时（把 reportInterval 调小但不重启，MaxPoints 仍按旧间隔冻结），
+// 这段窗口内的原始点读不到 —— 表现为空桶 / HoursSkipped++，启动期由 wireup 校验并 Warn。
+const bootstrapWindow = agentmetrics.RawBootstrapWindow
 
 // readCursor 读 `cursor_5m`；键缺失 → Bootstrap 语义（写 `now−24h` 对齐后的水位并返回它）。
 //

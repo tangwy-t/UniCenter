@@ -160,3 +160,31 @@ func TestFlushBootstrapCoversExactly24Hours(t *testing.T) {
 		t.Fatalf("Bootstrap 覆写了已有水位：cursor_5m = %d, want %d", got, base+86100-300)
 	}
 }
+
+// TestBootstrapWindowIsSingleSource 是「两侧同源」的交叉守卫（Plan 2G Task 1）。
+//
+// service 侧的补齐窗口**不得**再是一份自己的 24h 字面量：它必须逐字引用
+// agentmetrics.RawBootstrapWindow（热层窗口跨度的单一来源），而回填/回退窗口
+// （defaultBackfillHours）由**同一个**常量推导，不构成第三份「一天」。
+//
+// 为什么必须由 service 侧断言：agentmetrics **不能** import service（依赖方向相反），
+// 「service 用的就是那个常量」只有在这里才看得见。把常量改回本地字面量（例如 12h）时
+// 这条断言会红 —— 而「两份 24h 各自漂移」正是本任务要收掉的静默坑：
+// 热层实际覆盖多久（MaxPoints × Step，见 agentmetrics.RawWindowSpan）与
+// 补齐/回填/回退假设多久，必须是**同一个**数。
+func TestBootstrapWindowIsSingleSource(t *testing.T) {
+	if bootstrapWindow != agentmetrics.RawBootstrapWindow {
+		t.Fatalf("service 的 bootstrapWindow = %s, want agentmetrics.RawBootstrapWindow = %s（不得有第二份）",
+			bootstrapWindow, agentmetrics.RawBootstrapWindow)
+	}
+	if defaultBackfillHours != int(agentmetrics.RawBootstrapWindow/time.Hour) {
+		t.Fatalf("defaultBackfillHours = %d, want %d（= RawBootstrapWindow 的小时数，同一来源）",
+			defaultBackfillHours, int(agentmetrics.RawBootstrapWindow/time.Hour))
+	}
+	// ClampBackfillHours 的上界就是保留期本身：回填不可能越过「热层必然为空」的边界
+	// （更早的桶在 Redis 里必然读不到，重放它们只会白扫）。
+	if maxBackfillHours != defaultBackfillHours {
+		t.Fatalf("maxBackfillHours = %d, want %d（= 保留期，两个边界同一个事实来源）",
+			maxBackfillHours, defaultBackfillHours)
+	}
+}

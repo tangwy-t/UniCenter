@@ -5,7 +5,10 @@
 // 互转由 repository 负责。这样全部逻辑可脱离 GORM/DB 做单测。
 package agentmetrics
 
-import "time"
+import (
+	"math"
+	"time"
+)
 
 // Granularity 是分区周期粒度。
 type Granularity int
@@ -157,11 +160,73 @@ type ResourcePoint struct {
 	Values  map[string]*float64 `json:"values,omitempty"`
 }
 
+// RawBootstrapWindow 是**回填/回退假设的时间跨度**，也是每设备原始窗在 Redis 里的
+// 保留期（spec §7.1）：**单一 24h**。
+//
+// 为什么必须是导出常量（而不是各包各写一份 `24 * time.Hour`）：这个数同时是
+//  1. service 侧补齐窗口（`bootstrapStart` = alignDown(now−RawBootstrapWindow, 300)）、
+//  2. service 侧回填/回退窗口（`defaultBackfillHours` = 它的小时数）、
+//  3. 装配侧容量推导的目标跨度（`RawMaxPoints`）
+//
+// 的唯一依据。三处各写各的，就会出现「热层实际覆盖 14.4h、而服务侧按 24h 回填」这种
+// 两侧互不相干、且谁都不报错的形态（详见 RawWindowSpan）。
+const RawBootstrapWindow = 24 * time.Hour
+
+// rawWindowHeadroom 是容量推导的余量：滚动窗只保留 RawBootstrapWindow，
+// 多留 1.2 倍是为了让「恰好 24h」的那一段不因栅格对齐/迟到样本而缺尾巴。
+//
+// 不能 ≤ 0（那会让窗口短于回填假设 —— 服务侧仍按 24h 回填/回退，那一段必然读不到点：
+// 空桶 / HoursSkipped++，既不报错也没有读数指向它）。装配期的交叉校验见 wireup。
+const rawWindowHeadroom = 1.2
+
+// RawMaxPoints 返回「覆盖 RawBootstrapWindow 所需的条数容量」：`ceil(24h/Step × 1.2)`。
+//
+// 这是容量推导的**单一公式**（过去 wireup 里手写 `math.Ceil(24*time.Hour.Seconds()/step*1.2)`，
+// 与 service 侧那份 bootstrapWindow 各写各的 24h）。向上取整：条数必须是整数，
+// 向下取整会让窗口略短于 24h。Step 非正（未配置）时返回 0 —— 不做除法，
+// 免得 NaN/Inf 换算成 int64 得到一个荒唐的巨大容量。
+func RawMaxPoints(step time.Duration) int64 {
+	if step <= 0 {
+		return 0
+	}
+	return int64(math.Ceil(RawBootstrapWindow.Seconds() / step.Seconds() * rawWindowHeadroom))
+}
+
+// RawWindowSpan 返回热层窗口**实际覆盖的时间跨度** = `maxPoints × step`（单一公式）。
+//
+// 为什么这是一个必须被集中计算的量：`MaxPoints` 是**条数**上限，不是时间上限 ——
+// 窗口覆盖多久由「容量」与「节奏」两个**互相独立**的来源共同决定，而两者的生命周期
+// 不同：
+//
+//	MaxPoints  在**启动时**按当轮的 sys.agent.reportInterval 冻结（wireup 的装配）；
+//	Step       随 sys.agent.reportInterval **热更**（查询栅格每次读配置）。
+//
+// 于是把间隔从 10s 调到 5s（不重启）后，热层实际只保留 `MaxPoints × 5s ≈ 14.4h` 的点，
+// 而服务侧仍按 RawBootstrapWindow（24h）回填/回退 —— 中间那一段**必然**读不到点，
+// 表现为空桶 / HoursSkipped++，既不报错、也没有任何读数指向它。
+// 装配期的交叉校验（wireup）用本函数把这件事说出来；根治要等「按条数裁剪」
+// 改成「按时间裁剪」（另一个量级的改动）。
+//
+// 非正入参（未配置/非法）归 0：负跨度会让「跨度 < 回填窗口」的比较得出相反的结论。
+func RawWindowSpan(maxPoints int64, step time.Duration) time.Duration {
+	if maxPoints <= 0 || step <= 0 {
+		return 0
+	}
+	return time.Duration(maxPoints) * step
+}
+
 // RawOptions 装配每设备原始滚动窗。
 type RawOptions struct {
 	// Step 是采样节奏，用于 metricshistory 的取点启发式（= agent 的 reportInterval）。
 	Step time.Duration
-	// MaxPoints 是窗口容量（条数）；24h / Step × 1.2 的余量。
+	// MaxPoints 是窗口容量（条数）；`RawMaxPoints(Step)` = 24h / Step × 1.2 的余量。
+	//
+	// **它在启动时按当轮的 reportInterval 冻结**，而 reportInterval 可热更：
+	// 这是一份条数上限、不是时间上限，窗口实际覆盖的时间跨度是
+	// `RawWindowSpan(MaxPoints, Step)`。改 reportInterval 后**必须重启**才能重新推导
+	// MaxPoints；不重启则热层只剩 `MaxPoints × 新 Step` 的点（10s→5s 时约 14.4h <
+	// RawBootstrapWindow = 24h），那一段读不到点（空桶 / HoursSkipped）。
+	// 启动期校验见 wireup（RawWindowSpan < RawBootstrapWindow 时 Warn 一次）。
 	MaxPoints int64
 	// QueryTTL 是查询结果缓存 TTL；<=0 时取 metricshistory 默认 1s。
 	QueryTTL time.Duration

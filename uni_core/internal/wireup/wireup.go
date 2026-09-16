@@ -5,7 +5,6 @@ package wireup
 import (
 	"context"
 	"fmt"
-	"math"
 	"strconv"
 	"time"
 
@@ -69,6 +68,11 @@ const (
 	// defer Unregister 执行完」，量级是毫秒；20ms 让停机几乎立刻完成，
 	// 又不会变成忙等（drain 期的 CPU 不该被这里吃掉）。
 	agentDrainPollInterval = 20 * time.Millisecond
+
+	// rawWindowShortfallMarker 是「热层窗口跨度短于回填假设」那条启动期 Warn 的
+	// **稳定前缀**：同包测试按它筛日志（文案可以再改，前缀是契约），
+	// 运维也按它 grep/告警。理由见 Init 里那处启动期校验。
+	rawWindowShortfallMarker = "wireup: 热层窗口实际只覆盖"
 )
 
 // Init 完成所有 repo/service/handler/scheduler 的构造和组装。
@@ -83,7 +87,7 @@ func Init(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalClien
 	return initWith(db, sqlStats, redis, log, lc, cfg, initHooks{})
 }
 
-// initHooks 是 Init 装配过程中的两个**可观测接缝**，零值即生产行为。
+// initHooks 是 Init 装配过程中的三个**可观测接缝**，零值即生产行为。
 //
 // 为什么需要接缝（而不是直接调 partitionSvc.Reconcile / scheduler.NewScheduler）：
 // Plan 2C 有两条从外部观测不到的装配契约，只有在这两个边界上才能钉住——
@@ -91,6 +95,10 @@ func Init(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalClien
 //     除非在构造点上看一眼「此刻 6 张指标表是否已存在」；
 //  2. 「reconcile 失败不阻断启动」：需要一个可控的失败注入点，否则只能靠真去把
 //     DDL 弄坏（连带把后面所有装配一起弄坏），那样的测试什么也证明不了。
+//
+// Plan 2G 又加了第三条：热层窗口容量的 (Step, MaxPoints) 决策本身不可观测
+// （RawStore 不导出 MaxPoints、也不落读数），而「冻结的容量 × 当轮的节奏」这个跨度
+// 正是 Task 1 要暴露的东西（见 rawWindow 字段）。
 //
 // 它们不是「可配置行为」——没有任何配置项能改到它们，只在同包测试里被替换。
 type initHooks struct {
@@ -100,6 +108,16 @@ type initHooks struct {
 	// aroundScheduler **包裹**（而非替换）调度器构造：它拿到真实构造闭包，可以在
 	// 调用前后观测，并照常返回真实调度器。nil → 直接调真实构造。
 	aroundScheduler func(build func() (*scheduler.Scheduler, error)) (*scheduler.Scheduler, error)
+	// rawWindow 覆盖热层窗口容量的 **(Step, MaxPoints) 决策**：它拿到真实推导出的两个值
+	// （当轮的 sys.agent.reportInterval 与 agentmetrics.RawMaxPoints(Step)），返回**实际**
+	// 用于构造 RawStore 的两个值。nil → 原样使用（生产路径）。
+	//
+	// 为什么非要这个接缝：MaxPoints 是「启动时按当轮 reportInterval 冻结」的条数上限，
+	// 且 **RawStore 不导出它**、也不落任何读数 —— 「冻结的容量 × 当轮的节奏」这个跨度
+	// 从外部无法观测，而本任务要钉住的恰恰是它。默认路径的推导又**恒自洽**
+	// （容量自带 1.2 倍余量 → 跨度恒 28.8h ≥ 24h），所以「窗口不足时那条 Warn 真的会响」
+	// 只能用「容量按旧间隔冻结、间隔已热更」这一状态复现（测试里返回旧容量 + 新节奏）。
+	rawWindow func(step time.Duration, maxPoints int64) (time.Duration, int64)
 }
 
 func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalClient, log *logger.Logger, lc *lifecycle.Manager, cfg *config.Config, hooks initHooks) (*router.Dependencies, error) {
@@ -207,20 +225,56 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 
 	// ── Agent 指标热层（每设备原始滚动窗 + 水位投影）─────────────────────
 	// Step 取 sys.agent.reportInterval（秒，默认 10）——它与 agent 的上报节奏同源；
-	// 窗口容量按 24h/Step 再放 1.2 倍余量（滚动窗只保留 24h，更长区间走 DB 冷层）。
+	// 窗口容量按回填假设（agentmetrics.RawBootstrapWindow = 24h）再放 1.2 倍余量
+	// （滚动窗只保留 24h，更长区间走 DB 冷层），推导走 agentmetrics.RawMaxPoints
+	// 这个**单一公式**（过去这里手写 `math.Ceil(24*time.Hour.Seconds()/step*1.2)`，
+	// 与 service 侧那份 bootstrapWindow 各写各的 24h —— 两份互不相干的「一天」）。
+	//
+	// **MaxPoints 在启动时按当轮的 reportInterval 冻结**：它是一份条数上限，不是时间
+	// 上限，窗口实际覆盖的时间跨度是 agentmetrics.RawWindowSpan(MaxPoints, Step)。
+	// reportInterval 可热更而 MaxPoints 不会跟着变 —— 改小 reportInterval 后**必须重启**
+	// 才能重新推导 MaxPoints；不重启则热层只剩 MaxPoints × 新 Step 的点
+	// （10s→5s 时约 14.4h < 24h），服务侧仍按 24h 回填/回退，那一段必然读不到点
+	// （空桶 / HoursSkipped++，不报错也没有读数指向它）。启动期校验见下方；
+	// 根治要把「按条数裁剪」改成「按时间裁剪」，是另一个量级的改动（不在本任务范围）。
 	// wireup 里没有请求 ctx，用 context.Background()（与上方 RotateDefaultJWTSecret 同款）。
 	agentStepSec := configSvc.GetInt(context.Background(), "sys.agent.reportInterval", 10)
 	if agentStepSec <= 0 {
 		agentStepSec = 10
 	}
 	agentStep := time.Duration(agentStepSec) * time.Second
-	// ceil(24h/Step × 1.2)：MaxPoints 是条数上限，向上取整避免窗口略短于 24h。
-	agentMaxPoints := int64(math.Ceil(24 * time.Hour.Seconds() / agentStep.Seconds() * 1.2))
+	agentMaxPoints := agentmetrics.RawMaxPoints(agentStep)
+	// 测试接缝（生产恒为 nil）：(Step, MaxPoints) 决策的观测与替换点，
+	// 见 initHooks.rawWindow 的说明 —— 这两个值从外部不可观测。
+	if hooks.rawWindow != nil {
+		agentStep, agentMaxPoints = hooks.rawWindow(agentStep, agentMaxPoints)
+	}
 	// QueryTTL = 0 → 交给 metricshistory 取默认 1s（趋势图连点时的短时缓存）。
 	rawStore := agentmetrics.NewRawStore(redis, agentmetrics.RawOptions{
 		Step: agentStep, MaxPoints: agentMaxPoints, QueryTTL: 0,
 	})
 	latestStore := agentmetrics.NewLatestStore(redis)
+
+	// ── 启动期热层窗口跨度校验（**必须**在 scheduler.NewScheduler 之前）────
+	// 与既有 reconcile 同级的启动期动作：把「上一步那对 (Step, MaxPoints) 决定的**实际**
+	// 时间跨度」与「服务侧回填/回退假设的窗口」对一次账。两者不一致时，多出来的那一段
+	// 窗口里的原始点在热层里不存在 —— flush 只会得到空桶（HoursSkipped++），
+	// 既不是错误也没有任何读数指向它（与 Plan 2F 修掉的 P1 是同一类静默坑）。
+	// 失败**不阻断启动**：热层仍然可用，只是窗口短（控制面与冷层都不受影响），
+	// 而且此时唯一的补救是重启（重新推导 MaxPoints），把服务拦下来只会扩大影响面。
+	if span := agentmetrics.RawWindowSpan(agentMaxPoints, agentStep); span < agentmetrics.RawBootstrapWindow {
+		log.Warn(fmt.Sprintf(
+			"%s %s，短于服务侧回填/回退假设的 %s（Step=%s、MaxPoints=%d）：这段窗口内的原始点读不到，"+
+				"表现为空桶 / HoursSkipped++；MaxPoints 在启动时按当轮的 reportInterval 冻结，"+
+				"改 reportInterval 后需重启以重新推导 MaxPoints",
+			rawWindowShortfallMarker, span, agentmetrics.RawBootstrapWindow, agentStep, agentMaxPoints),
+			zap.String("rawWindowSpan", span.String()),
+			zap.String("bootstrapWindow", agentmetrics.RawBootstrapWindow.String()),
+			zap.String("step", agentStep.String()),
+			zap.Int64("maxPoints", agentMaxPoints),
+			zap.String("hint", "改 reportInterval 后需重启以重新推导 MaxPoints，否则这段窗口的点读不到（表现为空桶/HoursSkipped）"),
+		)
+	}
 
 	// ── Agent 服务（入湖写路径 + 趋势/下钻查询 + 设备管理）──────────────
 	// 同一个 rawStore 分别以写入面与读取面注入：*agentmetrics.RawStore 同时具备

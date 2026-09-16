@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -17,6 +18,8 @@ import (
 	"github.com/glebarez/sqlite"
 	"github.com/gorilla/websocket"
 	goredis "github.com/redis/go-redis/v9"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 	"gorm.io/gorm"
 
 	agentproto "github.com/tangwy-t/UniCenter/uni_protocol"
@@ -1032,4 +1035,140 @@ func waitRedisValue(t *testing.T, rdb goredis.UniversalClient, key, want string)
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatalf("等待 %s = %q 超时（实际 %q, err=%v）—— 帧没有被计数到 Redis", key, want, last, lastErr)
+}
+
+// ── 断言 8：热层窗口跨度 vs 回填假设（Plan 2G Task 1）──────────────────────
+//
+// `MaxPoints` 是**启动时按当轮 `sys.agent.reportInterval` 冻结**的条数上限，而
+// `reportInterval` 可热更：运维把间隔从 10s 调到 5s 后，热层实际只保留
+// `MaxPoints × 5s ≈ 14.4h` 的点，服务侧却仍按 24h 回填/回退 —— 那一段**必然**
+// 读不到点，表现为空桶 / `HoursSkipped++`，既不报错、也没有任何读数指向它。
+// 本断言钉住「装配期把这件事说出来」（Warn，含两个实际跨度 + 需重启），且默认配置不产生噪声。
+//
+// 观测方式：`rawWindow` 接缝（拿到真实推导出的 Step/MaxPoints，可原样返回或替换成
+// 「按旧间隔冻结」的那一对）。非要有接缝的原因：RawStore 不导出 MaxPoints，也不落任何
+// 读数，而**默认路径的推导恒自洽**（容量自带 1.2 倍余量 → 跨度恒 28.8h ≥ 24h），
+// 所以「这条 Warn 真的会响」只能用「容量按旧间隔冻结、间隔已热更」这一状态复现；
+// 没有接缝就只能去改生产代码。
+//
+// 反向验证：① 把 RawWindowSpan 改成恒等于 RawBootstrapWindow（抹掉真实跨度）→
+// 本组断言变红；② 删掉那条 Warn → 本组断言变红。两者都是可编译的变异。
+
+// withObservedWarn 把夹具的 logger 换成 zap observer（收集 Warn 及以上），返回日志快照。
+//
+// 为什么不用替身 logger 而是真 zap core：这里要断的正是**结构化字段与消息文本**
+// （两个跨度、需重启），一个只记「调用过 Warn」的替身证明不了内容。
+func (f *initFixture) withObservedWarn(t *testing.T) *observer.ObservedLogs {
+	t.Helper()
+	core, logs := observer.New(zapcore.WarnLevel)
+	l, err := logger.NewWithCore(core)
+	if err != nil {
+		t.Fatalf("logger.NewWithCore: %v", err)
+	}
+	f.log = l
+	return logs
+}
+
+// shortfallWarns 从观测到的日志里筛出「热层窗口短于回填假设」那一条 Warn。
+//
+// 用消息前缀而不是整句匹配：文案可以调整，前缀是**契约**（运维也按它 grep）。
+func shortfallWarns(logs *observer.ObservedLogs) []observer.LoggedEntry {
+	var out []observer.LoggedEntry
+	for _, e := range logs.All() {
+		if strings.Contains(e.Message, rawWindowShortfallMarker) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// TestWireupWarnsWhenFrozenRawCapacityShorterThanBootstrap：容量按 10s 冻结、
+// 间隔已热更为 5s（真实里就是「运维改了配置但没重启」）→ 必须有一条 Warn，
+// 且**消息里**含两个实际跨度与「需重启」，结构化字段里也有这两个跨度。
+func TestWireupWarnsWhenFrozenRawCapacityShorterThanBootstrap(t *testing.T) {
+	f := newInitFixture(t)
+	logs := f.withObservedWarn(t)
+
+	// 当前配置：5s（热更后的值 —— 装配会真的用它，查询栅格也是 5s）。
+	f.setConfigValue(t, "sys.agent.reportInterval", "5")
+	// 冻结的容量：进程启动时按 10s 推导出来的那一个（= ceil(24h/10s × 1.2) = 10368）。
+	// 它与配置无关 —— 这正是缺陷的形态：条数上限不会跟着热更走。
+	const frozenMaxPoints = int64(10368)
+	const hotStep = 5 * time.Second
+	// 期望跨度用**字面量乘法**算（不复用 RawWindowSpan）：否则反向验证①（把
+	// RawWindowSpan 改成恒等于 RawBootstrapWindow）会先撞死在夹具自检上，
+	// 而不是撞在本断言的 Warn 上 —— 那就分不清「实现错」与「夹具错」。
+	const wantSpan = time.Duration(frozenMaxPoints) * hotStep // 51840s = 14h24m0s
+	if wantSpan >= agentmetrics.RawBootstrapWindow {
+		t.Fatalf("夹具无效：冻结容量(%d)×热更后的 %s = %s 不小于 %s，构造不出「窗口不足」状态",
+			frozenMaxPoints, hotStep, wantSpan, agentmetrics.RawBootstrapWindow)
+	}
+
+	hooks := initHooks{rawWindow: func(time.Duration, int64) (time.Duration, int64) {
+		return hotStep, frozenMaxPoints
+	}}
+	if _, err := f.initWith(t, hooks); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	warns := shortfallWarns(logs)
+	if len(warns) != 1 {
+		t.Fatalf("「窗口短于回填假设」必须恰好一条 Warn，实际 %d 条（全部 Warn：%v）",
+			len(warns), logs.All())
+	}
+	// 消息文本：两个**实际**跨度 + 后果 + 需重启（运维只看得见这一行时也要够用）。
+	for _, want := range []string{wantSpan.String(), agentmetrics.RawBootstrapWindow.String(), "重启"} {
+		if !strings.Contains(warns[0].Message, want) {
+			t.Fatalf("Warn 消息里必须写出 %q，实际：%s", want, warns[0].Message)
+		}
+	}
+	// 结构化字段：供日志检索/面板按字段取值（与消息文本同一对数）。
+	fields := warns[0].ContextMap()
+	if got := fields["rawWindowSpan"]; got != wantSpan.String() {
+		t.Fatalf("Warn 字段 rawWindowSpan = %v, want %s", got, wantSpan)
+	}
+	if got := fields["bootstrapWindow"]; got != agentmetrics.RawBootstrapWindow.String() {
+		t.Fatalf("Warn 字段 bootstrapWindow = %v, want %s", got, agentmetrics.RawBootstrapWindow)
+	}
+}
+
+// TestWireupWarnsNotEmittedForDefaultReportInterval：默认 reportInterval = 10s 的装配
+// **不得**打这条 Warn —— 否则正常部署每次启动都在噪声里泡着，真正的那条会被淹掉。
+//
+// 「没打 Warn」不能是空话：同时**观测**装配真的推导出的 (Step, MaxPoints)（接缝原样
+// 返回，走的就是生产决策），用字面量公式独立算出期望容量并断言跨度 ≥ 回填假设。
+func TestWireupWarnsNotEmittedForDefaultReportInterval(t *testing.T) {
+	f := newInitFixture(t)
+	logs := f.withObservedWarn(t)
+
+	var (
+		called    bool
+		gotStep   time.Duration
+		gotPoints int64
+	)
+	hooks := initHooks{rawWindow: func(step time.Duration, maxPoints int64) (time.Duration, int64) {
+		called, gotStep, gotPoints = true, step, maxPoints
+		return step, maxPoints // 原样返回：装配行为与生产路径逐字一致
+	}}
+	if _, err := f.initWith(t, hooks); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if !called {
+		t.Fatal("rawWindow 接缝未被调用：装配没有走「推导容量」这条路（断言会变成永真的假绿）")
+	}
+	if gotStep != 10*time.Second {
+		t.Fatalf("Step = %s, want 10s（sys.agent.reportInterval 的缺省，v008 种子同值）", gotStep)
+	}
+	// 字面量公式独立算：ceil(24h/10s × 1.2) = 10368。
+	if want := int64(math.Ceil((24 * time.Hour).Seconds() / gotStep.Seconds() * 1.2)); gotPoints != want {
+		t.Fatalf("MaxPoints = %d, want %d（公式 ceil(24h/Step × 1.2)，与 wireup 的旧实现同值）",
+			gotPoints, want)
+	}
+	if span := agentmetrics.RawWindowSpan(gotPoints, gotStep); span < agentmetrics.RawBootstrapWindow {
+		t.Fatalf("默认装配的跨度 %s < %s：默认配置必须自洽（否则每次启动都会打这条 Warn）",
+			span, agentmetrics.RawBootstrapWindow)
+	}
+	if warns := shortfallWarns(logs); len(warns) != 0 {
+		t.Fatalf("默认 reportInterval=10s 不得打这条 Warn，却打了 %d 条：%v", len(warns), warns)
+	}
 }
