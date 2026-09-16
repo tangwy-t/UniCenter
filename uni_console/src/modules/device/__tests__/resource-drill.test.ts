@@ -1,14 +1,9 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 
-vi.mock('@/utils/http', () => ({ default: { get: vi.fn(), post: vi.fn(), del: vi.fn() } }))
-vi.mock('@/store/modules/setting', () => ({
-  useSettingStore: () => ({ isDark: false, menuOpen: true, menuType: 'left' })
-}))
-vi.mock('@/store/modules/user', () => ({
-  useUserStore: () => ({ info: { permissions: [] }, accessToken: '', refreshToken: '' })
-}))
+// Task 5：纯逻辑已搬到**零副作用**的 `../utils/metrics`，Task 4 为「经组件
+// setup 块触达 store/localStorage」而加的 `vi.mock` 挡板已无对象，故移除。
 
-import { RESOURCE_KINDS, formatSeenAt, isStaleResource } from '../components/resource-drill.vue'
+import { RESOURCE_KINDS, formatSeenAt, isStaleResource } from '../utils/metrics'
 
 describe('isStaleResource · stale 标注', () => {
   it('stale=true 判为「已消失」，false 不判', () => {

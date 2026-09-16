@@ -1,15 +1,8 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 
-// 面板的 setup 块会经 `../api` → `@/utils/http` → store(模块级读 localStorage)
-// 触达 node 环境不存在的东西。这里只测**普通块导出的纯函数**，故把副作用链
-// 挡在门外（与仓库既有的 auth-permission 注释同一理由）。
-vi.mock('@/utils/http', () => ({ default: { get: vi.fn(), post: vi.fn(), del: vi.fn() } }))
-vi.mock('@/store/modules/setting', () => ({
-  useSettingStore: () => ({ isDark: false, menuOpen: true, menuType: 'left' })
-}))
-vi.mock('@/store/modules/user', () => ({
-  useUserStore: () => ({ info: { permissions: [] }, accessToken: '', refreshToken: '' })
-}))
+// Task 5：纯逻辑已搬到 `../utils/metrics`（一个**零副作用**的普通 TS 模块），
+// 故不再需要 Task 4 为「经组件 setup 块触达 store/localStorage」而加的
+// `vi.mock` 挡板 —— 那些 mock 现在覆盖不到任何真实依赖，留着反而是死代码。
 
 import {
   BUCKET_TS_COLUMN,
@@ -17,11 +10,12 @@ import {
   buildSeries,
   defaultColumns,
   formatAxisTick,
+  formatMetricValue,
   formatResolution,
   rangeOptions,
   resourceRows,
   trendRows
-} from '../components/metrics-panel.vue'
+} from '../utils/metrics'
 
 const BASE = 1758000000 // 一个固定的 unix 秒基准
 
@@ -89,6 +83,65 @@ describe('buildSeries · available_metrics 驱动（纪律 2 断言 2）', () =>
     expect(built.series.map((s) => s.name)).toEqual(['cpu_used_percent'])
     expect(built.unavailableColumns).toEqual([])
   })
+
+  it('bucket_ts 即使被列进 available_metrics（后端 withBucketTS 恒补）也必须剔除', () => {
+    // 后端 `withBucketTS` 会**恒补** bucket_ts 到 available_metrics 里，
+    // 故它一定出现在响应的列集内。它必须走「既不是指标、也不算无此指标」
+    // 这条路：不渲染、不进 unavailableColumns、更不占用 x 轴。
+    const rows = [{ t: BASE, bucket_ts: BASE - 3600, cpu_used_percent: 7 }]
+    const built = buildSeries(
+      rows,
+      ['bucket_ts', 'cpu_used_percent'],
+      ['bucket_ts', 'cpu_used_percent']
+    )
+    expect(built.series.map((s) => s.name)).toEqual(['cpu_used_percent'])
+    // 剔除的桶键**不得**混进「该档位无此指标」（它不是指标，谈不上「无此指标」）。
+    expect(built.unavailableColumns).toEqual([])
+    // x 轴取 `t`，不是 bucket_ts：否则时间轴会被桶键（另一列）带偏。
+    expect(built.series[0].points.map(([x]) => x)).toEqual([BASE * 1000])
+  })
+})
+
+describe('buildSeries · 列存在性用 `in` 判断（Task 1 报告点名的坑）', () => {
+  it('「键存在且有值 / 键存在但值为 null / 键缺失」三态都不抛错且可判未采集', () => {
+    // 契约：`DeviceResourcePoint.values?: Record<string, number|null>` 是**可选**的，
+    // 而后端保证「值为 nil 的列不出现」（omitempty）。故前端可能收到三种形状，
+    // 存在性判断**必须**是 `col in (values ?? {})`，而不是 `!= null`。
+    const rows = [
+      { t: BASE, a: 1 }, // 键存在、有数值 → 有样本
+      { t: BASE + 900, a: null }, // 键存在、值为 null → 未采集
+      { t: BASE + 1800 } // 键缺失（后端不写 nil 列）→ 未采集
+    ]
+    // 连 `t` 都缺的异常形状不得把函数打崩。
+    expect(() => buildSeries([{}], ['a'], ['a'])).not.toThrow()
+
+    const built = buildSeries(rows, ['a'], ['a'])
+    const ys = built.series[0].points.map(([, y]) => y)
+    expect(ys).toEqual([1, null, null])
+    // 三条逐一钉住「未采集」谓词（y === null）。
+    expect(ys[0] === null).toBe(false) // {a: 1}      → 有样本
+    expect(ys[1] === null).toBe(true) // {a: null}   → 未采集
+    expect(ys[2] === null).toBe(true) // {}（缺键）   → 未采集
+  })
+
+  it('值为 0 必须是样本，不得被当成「未采集」', () => {
+    // `!= null` / truthiness 风格的实现会把 0 误判为缺值；`in` 判断不会。
+    const built = buildSeries([{ t: BASE, a: 0 }], ['a'], ['a'])
+    const ys = built.series[0].points.map(([, y]) => y)
+    expect(ys).toEqual([0])
+    expect(ys[0] === null).toBe(false)
+  })
+
+  it('下钻路径（resourceRows 摊平后）的 values 缺省同样不抛错', () => {
+    const rows = resourceRows([
+      { t: BASE, samples: 1, values: { used_percent: 42.5 } },
+      { t: BASE + 300, samples: 0 } // values 缺省（omitempty）→ `?? {}` 后摊平
+    ])
+    expect(() => buildSeries(rows, ['used_percent'], ['used_percent'])).not.toThrow()
+    const built = buildSeries(rows, ['used_percent'], ['used_percent'])
+    expect(built.series[0].points.map(([, y]) => y)).toEqual([42.5, null])
+    expect(built.unavailableColumns).toEqual([])
+  })
 })
 
 describe('rangeOptions · 档位约束（>30d 在下钻禁用）', () => {
@@ -96,6 +149,8 @@ describe('rangeOptions · 档位约束（>30d 在下钻禁用）', () => {
     const opts = rangeOptions(false)
     expect(opts.map((o) => o.seconds)).toEqual([3600, 86400, 604800, 2592000, 7776000, 15552000])
     expect(opts.every((o) => !o.disabled)).toBe(true)
+    // 整机口径必须真的包含 90d 与 180d 这两个 key。
+    expect(opts.map((o) => o.key)).toEqual(['1h', '24h', '7d', '30d', '90d', '180d'])
   })
 
   it('下钻禁用 >30d，但 30d（2592000）本身仍可用', () => {
@@ -106,6 +161,10 @@ describe('rangeOptions · 档位约束（>30d 在下钻禁用）', () => {
     expect(disabled.map((o) => o.seconds)).toEqual([7776000, 15552000])
     // 禁用项必须给出**原因**（不能让用户点了再吃 400）。
     expect(disabled.every((o) => o.disabledReason.length > 0)).toBe(true)
+    // 对称断言：**没有**任何 <=30d 的档位被禁用（含 30d 本身）。
+    expect(opts.filter((o) => o.seconds <= DRILL_MAX_RANGE_SECONDS).map((o) => o.disabled)).toEqual(
+      [false, false, false, false]
+    )
   })
 })
 
@@ -126,6 +185,14 @@ describe('formatAxisTick · 刻度粒度由 range 推导', () => {
     expect(formatAxisTick(ms, 86400)).toBe('13:05')
     expect(formatAxisTick(ms, 604800)).toBe('09-16 13:05')
     expect(formatAxisTick(ms, 15552000)).toBe('2026-09-16')
+  })
+})
+
+describe('formatMetricValue · 缺值「—」而不是 0', () => {
+  it('null/undefined 显示「—」，0 显示 0', () => {
+    expect(formatMetricValue(null)).toBe('—')
+    expect(formatMetricValue(undefined)).toBe('—')
+    expect(formatMetricValue(0)).toBe('0')
   })
 })
 

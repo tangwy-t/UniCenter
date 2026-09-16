@@ -79,29 +79,14 @@
 </template>
 
 <script lang="ts">
-  import { RESOURCE_KINDS, kindLabelOf } from './metrics-panel.vue'
+  // Task 5：本文件的纯逻辑（isStaleResource / formatSeenAt）连同共用常量与
+  // kindLabelOf 一起搬到了 `../utils/metrics`。这里**必须**用普通 import（而非
+  // `export … from` 中转）：经 SFC 实测，普通块的 import 才会注册为模板可见
+  // 绑定，纯再导出不会 → 模板绑定会编译报错。
+  import { RESOURCE_KINDS, formatSeenAt, isStaleResource, kindLabelOf } from '../utils/metrics'
 
-  /**
-   * 下钻资源项 → 是否要在下拉里标「已消失」。
-   *
-   * 抽成具名导出的纯函数，便于单测/反向验证直接命中该语义
-   * （stale 由后端给出：超过 resourceStaleMarkDays 未出现即 true）。
-   */
-  export function isStaleResource(item: { stale: boolean }): boolean {
-    return item.stale === true
-  }
-
-  /** unix 秒 → 本地时间；缺值「—」（与列表/详情同一约定）。 */
-  export function formatSeenAt(v?: number | null): string {
-    if (v === undefined || v === null) return '—'
-    const d = new Date(v * 1000)
-    const p = (n: number) => String(n).padStart(2, '0')
-    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(
-      d.getMinutes()
-    )}`
-  }
-
-  export { RESOURCE_KINDS, kindLabelOf }
+  // 既有 import 方（单测）照旧走组件路径，故一并再导出。
+  export { RESOURCE_KINDS, formatSeenAt, isStaleResource, kindLabelOf }
 </script>
 
 <script setup lang="ts">
