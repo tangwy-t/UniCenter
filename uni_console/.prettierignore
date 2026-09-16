@@ -6,3 +6,8 @@
 # "重新生成并 git diff --exit-code" 会永远失败。
 # prettier 会把生成器的缩进规整掉 → 提前排除,而非每次生成后再格式化。
 /src/types/api/api.generated.d.ts
+# 生成物:由 vite.config.ts 的 unplugin-auto-import 生成(AutoImport.dts 指向此路径),
+# 每次 dev/build 都会重写它。头部自带 /* eslint-disable */ 与 /* prettier-ignore */,
+# 但 prettier 不认文件级豁免 —— 实测 `pnpm lint:prettier` 会把它从 d94c0632 改写成
+# e8ecd57b(与生成器输出不再一致),故在此显式排除。与上一条同属"生成物"类。
+/src/types/import/auto-imports.d.ts
