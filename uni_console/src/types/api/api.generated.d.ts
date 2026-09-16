@@ -595,6 +595,109 @@ declare namespace Api {
     }
   }
 
+  namespace Device {
+    interface DeviceListItem {
+      id: string
+      hostname: string
+      os: string
+      arch: string
+      agentVersion: string
+      status: number
+      online: boolean
+      lastSeenAt?: number | null
+      cpuUsedPercent?: number | null
+      memUsedPercent?: number | null
+      diskUsedPercent?: number | null
+      watermarkAt?: number | null
+    }
+
+    interface DeviceResp {
+      id: string
+      hostname: string
+      os: string
+      arch: string
+      agentVersion: string
+      status: number
+      online: boolean
+      lastSeenAt?: number | null
+      cpuUsedPercent?: number | null
+      memUsedPercent?: number | null
+      diskUsedPercent?: number | null
+      watermarkAt?: number | null
+      platform?: string
+      platformVer?: string
+      kernel?: string
+      cpuModel?: string
+      cpuCores?: number
+      memTotalMb?: number
+      bootTime?: number
+      createdAt?: number
+    }
+
+    interface DeviceMetricPoint {
+      t: number
+      cpu_used_percent?: number | null
+      cpu_iowait?: number | null
+      load1?: number | null
+      load5?: number | null
+      load15?: number | null
+      mem_used_percent?: number | null
+      mem_used_mb?: number | null
+      mem_available_mb?: number | null
+      swap_used_percent?: number | null
+      swap_used_mb?: number | null
+      tcp_total?: number | null
+      tcp_established?: number | null
+      tcp_listen?: number | null
+      proc_count?: number | null
+      uptime_sec?: number | null
+      disk_total_gb?: number | null
+      disk_used_gb?: number | null
+      disk_used_percent?: number | null
+      disk_io_read_bytes_sec?: number | null
+      disk_io_write_bytes_sec?: number | null
+      nic_rx_bytes_sec?: number | null
+      nic_tx_bytes_sec?: number | null
+      max_temperature_c?: number | null
+      samples: number
+    }
+
+    interface DeviceResourcePoint {
+      t: number
+      samples: number
+      values?: Record<string, number | null>
+    }
+
+    interface DeviceMetricsResp {
+      range_seconds: number
+      resolution_seconds: number
+      source: string
+      available_metrics: string[]
+      buckets: Api.Device.DeviceMetricPoint[]
+    }
+
+    interface DeviceResourceResp {
+      range_seconds: number
+      resolution_seconds: number
+      source: string
+      resource_kind: string
+      name: string
+      available_metrics: string[]
+      buckets: Api.Device.DeviceResourcePoint[]
+    }
+
+    interface DeviceResourceItem {
+      name: string
+      kind: string
+      lastSeenAt: number
+      stale: boolean
+    }
+
+    interface DeviceResourcesResp {
+      list: Api.Device.DeviceResourceItem[]
+    }
+  }
+
   namespace File {
     interface FileResp {
       id: string

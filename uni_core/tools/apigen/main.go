@@ -27,6 +27,7 @@ var fileNamespace = map[string]string{
 	"cache.go":          "Monitor",
 	"config.go":         "Config",
 	"dept.go":           "System",
+	"device.go":         "Device",
 	"dict.go":           "Dict",
 	"dict_data.go":      "Dict",
 	"dict_type.go":      "Dict",
@@ -47,7 +48,11 @@ var fileNamespace = map[string]string{
 }
 
 // namespaceOrder fixes emission order for byte-stable output.
-var namespaceOrder = []string{"Auth", "Dict", "System", "Notice", "Config", "Job", "Log", "Monitor", "File"}
+//
+// 该切片是**穷举**的:genPackage 只遍历它来发射命名空间,fileNamespace 里登记了
+// 却不在本切片里的命名空间会被**静默丢弃**(不报错、不产出),故新增命名空间必须
+// 同时改两处。位置只影响发射顺序(进而影响生成物的字节形状),不影响类型。
+var namespaceOrder = []string{"Auth", "Dict", "System", "Notice", "Config", "Job", "Log", "Monitor", "Device", "File"}
 
 // primitives maps Go predeclared identifiers to TypeScript types.
 var primitives = map[string]string{
