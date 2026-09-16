@@ -307,3 +307,96 @@ func TestCursorStoreAdvanceScriptIsAtomicCompareAndWrite(t *testing.T) {
 		t.Fatal("水位不得带 TTL：水位是「已落库到哪」的记账，过期会让窗口被整段重放/漏放")
 	}
 }
+
+// ── 回退「待追平」标记（Task 1 的标记写入侧与清除侧）──────────────
+
+// TestCursorStoreRewindMarkerLifecycle 钉住标记三件套的语义：
+//   - 键缺失时 PendingRewind 返回 (0,false,nil)（**不是错误**，= 没有待追平的回退）；
+//   - MarkRewind 写值；重复写只向**更早**移动（浅回退不得把目标推后）；
+//   - ClearRewind 只在值仍是期望值时才删（并发回退改得更早时让位）；
+//   - 键名走契约字面量（形态与游标键同族：agent:device:{id}:rewind_1h）。
+func TestCursorStoreRewindMarkerLifecycle(t *testing.T) {
+	store, rdb, _ := newCursorStoreFixture(t)
+	ctx := context.Background()
+	key := cursorKeyLiteral(1001, "rewind_1h")
+
+	// 缺键：没有待追平的回退，不是错误。
+	if v, ok, err := store.PendingRewind(ctx, 1001, Resolution1h); err != nil || ok || v != 0 {
+		t.Fatalf("缺键时 PendingRewind = (%d, %v, %v), want (0, false, nil)", v, ok, err)
+	}
+
+	// 写入后读回同一个值（键名必须是契约字面量）。
+	if err := store.MarkRewind(ctx, 1001, Resolution1h, 1800000000); err != nil {
+		t.Fatalf("MarkRewind: %v", err)
+	}
+	if got := rdb.Get(ctx, key).Val(); got != "1800000000" {
+		t.Fatalf("标记键 %s = %q, want %q（键名契约：agent:device:{id}:rewind_1h）", key, got, "1800000000")
+	}
+	if v, ok, err := store.PendingRewind(ctx, 1001, Resolution1h); err != nil || !ok || v != 1800000000 {
+		t.Fatalf("PendingRewind = (%d, %v, %v), want (1800000000, true, nil)", v, ok, err)
+	}
+
+	// 更早的目标 → 覆盖；更晚的目标 → **不动**（只向更早移动）。
+	if err := store.MarkRewind(ctx, 1001, Resolution1h, 1799990000); err != nil {
+		t.Fatalf("MarkRewind(更早): %v", err)
+	}
+	if v, _, _ := store.PendingRewind(ctx, 1001, Resolution1h); v != 1799990000 {
+		t.Fatalf("标记 = %d, want 1799990000（更早的目标必须覆盖）", v)
+	}
+	if err := store.MarkRewind(ctx, 1001, Resolution1h, 1800000000); err != nil {
+		t.Fatalf("MarkRewind(更晚): %v", err)
+	}
+	if v, _, _ := store.PendingRewind(ctx, 1001, Resolution1h); v != 1799990000 {
+		t.Fatalf("标记 = %d, want 1799990000（更晚的目标不得推后它：待追平区间只许变长）", v)
+	}
+
+	// 期望值不匹配 → 不删（并发回退写下的更早目标必须留下）。
+	if cleared, err := store.ClearRewind(ctx, 1001, Resolution1h, 1800000000); err != nil || cleared {
+		t.Fatalf("ClearRewind(期望值不匹配) = (%v, %v), want (false, nil)", cleared, err)
+	}
+	if v, ok, _ := store.PendingRewind(ctx, 1001, Resolution1h); !ok || v != 1799990000 {
+		t.Fatalf("期望值不匹配时标记被删掉了（待追平状态丢失）：(%d, %v)", v, ok)
+	}
+
+	// 期望值匹配 → 删掉，且再读是「没有标记」。
+	if cleared, err := store.ClearRewind(ctx, 1001, Resolution1h, 1799990000); err != nil || !cleared {
+		t.Fatalf("ClearRewind(期望值匹配) = (%v, %v), want (true, nil)", cleared, err)
+	}
+	if v, ok, err := store.PendingRewind(ctx, 1001, Resolution1h); err != nil || ok || v != 0 {
+		t.Fatalf("清除后 PendingRewind = (%d, %v, %v), want (0, false, nil)", v, ok, err)
+	}
+
+	// 两个档位的标记是**两个键**：各自的值互不影响（同键会让 5m 的回退掩盖 1h 的待追平状态）。
+	if err := store.MarkRewind(ctx, 1001, Resolution5m, 1799990000); err != nil {
+		t.Fatalf("MarkRewind(5m): %v", err)
+	}
+	if err := store.MarkRewind(ctx, 1001, Resolution1h, 1799980000); err != nil {
+		t.Fatalf("MarkRewind(1h): %v", err)
+	}
+	if v, ok, _ := store.PendingRewind(ctx, 1001, Resolution1h); !ok || v != 1799980000 {
+		t.Fatalf("1h 标记 = %d(ok=%v), want 1799980000（不得被 5m 的那次写入影响）", v, ok)
+	}
+	if v, ok, _ := store.PendingRewind(ctx, 1001, Resolution5m); !ok || v != 1799990000 {
+		t.Fatalf("5m 标记 = %d(ok=%v), want 1799990000", v, ok)
+	}
+	key5m := cursorKeyLiteral(1001, "rewind_5m")
+	if got := rdb.Get(ctx, key5m).Val(); got != "1799990000" {
+		t.Fatalf("5m 标记键 %s = %q, want 1799990000（两个档位的标记必须落在各自的键上）", key5m, got)
+	}
+
+	// 未登记的档位：三个方法都必须在构造键之前报错，且不触碰任何键。
+	unknown := Resolution(uint8(len(rewindMarkerSuffixes)))
+	before := len(rdb.Keys(ctx, "agent:device:*").Val())
+	if _, _, err := store.PendingRewind(ctx, 1001, unknown); err == nil {
+		t.Fatal("PendingRewind(未登记档位) 未报错")
+	}
+	if err := store.MarkRewind(ctx, 1001, unknown, 1); err == nil {
+		t.Fatal("MarkRewind(未登记档位) 未报错")
+	}
+	if _, err := store.ClearRewind(ctx, 1001, unknown, 1); err == nil {
+		t.Fatal("ClearRewind(未登记档位) 未报错")
+	}
+	if after := len(rdb.Keys(ctx, "agent:device:*").Val()); after != before {
+		t.Fatalf("未登记档位不得触碰任何键：键数 %d → %d", before, after)
+	}
+}

@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/agentmetrics"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
@@ -467,5 +470,339 @@ func TestRewindHours5mIsTheSameRewindStepAsBackfill(t *testing.T) {
 
 	if gotRewind != gotBackfill {
 		t.Fatalf("两个入口在 5m 档上退到了不同的值：%d vs %d —— 回退公式分叉了", gotRewind, gotBackfill)
+	}
+}
+
+// ── Task 1：回退「待追平」标记（问题②：回退是否生效不可观测）────────────
+//
+// 问题②：回退**本身**只花一次 Redis 读 + 一次写，而它的效果（那些小时被重新走过、
+// 1h 空洞被补出来）全部记在 rollup 的 `HoursWritten` 里 —— 一个与「回退」这个动作无关的
+// 计数（同样的数字也来自「设备刚好有新数据」）。运维执行完回退没有任何读数或告警能回答
+// 「回退生效了吗、追平了吗」。故：`RewindHours` 写下标记，rollup 每轮在收尾 CAS 之后
+// 看一眼，追平了就 log.Info + 删标记 + 计数。
+
+// rewindMarkerKey 是**契约字面量**：不复用 agentmetrics.RewindMarkerKey，否则键名写错也自洽
+// （同 rollupCursorKey / rollupRepairKey 的处理）。运维按 spec 键名读它，形态与游标键同族：
+// `agent:device:{id}:rewind_1h`。
+func rewindMarkerKey(deviceID uint64) string {
+	return "agent:device:" + itoaU64(deviceID) + ":rewind_1h"
+}
+
+// rewindMarker5mKey 是 5m 档的标记键（本任务**刻意不写**它，见 markRewindPending 的注释）。
+func rewindMarker5mKey(deviceID uint64) string {
+	return "agent:device:" + itoaU64(deviceID) + ":rewind_5m"
+}
+
+// loggedLine 是一条日志记录（消息 + 摊平的字段）。
+type loggedLine struct {
+	msg    string
+	fields map[string]any
+}
+
+// rewindLogSpy 记录 Info 的消息与字段：本任务的「追平可观测」断言要求 log.Info
+// **带设备号与目标** —— 只数次数不足以钉住这一点，而 fakeLogger 只统计 Warn。
+type rewindLogSpy struct {
+	infos []loggedLine
+	warns int
+}
+
+func (l *rewindLogSpy) Debug(string, ...zap.Field) {}
+func (l *rewindLogSpy) Info(msg string, fields ...zap.Field) {
+	l.infos = append(l.infos, newLoggedLine(msg, fields))
+}
+func (l *rewindLogSpy) Warn(string, ...zap.Field)  { l.warns++ }
+func (l *rewindLogSpy) Error(string, ...zap.Field) {}
+func (l *rewindLogSpy) IsDebug() bool              { return false }
+
+// newLoggedLine 把 zap 字段摊成 map（只保留断言要用的标量类型，其余原样放 Interface）。
+func newLoggedLine(msg string, fields []zap.Field) loggedLine {
+	m := make(map[string]any, len(fields))
+	for _, fl := range fields {
+		switch fl.Type {
+		case zapcore.Int64Type, zapcore.Uint64Type, zapcore.Int32Type, zapcore.Uint32Type:
+			m[fl.Key] = fl.Integer
+		case zapcore.StringType:
+			m[fl.Key] = fl.String
+		default:
+			m[fl.Key] = fl.Interface
+		}
+	}
+	return loggedLine{msg: msg, fields: m}
+}
+
+// hasInfo 找一条「消息含 sub，且同时带 deviceId 与 target 字段」的 Info 记录。
+func (l *rewindLogSpy) hasInfo(sub string, deviceID uint64, target int64) bool {
+	for _, line := range l.infos {
+		if !strings.Contains(line.msg, sub) {
+			continue
+		}
+		if got, ok := line.fields["deviceId"].(int64); !ok || uint64(got) != deviceID {
+			continue
+		}
+		if got, ok := line.fields["target"].(int64); !ok || got != target {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// markerGetFailer 只让**标记键**的 GET 失败，其余命令原样委托（嵌入 goredis.Cmdable 拿到
+// 全部方法，只覆盖一个）：用来证明「观测设施的读失败不阻断数据通路」。
+type markerGetFailer struct {
+	goredis.Cmdable
+	key string
+}
+
+func (c markerGetFailer) Get(ctx context.Context, key string) *goredis.StringCmd {
+	if key == c.key {
+		return goredis.NewStringResult("", errors.New("injected marker GET failure"))
+	}
+	return c.Cmdable.Get(ctx, key)
+}
+
+// TestRewindHoursWritesPendingRewindMarker 钉住标记的**写入侧**（Step 1 的 5 + 7）：
+//   - 1h 回退必须写下标记，值 == 回退目标（也 == 回退后的水位）；
+//   - 5m 档**不写** 1h 标记（键是档位专属），也不写 5m 标记（没有消费方，见下）；
+//   - 水位键缺失时让位给消费方的 Bootstrap 语义 → 没有回退，也没有标记。
+func TestRewindHoursWritesPendingRewindMarker(t *testing.T) {
+	now := rollupBaseTS + 30*rollupHourSec + 60
+	ctx := context.Background()
+
+	t.Run("1h 回退写下标记且值 == 回退目标", func(t *testing.T) {
+		f := newRewindFixture(t, now, 0)
+		f.setCursor(t, alignDownHour(now))
+		stats, err := f.flush.RewindHours(ctx, nil, agentmetrics.Resolution1h, 24)
+		if err != nil {
+			t.Fatalf("RewindHours: %v", err)
+		}
+		if stats.CursorsRewound != 1 {
+			t.Fatalf("cursorsRewound = %d, want 1（stats=%+v）", stats.CursorsRewound, stats)
+		}
+		target := target1h(now, 24)
+		f.mustCursor1h(t, target)
+		f.mustMarker(t, rewindMarkerKey(rollupDevID), target)
+		// 键名契约（字面量已在上面的 helper 里写死，这里再钉一次形态）：
+		// 档位名必须在设备号**之后**，且与游标键同前缀。
+		key, kerr := agentmetrics.RewindMarkerKey(rollupDevID, agentmetrics.Resolution1h)
+		if kerr != nil {
+			t.Fatalf("RewindMarkerKey(1h) 报错: %v", kerr)
+		}
+		if key != rewindMarkerKey(rollupDevID) {
+			t.Fatalf("RewindMarkerKey(1h) = %q, want %q（与契约字面量一致）", key, rewindMarkerKey(rollupDevID))
+		}
+		key5m, kerr5 := agentmetrics.RewindMarkerKey(rollupDevID, agentmetrics.Resolution5m)
+		if kerr5 != nil {
+			t.Fatalf("RewindMarkerKey(5m) 报错: %v", kerr5)
+		}
+		if key5m != rewindMarker5mKey(rollupDevID) {
+			t.Fatalf("RewindMarkerKey(5m) = %q, want %q", key5m, rewindMarker5mKey(rollupDevID))
+		}
+		if key5m == key {
+			t.Fatal("两个档位的标记键不得相同：同键会让 5m 的回退把 1h 的待追平状态覆盖掉")
+		}
+	})
+
+	t.Run("5m 回退不写 1h 标记", func(t *testing.T) {
+		f := newRewindFixture(t, now, 0)
+		f.setCursor(t, alignDownHour(now))
+		if err := f.rdb.Set(ctx, flushCursorKey(rollupDevID), alignDownHour(now), 0).Err(); err != nil {
+			t.Fatalf("set cursor_5m: %v", err)
+		}
+		stats, err := f.flush.RewindHours(ctx, nil, agentmetrics.Resolution5m, 6)
+		if err != nil {
+			t.Fatalf("RewindHours(5m): %v", err)
+		}
+		if stats.CursorsRewound != 1 {
+			t.Fatalf("cursorsRewound = %d, want 1（stats=%+v）", stats.CursorsRewound, stats)
+		}
+		if _, ok := f.marker(t, rewindMarkerKey(rollupDevID)); ok {
+			t.Fatal("5m 回退写下了 1h 的待追平标记：标记的消费方是 rollup 的 cursor_1h，" +
+				"5m 的回退写它会给出一个永远不会被追平、也永远不会被清掉的假状态")
+		}
+		// 也不写 5m 自己的标记：5m 的回退效果由 flush 在本轮重放里体现（BackfillOnce 是
+		// 「回退 + 重放」不可分），没有第二个读者 —— 一个永远为真的「待追平」比没有更糟。
+		if _, ok := f.marker(t, rewindMarker5mKey(rollupDevID)); ok {
+			t.Fatal("5m 回退写下了 5m 标记：没有任何读取方，它只会永久留在 Redis 里")
+		}
+	})
+
+	t.Run("水位键缺失时不回退也不写标记", func(t *testing.T) {
+		f := newRewindFixture(t, now, 0)
+		stats, err := f.flush.RewindHours(ctx, nil, agentmetrics.Resolution1h, 24)
+		if err != nil {
+			t.Fatalf("RewindHours: %v", err)
+		}
+		if stats.CursorsRewound != 0 {
+			t.Fatalf("cursorsRewound = %d, want 0（水位键缺失 → 让位给消费方的 Bootstrap 语义）",
+				stats.CursorsRewound)
+		}
+		if _, ok := f.marker(t, rewindMarkerKey(rollupDevID)); ok {
+			t.Fatal("没有回退却写下了标记：标记只描述「水位被退回过」，凭 now 推导出的假标记会永远追不平")
+		}
+	})
+}
+
+// TestRewindMarkerOnlyMovesEarlier 钉住标记的**单调方向**（Step 1 的 7 后半）：
+// 重复回退时标记取**更早**的那个目标，绝不被后来的浅回退推后。
+//
+// 场景（生产里很常见）：运维在 T 执行「回退 24 小时」（目标 T−25h），几小时后再执行同一条
+// 命令 —— 此时 now 前移，新的目标是 (T+5h)−25h，也就是**更晚**的一个水位。若标记被它覆盖，
+// 「待追平」的区间就从 T−25h 缩到 T−20h，前 5 个小时重新变成无人观测（而配额下它们很可能
+// 还没被走过）。
+func TestRewindMarkerOnlyMovesEarlier(t *testing.T) {
+	now := rollupBaseTS + 30*rollupHourSec + 60
+	f := newRewindFixture(t, now, 0)
+	ctx := f.ctx()
+	f.setCursor(t, alignDownHour(now))
+
+	if _, err := f.flush.RewindHours(ctx, nil, agentmetrics.Resolution1h, 24); err != nil {
+		t.Fatalf("RewindHours(1): %v", err)
+	}
+	deep := target1h(now, 24)
+	f.mustCursor1h(t, deep)
+	f.mustMarker(t, rewindMarkerKey(rollupDevID), deep)
+
+	// 时间前进 5 小时；水位被 rollup 推到了最新（模拟这几轮里它一直在追平）。
+	later := now + 5*rollupHourSec
+	f.clock.t = time.Unix(later, 0)
+	f.setCursor(t, alignDownHour(later))
+
+	shallow := target1h(later, 24)
+	if shallow <= deep {
+		t.Fatalf("前置不成立：新目标 %d 必须比旧目标 %d 更晚（否则本条测不到「推后」）", shallow, deep)
+	}
+	stats, err := f.flush.RewindHours(ctx, nil, agentmetrics.Resolution1h, 24)
+	if err != nil {
+		t.Fatalf("RewindHours(2): %v", err)
+	}
+	if stats.CursorsRewound != 1 {
+		t.Fatalf("cursorsRewound = %d, want 1（水位比新目标更新 → 这次回退确实生效）", stats.CursorsRewound)
+	}
+	// 水位按新目标走（回退本身是「最新一次请求说了算」）……
+	f.mustCursor1h(t, shallow)
+	// ……但标记必须留在更早的那个目标上：待追平区间只许变长，不许被浅回退截短。
+	f.mustMarker(t, rewindMarkerKey(rollupDevID), deep)
+}
+
+// TestRewindMarkerCaughtUpOnlyAfterBacklogWalked 钉住标记的**追平侧**（Step 1 的 6）：
+//   - 未追平时标记**必须仍在**（否则观测就失效了）—— 尤其是「配额只走了 48/720 小时」
+//     的那些轮：那时水位已经越过标记值，但绝大多数小时根本没被走过；
+//   - 走完整个 720 小时的窗口之后 → log.Info（带设备号与目标）+ 删标记 + RewindsCaughtUp++。
+//
+// 这条断言同时是两个问题的交汇点：问题①（配额把追平切成 15 轮）与问题②（回退是否生效
+// 必须可观测）。若「追平」只看 `cursor >= target`，回退后的**第一轮**就会把标记删掉并
+// 打出「已追平」，而那 672 个小时还要再走 14 轮 —— 一个比没有标记更糟的假信号。
+func TestRewindMarkerCaughtUpOnlyAfterBacklogWalked(t *testing.T) {
+	f := newRewindFixture(t, quotaWindowNow, 0)
+	spy := &rewindLogSpy{}
+	f.withRollupDeps(rollupCfg{rescanHours: defaultRollupRescanHours, maxHours: defaultRollupMaxHoursPerRound}, nil, spy)
+	seedQuotaWindow(t, f.rollupFixture)
+	target, upper := quotaRewindTarget(), quotaWindowUpper()
+	ctx := f.ctx()
+
+	// 前置：水位在最新（生产里的常态），回退 720 小时 → 水位与标记都落到目标上。
+	f.setCursor(t, alignDownHour(quotaWindowNow))
+	rw, err := f.flush.RewindHours(ctx, nil, agentmetrics.Resolution1h, quotaWindowHours)
+	if err != nil {
+		t.Fatalf("RewindHours: %v", err)
+	}
+	if rw.CursorsRewound != 1 || rw.WindowHours != quotaWindowHours {
+		t.Fatalf("前置 stats = %+v, want 1 rewound / 720 hours", rw)
+	}
+	f.mustCursor1h(t, target)
+	f.mustMarker(t, rewindMarkerKey(rollupDevID), target)
+
+	rounds := quotaWindowHours / defaultRollupMaxHoursPerRound
+	for round := 1; round <= rounds; round++ {
+		stats := f.rollupRound(t)
+
+		if round < rounds {
+			// 未追平：标记必须仍在（值不变），且不得被计数。
+			if got, ok := f.marker(t, rewindMarkerKey(rollupDevID)); !ok || got != target {
+				t.Fatalf("第 %d 轮后标记 = %d(ok=%v), want %d：本轮只走了 48/%d 个小时，"+
+					"标记绝不能因为「水位已越过回退目标」而被当成追平删掉",
+					round, got, ok, target, quotaWindowHours)
+			}
+			if stats.RewindsCaughtUp != 0 {
+				t.Fatalf("第 %d 轮 stats = %+v, want rewindsCaughtUp=0（追平还没发生）", round, stats)
+			}
+			if stats.HoursDeferred <= 0 {
+				t.Fatalf("第 %d 轮 stats = %+v, want hoursDeferred>0（配额用尽）", round, stats)
+			}
+			continue
+		}
+
+		// 最后一轮：水位走到窗口末尾（追平），标记被清掉并计一次数。
+		if cur, _ := f.cursor(t); cur != upper-rollupHourSec {
+			t.Fatalf("第 %d 轮 cursor_1h = %d, want %d（追平轮的水位应落在窗口的最后一个小时）",
+				round, cur, upper-rollupHourSec)
+		}
+		if stats.HoursDeferred != 0 {
+			t.Fatalf("第 %d 轮 stats = %+v, want hoursDeferred=0（配额未用尽）", round, stats)
+		}
+		if stats.RewindsCaughtUp != 1 {
+			t.Fatalf("第 %d 轮 stats = %+v, want rewindsCaughtUp=1（追平必须被计数）", round, stats)
+		}
+		if _, ok := f.marker(t, rewindMarkerKey(rollupDevID)); ok {
+			t.Fatal("追平之后标记必须被删除：留着它就等于「永远待追平」，运维再也无法从标记上读到任何信息")
+		}
+		if !spy.hasInfo("已追平", rollupDevID, target) {
+			t.Fatalf("追平时必须 log.Info 且**带设备号与目标**（deviceId=%d target=%d），实际记录 = %+v",
+				rollupDevID, target, spy.infos)
+		}
+	}
+
+	// 追平之后的轮次不得重复计数（标记已删 = 这件事只发生一次）。
+	after := f.rollupRound(t)
+	if after.RewindsCaughtUp != 0 {
+		t.Fatalf("追平后的轮次 stats = %+v, want rewindsCaughtUp=0（标记已删，不得重复计数）", after)
+	}
+}
+
+// TestRollupToleratesRewindMarkerReadFailure 钉住「观测设施不得成为数据通路的单点」：
+// 标记读失败 → 只记 log.Warn 并继续本轮（不返回错误、不删标记、该回滚的小时照常回滚）。
+func TestRollupToleratesRewindMarkerReadFailure(t *testing.T) {
+	now := rollupBaseTS + 30*rollupHourSec + 60
+	f := newRewindFixture(t, now, 0)
+	ctx := f.ctx()
+	f.setCursor(t, alignDownHour(now))
+	if _, err := f.flush.RewindHours(ctx, nil, agentmetrics.Resolution1h, 6); err != nil {
+		t.Fatalf("RewindHours: %v", err)
+	}
+	target := target1h(now, 6)
+	f.mustMarker(t, rewindMarkerKey(rollupDevID), target)
+
+	// 一个待补的小时：证明这一轮**照常干活**（数据通路不受观测故障影响）。
+	late := target + rollupHourSec
+	f.seed5m(t, fullHourRows(late, func(int) fiveMin {
+		return fiveMin{samples: 30, cpu: 33}
+	})...)
+
+	spy := &rewindLogSpy{}
+	f.withRollupDeps(rollupCfg{rescanHours: defaultRollupRescanHours, maxHours: defaultRollupMaxHoursPerRound},
+		markerGetFailer{Cmdable: f.rdb, key: rewindMarkerKey(rollupDevID)}, spy)
+
+	stats, err := f.svc.RollupOnce(ctx)
+	if err != nil {
+		t.Fatalf("标记读失败不得让整轮失败（观测设施不是数据通路），实际 err = %v", err)
+	}
+	if spy.warns < 1 {
+		t.Fatal("标记读失败必须 log.Warn（静默吞掉 = 观测失效且无人知道）")
+	}
+	if stats.RewindsCaughtUp != 0 {
+		t.Fatalf("stats = %+v, want rewindsCaughtUp=0（读不到标记就不能声称追平）", stats)
+	}
+	// 标记仍然在：读失败不等于「没有标记」，更不许顺手删掉它。
+	if _, ok := f.marker(t, rewindMarkerKey(rollupDevID)); !ok {
+		t.Fatal("标记读失败的一轮不得删除标记")
+	}
+	// 数据通路照常：那个小时被回滚出来（读失败没有连坐普通区间）。
+	row := f.hourRow(t, late)
+	if row == nil {
+		t.Fatal("标记读失败连坐了普通区间：那个小时的 1h 行没有被写出来")
+	}
+	if row.Samples != 360 || row.CPUUsedPercent == nil || *row.CPUUsedPercent != 33 {
+		t.Fatalf("补出的 1h 行 = samples %d / cpu %v, want 360 / 33", row.Samples, row.CPUUsedPercent)
 	}
 }

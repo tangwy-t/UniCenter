@@ -60,7 +60,17 @@ func (c *fixedClock) now() time.Time { return c.t }
 type fakeConfig struct{ reportSec int }
 
 func (f fakeConfig) GetString(_ context.Context, _ string, def string) string { return def }
-func (f fakeConfig) GetInt(_ context.Context, _ string, def int) int {
+func (f fakeConfig) GetInt(_ context.Context, key string, def int) int {
+	// 每轮小时配额（rollup 的键，flush 侧不读）：回落**调用方给的默认值**（生产缺省 48）。
+	//
+	// 不特殊处理就会落进下面的兜底分支（任何键都回 reportSec），于是每一个用本替身的
+	// rollup 夹具都会把配额读成 10 小时 —— 「测试里的配额恰好比生产缺省小 5 倍」是一个
+	// 隐性地雷：将来谁用更大的窗口测 rollup，就会得到一个被静默截断的读数。
+	// rollup 的配额断言各自用 rollupCfg / withMaxHours 显式给值，本分支只保证**缺省**
+	// 这一支在共享夹具下等于生产缺省。
+	if key == configAgentRollupMaxHoursPerRound {
+		return def
+	}
 	if f.reportSec == 0 {
 		return def
 	}

@@ -72,6 +72,26 @@ type RollupStats struct {
 	// HoursBackfilled 是本轮重扫真正**补出** 1h 行的小时数（HoursRescanned 与 HoursWritten
 	// 的子集）。正常的一轮它是 0（集合差为空 = 没有空洞）；只有迟到落库的小时才会让它非零。
 	HoursBackfilled int
+	// HoursDeferred 是本轮因**配额用尽**而尚未处理的小时数，口径定死为
+	// `(upper − 本轮 CAS 后的水位) / 3600`（整数除法，精确值而非估算）；配额没有用尽时为 0。
+	//
+	// 「配额用尽」是**主动暂停**，不是失败：RollupOnce 照常返回 nil，水位已经前移到
+	// 最后一个**已完成**的小时，下一轮从它后面继续（不这样做的话，下一轮会重做同样的那批
+	// 小时，而配额又只允许那批小时 —— 水位永远走不动，配额就成了死循环）。
+	//
+	// 这个公式把游标自己那一格也算进去了（游标语义是「已成功回滚到（**含**）」），
+	// 故它等于「严格尚未处理的小时数 + 1」；口径以公式为准、不另立第二张表。多设备时
+	// 是本轮所有被截断设备的合计。它是 0 **当且仅当**本轮没有被配额截断
+	//（那一格不可能超出 upper，故配额用尽时必然 ≥ 1）—— 「回退是否已追平」的判定靠的
+	// 正是这个等价关系（见 rewindCaughtUp）。
+	HoursDeferred int
+	// RewindsCaughtUp 是本轮**追平并清掉**该设备「回退待追平」标记的设备数
+	//（标记见 agentmetrics.RewindMarkerKey、写入见 AgentMetricsFlushService.RewindHours）。
+	//
+	// 为什么要有它（问题②）：补出来的小时走的是**普通区间**，与「设备本来就有新数据」记在
+	// 同一个 HoursWritten 上；没有任何读数把结果与「运维回退过水位」这个动作挂钩，
+	// 运维执行完回退无从判断它有没有生效。本字段（与同一处的 log.Info）就是那个挂钩。
+	RewindsCaughtUp int
 	// Errors 是本轮失败次数（每台失败设备 +1）。
 	Errors int
 }
@@ -156,6 +176,46 @@ const configAgentRollupRescanHours = "sys.agent.rollupRescanHours"
 // （rollupHour → ReadWideRows），不是 Redis 里的原始点。
 const defaultRollupRescanHours = 24
 
+// configAgentRollupMaxHoursPerRound 是「每设备每轮的小时配额」配置键（默认 48）。
+//
+// 为什么必须存在（问题①）：`RewindHours` 只花一次 Redis 读 + 一次 Lua 写，但它的**后果**
+// 落在下一轮 rollup 上 —— 普通区间会从新水位顺序走完最多 720 小时/设备，每个小时一次
+// `ReadWideRows` + 一次 UPSERT。多设备时那是一波没有上限的 DB 负载（一次运维回退就能换来
+// 「N 台设备 × 720 次读写」），而回退本身恰恰是**人为**触发的：它的代价必须有个闸门。
+//
+// 为什么做成配置而不是常量：配额是负载取舍（「一轮愿意给回滚多少 DB 时间」），与重扫窗口、
+// 保留期、上报间隔一样随部署环境变化。
+//
+// 注意：本键**没有**迁移种子（与 sys.agent.rollupRescanHours 同一处理：v011 已存在，
+// 新增 v012 会打乱其它任务的编号约定）。缺键时 GetInt 回落 defaultRollupMaxHoursPerRound
+// —— 配置面板里加一条即可覆盖。
+const configAgentRollupMaxHoursPerRound = "sys.agent.rollupMaxHoursPerRound"
+
+// defaultRollupMaxHoursPerRound 是每设备每轮的小时配额缺省值（48 = 两天）。
+//
+// 为什么是 48：① 回退的上界是 5m 行保留期（默认 30 天 = 720 小时），配额就是给那段
+// 「人为触发的追平」设的上限；② 48 小时让「一次 30 天的回退」在 15 轮内追平
+// （默认 5 分钟一轮 → 约 75 分钟），既不是「一轮扫完 720 小时」（那正是要消灭的负载尖峰），
+// 也不是「一轮一小时」（追平要 12 小时）；③ 它是**每设备**的：做成全局配额会让按枚举顺序
+// 排在后面的设备在回退后长期得不到追平（饥饿），而设备之间本来就相互独立（各自的游标、
+// 各自的事务），把配额切在设备边界上不改变任何语义。
+const defaultRollupMaxHoursPerRound = 48
+
+// maxHoursPerRound 返回每设备每轮的小时配额（配置缺键/非法值 → 默认 48）。
+//
+// 非法值（<=0）回落默认而**不是**解释成「不限量」：与 rescanWindowHours /
+// WithMaxRepairHours 同一取向 —— 传 0 最可能的意思是「忘了填」，而静默不限量正好等于把
+// 本键唯一的用处（给人为触发的追平上负载上限）去掉。那是**静默失效**：配置里有这条键、
+// 读出来也有个值，行为却与没配一样。
+func (s *AgentMetricsRollupService) maxHoursPerRound() int {
+	n := s.cfg.GetInt(context.Background(), configAgentRollupMaxHoursPerRound,
+		defaultRollupMaxHoursPerRound)
+	if n <= 0 {
+		n = defaultRollupMaxHoursPerRound
+	}
+	return n
+}
+
 // rescanWindowHours 返回重扫窗口的小时数（配置缺键/非法值 → 默认 24）。
 //
 // 非法值（<=0）回落默认而不是「关掉重扫」：与 WithMaxRepairHours / WithEmptyHourGrace
@@ -231,6 +291,10 @@ var ErrRollupPartial = errors.New("agentmetrics rollup: 本轮部分回滚失败
 // 返回的 error 是「本轮有失败」的汇总（sentinel：ErrRollupPartial），用于让任务层
 // 记日志/告警；**游标语义不受它影响** —— 失败设备的水位留在原处（唯一的例外是「只有按需重扫
 // 失败」：它排在普通区间的乐观 CAS **之后**，水位已经按普通区间前移；见 rollupDevice 的第 3 步）。
+//
+// **配额用尽不是失败**：每设备每轮最多处理 maxHoursPerRound 个小时
+// （`sys.agent.rollupMaxHoursPerRound`，默认 48），用尽即主动暂停 —— 水位已经前移到最后一个
+// 已完成的小时，本轮照常返回 nil，剩余的小时记在 HoursDeferred 里（见该字段）。
 func (s *AgentMetricsRollupService) RollupOnce(ctx context.Context) (RollupStats, error) {
 	var stats RollupStats
 
@@ -239,16 +303,20 @@ func (s *AgentMetricsRollupService) RollupOnce(ctx context.Context) (RollupStats
 		return stats, fmt.Errorf("agentmetrics rollup: 枚举设备失败: %w", err)
 	}
 	upper := s.closedHourUpper()
+	// 配额在**轮初**读一次（与 upper 同源）：配置热更不会让同一轮里前后设备用不同的配额。
+	quota := s.maxHoursPerRound()
 
 	failures := 0
 	for _, deviceID := range devices {
-		part, derr := s.rollupDevice(ctx, deviceID, upper)
+		part, derr := s.rollupDevice(ctx, deviceID, upper, quota)
 		stats.HoursScanned += part.HoursScanned
 		stats.HoursWritten += part.HoursWritten
 		stats.HoursRepaired += part.HoursRepaired
 		stats.HoursSkipped += part.HoursSkipped
 		stats.HoursRescanned += part.HoursRescanned
 		stats.HoursBackfilled += part.HoursBackfilled
+		stats.HoursDeferred += part.HoursDeferred
+		stats.RewindsCaughtUp += part.RewindsCaughtUp
 		if derr != nil {
 			failures++
 			stats.Errors++
@@ -283,8 +351,12 @@ func (s *AgentMetricsRollupService) RollupOnce(ctx context.Context) (RollupStats
 //     否则一台离线设备会把水位永久卡死在第一个空小时上。
 //
 // 唯一不参与水位判定的失败是第 3 步（按需重扫，排在乐观 CAS 之后）。
+//
+// quota 是本轮允许处理的**普通区间**小时数（见 maxHoursPerRound）：达到即停止循环并
+// **正常收尾**（水位照常前移到最后一个已完成的小时）。它是主动暂停而不是失败 ——
+// 见下面「2)」里的取舍说明。
 func (s *AgentMetricsRollupService) rollupDevice(ctx context.Context, deviceID uint64,
-	upper int64) (RollupStats, error) {
+	upper int64, quota int) (RollupStats, error) {
 
 	var stats RollupStats
 	hourSec := resolutionSeconds(agentmetrics.Resolution1h)
@@ -304,6 +376,12 @@ func (s *AgentMetricsRollupService) rollupDevice(ctx context.Context, deviceID u
 	// 空小时的等待窗口（emptyHourGrace）在这里**不适用**：repair 里的小时都在游标之前，
 	// 普通区间已经越过它们，扣住它们拦不住任何东西（水位不会再前移）；而那条路径上的
 	// 「空」有另一种明确含义 —— 该小时的 5m 行已被保留期回收，再也修不好了。
+	//
+	// **repair 不占配额**（下面的 quota 只约束普通区间）：这是刻意的取舍 ——
+	// ① 它的规模是**有界**的（集合上限 maxRepairHours，默认 720 小时，且成员是「不完整
+	// 就留着」的收敛项，不是每轮新增）；② 它比补空洞更紧要：集合里的小时**已经有**一行
+	// 残缺的 1h 行落库并被查询方读到（错的值），而配额扣住的那些小时只是**还没有**行
+	//（缺的值）—— 先修错的，再补缺的。
 	repairs, err := s.repairHours(ctx, deviceID, upper)
 	if err != nil {
 		return stats, err
@@ -336,9 +414,22 @@ func (s *AgentMetricsRollupService) rollupDevice(ctx context.Context, deviceID u
 	// 它们只是重写一遍（代价 ≤ 等待窗口，即最多几个 1h 行）。若在这里 break，设备离线
 	// 一小时的期间，后面那些**有数据**的小时也要陪着空等满 2 小时才写出 1h 行。
 	// 唯一的差别是：被扣住之后的小时**不再带动水位**（`last` 冻结）。
+	//
+	// **每轮小时配额**（quota，见 maxHoursPerRound）：普通区间是本服务里**唯一**能被外部
+	// 动作放大的工作量 —— 一次 `RewindHours` 就能让下一轮从 720 小时之前重走（每设备
+	// 720 次 ReadWideRows + 720 次 UPSERT）。达到配额即停止循环：水位照常前移到最后一个
+	// **已完成**的小时（下面的 CAS），本轮**正常收尾**（返回 nil），剩余小时数记进
+	// HoursDeferred。把水位停在原处才是错的：下一轮会重做同样的那批小时，配额变成死循环。
 	last := cursor
 	blockedAt := int64(-1) // 本轮第一个被扣住的小时（-1 = 没有）
+	processed := 0         // 本轮普通区间已处理的小时数（配额只数它，见上）
+	quotaCut := false      // 配额是否截断了本轮（决定 HoursDeferred 的口径与追平判定）
 	for h := cursor + hourSec; h < upper; h += hourSec {
+		if processed >= quota {
+			quotaCut = true
+			break
+		}
+		processed++
 		already[h] = true
 		stats.HoursScanned++
 		written, skipped, herr := s.rollupHour(ctx, deviceID, h, false)
@@ -367,6 +458,14 @@ func (s *AgentMetricsRollupService) rollupDevice(ctx context.Context, deviceID u
 			}
 		}
 	}
+	if quotaCut {
+		// 口径定死为 (upper − CAS 后的水位)/3600 —— 见 HoursDeferred 的字段注释。
+		stats.HoursDeferred = int((upper - last) / hourSec)
+		s.log.Debug("agentmetrics rollup: 本轮小时配额用尽，主动暂停并前移水位（不是失败，下轮继续）",
+			zap.Uint64("deviceId", deviceID), zap.Int("quota", quota),
+			zap.Int("hoursProcessed", processed), zap.Int("hoursDeferred", stats.HoursDeferred),
+			zap.Int64("cursor", last))
+	}
 
 	// 走到这里说明普通区间里每个小时都成功（空小时也算成功），才前移水位。
 	//
@@ -374,10 +473,21 @@ func (s *AgentMetricsRollupService) rollupDevice(ctx context.Context, deviceID u
 	// 原语、同一条理由 —— 1h 水位不会被回退（repair 是另一族键），但复用同一实现
 	// 能让「游标只能被原子地比较-写」这条不变量在两个档位上一致成立，
 	// 未来给 1h 加任何回退/重放能力时不会再长出第二份读-比-写。
+	//
+	// 配额用尽的那一轮**照样**走这一步：水位前移到最后一个已完成的小时，是「主动暂停」
+	// 与「失败」的分界线（失败时水位必须留在轮初，暂停时水位必须前移）。
 	if last != cursor {
 		if err := s.writeCursor(ctx, deviceID, cursor, last); err != nil {
 			return stats, err
 		}
+	}
+
+	// 收尾（CAS 之后）：回退「待追平」标记的追平检测。
+	//
+	// 排在 CAS **之后**与第 3 步同一条纪律：水位是普通区间（与 repair）结果的纯函数，
+	// 观测只能读**已经落定**的水位，不能反过来影响它。
+	if s.catchUpRewindMarker(ctx, deviceID, last, stats.HoursDeferred) {
+		stats.RewindsCaughtUp++
 	}
 
 	// 3) 按需重扫：把**迟到落库**的 5m 行补成 1h 行（只补行，不碰水位）。
@@ -390,6 +500,11 @@ func (s *AgentMetricsRollupService) rollupDevice(ctx context.Context, deviceID u
 	// 代价（刻意接受、且已写入 ErrRollupPartial 的注释与文案）：只有重扫失败时，本轮会以
 	// ErrRollupPartial 上报，而水位已按普通区间前移 —— 重扫只补历史空洞，不影响「已回滚到
 	// 哪个小时」的记账；它没补上的小时会被下一轮的集合差重新发现。
+	//
+	// **重扫（第 3 步）也不占配额**（刻意的取舍）：它是按「集合差」记账的 —— 只为**真正
+	// 缺失**的小时写行，正常的一轮是 0 次写、两条集合查询，量级与普通区间完全不是一回事。
+	// 把它算进配额反而会在「配额恰好被普通区间用尽」时让一个真实的空洞留在那里，
+	// 而下一轮它照样会被集合差重新发现（只是白等一轮）—— 没有收益，只有一个更难解释的读数。
 	rescanned, backfilled, rerr := s.rescanDevice(ctx, deviceID, upper, already)
 	stats.HoursRescanned += rescanned
 	stats.HoursBackfilled += backfilled
@@ -497,6 +612,69 @@ func (s *AgentMetricsRollupService) rollupHour(ctx context.Context, deviceID uin
 		}
 	}
 	return true, false, nil
+}
+
+// ─ 回退「待追平」标记 ─────────────────────────────────
+
+// rewindCaughtUp 判断「回退写下的待追平标记」是否已经被走完（纯函数，便于逐条钉住）。
+//
+// 主条件是 `cursor >= target`：标记的值就是那次回退写下的**目标水位**，水位重新走到它
+// （或越过它）说明回退的下界已经被踩过一遍。**但它单独不够**：回退本身就把水位写到了
+// target，于是从回退后的第一轮起 `cursor >= target` 恒真 —— 而本服务同时有每轮小时配额，
+// 配额用尽的一轮可能只走了 48/720 个小时。只按它判定，就会在「绝大多数小时还没被走过」时
+// 删掉标记并打出「已追平」：那是一个比没有标记更糟的假信号（运维据此以为回退生效了）。
+// 故要求本轮**没有被配额截断** —— HoursDeferred == 0 当且仅当配额未用尽（见该字段口径）。
+//
+// 注意「没有被截断」不等于「所有小时都被写过」：空小时（设备离线）与仍被等待窗口扣住的
+// 小时都算「处理过」，前者是事实、后者下一轮自会重试；它们都不是回退这件事的欠账。
+func rewindCaughtUp(cursor, target int64, deferred int) bool {
+	return cursor >= target && deferred == 0
+}
+
+// catchUpRewindMarker 在**收尾 CAS 之后**读一次该设备的「待追平」标记：
+//   - 有标记且已追平 → log.Info（带设备号与目标）+ 删标记，返回 true；
+//   - 有标记但未追平 → 什么都不做（下一轮再看），返回 false；
+//   - 没有标记 → 什么都不做，返回 false。
+//
+// 为什么排在 CAS **之后**：水位是普通区间（与 repair）结果的纯函数，标记的判定只能读
+// **已经落定**的水位，不能反过来影响它（与按需重扫同一条纪律）。
+//
+// 比较用的是**本轮记账后的水位**（last，即 CAS 尝试写入的那个值），不是再读一次 Redis：
+// 并发的 Advance 只会把水位改得**更大**（Advance 是只前进的），故它不可能把「已追平」
+// 变成假否；而并发的 RewindHours 会把标记改得更早，那种情况下 ClearRewind 的比较会失败、
+// 本轮让位（见下）—— 两个方向都不会误判「已追平」。
+//
+// 为什么只返回 bool、不返回 error：标记是**观测设施**，不是数据通路的一部分。
+// 读/删失败一律记 log.Warn 后继续 —— 让它成为「整轮回滚失败」的原因，等于一次 Redis 抖动
+// 就能把 1h 的补算一起停掉（观测设施绝不该成为数据通路的单点）。删除失败时**不**计数：
+// 标记还在，下一轮会再判一次（重复报一条 Info 好过悄悄丢掉一次追平的证据）。
+func (s *AgentMetricsRollupService) catchUpRewindMarker(ctx context.Context, deviceID uint64,
+	cursor int64, deferred int) bool {
+
+	target, ok, err := s.cursors.PendingRewind(ctx, deviceID, agentmetrics.Resolution1h)
+	if err != nil {
+		s.log.Warn("agentmetrics rollup: 读回退待追平标记失败（只影响追平观测，不影响本轮回滚）",
+			zap.Uint64("deviceId", deviceID), zap.Error(err))
+		return false
+	}
+	if !ok || !rewindCaughtUp(cursor, target, deferred) {
+		return false
+	}
+	cleared, cerr := s.cursors.ClearRewind(ctx, deviceID, agentmetrics.Resolution1h, target)
+	if cerr != nil {
+		s.log.Warn("agentmetrics rollup: 回退待追平标记清除失败（标记仍在，下一轮会重新判定）",
+			zap.Uint64("deviceId", deviceID), zap.Int64("target", target), zap.Error(cerr))
+		return false
+	}
+	if !cleared {
+		// 标记已被并发的（更深的）回退改成了别的目标：让位，本轮不动它。
+		s.log.Debug("agentmetrics rollup: 待追平标记已被并发回退改得更早，本轮不清除",
+			zap.Uint64("deviceId", deviceID), zap.Int64("seenTarget", target))
+		return false
+	}
+	s.log.Info("agentmetrics rollup: 回退目标已追平（水位重新走到回退时写下的目标，标记已清除）",
+		zap.Uint64("deviceId", deviceID), zap.Int64("target", target), zap.Int64("cursor", cursor))
+	return true
 }
 
 // ─ 按需重扫（让 1h 空洞自愈）────────────────────────────

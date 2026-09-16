@@ -1,6 +1,7 @@
 package agentmetrics
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -83,5 +84,54 @@ func TestResolutionBucketSeconds(t *testing.T) {
 	}
 	if Resolution5m.String() != "5m" || Resolution1h.String() != "1h" {
 		t.Fatalf("Resolution.String() = %q/%q, want 5m/1h", Resolution5m, Resolution1h)
+	}
+}
+
+// TestRewindMarkerKeyMatchesSpecContract 用**字符串字面量**钉住回退标记的键名契约
+// （同 TestCursorKeyMatchesSpecContract：不复用实现里的拼装，否则改错了也自洽）。
+//
+// 运维与外部脚本按 spec 键名读这个键（「这台设备有没有一次还没追平的回退」），
+// 形态必须与 CursorKey/RepairSetKey 同源（`agent:device:{id}:xxx`），
+// 且两个档位的标记必须是**两个键**（同键会让 5m 的回退掩盖 1h 的待追平状态）。
+func TestRewindMarkerKeyMatchesSpecContract(t *testing.T) {
+	key1h, err := RewindMarkerKey(1001, Resolution1h)
+	if err != nil {
+		t.Fatalf("RewindMarkerKey(1001, Resolution1h) 报错: %v", err)
+	}
+	if key1h != "agent:device:1001:rewind_1h" {
+		t.Fatalf("RewindMarkerKey(1001, Resolution1h) = %q, want %q", key1h, "agent:device:1001:rewind_1h")
+	}
+	key5m, err := RewindMarkerKey(1001, Resolution5m)
+	if err != nil {
+		t.Fatalf("RewindMarkerKey(1001, Resolution5m) 报错: %v", err)
+	}
+	if key5m != "agent:device:1001:rewind_5m" {
+		t.Fatalf("RewindMarkerKey(1001, Resolution5m) = %q, want %q", key5m, "agent:device:1001:rewind_5m")
+	}
+	if key5m == key1h {
+		t.Fatal("两个档位的标记不得是同一个键（5m 的回退会掩盖 1h 的待追平状态）")
+	}
+	// 与游标/repair 键同源：前缀是 agent:device:，档位名在设备号**之后**。
+	if bad := "agent:device:rewind_1h:1001"; key1h == bad {
+		t.Fatalf("标记键 %q 用了「档位名在前」的旧形态", bad)
+	}
+	cursor1h, err := CursorKey(1001, Resolution1h)
+	if err != nil {
+		t.Fatalf("CursorKey: %v", err)
+	}
+	const prefix = "agent:device:1001:"
+	if !strings.HasPrefix(key1h, prefix) || !strings.HasPrefix(cursor1h, prefix) {
+		t.Fatalf("标记键 %q / 游标键 %q 必须同源（都以 %q 开头）", key1h, cursor1h, prefix)
+	}
+	// 未登记的档位必须报错，绝不退化成 5m（与 CursorKey 同一条纪律）。
+	registered := uint8(len(rewindMarkerSuffixes))
+	for _, unknown := range []Resolution{Resolution(registered), Resolution(255)} {
+		key, err := RewindMarkerKey(1001, unknown)
+		if err == nil {
+			t.Fatalf("RewindMarkerKey(1001, %d) 未报错，返回 %q —— 未登记档位必须报错", uint8(unknown), key)
+		}
+		if key != "" {
+			t.Fatalf("RewindMarkerKey(1001, %d) 报错时仍返回键名 %q", uint8(unknown), key)
+		}
 	}
 }

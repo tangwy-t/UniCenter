@@ -284,6 +284,34 @@ func (f *rollupFixture) setCursor(t *testing.T, sec int64) {
 	}
 }
 
+// marker 读一个「回退待追平」标记键（键名由调用方按**契约字面量**给出）；键不存在 → (0,false)。
+//
+// 刻意不从 agentmetrics.RewindMarkerKey 取键：键名是 Redis 契约（运维按 spec 键名读），
+// 复用实现的拼装会让「键名写错」与「读写自洽」同时成立。
+func (f *rollupFixture) marker(t *testing.T, key string) (int64, bool) {
+	t.Helper()
+	v, err := f.rdb.Get(context.Background(), key).Int64()
+	if errors.Is(err, goredis.Nil) {
+		return 0, false
+	}
+	if err != nil {
+		t.Fatalf("读标记 %s: %v", key, err)
+	}
+	return v, true
+}
+
+// mustMarker 断言标记此刻的**精确值**（不存在也算失败）。
+func (f *rollupFixture) mustMarker(t *testing.T, key string, want int64) {
+	t.Helper()
+	got, ok := f.marker(t, key)
+	if !ok {
+		t.Fatalf("标记 %s 不存在, want %d", key, want)
+	}
+	if got != want {
+		t.Fatalf("标记 %s = %d, want %d", key, got, want)
+	}
+}
+
 func (f *rollupFixture) repairMembers(t *testing.T) []int64 {
 	t.Helper()
 	raw, err := f.rdb.SMembers(context.Background(), rollupRepairKey(rollupDevID)).Result()
@@ -982,6 +1010,10 @@ func TestRollupDeviceEnumerationErrorIsReturned(t *testing.T) {
 type rollupCfg struct {
 	// rescanHours = 0 表示**缺键**（回落到调用方给的默认值，模拟「配置面板里没加这条」）。
 	rescanHours int
+	// maxHours 是每轮小时配额（`sys.agent.rollupMaxHoursPerRound`）；0 表示**缺键**
+	// （回落默认 48）。显式的 0 与「没配」在真实配置层是两种输入，但本替身只服务
+	// 「值与默认值不同」的那些断言 —— 「显式 0 必须回落缺省」由 quotaCfg 专门覆盖。
+	maxHours int
 }
 
 func (c rollupCfg) GetString(_ context.Context, _ string, def string) string { return def }
@@ -993,6 +1025,11 @@ func (c rollupCfg) GetInt(_ context.Context, key string, def int) int {
 			return def
 		}
 		return c.rescanHours
+	case configAgentRollupMaxHoursPerRound:
+		if c.maxHours == 0 {
+			return def
+		}
+		return c.maxHours
 	case configAgentReportInterval:
 		return rollupReportSec
 	default:
@@ -1000,17 +1037,55 @@ func (c rollupCfg) GetInt(_ context.Context, key string, def int) int {
 	}
 }
 
-// withRescanHours 把 fixture 的服务换成「重扫窗口 = n 小时」的那一份（其余装配逐字相同）。
-func (f *rollupFixture) withRescanHours(n int) *rollupFixture {
+// withRollupDeps 用给定的配置重建 rollup 服务（其余装配与 newRollupFixture 逐字相同）。
+//
+// 三个入参都允许「不变」：rdb / log 传 nil 时沿用 fixture 自己的那两个，
+// 于是绝大多数调用点只需给配置（见 withRescanHours / withMaxHours）。
+func (f *rollupFixture) withRollupDeps(cfg rollupCfg, rdb goredis.Cmdable,
+	log logger.LoggerInterface) *rollupFixture {
+
 	var metrics RollupMetricRepo = f.repo
 	if f.writer != nil {
 		metrics = f.writer
 	}
-	f.svc = NewAgentMetricsRollupService(metrics, fakeDeviceSource{ids: []uint64{rollupDevID}},
-		rollupCfg{rescanHours: n}, f.log).
-		WithCursorStore(f.rdb).
+	if rdb == nil {
+		rdb = f.rdb
+	}
+	if log == nil {
+		log = f.log
+	}
+	f.svc = NewAgentMetricsRollupService(metrics, fakeDeviceSource{ids: []uint64{rollupDevID}}, cfg, log).
+		WithCursorStore(rdb).
 		WithClock(f.clock.now)
 	return f
+}
+
+// withRescanHours 把 fixture 的服务换成「重扫窗口 = n 小时」的那一份（其余装配逐字相同）。
+func (f *rollupFixture) withRescanHours(n int) *rollupFixture {
+	return f.withRollupDeps(rollupCfg{rescanHours: n}, nil, nil)
+}
+
+// withMaxHours 把 fixture 的服务换成「重扫窗口 = rescanHours、每轮小时配额 = maxHours」
+// 的那一份（其余装配逐字相同）。
+func (f *rollupFixture) withMaxHours(rescanHours, maxHours int) *rollupFixture {
+	return f.withRollupDeps(rollupCfg{rescanHours: rescanHours, maxHours: maxHours}, nil, nil)
+}
+
+// rollupRound 跑一轮 rollup 并清零写路径替身的计数（配额断言要的是「这一轮」的写次数）。
+//
+// err 一律 fail：本夹具里唯一的失败来源是测试自己注入的替身，而**配额用尽不是失败**
+// —— 那正是 Task 1 的核心语义，由各条断言单独钉住。
+func (f *rollupFixture) rollupRound(t *testing.T) RollupStats {
+	t.Helper()
+	if f.writer != nil {
+		f.writer.calls = 0
+		f.writer.written = nil
+	}
+	stats, err := f.svc.RollupOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RollupOnce: %v（配额用尽是主动暂停，不得返回错误）", err)
+	}
+	return stats
 }
 
 // bucketSetFailer 让**重扫的集合读**失败，其余读写走真仓储（普通区间照常成功）。
@@ -1447,5 +1522,379 @@ func TestRollupRescanReadFailureSurfacesAndKeepsCursor(t *testing.T) {
 	if cur != cur2 {
 		t.Fatalf("重扫读失败时水位 = %d，重扫正常时 = %d（必须相同：重扫只补行，水位由普通区间与 repair 管）",
 			cur, cur2)
+	}
+}
+
+// ── Task 1：每轮小时配额（`sys.agent.rollupMaxHoursPerRound`）────────────
+//
+// 问题①：`RewindHours` 只花一次 Redis 读 + 一次写，但**下一轮** rollup 会从新水位顺序
+// 走完最多 720 小时/设备（每小时一次 ReadWideRows + 一次 UPSERT）—— 多设备时那是一波
+// 无保护的 DB 负载。配额把它切成多轮，于是下面这些断言分成两组：
+//   - 「配额真的切了」：单轮写的小时数、水位停在哪里、HoursDeferred 的口径；
+//   - 「切了也不丢也不失败」：返回 nil、第二轮从第 49 个小时继续、15 轮恰好走完 720 小时。
+
+// quotaWindowNow 是配额/追平断言的共享时钟：落在第 800 个小时的第 60 秒（> CloseGrace 20s），
+// 于是 upper = base+800h，而「回退 720 小时」的目标是 base+79h —— 普通区间恰好 720 个小时。
+//
+// 为什么要把 now 推到 800 小时之后（其它测试用 30）：回退的上界是 5m 行的保留期
+// （30 天 = 720h），「一次 720 小时的回退被配额切成 15 轮」这条断言要求窗口本身真的有
+// 720 个小时，30 小时的夹具根本装不下。
+const quotaWindowNow = rollupBaseTS + 800*rollupHourSec + 60
+
+// quotaWindowHours 是一次回退请求的小时数（= 5m 保留期的上界 720 = 30 天）。
+const quotaWindowHours = 720
+
+// quotaRewindTarget 是测试侧**独立算出**的回退后水位（不复用实现里的 rewindTarget：
+// 端点语义写错也自洽的断言不算断言）：水位 = now 对齐 − 720h − 1h，于是 rollup 的普通区间
+// `[cursor+3600, upper)` 恰好是 720 个小时。
+func quotaRewindTarget() int64 {
+	return alignDownHour(quotaWindowNow) - quotaWindowHours*rollupHourSec - rollupHourSec
+}
+
+// quotaWindowUpper 是已闭小时的半开上界（now 落在小时的 +60s，> CloseGrace 20s）。
+func quotaWindowUpper() int64 { return alignDownHour(quotaWindowNow) }
+
+// quotaWindowSeeded 返回窗口里**种了 5m 行**的小时序号（1-based）：
+// 前 96 个（第 1、2 轮各 48 个，用来把「WriteHour 调用 == 配额」逐轮钉死）与最后两个。
+//
+// 最后两个必须种：它们在 emptyHourGrace（2h）的等待窗口内，**空**的话会扣住水位
+// （见 emptyHourWithinGrace），最后一轮的水位就落不到窗口末尾。中间的 622 个小时故意留空：
+// 它们同样是「被处理过的小时」（已过等待窗口的空小时照常让水位越过），却不必种 622×12 行
+// —— 本测试要的是 720 个小时的**量级**，不是数据量。
+func quotaWindowSeeded() []int {
+	out := make([]int, 0, 98)
+	for i := 1; i <= 96; i++ {
+		out = append(out, i)
+	}
+	return append(out, quotaWindowHours-1, quotaWindowHours)
+}
+
+// seedQuotaWindow 在回退窗口里种数据（5m 行走生产写路径）。
+//
+// 窗口末尾那两个小时要种**两张表**：
+//   - 5m 行：让普通区间在最后一轮把它们**写出来**（它们在 emptyHourGrace 的等待窗口内，
+//     空的话会扣住水位、最后一轮的水位就落不到窗口末尾，「15 轮恰好走完 720 个小时」
+//     只剩一半可断言）；
+//   - 1h 行（seed1h）：让**重扫**的集合差里没有它们 —— 否则第一轮的重扫会顺手补这 2 个小时，
+//     「一轮最多写 48 个小时」那条断言会被多出来的 2 次写打红。那是**夹具没摆对**，不是
+//     实现错：重扫不占配额是刻意的（见 TestRollupQuotaDoesNotCoverRepairOrRescan）。
+//     「重扫窗口里的小时已经有 1h 行」也正是生产里的常态：一次回退扫过的区间里，
+//     绝大多数小时本来就是好的。
+//
+// samples=30：12 行 × 30 = 360 = ExpectedSamplesPerHour(10s)，于是这些小时是**完整**的
+// （不进 repair 集合、也不触发「样本偏薄」告警）—— 断言里的小时计数因此只反映配额。
+func seedQuotaWindow(t *testing.T, f *rollupFixture) {
+	t.Helper()
+	start := quotaRewindTarget()
+	for _, i := range quotaWindowSeeded() {
+		hour := start + int64(i)*rollupHourSec
+		f.seed5m(t, fullHourRows(hour, func(int) fiveMin {
+			return fiveMin{samples: 30, cpu: 42}
+		})...)
+		if i > quotaWindowHours-2 {
+			f.seed1h(t, hour)
+		}
+	}
+}
+
+// seed1h 直接写一行 1h 宽表行：模拟「这个小时早就滚好了」的既有一行。
+func (f *rollupFixture) seed1h(t *testing.T, hour int64) {
+	t.Helper()
+	row, err := repository.EntityFromWide(agentmetrics.Wide{
+		DeviceID: rollupDevID, BucketTS: hour, Samples: 360, CPUUsedPercent: f64p(42),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.repo.WriteHour(context.Background(), row); err != nil {
+		t.Fatalf("seed 1h 行: %v", err)
+	}
+}
+
+// TestRollupMaxHoursPerRoundDefersExcessHours 是配额语义的核心断言（Step 1 的 1 + 2）：
+//
+//	① 「回退 720 小时」之后的一轮**最多写 48 个小时**（用写路径替身数 WriteHour 调用）；
+//	② 水位**正好**推进到第 48 个小时（不是 0、也不是 720）；
+//	③ 配额用尽时 RollupOnce **返回 nil**（主动暂停，不是失败），且 HoursDeferred > 0；
+//	④ 第二轮从第 49 个小时继续；连跑 15 轮恰好走完 720 个小时。
+//
+// 为什么 ② 是硬约束而不是「顺手」：若配额用尽时把水位停在原处，下一轮会**重做同样的
+// 48 小时**，而配额又只允许 48 小时 —— 那个设备的水位永远走不动，回退的追平变成死循环。
+func TestRollupMaxHoursPerRoundDefersExcessHours(t *testing.T) {
+	if defaultRollupMaxHoursPerRound != 48 {
+		t.Fatalf("defaultRollupMaxHoursPerRound = %d, want 48（计划给定）", defaultRollupMaxHoursPerRound)
+	}
+	f := newRollupFixture(t, quotaWindowNow, true, 0) // spy：数清每一轮到底写了几行
+	f.withMaxHours(defaultRollupRescanHours, defaultRollupMaxHoursPerRound)
+	seedQuotaWindow(t, f)
+	target, upper := quotaRewindTarget(), quotaWindowUpper()
+	// 水位放到回退目标上（= RewindHours(…, Resolution1h, 720) 之后的状态；标记的生命周期
+	// 由 agent_metrics_rewind_test.go 覆盖，本测试只钉配额与水位）。
+	f.setCursor(t, target)
+
+	// ─ 第 1 轮：48 个小时之后配额用尽 ──
+	stats1 := f.rollupRound(t)
+	if f.writer.calls != defaultRollupMaxHoursPerRound || len(f.writer.written) != defaultRollupMaxHoursPerRound {
+		t.Fatalf("第 1 轮 WriteHour 调用 = %d（替身记录 %d 行），want %d（= 每轮配额）",
+			f.writer.calls, len(f.writer.written), defaultRollupMaxHoursPerRound)
+	}
+	if stats1.HoursScanned != 48 || stats1.HoursWritten != 48 {
+		t.Fatalf("第 1 轮 stats = %+v, want 48 scanned / 48 written（第 49 个小时起本轮不碰）", stats1)
+	}
+	wantCursor1 := target + 48*rollupHourSec
+	if cur, ok := f.cursor(t); !ok || cur != wantCursor1 {
+		t.Fatalf("第 1 轮 cursor_1h = %d(ok=%v), want %d（= 回退目标 + 48 小时）：配额用尽必须把水位"+
+			"前移到**最后一个已完成的小时**；停在水位原处会让下一轮重做同样的 48 小时，配额变成死循环",
+			cur, ok, wantCursor1)
+	}
+	if want := int((upper - wantCursor1) / rollupHourSec); stats1.HoursDeferred != want {
+		t.Fatalf("第 1 轮 HoursDeferred = %d, want %d（口径定死：(upper − CAS 后的水位)/3600）",
+			stats1.HoursDeferred, want)
+	}
+	if stats1.HoursDeferred <= 0 {
+		t.Fatal("配额用尽时 HoursDeferred 必须 > 0（否则读数里看不出本轮被配额截断）")
+	}
+	// 严格剩余 = HoursDeferred − 1：公式把游标自己那一格也算进去了（游标语义是「已含」）。
+	// 这一条把偏一钉死（617/673 之类的手滑会被它抓住），也把「笔误成估算」挡住。
+	if rem := quotaWindowHours - 48; stats1.HoursDeferred-1 != rem {
+		t.Fatalf("第 1 轮 HoursDeferred = %d，按公式推出的严格剩余 = %d，want %d",
+			stats1.HoursDeferred, stats1.HoursDeferred-1, rem)
+	}
+
+	// ─ 第 2 轮：从第 49 个小时继续（不是从头来） ──
+	stats2 := f.rollupRound(t)
+	if f.writer.calls != 48 || len(f.writer.written) != 48 {
+		t.Fatalf("第 2 轮 WriteHour 调用 = %d（替身记录 %d 行），want 48", f.writer.calls, len(f.writer.written))
+	}
+	if first := f.writer.written[0].BucketTS; first != target+49*rollupHourSec {
+		t.Fatalf("第 2 轮第一个写出的小时 = %d, want %d（= 第 49 个小时；从第 1 个重来 = 配额在空转）",
+			first, target+49*rollupHourSec)
+	}
+	wantCursor2 := target + 96*rollupHourSec
+	if cur, _ := f.cursor(t); cur != wantCursor2 {
+		t.Fatalf("第 2 轮 cursor_1h = %d, want %d（= 回退目标 + 96 小时）", cur, wantCursor2)
+	}
+	if want := int((upper - wantCursor2) / rollupHourSec); stats2.HoursDeferred != want {
+		t.Fatalf("第 2 轮 HoursDeferred = %d, want %d", stats2.HoursDeferred, want)
+	}
+	if stats2.HoursDeferred >= stats1.HoursDeferred {
+		t.Fatalf("HoursDeferred 必须随轮次单调下降（第 1 轮 %d → 第 2 轮 %d），否则追平不收敛",
+			stats1.HoursDeferred, stats2.HoursDeferred)
+	}
+
+	// ─ 第 3..15 轮：恰好走完 720 个小时 ─
+	scanned := stats1.HoursScanned + stats2.HoursScanned
+	written := stats1.HoursWritten + stats2.HoursWritten
+	last := stats2
+	rounds := quotaWindowHours / defaultRollupMaxHoursPerRound
+	for round := 3; round <= rounds; round++ {
+		last = f.rollupRound(t)
+		scanned += last.HoursScanned
+		written += last.HoursWritten
+		if last.HoursScanned != 48 {
+			t.Fatalf("第 %d 轮 HoursScanned = %d, want 48（每一轮都恰好被配额切到 48）", round, last.HoursScanned)
+		}
+	}
+	if scanned != quotaWindowHours {
+		t.Fatalf("%d 轮共处理 %d 个小时, want %d（配额只切分工作量，不丢小时）", rounds, scanned, quotaWindowHours)
+	}
+	if written != 98 {
+		t.Fatalf("%d 轮共写出 %d 个小时, want 98（种了行的 96 个 + 窗口最后两个）", rounds, written)
+	}
+	if last.HoursDeferred != 0 {
+		t.Fatalf("追平后的最后一轮 HoursDeferred = %d, want 0（配额未用尽 → 按口径为 0）", last.HoursDeferred)
+	}
+	if cur, _ := f.cursor(t); cur != upper-rollupHourSec {
+		t.Fatalf("%d 轮后 cursor_1h = %d, want %d（窗口的最后一个小时）",
+			rounds, cur, upper-rollupHourSec)
+	}
+}
+
+// TestRollupMaxHoursPerRoundLeavesShortRoundsUntouched 钉住「配额不影响正常路径」（Step 1 的 3）：
+// 待处理小时数 < 配额、以及**恰好等于**配额时，一轮的行为与引入配额之前逐字相同
+// —— 所有小时都被处理、水位走到最后一个已完成的小时、HoursDeferred == 0、没有错误。
+//
+// 「恰好等于」是边界上唯一有歧义的一格：配额是「最多 N 个小时」，故 N 个小时**不是**
+// 「用尽」（下一轮没有剩余工作可做），它不得被记成截断 —— 否则后面那条「追平」判定
+// （HoursDeferred == 0）会在收尾那一轮误判。
+func TestRollupMaxHoursPerRoundLeavesShortRoundsUntouched(t *testing.T) {
+	now := rollupBaseTS + 6*rollupHourSec + 60 // upper = base+6h
+
+	// 水位显式放在 base+1h，于是待处理的是 base+2h..base+5h 共 4 个小时（都有 12 行）。
+	seed := func(f *rollupFixture) {
+		for i := 2; i <= 5; i++ {
+			f.seed5m(t, fullHourRows(rollupBaseTS+int64(i)*rollupHourSec, func(int) fiveMin {
+				return fiveMin{samples: 30, cpu: 20}
+			})...)
+		}
+	}
+
+	for _, tc := range []struct {
+		name  string
+		quota int
+	}{
+		{"配额远大于待处理小时数", 48},
+		{"配额恰好等于待处理小时数（边界：不是「用尽」）", 4},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRollupFixture(t, now, true, 0)
+			f.withMaxHours(defaultRollupRescanHours, tc.quota)
+			seed(f)
+			f.setCursor(t, rollupBaseTS+rollupHourSec)
+
+			stats := f.rollupRound(t)
+			if stats.HoursScanned != 4 || stats.HoursWritten != 4 || stats.HoursSkipped != 0 {
+				t.Fatalf("stats = %+v, want 4 scanned / 4 written / 0 skipped（配额不得切掉任何小时）", stats)
+			}
+			if stats.HoursDeferred != 0 {
+				t.Fatalf("HoursDeferred = %d, want 0（配额未用尽 → 按口径为 0）", stats.HoursDeferred)
+			}
+			if cur, _ := f.cursor(t); cur != rollupBaseTS+5*rollupHourSec {
+				t.Fatalf("cursor_1h = %d, want %d（水位走到最后一个已完成的小时）", cur, rollupBaseTS+5*rollupHourSec)
+			}
+			if f.writer.calls != 4 {
+				t.Fatalf("WriteHour 调用 = %d, want 4", f.writer.calls)
+			}
+		})
+	}
+}
+
+// TestRollupQuotaDoesNotCoverRepairOrRescan 钉住配额的**取舍**（Step 3(a) 的两条注释）：
+// 配额只约束**普通游标区间**的工作量 ——
+//   - repair 集合里的小时照常重算（集合有界，且「把残缺值修对」比「补空洞」更紧要）；
+//   - 按需重扫照常按集合差补行（它只对**真正缺失**的小时写，正常一轮是 0 次写）。
+//
+// 场景：配额压到 1，并让这一轮普通区间只剩一个（空且仍在等待窗口内的）小时 ——
+// 于是配额**只吃掉 1 个小时**，而同一轮里的 repair 与重扫都照常做完。
+func TestRollupQuotaDoesNotCoverRepairOrRescan(t *testing.T) {
+	now := rollupBaseTS + 10*rollupHourSec + 60 // upper = base+10h
+	const (
+		repairHour = rollupBaseTS + 2*rollupHourSec // 残缺（7 行）→ 进 repair 集合
+		fullHour   = rollupBaseTS + 3*rollupHourSec // 完整 → 把水位推过 repairHour
+	)
+	f := newRollupFixture(t, now, true, 0)
+	f.withMaxHours(defaultRollupRescanHours, defaultRollupMaxHoursPerRound)
+	f.seed5m(t, fullHourRows(repairHour, func(int) fiveMin {
+		return fiveMin{samples: 30, cpu: 10}
+	})[:7]...)
+	f.seed5m(t, fullHourRows(fullHour, func(int) fiveMin {
+		return fiveMin{samples: 30, cpu: 20}
+	})...)
+
+	// ─ 第 1 轮（配额 48）：把水位推到 base+7h，并把 repairHour 记进 repair 集合 ──
+	first := f.rollupRound(t)
+	if !f.inRepair(t, repairHour) {
+		t.Fatalf("前置不成立：残缺小时必须已进 repair 集合（stats=%+v）", first)
+	}
+	cur1, _ := f.cursor(t)
+	if cur1 != rollupBaseTS+7*rollupHourSec {
+		t.Fatalf("前置不成立：cursor_1h = %d, want %d（= base+7h；base+8h 是仍在等待窗口内的空小时）",
+			cur1, rollupBaseTS+7*rollupHourSec)
+	}
+
+	// fullHour 变成「有 5m 行却没有 1h 行」→ 它只属于重扫的差集（repair 集合里没有它）。
+	f.drop1hRange(t, fullHour, fullHour)
+
+	// ─ 第 2 轮：配额 = 1 ──
+	f.withMaxHours(defaultRollupRescanHours, 1)
+	stats := f.rollupRound(t)
+
+	if stats.HoursRepaired != 1 {
+		t.Fatalf("stats = %+v, want 1 repaired（repair 不占配额：配额用尽也要照常重算）", stats)
+	}
+	if scanned := stats.HoursScanned - stats.HoursRepaired; scanned != 1 {
+		t.Fatalf("普通区间本轮处理了 %d 个小时, want 1（= 配额；repair 的那一个小时不得占用它）", scanned)
+	}
+	if stats.HoursDeferred != 3 {
+		t.Fatalf("HoursDeferred = %d, want 3（配额用尽：(upper − 水位)/3600 = (base+10h − base+7h)/3600）",
+			stats.HoursDeferred)
+	}
+	if stats.HoursRescanned != 1 || stats.HoursBackfilled != 1 {
+		t.Fatalf("stats = %+v, want 1 rescanned / 1 backfilled（重扫不占配额：配额用尽也要照常补行）", stats)
+	}
+	if f.hourRow(t, fullHour) == nil {
+		t.Fatal("重扫的那个小时没有被补出来（配额把重扫也一起挡掉了）")
+	}
+	if f.writer.calls != 2 {
+		t.Fatalf("WriteHour 调用 = %d, want 2（1 次 repair + 1 次重扫；配额里的那个空小时不写行）",
+			f.writer.calls)
+	}
+	if cur, _ := f.cursor(t); cur != cur1 {
+		t.Fatalf("cursor_1h = %d, want %d（本轮普通区间只剩空小时，水位不动）", cur, cur1)
+	}
+}
+
+// quotaCfg 是**只服务配额键**的配置替身：它能区分「没配这条」与「显式配成 0」——
+// 而「显式 0 不得被解释成不限量」正是本键的一条硬约束（rollupCfg 用 0 表示缺键，做不到）。
+type quotaCfg struct {
+	v        int
+	explicit bool
+}
+
+func (c quotaCfg) GetString(_ context.Context, _ string, def string) string { return def }
+
+func (c quotaCfg) GetInt(_ context.Context, key string, def int) int {
+	if key == configAgentRollupMaxHoursPerRound && c.explicit {
+		return c.v
+	}
+	return def
+}
+
+// TestRollupMaxHoursPerRoundConfigFallback 钉住配额的配置契约（Step 1 的 4）：
+// 键名是字面量、缺省 48，且 `<=0`/非法值**回落缺省**而**不是**「不限量」
+// —— 后者是静默失效：把配额配成 0 的本意绝不是「把唯一的负载上限去掉」。
+func TestRollupMaxHoursPerRoundConfigFallback(t *testing.T) {
+	if configAgentRollupMaxHoursPerRound != "sys.agent.rollupMaxHoursPerRound" {
+		t.Fatalf("配置键 = %q, want sys.agent.rollupMaxHoursPerRound", configAgentRollupMaxHoursPerRound)
+	}
+	if defaultRollupMaxHoursPerRound != 48 {
+		t.Fatalf("defaultRollupMaxHoursPerRound = %d, want 48（计划给定）", defaultRollupMaxHoursPerRound)
+	}
+	// 缺键（配置面板里没有这条）→ 默认 48。
+	if got := NewAgentMetricsRollupService(nil, nil, quotaCfg{}, nil).maxHoursPerRound(); got != defaultRollupMaxHoursPerRound {
+		t.Fatalf("缺键时配额 = %d, want %d", got, defaultRollupMaxHoursPerRound)
+	}
+	// 显式 0 / 负数 → 同一处回落。正数之外的任何值都**不得**被读成「不限量」：
+	// 那会让追平重新变成「一轮扫完 720 小时」，即本键要消灭的那波负载。
+	for _, bad := range []int{0, -1, -3} {
+		svc := NewAgentMetricsRollupService(nil, nil, quotaCfg{v: bad, explicit: true}, nil)
+		if got := svc.maxHoursPerRound(); got != defaultRollupMaxHoursPerRound {
+			t.Fatalf("配额配成 %d 时读回 %d, want 默认 %d（<=0 必须回落缺省，**不得**解释成不限量）",
+				bad, got, defaultRollupMaxHoursPerRound)
+		}
+	}
+	// 显式正数生效。
+	if got := NewAgentMetricsRollupService(nil, nil, quotaCfg{v: 6, explicit: true}, nil).maxHoursPerRound(); got != 6 {
+		t.Fatalf("配额配成 6 时读回 %d, want 6（显式值必须生效）", got)
+	}
+}
+
+// TestRewindCaughtUpPredicate 逐条钉住「回退已追平」的判定（纯函数，无 I/O）。
+//
+// 关键是第 3 条：`cursor >= target` **单独不够**。回退本身就把水位写到了 target，
+// 于是从回退后的第一轮起这一条恒真；而本任务同时给 rollup 加了每轮小时配额 ——
+// 「720 小时只补了 48 小时」的一轮里，水位已经越过 target，但那 672 个小时根本没被走过。
+// 只按 `cursor >= target` 判定就会删掉标记并打出「已追平」，那正是这条标记要消灭的
+// 假阳性（运维会以为回退生效了，实际上要 15 轮才走完）。
+func TestRewindCaughtUpPredicate(t *testing.T) {
+	cases := []struct {
+		name           string
+		cursor, target int64
+		deferred       int
+		want           bool
+	}{
+		{"水位越过标记值且本轮未被配额截断", 200, 100, 0, true},
+		{"水位正好等于标记值且未被截断（边界：含）", 100, 100, 0, true},
+		{"水位越过标记值，但本轮被配额截断（120 个小时里只走了 48 个）", 200, 100, 120, false},
+		{"水位还没走到标记值", 50, 100, 0, false},
+		{"两者都不满足", 50, 100, 7, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := rewindCaughtUp(tc.cursor, tc.target, tc.deferred); got != tc.want {
+				t.Fatalf("rewindCaughtUp(cursor=%d, target=%d, deferred=%d) = %v, want %v",
+					tc.cursor, tc.target, tc.deferred, got, tc.want)
+			}
+		})
 	}
 }

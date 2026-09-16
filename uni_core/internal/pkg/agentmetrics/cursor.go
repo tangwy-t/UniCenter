@@ -92,6 +92,25 @@ end
 return 0
 `
 
+// clearRewindScript 是「值仍是期望值才删」的原子比较-删（回退标记专用）。
+//
+// 为什么删标记也要比较：标记的值是**目标水位**，而它的写入侧（MarkRewind）只向更早的
+// 方向移动。Go 侧的「读 → 判断已追平 → 删」之间仍然可以被并发的回退插入一次更深的回退：
+// 那次回退会把标记改成一个更早的目标，随后这次无条件 DEL 就把**刚刚写下的**待追平状态
+// 抹掉了 —— 观测随之消失，而且没有任何痕迹。与 advanceCursorScript 同一条纪律：
+// 比较与写必须在 Redis 侧压成一次原子操作。
+const clearRewindScript = `
+local cur = redis.call("GET", KEYS[1])
+if not cur then
+	return 0
+end
+if cur ~= ARGV[1] then
+	return 0
+end
+redis.call("DEL", KEYS[1])
+return 1
+`
+
 // initCursorScript 是「键缺失才写」的初始化（SETNX 语义），并**返回键上最终生效的值**。
 //
 // 为什么返回生效值而不是布尔：初始化是「两个实例同时发现水位键缺失」的固有竞态，
@@ -189,6 +208,78 @@ func (s *CursorStore) Rewind(ctx context.Context, deviceID uint64, r Resolution,
 	n, err := s.rdb.Eval(ctx, rewindCursorScript, []string{key}, sec).Int64()
 	if err != nil {
 		return false, fmt.Errorf("回退水位 %s 到 %d: %w", key, sec, err)
+	}
+	return n == 1, nil
+}
+
+// ─ 回退「待追平」标记 ─────────────────────────────────────
+//
+// 这三个方法读写的是 agentmetrics.RewindMarkerKey 那一族键：**运维回退过水位、但那些小时
+// 还没被重新走过**这件事的唯一载体。
+//
+// 为什么它是观测设施而**不是**数据通路的一部分（决定了下面所有失败取向）：
+// 水位（与本类型的另外四个方法）决定「哪些小时会被回滚」，漏一次就是数据空洞；标记只决定
+// 「运维能不能看见回退生效了」。故读失败必须能被调用方安全地降级成「这一轮不判定追平」，
+// 而绝不能变成「这一轮的回滚失败」—— 一个 Redis 抖动不该把 1h 的补算一起停掉。
+
+// MarkRewind 写下（或加深）该设备的「待追平」标记：值 = 这次回退的目标水位。
+//
+// 复用与新水位回退**同一条** Lua（rewindCursorScript）：两条不变式逐字相同 —— 键缺失即写、
+// 其余情况只向**更早**的方向移动。这正是「重复回退取更早的目标」这条语义的实现：
+// 后一次浅回退（目标更晚）不许把标记推后，否则待追平区间会被截短，那段区间里的小时
+// 重新变成无人观测（在每轮小时配额下它们很可能还没被走过）。
+// 拆一份副本只会让「只后退」这条语义长出第二个漂移面。
+func (s *CursorStore) MarkRewind(ctx context.Context, deviceID uint64, r Resolution, target int64) error {
+	key, kerr := RewindMarkerKey(deviceID, r)
+	if kerr != nil {
+		return kerr
+	}
+	// 返回值（是否真的写了）在这里没有用武之地：调用方关心的是「标记现在指向最深的
+	// 那个目标」，而 Lua 已经把这件事做成了原子操作。
+	if _, err := s.rdb.Eval(ctx, rewindCursorScript, []string{key}, target).Result(); err != nil {
+		return fmt.Errorf("写回退标记 %s = %d: %w", key, target, err)
+	}
+	return nil
+}
+
+// PendingRewind 读该设备的「待追平」标记。
+//
+// 返回 (目标水位, 标记是否存在, 错误)：**「标记不存在」不是错误**（= 没有待追平的回退），
+// 而 Redis 故障必须上抛给调用方去决定降级方式（service 侧选择只记 Warn 并继续本轮）。
+func (s *CursorStore) PendingRewind(ctx context.Context, deviceID uint64, r Resolution) (int64, bool, error) {
+	key, kerr := RewindMarkerKey(deviceID, r)
+	if kerr != nil {
+		return 0, false, kerr
+	}
+	v, err := s.rdb.Get(ctx, key).Int64()
+	if err == nil {
+		return v, true, nil
+	}
+	if errors.Is(err, goredis.Nil) {
+		return 0, false, nil
+	}
+	return 0, false, fmt.Errorf("读回退标记 %s: %w", key, err)
+}
+
+// ClearRewind 删掉该设备的「待追平」标记，**仅当它此刻仍是 expected** 时。
+//
+// 返回 (是否真的删掉了, 错误)：false 表示标记不存在、或已经被并发的（更深的）回退改成了
+// 别的目标 —— 后者必须让位，否则这次删除会把刚刚写下的待追平状态一起抹掉（见
+// clearRewindScript 的注释）。两种都不是错误，与 Advance 的「没写」同一取向。
+//
+// 为什么多一个 expected 参数（计划里给的是三参形式）：删标记是这一族键上唯一的
+// 「比较-写」型操作之一，而「读 → 判断 → 删」在并发回退面前和裸 CAS 一样不可靠 ——
+// 本文件存在的全部理由就是把这种比较放进 Redis（见文件头的第 2 条）。
+func (s *CursorStore) ClearRewind(ctx context.Context, deviceID uint64, r Resolution,
+	expected int64) (bool, error) {
+
+	key, kerr := RewindMarkerKey(deviceID, r)
+	if kerr != nil {
+		return false, kerr
+	}
+	n, err := s.rdb.Eval(ctx, clearRewindScript, []string{key}, expected).Int64()
+	if err != nil {
+		return false, fmt.Errorf("清除回退标记 %s（期望值 %d）: %w", key, expected, err)
 	}
 	return n == 1, nil
 }

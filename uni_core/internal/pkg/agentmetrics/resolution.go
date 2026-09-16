@@ -95,3 +95,37 @@ const repairKeySuffix = "repair_1h"
 func RepairSetKey(deviceID uint64) string {
 	return fmt.Sprintf("%s%d:%s", historyKeyPrefix, deviceID, repairKeySuffix)
 }
+
+// rewindMarkerSuffixes 是回退「待追平」标记键的**唯一**后缀清单（与 cursorKeySuffixes 同族分列）。
+//
+// 为什么不与游标后缀共用一张表：它们是不同的键族（游标是水位本身，标记是「水位被退回过、
+// 但还没走回来」的一次观测），合并成一张表会让「给游标加档位」顺手长出一个没有消费方的
+// `rewind_<新档位>` 键。理由与 repairKeySuffix 单列时逐字相同。
+var rewindMarkerSuffixes = [...]string{"rewind_5m", "rewind_1h"}
+
+// RewindMarkerKey 返回该设备该档位的**回退「待追平」标记**键；未登记的档位返回错误，
+// 绝不退化成 5m —— 与 CursorKey 同一条纪律（键名漂移的症状是「静默读不到」，
+// 而这里更糟：读不到的标记看起来就是「没有待追平的回退」）。
+//
+// 键名契约（形态与 CursorKey/RepairSetKey 同源，前缀复用 historyKeyPrefix）：
+//
+//	agent:device:{id}:rewind_5m
+//	agent:device:{id}:rewind_1h
+//
+// 值 = 该次回退写下的**目标水位**（unix 秒的十进制），语义是「水位被退回到这里、
+// 随后要再走回来」。键不存在 = 该设备当前没有待追平的回退。
+//
+// 为什么只有 1h 那个键真的会被写：标记的读者只有一个 —— rollup 的普通区间
+// （它消费 `cursor_1h`）。5m 档的回退效果由 flush 在**同一轮**的重放里体现
+// （BackfillOnce 是「回退 + 重放」不可分），没有第二个读者；给 5m 也写一个标记，
+// 那个键既不会被追平也不会被清除，只会永久留着一个永远为真的「待追平」
+// —— 比没有标记更糟（它会教人忽略这个键）。故后缀清单两个档位都登记（键名契约完整、
+// 与游标族同形），而写入侧只写 1h（见 service 层的 markRewindPending）。
+func RewindMarkerKey(deviceID uint64, r Resolution) (string, error) {
+	// Resolution 是 uint8，故不存在负值下标；越界只有「大于已登记档位数」一种。
+	if int(r) >= len(rewindMarkerSuffixes) {
+		return "", fmt.Errorf("agentmetrics: 未登记的指标档位 %d（回退标记已登记：%v）",
+			uint8(r), rewindMarkerSuffixes)
+	}
+	return fmt.Sprintf("%s%d:%s", historyKeyPrefix, deviceID, rewindMarkerSuffixes[r]), nil
+}

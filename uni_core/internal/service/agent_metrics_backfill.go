@@ -312,7 +312,14 @@ type RewindStats struct {
 // 根本没有能写 1h 行的方法（刻意的：1h 的写路径只能有一条），所以「回退 1h 水位再顺手
 // 重放」在这里不仅多余，而且是**做不到**的。回退与重放因此被拆成两个入口，
 // 由各自的消费方在下一轮完成任务 —— 这也让本入口不需要限速（它只做每设备一次 Redis 读
-// 与至多一次 Lua 写，没有任何 DB 放大）。
+// 与至多两次 Lua 写，没有任何 DB 放大）。
+//
+// **但它的后果是有限速的**（问题①）：回退把 720 小时重新推到 rollup 面前，那些小时要
+// 逐小时读回 + UPSERT。闸门在消费方那一侧（`sys.agent.rollupMaxHoursPerRound`，默认 48
+// 小时/设备/轮）—— 一次人为触发的回退因此不会在下一轮里换来一波无上限的 DB 负载。
+//
+// 同时写下一个「待追平」标记（见 markRewindPending）：运维能在 rollup 的日志/读数里看到
+// 这次回退**何时被追平**，而不是只看到一个与「回退」无关的 HoursWritten 增量。
 //
 // 边界（与 BackfillOnce 的夹取取向一致，但上界随档位不同）：
 //   - 窗口上界是**该档位重算所依赖的那份数据的保留期**（见 rewindBoundHours）：
@@ -376,6 +383,10 @@ func (s *AgentMetricsFlushService) RewindHours(ctx context.Context, deviceIDs []
 		}
 		if applied {
 			stats.CursorsRewound++
+			// 回退生效的同时写下「待追平」标记 —— 见 markRewindPending 的全部理由。
+			// 只在**真的回退过**时写：没有回退（水位已经不比目标更新）就没有新的待追平区间，
+			// 此时凭空写一个标记会造出一个永远追不平的假状态（它的目标比水位还晚）。
+			s.markRewindPending(ctx, deviceID, res, target)
 		}
 	}
 
@@ -388,6 +399,41 @@ func (s *AgentMetricsFlushService) RewindHours(ctx context.Context, deviceIDs []
 			zap.Int64("targetBucket", target))
 	}
 	return stats, nil
+}
+
+// markRewindPending 写下「待追平」标记：值 = 这次回退的目标水位（只有 1h 档写）。
+//
+// 为什么必须有它（问题②：回退是否生效不可观测）：回退**本身**只花一次 Redis 读 + 一次
+// Lua 写，而它的效果 —— 那些小时被重新走过、1h 空洞被补出来 —— 全部记在 rollup 的
+// `HoursWritten` 里，一个与「回退」这个动作无关的计数（同样的数字也来自「设备刚好有新
+// 数据」）。于是运维执行完回退，没有任何读数或告警能回答「生效了吗、追平了吗」。
+// 标记把两件事连起来：本方法写下目标 → rollup 每轮在收尾 CAS 之后看一眼 →
+// 追平了就打 log.Info（带设备号与目标）、清掉标记并计入 RollupStats.RewindsCaughtUp。
+//
+// 重复回退**取更早的目标**：写入复用 CursorStore.MarkRewind，它用的是与水位回退同一条
+// 「只向更早移动」的 Lua —— 后一次浅回退不许把标记推后（推后会让待追平区间被截短，
+// 前面那段小时重新变成无人观测，而在每轮小时配额下它们很可能还没被走过）。
+//
+// 为什么 5m 档**不写**（键是档位专属，写它不会碰到 1h 那个键）：标记的读者只有 rollup 的
+// 普通区间，它消费 `cursor_1h`。5m 的回退效果由 flush 在**同一轮**的重放里体现
+// （BackfillOnce 就是「回退 + 重放」，两者不可分，落库与否当场就有读数），不需要第二套观测；
+// 而给 5m 也写一个 `rewind_5m`，那个键**没有任何读者** —— 既不会被追平也不会被清除，
+// 只会永久留着一个永远为真的「待追平」，比没有标记更糟（它会教人忽略这个键）。
+//
+// 写失败**只记 Warn 并继续**（不上抛）：回退已经生效，标记是观测设施 —— 在这里上抛会中止
+// 循环里**其余设备**的回退，等于让一次 Redis 抖动挡住数据自愈，正是「观测设施不得成为数据
+// 通路的单点」的反面。代价是这一轮的回退少了一次观测（下一轮相同命令会再写一次）。
+func (s *AgentMetricsFlushService) markRewindPending(ctx context.Context, deviceID uint64,
+	res agentmetrics.Resolution, target int64) {
+
+	if res != agentmetrics.Resolution1h {
+		return
+	}
+	if err := s.cursors.MarkRewind(ctx, deviceID, res, target); err != nil {
+		s.log.Warn("agentmetrics rewind: 待追平标记写入失败（回退本身已生效，标记只用于追平观测）",
+			zap.Uint64("deviceId", deviceID), zap.String("resolution", res.String()),
+			zap.Int64("target", target), zap.Error(err))
+	}
 }
 
 // rewindBoundHours 返回该档位回退窗口的上界（小时）= **这个档位重算所依赖的那份数据的
