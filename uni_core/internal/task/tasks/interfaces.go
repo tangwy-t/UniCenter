@@ -3,6 +3,7 @@ package tasks
 import (
 	"context"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/entity"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/agentmetrics"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/service"
 	"time"
 )
@@ -40,14 +41,19 @@ type ConfigProvider interface {
 //
 // 为什么两个任务共用一个接口：它们消费的是**同一个服务实例**的两个入口
 // （落库 / 回退水位后落库），拆成两份只会让 wireup 把同一个实例填两次。
-// 方法只列任务真正会调的三个 —— 消费方定义接口是仓库既有约定（同 DeleteBeforeRepo）。
+// 方法只列任务真正会调的四个 —— 消费方定义接口是仓库既有约定（同 DeleteBeforeRepo）。
 type AgentFlushService interface {
 	// Bootstrap 只为**缺失**的水位写起点（now−raw 保留期），不覆写已有水位。
 	Bootstrap(ctx context.Context) error
 	// FlushOnce 跑一轮全量落库（只向前推进水位）。
 	FlushOnce(ctx context.Context) (service.FlushStats, error)
-	// BackfillOnce 先把窗口内的水位回退到 now−hours，再跑一轮全量落库。
+	// BackfillOnce 先把窗口内的 5m 水位回退到 now−hours，再跑一轮全量落库。
 	BackfillOnce(ctx context.Context, deviceIDs []uint64, hours int) (service.BackfillStats, error)
+	// RewindHours 只回退**指定档位**的水位（不重放）：resolution=1h 时把 cursor_1h
+	// 退到 now−hours，被退回的那段小时由**下一轮 rollup** 重算补出 ——
+	// 1h 的写路径只有 rollup 一条（flush 服务上没有能写 1h 行的方法）。
+	RewindHours(ctx context.Context, deviceIDs []uint64, resolution agentmetrics.Resolution,
+		hours int) (service.RewindStats, error)
 }
 
 // AgentRollupService 是 rollup（5m → 1h 回滚 + repair 重算）任务的窄接口。

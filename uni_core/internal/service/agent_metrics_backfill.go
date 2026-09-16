@@ -101,6 +101,14 @@ const (
 // 已知边界（写清而不是假装没有）：1h 行是可推导数据，由 rollup 按 `cursor_1h`
 // 消费；重放 5m 不会自动重算**已经被 rollup 消费过的**小时（那要走 rollup 的
 // repair 集合）。故回溯窗口应与运维想修的范围一致，且 1h 的修正另有 repair 路径。
+//
+// 「1h 的修正另有路径」这件事如今是两条，各自的覆盖范围不同，别混起来：
+//   - rollup 的**按需重扫**（`sys.agent.rollupRescanHours`，默认 24h）：零运维介入，
+//     但只覆盖最近 24h 内的迟到落库；
+//   - 本文件的 **RewindHours**（`resolution=1h`，窗口受 5m 行保留期约束，默认 30 天）：
+//     把 `cursor_1h` 退回去，让**下一轮 rollup 的普通区间**重新走到那些小时。
+//
+// 比 5m 保留期更早的空洞是真的救不回来（重算的输入已经不在了），那是能力边界。
 func (s *AgentMetricsFlushService) BackfillOnce(ctx context.Context, deviceIDs []uint64, hours int) (BackfillStats, error) {
 	stats := BackfillStats{WindowHours: clampBackfillHours(hours)}
 
@@ -256,4 +264,195 @@ func deviceScope(deviceIDs []uint64) map[uint64]bool {
 		out[id] = true
 	}
 	return out
+}
+
+// ── 按档位回退水位（不含重放）──────────────────────────
+
+// RewindStats 是「只回退水位」一轮的读数。
+//
+// 它与 BackfillStats **刻意不同形**：本入口不做任何落库（重放是各档位自己的事），
+// 故这里没有 Flush / Batches / PacingWaits —— 一份读数里放着永远不会被填的字段，
+// 读的人迟早会把那个 0 当成「这一轮没写任何桶」的事实，而不是「本入口根本不看这件事」。
+type RewindStats struct {
+	// DevicesScanned 是本轮从活跃索引里枚举到的设备数（**过滤前**的，与 FlushStats /
+	// BackfillStats 同源）：device_ids 只缩小回退范围，不缩小枚举。
+	DevicesScanned int
+	// CursorsRewound 是**实际被回退**的水位个数（已经不比目标更旧的、不在 device_ids 里的、
+	// 以及水位键缺失的，都不计入 —— 与 BackfillStats.CursorsRewound 同一口径）。
+	CursorsRewound int
+	// WindowHours 是实际生效的回退窗口（小时，已按**该档位**的保留期夹取）。
+	// 它**不是**入参的原样回显：入参 0 或负数 = 用满保留期（5m → 24h、1h → 720h），
+	// 入参 10_000 会夹到上界。运维只能靠它判断「这一轮到底退回了多少历史」。
+	WindowHours int
+	// Resolution 是本轮回退的档位（5m / 1h）：同一个入口服务两个档位，
+	// 没有它就无法从读数里看出「这一轮到底动没动 cursor_1h」。
+	Resolution agentmetrics.Resolution
+}
+
+// RewindHours 回退**指定档位**的水位到 `now−hours`（对齐到该档位的桶宽），
+// **不做任何重放**。返回的 error 只可能是「枚举设备失败」或「Redis 读写失败」——
+// 它是本入口唯一的两个依赖。
+//
+// 为什么必须存在（这是本方法的全部理由）：`CursorStore.Rewind` 在引入本入口之前的
+// 唯一生产调用点是 BackfillOnce，而 BackfillOnce 只会回退 `cursor_5m`。于是
+// `cursor_1h` **没有任何回退机制**，而 rollup 的按需重扫窗口默认只有 24h
+// （`sys.agent.rollupRescanHours`）—— 一个 24h 之前形成的 1h 空洞（5m 行迟到落库、
+// 分区修复后重放、Redis 从旧备份恢复）只能靠运维手工改 Redis 键。
+//
+// 为什么 1h 的重算**不需要原始点**（这条洞察是本入口成立的依据）：rollup 的输入是
+// **库里的 5m 行**（rollupHour → RollupMetricRepo.ReadWideRows），不是 Redis 里的
+// 原始点 —— 而 5m 行保留 30 天（`sys.agent.historyRetentionDays`），原始点只保留 24h。
+// 故 1h 空洞的自愈范围由 5m 保留期决定（30 天），而不是由重扫窗口（24h）或 raw 保留期
+// 决定：把 cursor_1h 退回去，下一轮 rollup 的普通区间 `[cursor_1h + 3600, upper)` 就会
+// 重新走到那些小时，把它补出来。
+//
+// 为什么**不重放**（与 BackfillOnce 的关键差别）：重放是各档位自己的事 —— 5m 由 flush
+// 走（BackfillOnce 就是「回退 + 重放」，两者不可分：5m 的真值来源是 Redis 原始点，
+// 只能在回退的同一轮里立刻读回来），1h 由 rollup 走（它读库里的 5m 行）。本服务手上
+// 根本没有能写 1h 行的方法（刻意的：1h 的写路径只能有一条），所以「回退 1h 水位再顺手
+// 重放」在这里不仅多余，而且是**做不到**的。回退与重放因此被拆成两个入口，
+// 由各自的消费方在下一轮完成任务 —— 这也让本入口不需要限速（它只做每设备一次 Redis 读
+// 与至多一次 Lua 写，没有任何 DB 放大）。
+//
+// 边界（与 BackfillOnce 的夹取取向一致，但上界随档位不同）：
+//   - 窗口上界是**该档位重算所依赖的那份数据的保留期**（见 rewindBoundHours）：
+//     退到没有数据的地方毫无意义，只是让下一轮白扫；
+//   - 只后退：复用 CursorStore.Rewind 的原子「只后退」语义，水位已经不比目标更旧时
+//     什么都不做（绝不把水位前移 —— 前移会永久跳过中间那段小时）；
+//   - 水位键缺失时**不回退也不初始化**，交由消费方的 Bootstrap 语义决定起点（见循环内的注释）。
+//
+// deviceIDs 的语义与 BackfillOnce 逐字一致：**只回退这些设备的水位**（空 = 全部活跃设备）。
+func (s *AgentMetricsFlushService) RewindHours(ctx context.Context, deviceIDs []uint64,
+	res agentmetrics.Resolution, hours int) (RewindStats, error) {
+
+	stats := RewindStats{
+		Resolution:  res,
+		WindowHours: s.clampRewindHours(res, hours),
+	}
+
+	devices, err := s.raw.Index(ctx)
+	if err != nil {
+		return stats, fmt.Errorf("agentmetrics rewind: 枚举活跃设备失败: %w", err)
+	}
+	stats.DevicesScanned = len(devices)
+
+	scope := deviceScope(deviceIDs)
+	target := s.rewindTarget(res, stats.WindowHours)
+
+	for _, deviceID := range devices {
+		if scope != nil && !scope[deviceID] {
+			continue
+		}
+		cursor, ok, cerr := s.cursors.Read(ctx, deviceID, res)
+		if cerr != nil {
+			// 读失败即上抛（与 BackfillOnce 同一条理由）：静默跳过会让这台设备的水位
+			// 永远不回退，而回退正是本方法的全部职责（下一轮从同一目标重试）。
+			return stats, cerr
+		}
+		if !ok {
+			// 水位键缺失：**不回退，也不替消费方初始化它**。
+			//
+			// 依据是消费方自己的 Bootstrap 语义：rollup 的 readCursor 在键缺失时按
+			// `max(now−180d, 该设备**最早的 5m 行**) − 1h` 起步，flush 的 readCursor 按
+			// `now−24h` 起步 —— 两者都由**数据**或**保留期**推出，且「最早 5m 行 − 1h」
+			// 保证**没有任何一个有 5m 行的小时**落在那个起点之前。也就是说：键缺失时
+			// 自愈范围已经由消费方覆盖干净，此时写下一个凭 now 推导的目标，只可能比它
+			// **更浅**（挡掉消费方本该处理的小时）或**更深**（白扫没有数据的小时），
+			// 两种都不会多补出一行数据。故这里让位，并把「让位」记进日志（否则
+			// 「resolution=1h 跑了但 CursorsRewound=0」会变成一个无从解释的读数）。
+			s.log.Debug("agentmetrics rewind: 水位键缺失，交由消费方的 bootstrap 语义决定起点，本轮不回退",
+				zap.String("resolution", res.String()), zap.Uint64("deviceId", deviceID))
+			continue
+		}
+		if cursor <= target {
+			// 已经不比目标更新：**不回退**。这就是「只后退」的 Go 侧一半（另一半在 Lua 里，
+			// 见 agentmetrics.CursorStore.Rewind：Go 侧判定之后、写之前水位仍可能被并发者
+			// 改得更旧，只有 Redis 侧的比较才能保证「绝不写下更大的值」）。
+			continue
+		}
+		applied, werr := s.cursors.Rewind(ctx, deviceID, res, target)
+		if werr != nil {
+			return stats, werr
+		}
+		if applied {
+			stats.CursorsRewound++
+		}
+	}
+
+	if stats.CursorsRewound > 0 {
+		s.log.Info("agentmetrics rewind: 水位已回退（本轮不重放，重算由该档位的消费方在下一轮承担）",
+			zap.String("resolution", res.String()),
+			zap.Int("cursorsRewound", stats.CursorsRewound),
+			zap.Int("devicesScanned", stats.DevicesScanned),
+			zap.Int("windowHours", stats.WindowHours),
+			zap.Int64("targetBucket", target))
+	}
+	return stats, nil
+}
+
+// rewindBoundHours 返回该档位回退窗口的上界（小时）= **这个档位重算所依赖的那份数据的
+// 保留期**。两个档位的上界不同源，各有各的依据：
+//
+//   - **1h → 5m 行的保留期**（`sys.agent.historyRetentionDays`，v008 种子 30 天）：
+//     rollupHour 读的是库里的 5m 行（ReadWideRows），退到没有 5m 行的地方必然什么都
+//     算不出来，只是让下一轮 rollup 白扫那些空小时。
+//   - **5m → 原始点的保留期**（bootstrapWindow，24h）：5m 的重放读的是 Redis 原始窗，
+//     更早的桶在热层里必然为空（spec §7.1）。这与 BackfillOnce 的上界**逐字同值**。
+//
+// 为什么 1h 取配置而不是写死 30 天：5m 行的实际回收边界由分区协调器按**同一把**配置键
+// 决定（withConfiguredRetention），保留期被调短（例如 7 天）时，写死的 30 天会让回退
+// 越过真实的回收边界、退出一段白扫的窗口；配置键缺失或非法（<=0）回落默认值，
+// 与 withConfiguredRetention 同一取向。
+func (s *AgentMetricsFlushService) rewindBoundHours(res agentmetrics.Resolution) int {
+	if res != agentmetrics.Resolution1h {
+		return defaultBackfillHours
+	}
+	days := s.cfg.GetInt(context.Background(),
+		configAgentHistoryRetentionDays, defaultAgentHistoryRetentionDays)
+	if days <= 0 {
+		days = defaultAgentHistoryRetentionDays
+	}
+	return days * 24
+}
+
+// clampRewindHours 把入参窗口夹到「该档位的保留期」；`hours <= 0` 视为「用满保留期」。
+//
+// 与 clampBackfillHours 分开而不是复用它：后者的上界写死在 raw 保留期（24h），
+// 而这里上界是档位的函数。合并只能靠「传一个上界进来」——那会把「为什么是这个上界」
+// 推回调用方，正是本函数要收拢的那件事（依据属于存储事实，不属于入参校验）。
+func (s *AgentMetricsFlushService) clampRewindHours(res agentmetrics.Resolution, hours int) int {
+	bound := s.rewindBoundHours(res)
+	if hours <= 0 || hours > bound {
+		return bound
+	}
+	return hours
+}
+
+// rewindTarget 返回该档位的回退目标（unix 秒，已夹到 0 下界）。
+//
+// 两个档位的公式**不同，而且必须不同** —— 差别只在「水位的端点语义」：
+//
+//   - **5m**：直接复用 backfillTarget（`now−hours` 向下对齐到 5min 栅格），
+//     于是 `RewindHours(…, Resolution5m, h)` 就是 `BackfillOnce(…, h)` 的**回退那一步**：
+//     同一条公式、同一个原子写，两个入口的回退语义不可能各自漂移。
+//   - **1h**：在 `now−hours` 之上再**减去一小时**。理由与 rollup 的 bootstrapCursor 逐字
+//     相同：游标的语义是「已成功回滚到（**含**）的小时」，而普通区间的下界是
+//     `cursor + 3600` —— 把窗口起点直接写成水位，**起点那个小时会被下界排除**，
+//     它的 1h 行永远不会被写出来（那正是本入口要修的东西）。减去一小时后，被 rollup
+//     处理的**数据范围**恰好是 `[now−hours, now)`：一小时不多、一小时不少。
+//
+// 对齐的理由同 backfillTarget：桶/小时行的 bucket_ts 是桶宽的整数倍，水位落在半个桶上
+// 会让第一个桶少半桶数据，且错得静默（rollup 从非整点水位起步会写出非整点的 1h 行）。
+// 夹 0 下界的理由同 bootstrapStart：负水位会被真的写进 Redis，且与「从 0 起步」在语义上
+// 无法区分。注意 1h 的那个 −3600 之后才夹取：夹取本身不许把水位推到负数。
+func (s *AgentMetricsFlushService) rewindTarget(res agentmetrics.Resolution, hours int) int64 {
+	if res != agentmetrics.Resolution1h {
+		return s.backfillTarget(hours)
+	}
+	target := alignDown(s.now().Add(-time.Duration(hours)*time.Hour).Unix(),
+		resolutionSeconds(agentmetrics.Resolution1h)) - resolutionSeconds(agentmetrics.Resolution1h)
+	if target < 0 {
+		return 0
+	}
+	return target
 }

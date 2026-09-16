@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/agentmetrics"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/service"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/task"
@@ -360,6 +361,15 @@ type fakeAgentService struct {
 	backfillStats     service.BackfillStats
 	backfillErr       error
 
+	// rewind* 记录 RewindHours 的入参：resolution=1h 那一支与 5m 支**互斥**
+	// （一支只回退不重放、另一支回退+重放），故「哪一支被调到」本身就是断言的一部分。
+	rewindCalls      int
+	rewindDeviceIDs  []uint64
+	rewindResolution agentmetrics.Resolution
+	rewindHours      int
+	rewindStats      service.RewindStats
+	rewindErr        error
+
 	rollupCalls int
 	rollupStats service.RollupStats
 	rollupErr   error
@@ -387,6 +397,16 @@ func (f *fakeAgentService) BackfillOnce(_ context.Context, deviceIDs []uint64, h
 	f.backfillDeviceIDs = append([]uint64(nil), deviceIDs...)
 	f.backfillHours = hours
 	return f.backfillStats, f.backfillErr
+}
+
+func (f *fakeAgentService) RewindHours(_ context.Context, deviceIDs []uint64,
+	resolution agentmetrics.Resolution, hours int) (service.RewindStats, error) {
+	f.rewindCalls++
+	f.order = append(f.order, "rewind")
+	f.rewindDeviceIDs = append([]uint64(nil), deviceIDs...)
+	f.rewindResolution = resolution
+	f.rewindHours = hours
+	return f.rewindStats, f.rewindErr
 }
 
 func (f *fakeAgentService) RollupOnce(_ context.Context) (service.RollupStats, error) {
