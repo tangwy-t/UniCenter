@@ -461,7 +461,15 @@ func (s *AgentMetricsRollupService) rollupDevice(ctx context.Context, deviceID u
 	if quotaCut {
 		// 口径定死为 (upper − CAS 后的水位)/3600 —— 见 HoursDeferred 的字段注释。
 		stats.HoursDeferred = int((upper - last) / hourSec)
-		s.log.Debug("agentmetrics rollup: 本轮小时配额用尽，主动暂停并前移水位（不是失败，下轮继续）",
+		// 级别是 **Info** 而不是 Debug（Plan 2F 漏掉的可观测性之一）：部署的日志阈值是
+		// info，Debug 等于这条读数的**唯一逐设备说明**在生产里根本取不到，于是「这一轮为什么
+		// 只写了 48 个小时」只能靠人猜。
+		//
+		// 为什么是 Info 而不是 Warn：配额用尽是运行期的**正常**事件（RollupOnce 照常返回
+		// nil、水位照常前移到最后一个已完成的小时），它要传达的是「积压正在按配额推进、
+		// 下一轮接着走」；Warn 在那套语义里是「需要人看一眼」，用在这里会让「按 warn 计数
+		// 告警」的管道被正常事件打满。
+		s.log.Info("agentmetrics rollup: 本轮小时配额用尽，主动暂停并前移水位（不是失败，下轮继续）",
 			zap.Uint64("deviceId", deviceID), zap.Int("quota", quota),
 			zap.Int("hoursProcessed", processed), zap.Int("hoursDeferred", stats.HoursDeferred),
 			zap.Int64("cursor", last))
