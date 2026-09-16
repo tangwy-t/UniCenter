@@ -35,6 +35,10 @@ type rewindingReader struct {
 
 func (r *rewindingReader) Index(ctx context.Context) ([]uint64, error) { return r.inner.Index(ctx) }
 
+// MaxPoints 透传（容量随 Plan 2G Task 2 进了 FlushRawReader）：本包装器只插入一个
+// **时序**钩子，容量必须与生产同源（见 countingRawReader 的同名方法）。
+func (r *rewindingReader) MaxPoints() int64 { return r.inner.MaxPoints() }
+
 func (r *rewindingReader) BucketRange(ctx context.Context, deviceID uint64,
 	fromMs, toMs int64) ([]agentproto.MetricsSample, error) {
 

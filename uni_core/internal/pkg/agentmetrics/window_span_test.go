@@ -1,9 +1,15 @@
 package agentmetrics
 
 import (
+	"context"
 	"math"
 	"testing"
 	"time"
+
+	"github.com/alicebob/miniredis/v2"
+	goredis "github.com/redis/go-redis/v9"
+
+	agentproto "github.com/tangwy-t/UniCenter/uni_protocol"
 )
 
 // 本文件是 Plan 2G Task 1 的产物：把「热层窗口覆盖多久」这件事收敛成**单一公式与
@@ -105,5 +111,42 @@ func TestRawMaxPointsKeepsWindowAtLeastBootstrap(t *testing.T) {
 		if got := RawMaxPoints(step); got != 0 {
 			t.Fatalf("RawMaxPoints(%s) = %d, want 0（非正 Step 不做除法）", step, got)
 		}
+	}
+}
+
+// TestRawStoreMaxPointsReturnsFrozenCapacity 钉住「冻结容量的唯一只读出口」的语义
+// （Plan 2G Task 2：flush 的每轮运行期比对靠它取证）。
+//
+// 为什么这条断言不可省：运行期比对的两个数里，容量必须是**真正被用来构造滚动窗的那一个**
+// （启动时按当轮的 reportInterval 冻结）。访问器一旦变成「按当前配置重算」「读当前点位数」
+// 或「返回一个兜底默认值」，比对就会在真实错配下自洽 —— 而那正是它唯一的失效模式，
+// 且症状与「本来就一致」完全一样（都不出声）。
+func TestRawStoreMaxPointsReturnsFrozenCapacity(t *testing.T) {
+	const frozen = int64(10368) // = RawMaxPoints(10s)，生产默认间隔下的容量
+	mr := miniredis.RunT(t)
+	rdb := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+
+	// 容量按 10s 冻结（生产装配的形态）。
+	store := NewRawStore(rdb, RawOptions{Step: 10 * time.Second, MaxPoints: frozen})
+	if got := store.MaxPoints(); got != frozen {
+		t.Fatalf("MaxPoints() = %d, want %d（必须原样返回装配时冻结的容量）", got, frozen)
+	}
+
+	// 访问器是**只读**的：写入（会触发 LTRIM 裁剪）之后读数不得改变。
+	for i := 0; i < 3; i++ {
+		if err := store.Append(context.Background(), 1, &agentproto.MetricsSample{T: int64(i) * 10000}); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+	if got := store.MaxPoints(); got != frozen {
+		t.Fatalf("写入后 MaxPoints() = %d, want %d（访问器不得变成「当前点位数」或别的动态量）",
+			got, frozen)
+	}
+
+	// 未配置（0）原样返回 0：调用方据此得到 RawWindowSpan == 0 →「跨度 < 回填假设」——
+	// 那是**正确**的结论（容量为 0 的窗什么都留不住），不得在这里被悄悄兜成默认容量。
+	if got := NewRawStore(rdb, RawOptions{}).MaxPoints(); got != 0 {
+		t.Fatalf("未配置容量的 MaxPoints() = %d, want 0（不得兜底成默认容量）", got)
 	}
 }

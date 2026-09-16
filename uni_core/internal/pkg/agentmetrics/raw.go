@@ -66,6 +66,20 @@ func NewRawStore(rdb goredis.UniversalClient, opts RawOptions) *RawStore {
 	return &RawStore{rdb: rdb, opts: opts, wins: map[uint64]*metricshistory.Window[agentproto.MetricsSample, RawSnapshot]{}}
 }
 
+// MaxPoints 返回本实例**冻结的窗口容量**（条数上限）—— 只读访问器，供「运行期窗口比对」用。
+//
+// 为什么要这个访问器（而不是让消费方自己持有装配时的那个数）：容量是 `RawStore` 的内部
+// 决策，装配侧算完就交出去了；消费方（flush 的每轮比对）若自己去读配置再推导，就会变成
+// 「按**当前**配置推导容量」—— 而缺陷恰恰是容量**不**跟着配置走，那样比对永远自洽、永远不响。
+// 唯一正确的事实来源是真正被用来构造滚动窗的那个数。
+//
+// 为什么只要 `MaxPoints()` 一个数、**不**导出 `Options() RawOptions`：比对需要的步长必须是
+// **当前**配置的 `sys.agent.reportInterval`（可热更），而 `RawOptions.Step` 是**启动时冻结**
+// 的那一个。把整个 `Options` 暴露出去，等于给「拿冻结的 Step 当现在的步长」留一条缝 ——
+// 两个冻结值互相自洽，正是本访问器要暴露的那种错配会被它掩盖掉。返回一个数既够用、
+// 又把那条错路从签名上关掉了（同 `FlushRawReader` 只给 Index/BucketRange 的取向）。
+func (s *RawStore) MaxPoints() int64 { return s.opts.MaxPoints }
+
 // windowFor 懒建某设备的滚动窗（带锁）。
 func (s *RawStore) windowFor(deviceID uint64) *metricshistory.Window[agentproto.MetricsSample, RawSnapshot] {
 	s.mu.Lock()

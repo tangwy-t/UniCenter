@@ -635,6 +635,11 @@ func (c *countingRawReader) Index(ctx context.Context) ([]uint64, error) {
 	return c.inner.Index(ctx)
 }
 
+// MaxPoints 透传（容量随 Plan 2G Task 2 进了 FlushRawReader）：本包装器只插入**统计**
+// 钩子，容量与读路径一样必须与生产同源 —— 替身若自己造一个容量，轮初的运行期比对就会在
+// 一片「一致」里绿掉，而真实装配里那个数根本不是它。
+func (c *countingRawReader) MaxPoints() int64 { return c.inner.MaxPoints() }
+
 func (c *countingRawReader) BucketRange(ctx context.Context, deviceID uint64,
 	fromMs, toMs int64) ([]agentproto.MetricsSample, error) {
 

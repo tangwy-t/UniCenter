@@ -218,6 +218,11 @@ func RawWindowSpan(maxPoints int64, step time.Duration) time.Duration {
 // RawOptions 装配每设备原始滚动窗。
 type RawOptions struct {
 	// Step 是采样节奏，用于 metricshistory 的取点启发式（= agent 的 reportInterval）。
+	//
+	// 与 MaxPoints 一样是**装配时冻结**的值（装配只读一次配置）。故运行期的窗口比对
+	// **不得**用它当「现在的步长」：那必须是**当前**配置的 reportInterval（可热更），
+	// 否则两个冻结值互相自洽，要暴露的错配恰好被抹平。冻结容量的只读出口是
+	// RawStore.MaxPoints()（见那里的注释：为什么只导出那一个数）。
 	Step time.Duration
 	// MaxPoints 是窗口容量（条数）；`RawMaxPoints(Step)` = 24h / Step × 1.2 的余量。
 	//

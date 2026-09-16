@@ -72,6 +72,11 @@ const (
 	// rawWindowShortfallMarker 是「热层窗口跨度短于回填假设」那条启动期 Warn 的
 	// **稳定前缀**：同包测试按它筛日志（文案可以再改，前缀是契约），
 	// 运维也按它 grep/告警。理由见 Init 里那处启动期校验。
+	//
+	// **这条 Warn 在今天不可达**（Plan 2G Task 2 的取证结论，见 Init 里那段注释）：
+	// 启动期那两个值同源，跨度结构性恒 ≥ 24h。真实错配（进程先起、之后热更间隔）的出口是
+	// flush 每轮的 `agentmetrics flush: 运行期热层窗口跨度短于回填假设`
+	//（service.rawWindowRuntimeShortfallMarker），两个前缀刻意不同。
 	rawWindowShortfallMarker = "wireup: 热层窗口实际只覆盖"
 )
 
@@ -262,6 +267,17 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 	// 既不是错误也没有任何读数指向它（与 Plan 2F 修掉的 P1 是同一类静默坑）。
 	// 失败**不阻断启动**：热层仍然可用，只是窗口短（控制面与冷层都不受影响），
 	// 而且此时唯一的补救是重启（重新推导 MaxPoints），把服务拦下来只会扩大影响面。
+	//
+	// **这条校验在今天的生产路径上不可达，它是「公式回归」守卫而不是缺陷的出口**：
+	// 上面那对 (Step, MaxPoints) 同源于同一次启动的**同一个**配置值（MaxPoints 由
+	// RawMaxPoints(Step) 推导，余量 1.2 > 1.0），故跨度结构性恒为 1.2×24h > 24h ——
+	// 除非有人把余量改成 ≤ 1 或把两个值拆成两个来源。真实错配发生在**运行期**：
+	// 进程先起、之后热更 `sys.agent.reportInterval`（10s→5s），冻结的容量不变而步长变小，
+	// 热层只剩 MaxPoints×5s ≈ 14.4h 的点。那条出口在 flush 的每轮比对里
+	//（service.AgentMetricsFlushService 的 warnOnRawWindowShortfall），前缀
+	// `agentmetrics flush: 运行期热层窗口跨度短于回填假设` —— 与这里的
+	// rawWindowShortfallMarker 刻意不同，便于分开 grep。本校验保留的理由：它盯住的是
+	// 「容量推导公式与回填假设是否仍然同源」这件事，而那正是两处 24h 曾经漂移的地方。
 	if span := agentmetrics.RawWindowSpan(agentMaxPoints, agentStep); span < agentmetrics.RawBootstrapWindow {
 		log.Warn(fmt.Sprintf(
 			"%s %s，短于服务侧回填/回退假设的 %s（Step=%s、MaxPoints=%d）：这段窗口内的原始点读不到，"+

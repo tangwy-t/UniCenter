@@ -31,6 +31,15 @@ type FlushRawReader interface {
 	// （见那里的注释）。查询服务的资源下钻用的是另一条面（agentmetrics.RawStore.Bucket，
 	// 单窗口），两处接口各自独立。
 	BucketRange(ctx context.Context, deviceID uint64, fromMs, toMs int64) ([]agentproto.MetricsSample, error)
+	// MaxPoints 返回滚动窗**冻结的容量**（条数上限）—— 轮初的运行期窗口比对要用它。
+	//
+	// 为什么它属于这个（消费方定义的）窄接口，而不是新开一个「容量面」、也不是把
+	// *agentmetrics.RawStore 塞进 service：比对所需的两个数里，只有一个来自热层
+	//（容量），另一个来自**当前配置**（步长）。容量与读点是同一台原始窗的两面，
+	// 拆成两个注入点只会让「装配忘了传容量」变成一条被静默跳过的比对（nil → 跳过 →
+	// 又回到「谁都不报错」）。接口仍只有三个方法、仍不含任何写能力，也没有把
+	// *RawStore 的具体类型带进 service。
+	MaxPoints() int64
 }
 
 // DeviceMetricWriter 是 flush 写宽表+子表的唯一出口。
@@ -172,11 +181,66 @@ func (s *AgentMetricsFlushService) Bootstrap(ctx context.Context) error {
 // 唯一的例外是「命中缺分区」（ErrMetricPartitionMissing）：那时本轮**立即中止**，
 // 因为故障域是整个集群的写入，继续跑只会把同一个错误刷 N 遍（spec §7.3）。
 func (s *AgentMetricsFlushService) FlushOnce(ctx context.Context) (FlushStats, error) {
+	// 轮初一次**运行期**窗口比对（每轮一次、集群级、不阻断本轮）—— 见 warnOnRawWindowShortfall。
+	s.warnOnRawWindowShortfall()
 	devices, err := s.raw.Index(ctx)
 	if err != nil {
 		return FlushStats{}, fmt.Errorf("agentmetrics flush: 枚举活跃设备失败: %w", err)
 	}
 	return s.flushDeviceSet(ctx, devices, s.closedBucketUpper())
+}
+
+// rawWindowRuntimeShortfallMarker 是「运行期热层窗口短于回填/回退假设」那条 Warn 的
+// **稳定前缀**（运维按它 grep / 建告警）。文案可以改，前缀是契约。
+//
+// 与 wireup 的启动期那条（`wireup: 热层窗口实际只覆盖…`）刻意用不同的前缀：两者的可见面
+// 不同，混在一个 grep 里会让人以为「启动期那条响了」。
+//
+//   - 启动期那条（Plan 2G Task 1 加的）在**装配**时比对刚推导出的 (Step, MaxPoints)；
+//     但这两个值同源于同一次启动的同一个配置值，且容量自带 1.2 倍余量 → 跨度结构性恒为
+//     1.2×24h > 24h。**它在今天不可达**（Task 1 的执行者已用探针证明这一点，故它实际
+//     只是一条「公式回归」守卫，不是缺陷的出口）。
+//   - 本前缀是**真实错配**的出口：进程先起、之后热更 `sys.agent.reportInterval`
+//     （10s→5s）→ 冻结的容量不变、步长变小 → 热层实际只剩 `MaxPoints × 5s ≈ 14.4h` 的点，
+//     而服务侧仍按 24h 回填/回退，那一段**必然**读不到点。
+const rawWindowRuntimeShortfallMarker = "agentmetrics flush: 运行期热层窗口跨度短于回填假设"
+
+// warnOnRawWindowShortfall 在**每轮开始时**做一次运行期比对：把「滚动窗**冻结的容量**」与
+// 「**当前配置**的上报间隔」一起换算成热层实际覆盖的时间跨度（agentmetrics.RawWindowSpan 的
+// 单一公式），短于回填/回退假设（agentmetrics.RawBootstrapWindow）时报一条 Warn。
+//
+// 为什么要这条运行期比对（启动期那条看不见它）：`MaxPoints` 在启动时按当轮的
+// `reportInterval` 冻结，而 `reportInterval` **可热更** —— 运维把间隔从 10s 调到 5s 后热层
+// 只剩约 14.4h 的点，服务侧仍按 24h 回填/回退：那一段**必然**读不到点，表现为空桶
+// （BucketsSkipped），**既不报错也没有任何读数指向它**（与 Plan 2F 修掉的 P1 同一类静默坑）。
+//
+// 三个刻意约束：
+//   - **每轮只打一次**：本函数在 FlushOnce 的轮初调用一次，**不在**逐设备路径上。这个错配是
+//     **集群级**的（与具体设备无关），500 台设备各刷一条只会把它淹掉。
+//   - **不阻断本轮**：热层仍然可用，只是窗口短；唯一的补救是重启（按新间隔重新推导容量），
+//     把整轮拦下来只会让 5m（唯一真值来源）陪着一块停摆。故本函数没有返回值、也不返回 error。
+//   - **两个跨度都写在消息里**（不只是字段）：运维只看得见被 grep 到的那一行时也要够用。
+//
+// 取证方式与 wireup 的启动期那条一致：容量必须是热层**真正冻结**的那个数（RawStore.MaxPoints），
+// 步长必须是**当前**配置值（agentReportInterval）—— 两边只要有一边取错，比对就恒自洽。
+func (s *AgentMetricsFlushService) warnOnRawWindowShortfall() {
+	maxPoints := s.raw.MaxPoints()
+	step := agentReportInterval(s.cfg)
+	span := agentmetrics.RawWindowSpan(maxPoints, step)
+	if span >= agentmetrics.RawBootstrapWindow {
+		return
+	}
+	s.log.Warn(fmt.Sprintf(
+		"%s %s（= 冻结容量 %d × 当前间隔 %s），短于服务侧回填/回退假设的 %s："+
+			"该段窗口内的原始点读不到（表现为空桶 / 下游 rollup 的 HoursSkipped++）；"+
+			"需重启以按新的 reportInterval 重新推导 MaxPoints，否则这段窗口的数据永久缺失",
+		rawWindowRuntimeShortfallMarker, span, maxPoints, step, agentmetrics.RawBootstrapWindow),
+		zap.String("rawWindowSpan", span.String()),
+		zap.String("bootstrapWindow", agentmetrics.RawBootstrapWindow.String()),
+		zap.String("reportInterval", step.String()),
+		zap.Int64("maxPoints", maxPoints),
+		zap.String("hint", "需重启以按新的 reportInterval 重新推导 MaxPoints，否则这段窗口的原始点读不到（表现为空桶/HoursSkipped）"),
+	)
 }
 
 // closedBucketUpper 返回已闭 5m 桶的半开上界：`alignDown(now − CloseGrace, 300)`。
@@ -516,7 +580,9 @@ func (s *AgentMetricsFlushService) bootstrapStart() int64 {
 //
 // 注意它与「热层实际覆盖多久」（agentmetrics.RawWindowSpan(MaxPoints, Step)）是**两个**
 // 量：后者短于前者时（把 reportInterval 调小但不重启，MaxPoints 仍按旧间隔冻结），
-// 这段窗口内的原始点读不到 —— 表现为空桶 / HoursSkipped++，启动期由 wireup 校验并 Warn。
+// 这段窗口内的原始点读不到 —— 表现为空桶 / HoursSkipped++。两条出口各自覆盖一种形态：
+// **运行期**的错配（进程先起、之后热更间隔）由本服务的 warnOnRawWindowShortfall 每轮说一次，
+// 而**装配期**就已经不一致的形态才由 wireup 在启动时 Warn（那条今天不可达，见那里的注释）。
 const bootstrapWindow = agentmetrics.RawBootstrapWindow
 
 // readCursor 读 `cursor_5m`；键缺失 → Bootstrap 语义（写 `now−24h` 对齐后的水位并返回它）。
