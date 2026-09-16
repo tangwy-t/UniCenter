@@ -23,7 +23,9 @@
   const router = useRouter()
   const userStore = useUserStore()
 
-  const dismissed = ref(sessionStorage.getItem(StorageConfig.PASSWORD_REMINDER_DISMISSED_KEY) === '1')
+  const dismissed = ref(
+    sessionStorage.getItem(StorageConfig.PASSWORD_REMINDER_DISMISSED_KEY) === '1'
+  )
   const mustChange = computed(() => !!userStore.info.mustChangePassword)
   const visible = computed(() => mustChange.value && !dismissed.value)
 

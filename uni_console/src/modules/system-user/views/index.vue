@@ -541,7 +541,12 @@
         formatter: (row) => row.email || '—'
       },
       { prop: 'roleNames', label: '角色', minWidth: 150, formatter: (row) => renderRoleTags(row) },
-      { prop: 'gender', label: '性别', width: 80, formatter: (row) => genderDict.labelOf(row.gender) },
+      {
+        prop: 'gender',
+        label: '性别',
+        width: 80,
+        formatter: (row) => genderDict.labelOf(row.gender)
+      },
       { prop: 'status', label: '状态', width: 96, formatter: (row) => renderStatus(row) },
       {
         prop: 'lastLoginTime',

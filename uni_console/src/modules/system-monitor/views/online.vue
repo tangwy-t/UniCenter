@@ -89,7 +89,8 @@
         prop: 'browser',
         label: '设备',
         minWidth: 180,
-        formatter: (row) => (row.os && row.os !== 'Unknown' ? `${row.browser} · ${row.os}` : row.browser)
+        formatter: (row) =>
+          row.os && row.os !== 'Unknown' ? `${row.browser} · ${row.os}` : row.browser
       },
       { prop: 'loginAt', label: '最后登录时间', width: 180 },
       { prop: 'expireAt', label: '过期时间', width: 180 },
