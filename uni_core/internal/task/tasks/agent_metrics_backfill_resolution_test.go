@@ -1,14 +1,21 @@
 package tasks
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/agentmetrics"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/service"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/task"
 )
 
 // 本文件覆盖 `agent-metrics-backfill` 的 `resolution` 维度（Plan 2E 收尾）：
@@ -215,4 +222,220 @@ func TestAgentMetricsBackfillTaskPropagatesRewindError(t *testing.T) {
 			t.Fatalf("失败日志缺少 zap 字段 %s，实际日志：%s", field, out)
 		}
 	}
+}
+
+// ── 调度器级覆盖（Plan 2F / Task 2 Step 4）──────────────────────────────
+//
+// 以上几个测试都是**直接构造**任务（`NewAgentMetricsBackfillTask(fake, lg)`）——
+// 它们证明了「这个类型的行为是对的」，但**没有**证明「调度器会走到这个类型」。
+// 而 Plan 2C 的教训恰恰在两者之间：任务名与 v009 种子的 `invoke_target` 脱节时，
+// 调度器 `reg.Get(job.InvokeTarget)` 查不到目标，只写一条 job_log 错误而后**静默
+// 不执行**（scheduler/executor.go）——编译、既有单测、启动全都不报错。
+//
+// `params` 的解析同理，而且更隐蔽：本任务**没有**实现 `task.ParamValidator`，
+// 故 params 只在 `Execute` 内部被解析一次。也就是说「解析规则对不对」这件事，
+// 只有在**真实注册表 → 任务 → 服务**这条路径上才被真正验证。
+//
+// 下面三个测试用的就是调度器的那条路径：`task.NewRegistry(All(deps))` 建注册表，
+// 再 `reg.Get("agent-metrics-backfill")` 取任务（与 migrations 包的
+// TestV009InvokeTargetsMatchTaskNames 同一体例，那里只查「查得到」，这里继续
+// 往下走一步：真的 Execute 一次并断言落到了哪个分支）。
+
+// registryBackfill 用**真实注册表**取出 agent-metrics-backfill。
+//
+// deps 只填 AgentFlush（本任务唯一用到的服务）与 Log，其余为零值：All() 会为
+// 其余任务构造零值依赖的对象，只会**构造**、不会执行，故不影响本路径。
+func registryBackfill(t *testing.T, svc *fakeAgentService, lg logger.LoggerInterface) task.Task {
+	t.Helper()
+	reg := task.NewRegistry(All(Deps{AgentFlush: svc, Log: lg})...)
+	tk, ok := reg.Get("agent-metrics-backfill")
+	if !ok {
+		t.Fatalf("真实注册表里查不到 agent-metrics-backfill（现有：%v）—— 调度器按 "+
+			"invoke_target 查不到目标就只写一条 job_log 错误而后静默不执行", reg.Names())
+	}
+	if tk.Name() != "agent-metrics-backfill" {
+		t.Fatalf("注册表取出的任务名 = %q, want agent-metrics-backfill（注册表的键与 Name() 必须同源）", tk.Name())
+	}
+	return tk
+}
+
+// TestAgentMetricsBackfillTaskViaRegistryResolvesResolution1h 是**断言 1**：
+// 在真实注册表路径上，`resolution=1h` 必须走到 1h 回退（不是 5m），且
+// `device_ids` 生效（透传到 RewindHours 的入参）。
+func TestAgentMetricsBackfillTaskViaRegistryResolvesResolution1h(t *testing.T) {
+	fake := &fakeAgentService{rewindStats: service.RewindStats{
+		Resolution: agentmetrics.Resolution1h, WindowHours: 48, DevicesScanned: 3, CursorsRewound: 2,
+	}}
+	lg, buf := newCaptureLogger(t)
+	tk := registryBackfill(t, fake, lg)
+
+	// params 用运维在 jobs 列表里会填的形态（含 device_ids 限定范围）。
+	if err := tk.Execute(context.Background(), json.RawMessage(
+		`{"hours":48,"resolution":"1h","device_ids":[1001,1002,1003]}`)); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if fake.rewindCalls != 1 {
+		t.Fatalf("RewindHours 调用次数 = %d, want 1（真实注册表路径下必须落到 1h 支）", fake.rewindCalls)
+	}
+	if fake.backfillCalls != 0 {
+		t.Fatalf("BackfillOnce 调用 = %d 次, want 0：resolution=1h 落到 5m 支就会顺手把 5m 桶"+
+			"重放一遍（写放大），且运维从 readings 上看不出跑错了档位", fake.backfillCalls)
+	}
+	if fake.rewindResolution != agentmetrics.Resolution1h {
+		t.Fatalf("透传档位 = %s, want 1h —— params 里的字符串没被解析成 1h（回落 5m 会让 hours=48 "+
+			"变成一次 48h 的 cursor_5m 回退 + 全量重放）", fake.rewindResolution)
+	}
+	if fake.rewindHours != 48 {
+		t.Fatalf("透传 hours = %d, want 48（hours 必须原样透传，不得被档位改写）", fake.rewindHours)
+	}
+	if want := []uint64{1001, 1002, 1003}; !slices.Equal(fake.rewindDeviceIDs, want) {
+		t.Fatalf("透传 device_ids = %v, want %v —— device_ids 没生效时回退范围会扩散到全部活跃设备",
+			fake.rewindDeviceIDs, want)
+	}
+	if fake.bootstrapCalls != 1 || !fake.bootstrapRanBeforeRewind() {
+		t.Fatalf("调用顺序 = %v：Bootstrap 必须先于 RewindHours（真实路径同样受这条前置契约约束）", fake.order)
+	}
+
+	out := buf.String()
+	for _, field := range []string{
+		`"resolution":"1h"`, `"windowHours":48`, `"devicesScanned":3`, `"cursorsRewound":2`, `"replayed":false`,
+	} {
+		if !strings.Contains(out, field) {
+			t.Fatalf("真实注册表路径的日志缺少 zap 字段 %s，实际日志：%s", field, out)
+		}
+	}
+}
+
+// TestAgentMetricsBackfillTaskViaRegistryFallsBackTo5m 是**断言 2**：
+// 非法 `resolution` 的回落路径在**真实注册表下**同样成立，结论与单测一致
+// （走 BackfillOnce、不碰 RewindHours；给了值却认不出来时留一条 Warn）。
+func TestAgentMetricsBackfillTaskViaRegistryFallsBackTo5m(t *testing.T) {
+	cases := []struct {
+		name        string
+		params      string
+		wantWarn    bool
+		wantDevices []uint64
+	}{
+		{"无法识别（大小写笔误）", `{"hours":6,"resolution":"1H","device_ids":[1001]}`, true, []uint64{1001}},
+		{"无法识别（其它写法）", `{"hours":6,"resolution":"hourly"}`, true, nil},
+		{"显式 5m", `{"hours":6,"resolution":"5m","device_ids":[1001,1002]}`, false, []uint64{1001, 1002}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeAgentService{backfillStats: service.BackfillStats{
+				WindowHours: 6, CursorsRewound: 1, DevicesScanned: 1,
+				Flush: service.FlushStats{BucketsWritten: 5},
+			}}
+			lg, buf := newCaptureLogger(t)
+			tk := registryBackfill(t, fake, lg)
+
+			if err := tk.Execute(context.Background(), json.RawMessage(tc.params)); err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			if fake.backfillCalls != 1 || fake.backfillHours != 6 {
+				t.Fatalf("真实注册表路径下 BackfillOnce 调用 = %d 次 / hours = %d, want 1 次 / 6"+
+					"（回落必须走既有 5m 路径）", fake.backfillCalls, fake.backfillHours)
+			}
+			if fake.rewindCalls != 0 {
+				t.Fatalf("RewindHours 调用次数 = %d, want 0（这不是 1h 支）", fake.rewindCalls)
+			}
+			// 顺带钉住 5m 支的 device_ids 透传（nil = 全部活跃设备）。
+			if !slices.Equal(fake.backfillDeviceIDs, tc.wantDevices) {
+				t.Fatalf("透传 device_ids = %v, want %v", fake.backfillDeviceIDs, tc.wantDevices)
+			}
+			out := buf.String()
+			for _, field := range []string{`"resolution":"5m"`, `"windowHours":6`, `"bucketsWritten":5`} {
+				if !strings.Contains(out, field) {
+					t.Fatalf("日志缺少 zap 字段 %s，实际日志：%s", field, out)
+				}
+			}
+			if got := strings.Contains(out, "无法识别"); got != tc.wantWarn {
+				t.Fatalf("「回落 5m」的 Warn 存在 = %v, want %v，实际日志：%s", got, tc.wantWarn, out)
+			}
+		})
+	}
+}
+
+// TestAgentMetricsBackfillTaskViaRegistryWithoutResolutionMatchesDirectPath 是**断言 3**：
+// 不传 `resolution` 时，真实注册表路径与「直接构造」路径必须**逐字相同**。
+//
+// 为什么用「两条路径互相对照」而不是再抄一遍既有断言：既有测试钉的是「直接构造」下的
+// 行为，而本任务引入 `resolution` 这一维时，风险恰恰是「解析的缺省值把既有路径改了」
+// —— 例如把缺省解析成 1h、或让缺省也带一条 Warn、或让 device_ids 的透传在某一支上
+// 变了。两侧喂**同一组 params**、比**同一组读数**（调用的服务方法序列 + 入参）与
+// **字节级相同的日志**，任何一处漂移都会红。
+func TestAgentMetricsBackfillTaskViaRegistryWithoutResolutionMatchesDirectPath(t *testing.T) {
+	// 与 v009 种子的 invoke_params（`{"hours":24}`）同形 —— 这条参数就在生产里跑着。
+	const params = `{"hours":24,"device_ids":[1001,1002]}`
+	newStats := func() service.BackfillStats {
+		return service.BackfillStats{
+			WindowHours: 24, CursorsRewound: 2, DevicesScanned: 2,
+			Flush: service.FlushStats{BucketsWritten: 7, BucketsSkipped: 3, ResourcesUpserted: 4},
+		}
+	}
+
+	// 路径一：真实注册表（调度器走的那条）。
+	viaRegistry := &fakeAgentService{backfillStats: newStats()}
+	lgRegistry, bufRegistry := newDeterministicCaptureLogger(t)
+	tk := registryBackfill(t, viaRegistry, lgRegistry)
+	if err := tk.Execute(context.Background(), json.RawMessage(params)); err != nil {
+		t.Fatalf("真实注册表 Execute: %v", err)
+	}
+
+	// 路径二：直接构造（引入 resolution 之前的装配方式，也是既有测试用的方式）。
+	viaDirect := &fakeAgentService{backfillStats: newStats()}
+	lgDirect, bufDirect := newDeterministicCaptureLogger(t)
+	if err := NewAgentMetricsBackfillTask(viaDirect, lgDirect).
+		Execute(context.Background(), json.RawMessage(params)); err != nil {
+		t.Fatalf("直接构造 Execute: %v", err)
+	}
+
+	// ① 服务侧读数（含调用顺序）逐项相同。
+	if !slices.Equal(viaRegistry.order, viaDirect.order) {
+		t.Fatalf("服务调用序列 = %v / %v（缺省 resolution 下两条路径不得有任何差别）",
+			viaRegistry.order, viaDirect.order)
+	}
+	if viaRegistry.backfillCalls != viaDirect.backfillCalls ||
+		viaRegistry.backfillHours != viaDirect.backfillHours ||
+		!slices.Equal(viaRegistry.backfillDeviceIDs, viaDirect.backfillDeviceIDs) {
+		t.Fatalf("BackfillOnce 入参 = (%d 次, hours %d, devices %v) / (%d 次, hours %d, devices %v)：必须逐项相同",
+			viaRegistry.backfillCalls, viaRegistry.backfillHours, viaRegistry.backfillDeviceIDs,
+			viaDirect.backfillCalls, viaDirect.backfillHours, viaDirect.backfillDeviceIDs)
+	}
+	if viaRegistry.rewindCalls != 0 || viaDirect.rewindCalls != 0 {
+		t.Fatalf("RewindHours 调用次数 = %d / %d, want 0 / 0（不传 resolution = 5m 支，不得碰 cursor_1h）",
+			viaRegistry.rewindCalls, viaDirect.rewindCalls)
+	}
+
+	// ② 日志**逐字**相同（同一条 params → 同一串字节）。
+	regLog, dirLog := bufRegistry.String(), bufDirect.String()
+	if regLog != dirLog {
+		t.Fatalf("日志不逐字相同：\n真实注册表: %s\n直接构造  : %s", regLog, dirLog)
+	}
+	// 前提校验：两边都不是空日志（否则上面的相等是平凡的真）。
+	if !strings.Contains(regLog, `"resolution":"5m"`) || !strings.Contains(regLog, "本轮完成") {
+		t.Fatalf("缺省路径的完成日志异常（不传 resolution 必须走 5m 支并记读数）：%s", regLog)
+	}
+	if strings.Contains(regLog, "无法识别") {
+		t.Fatalf("字段缺省不得留下「回落」的 Warn（缺省 = 认得出的 5m，不是回落）：%s", regLog)
+	}
+}
+
+// newDeterministicCaptureLogger 与 newCaptureLogger 同形，只把**时间戳**关掉
+// （zap 的 TimeKey 置空即整行不写 ts）。
+//
+// 为什么需要它：「不传 resolution 时行为与引入前逐字相同」这句要用**字节级**日志
+// 对比来钉，而生产 encoder 的 `ts` 每行都不同 —— 留着它就只能比「包含关系」，
+// 那比不出「多了一条字段」「换了一条文案」这类漂移。
+func newDeterministicCaptureLogger(t *testing.T) (*logger.Logger, *bytes.Buffer) {
+	t.Helper()
+	cfg := zap.NewProductionEncoderConfig()
+	cfg.TimeKey = ""
+	buf := &bytes.Buffer{}
+	core := zapcore.NewCore(zapcore.NewJSONEncoder(cfg), zapcore.AddSync(buf), zapcore.DebugLevel)
+	lg, err := logger.NewWithCore(core)
+	if err != nil {
+		t.Fatalf("NewWithCore: %v", err)
+	}
+	return lg, buf
 }

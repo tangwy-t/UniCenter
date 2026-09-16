@@ -1358,7 +1358,8 @@ func TestRollupRescanWindowBoundary(t *testing.T) {
 	}
 	if f.hourRow(t, tooOld) != nil {
 		t.Fatal("超出 rollupRescanHours 的更老小时不得被重扫：这是**明确的能力边界**" +
-			"（更老的空洞需手工回退水位再重放），必须被钉住而不是被当成 bug")
+			"（更老的空洞需用 `resolution=1h` 回退 `cursor_1h` 自愈，上限为该档保留期；" +
+			"**不得**把这条边界当成 bug）")
 	}
 	if f.hourRow(t, current) != nil {
 		t.Fatal("当前正在填充的小时不得被重扫（窗口不含它；写了就会把还在收数据的小时落成权威值）")
