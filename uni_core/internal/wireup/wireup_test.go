@@ -69,10 +69,25 @@ type initFixture struct {
 // 关键取舍：**不** AutoMigrate 6 张指标表。它们必须由「启动期 reconcile」建出来 ——
 // 夹具提前建好会让「6 张表已存在」这条断言变成永真的空断言（那是本任务最核心的
 // 一条证据，不能预先满足）。
+//
+// DSN 与**干净库**（Plan 2G Task 3 修掉的既有 flake）：
+//   - `cache=shared` 是硬要求：sqlite 的 `:memory:` 库是**每连接一个**的，而 GORM 背后
+//     是连接池 —— 池在 CPU 竞争下新开第二条连接时，那条连接看到的是一个**空库**，
+//     症状是同一个测试里 `no such table: device (1)` 与「查得到行」交替出现
+//     （纯净 HEAD worktree 上并发压测复现：30 次 1 次；既有 flake，非任何一轮引入）。
+//     与仓库既有先例同款（internal/repository/agent_partition_log_test.go、
+//     internal/service/agent_metrics_partition_test.go、以及同包的 e2e_test.go）。
+//   - 名字里的**纳秒后缀**是为了「每次运行都拿到全新库」：`cache=shared` 的库在**进程内
+//     按名字共享**，且只要还有一条连接活着就不销毁（本夹具的 *sql.DB 并不显式 Close），
+//     于是 `-count=N` 的第 N 次运行会看到上一次留下的行与**热更后的配置**
+//     （e2e_test.go 的同一个坑：第二次运行读到上一次的 reportInterval=20，断言立刻错位）。
+//     带纳秒后缀时每次运行的名字都不同，天然隔离；
+//   - 这里**故意**不写成 `:memory:`：它是「每连接一个库」的那个形态，正是本 flake 的成因。
 func newInitFixture(t *testing.T) *initFixture {
 	t.Helper()
 
-	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	dsn := fmt.Sprintf("file:%s-%d?mode=memory&cache=shared", t.Name(), time.Now().UnixNano())
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}

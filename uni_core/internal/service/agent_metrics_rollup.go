@@ -61,10 +61,32 @@ type RollupStats struct {
 	HoursWritten int
 	// HoursRepaired 是本轮从 repair 集合里重算并成功写出的小时数（HoursWritten 的子集）。
 	HoursRepaired int
-	// HoursSkipped 是没有 5m 行、故不写行的小时数。其中**仍处在等待窗口内**的空小时
-	// （见 emptyHourGrace）会让水位停在它之前、下一轮重试它；已超出窗口的空小时
-	// 才照常让水位越过（否则一台离线设备会把水位永久卡死）。
+	// HoursSkipped 是「没有 5m 行、故不写行」的小时数中**尚未**被判成永久空洞的那些 ——
+	// 即**仍在 5m 档保留期内**（sys.agent.historyRetentionDays，默认 30 天）的小时：
+	// 设备离线、flush 滞后、数据只是还没到，都属**暂时性**原因，下一轮（或按需重扫）
+	// 仍可能把它们补出来。
+	//
+	// 其中**仍处在等待窗口内**的空小时（见 emptyHourGrace）会让水位停在它之前、下一轮重试它；
+	// 已超出等待窗口、但仍在保留期内的空小时才照常让水位越过（否则一台离线设备会把水位
+	// 永久卡死）——「等待窗口」管的是**水位**，「保留期」管的是**计数语义**，两者不是一回事。
+	//
+	// 与 HoursReclaimed 的分工是本字段被**收窄**的部分：过去两者混在这一个数里，运维看到
+	// 「skipped=200」时分不出「等一等就会出现」与「这一小时永远不会有了」。
 	HoursSkipped int
+	// HoursReclaimed 是**永久空洞**的小时数：没有 5m 行、且该小时已**超出 5m 档保留期**
+	//（那些行已被分区回收，**再也补不回来**）。
+	//
+	// 口径定死为「没有 5m 行 + 已超出保留期」这一条判据（hourBeyondRetention），**普通区间
+	// 与 repair 路径用同一条规则**：计划原文把这条口径写在「普通区间」上，但 repair 路径上
+	// 沿用同一条规则才是自洽的 —— 否则一个已超出保留期的 repair 小时会被记进刚被收窄成
+	// 「仍在保留期内」的 HoursSkipped 里，两个字段的注释会互相打脸。既有断言
+	//（TestRollupRepairHourWithVanishedRowsIsDroppedFromSet 用的那个 repair 小时在保留期内）
+	// 因此逐字不变。
+	//
+	// 它与 HoursSkipped 互斥、且两者之和 = 本轮所有「没有 5m 行」的小时数；repair 路径上
+	// 读回为空的小时还会额外记一条 log.Warn（见 dropRepairHour）—— 计数告诉你**有多少**，
+	// Warn 告诉你**是哪个**（以及那小时的 1h 行是残缺的）。
+	HoursReclaimed int
 	// HoursRescanned 是本轮「按需重扫」**实际送去重算**的小时数 —— 即「有 5m 行却缺 1h 行」
 	// 的差集大小（已与本轮的 repair 集合、普通区间去重）。窗口内**已齐全**的小时不计入：
 	// 它们只被两条集合查询看见，不产生任何重算与写入。
@@ -128,6 +150,14 @@ type AgentMetricsRollupService struct {
 // 为什么必须有上限：repair 成员是「修不完就留着」的，一台长期缺行的设备（例如每天只上报
 // 半天）会持续产生不完整小时；没有上限时集合会无限增长，每轮的重算代价也跟着无限增长。
 const defaultMaxRepairHours = 720
+
+// repairHourDropMarker 是「repair 小时读回为空 → 摘除成员」那条 Warn 的**稳定前缀**：
+// 同包测试按它筛日志（文案其余部分可以改，前缀是契约），运维也按它 grep / 建告警。
+//
+// 为什么要一个稳定前缀：这条 Warn 是「某小时的 1h 行**永久残缺**」的**唯一**留痕 ——
+// 计数（HoursReclaimed）只说明有多少、不说是哪个，而集合里那个成员已经被摘掉、
+// 再也看不到这个小时。故它必须可被稳定检索出来（而不是靠匹配整句文案）。
+const repairHourDropMarker = "agentmetrics rollup: repair 小时的 5m 行读回为空（很可能已被保留期回收）"
 
 // defaultEmptyHourGrace 是空小时的等待窗口（2 小时）。
 //
@@ -313,6 +343,7 @@ func (s *AgentMetricsRollupService) RollupOnce(ctx context.Context) (RollupStats
 		stats.HoursWritten += part.HoursWritten
 		stats.HoursRepaired += part.HoursRepaired
 		stats.HoursSkipped += part.HoursSkipped
+		stats.HoursReclaimed += part.HoursReclaimed
 		stats.HoursRescanned += part.HoursRescanned
 		stats.HoursBackfilled += part.HoursBackfilled
 		stats.HoursDeferred += part.HoursDeferred
@@ -399,7 +430,10 @@ func (s *AgentMetricsRollupService) rollupDevice(ctx context.Context, deviceID u
 			stats.HoursWritten++
 			stats.HoursRepaired++
 		case skipped:
-			stats.HoursSkipped++
+			// 与普通区间**同一条**判据（见 HoursReclaimed 的字段注释）：这个小时若已超出
+			// 5m 保留期，它的 5m 行是被分区回收掉的、永远补不回来 —— 记成永久空洞，
+			// 而不是记进刚被收窄成「仍在保留期内」的 HoursSkipped。
+			s.countEmptyHour(&stats, h)
 		}
 	}
 
@@ -443,7 +477,11 @@ func (s *AgentMetricsRollupService) rollupDevice(ctx context.Context, deviceID u
 				last = h
 			}
 		case skipped:
-			stats.HoursSkipped++
+			// 两种「没有 5m 行」的分工在这里落地（见 HoursSkipped/HoursReclaimed 的字段注释）。
+			// 计数与水位判定是**两件事**：countEmptyHour 只看「这一小时的数据是不是永久没了」，
+			// 下面的 emptyHourWithinGrace 只看「水位要不要等它」——把两者混成一个分支，
+			// 就会出现「被扣住的小时不算永久空洞」这类悄悄改了计数口径的副作用。
+			s.countEmptyHour(&stats, h)
 			if s.emptyHourWithinGrace(h) {
 				if blockedAt < 0 {
 					blockedAt = h
@@ -543,6 +581,47 @@ func (s *AgentMetricsRollupService) emptyHourWithinGrace(hour int64) bool {
 	return age < s.emptyHourGrace
 }
 
+// hourBeyondRetention 判断一个「一行 5m 都没有」的小时是不是**永久空洞**：它的 5m 行已经
+// 超出 5m 档的保留期（sys.agent.historyRetentionDays，默认 30 天），分区回收之后
+// **再也补不回来**（按需重扫的输入就是那些行，行没了就什么都补不出来）。
+//
+// 判据用「小时**结束**时刻距今多久」，与 emptyHourWithinGrace 同取向（小时是闭的，从结束
+// 时刻算起才是「这一小时的 5m 行已经活了多久」）。边界取 `age >= retention`（恰好等于保留期
+// 即视为已回收），与 emptyHourWithinGrace 的 `age < grace` 在**取值约定**上一致（都用 `>=`
+// 表示「不再等/不再有」）。
+//
+// **它与等待窗口（emptyHourGrace）判的不是同一件事，不能互相替代**：grace=2h 管的是
+// 「水位要不要停下来等」；retention=30d 管的是「这一小时的数据是不是永久没了」。用一个
+// 代替另一个会让两个读数同时失真 —— 最常见的是拿 grace 当「永久」的判据，于是每个刚过
+// 2 小时的离线小时都会被记成「永远补不回来」。
+//
+// 保留期取**既有配置来源**（agentHistoryRetentionDays → `sys.agent.historyRetentionDays`，
+// 与分区协调器的回收边界、以及 flush 的回退上界**同一个数**），这里不新增事实来源。
+//
+// 为什么需要这条判据：两种「没有 5m 行」的后果截然不同 —— 保留期内的等一等就会出现
+// （迟到落库后由按需重扫补出来），超出保留期的永远不会有了。过去两者被混在 HoursSkipped
+// 同一个数里，运维看到「skipped=200」时分不出该等还是该修。
+func (s *AgentMetricsRollupService) hourBeyondRetention(hour int64) bool {
+	retention := time.Duration(agentHistoryRetentionDays(s.cfg)) * 24 * time.Hour
+	end := hour + resolutionSeconds(agentmetrics.Resolution1h)
+	age := time.Duration(s.now().Unix()-end) * time.Second
+	return age >= retention
+}
+
+// countEmptyHour 把一个「没有 5m 行」的小时记进**互斥的两个**计数器之一
+// （HoursSkipped = 仍在保留期内 / HoursReclaimed = 已超出保留期）。
+//
+// 为什么抽成一个函数而不是两处各写一遍 if：普通区间与 repair 路径必须用**同一条**判据，
+// 而它们各自还有一整套水位/集合的处置逻辑（见那两处）——判据散落在两处的话，
+// 将来只改一处就会让两个计数器在同一种事实上给出不同的数（而两边都编译得过、都跑得通）。
+func (s *AgentMetricsRollupService) countEmptyHour(stats *RollupStats, hour int64) {
+	if s.hourBeyondRetention(hour) {
+		stats.HoursReclaimed++
+		return
+	}
+	stats.HoursSkipped++
+}
+
 // rollupHour 回滚单个小时：读 5m 行 → RollupToHour → 写 1h 行（+ 维护 repair 集合）。
 //
 // 返回 (是否写出, 是否空小时, 错误)。fromRepair 标记这个小时来自 repair 集合。
@@ -566,8 +645,12 @@ func (s *AgentMetricsRollupService) rollupHour(ctx context.Context, deviceID uin
 		// 但**在 repair 路径上**，空小时意味着这个小时的 5m 行已经不存在了
 		// （分区保留期回收、设备被删除连带清理）：它再也修不好了，留在集合里只会
 		// 永久占位。故从集合里摘掉 —— 但已写出的 1h 行**不删**（残缺值好过空洞）。
+		//
+		// 读回为空这一路必须**出声**（readBackEmpty=true，见 dropRepairHour）：摘除是一次
+		// 静默的放弃 —— 集合里再也看不到这个小时，而它那行残缺的 1h 行会永久留在表里、
+		// 再也不会被重算。计数（HoursReclaimed）说明**有多少**，这条 Warn 说明**是哪个**。
 		if fromRepair {
-			if derr := s.dropRepairHour(ctx, deviceID, hour); derr != nil {
+			if derr := s.dropRepairHour(ctx, deviceID, hour, true); derr != nil {
 				return false, true, derr
 			}
 		}
@@ -614,7 +697,10 @@ func (s *AgentMetricsRollupService) rollupHour(ctx context.Context, deviceID uin
 			}
 		}
 		if fromRepair {
-			if derr := s.dropRepairHour(ctx, deviceID, hour); derr != nil {
+			// readBackEmpty=false：这一路是**正常出队**（小时已补齐，不变式要求成员资格 ==
+			// NeedRepair），不是「放弃」。若这里也出声，repair 集合里每一次正常收敛都会
+			// 打一条「残缺行永久留存」的 Warn —— 那会把上面那条真信号淹掉。
+			if derr := s.dropRepairHour(ctx, deviceID, hour, false); derr != nil {
 				return true, false, derr
 			}
 		}
@@ -893,11 +979,44 @@ func (s *AgentMetricsRollupService) addRepairHour(ctx context.Context, deviceID 
 	return nil
 }
 
-// dropRepairHour 把小时移出 repair 集合（成员不存在时是无害的空操作）。
-func (s *AgentMetricsRollupService) dropRepairHour(ctx context.Context, deviceID uint64, hour int64) error {
+// dropRepairHour 把小时移出 repair 集合（成员不存在时是无害的空操作），
+// 并在**读回为空**这一路 log.Warn —— 那是一条「已放弃」的留痕，不是正常出队。
+//
+// readBackEmpty 区分两种摘除（两者的运维含义完全相反，混成一条日志就没法用）：
+//   - true —— 该小时的 5m 行**一行都读不回来**（很可能已被保留期回收、或设备被删除连带
+//     清理）：它再也修不好了，摘掉成员是为了不让集合被不可修项永久占满。但**已写出的
+//     那行 1h 行是残缺的、且永远不会再被重算**（残缺值好过空洞，是刻意的取舍）——
+//     运维必须知道这件事，否则他会在控制台上看到一行「看起来正常、其实只统计了半天
+//     数据」的 1h 值，而没有任何地方提示它残了。
+//   - false —— 小时已补齐，不变式要求成员资格 == NeedRepair，属**正常出队**，不出声
+//     （否则 repair 集合的每一次正常收敛都会刷一条「残缺行永久留存」的 Warn，
+//     把上面那条真信号淹掉）。
+//
+// 为什么把 Warn 放在这里而不是两个调用点各写一遍：两个调用点都会走到这里，而「摘除」
+// 这个动作本身只有一个实现 —— 日志必须跟着那个实现走，否则将来加第三个调用点就会漏。
+//
+// 顺序取舍：消息在 SRem **成功之后**打印（Warn 里说的是「已成事实」的事）。SRem 失败时
+// 返回 error，调用方会把该设备本轮判为失败并记 log.Error（见 RollupOnce），
+// 那条 Error 比本 Warn 更响、也更准确（成员其实还在），两件事不会互相掩盖。
+func (s *AgentMetricsRollupService) dropRepairHour(ctx context.Context, deviceID uint64,
+	hour int64, readBackEmpty bool) error {
+
 	key := agentmetrics.RepairSetKey(deviceID)
 	if err := s.rdb.SRem(ctx, key, hour).Err(); err != nil {
 		return fmt.Errorf("清理 repair 集合 %s: %w", key, err)
+	}
+	if readBackEmpty {
+		// 设备号与小时**同时**写进正文与字段（与 wireup 那条窗口 Warn 同一体例）：
+		// 正文让「只看到一行日志」的人也够用，字段供检索/面板取值。
+		// 前缀是**稳定契约**（同包测试按它筛日志、运维按它 grep），前缀之后的文案可以改。
+		s.log.Warn(fmt.Sprintf(
+			"%s → 摘除 repair 成员（device=%d、hour=%d）；该小时的 1h 行是残缺的且不会再被重算",
+			repairHourDropMarker, deviceID, hour),
+			zap.Uint64("deviceId", deviceID), zap.Int64("hour", hour),
+			zap.String("repairKey", key),
+			zap.String("consequence", "该小时的 1h 行保持残缺值、永久不再重算（残缺值好过空洞，是刻意的）"),
+			zap.String("hint", "若这些小时仍应有数据，检查 5m 档保留期（sys.agent.historyRetentionDays）与分区回收"),
+		)
 	}
 	return nil
 }

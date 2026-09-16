@@ -162,6 +162,87 @@ func TestAgentMetricsRollupTaskKeepsReadingsOnFailureLine(t *testing.T) {
 	}
 }
 
+// ── 5) 永久空洞：hoursReclaimed 必须落进 job 日志（成功行与失败行都挂）──
+
+// TestAgentMetricsRollupTaskExposesReclaimedHoursInJobLog（Plan 2G Task 2）：`HoursReclaimed`
+// —— 「没有 5m 行、且已超出 5m 保留期（那些行已被回收、**永久**补不回来）」的小时数 ——
+// 必须与 hoursSkipped 一样落在任务层那一行日志上（照 Plan 2F 的体例）。
+//
+// 为什么这个字段非进日志不可：它与 hoursSkipped 过去是**同一个数**，而两者的处置完全相反
+// —— skipped 的那批「等一等就可能出现」（设备离线、flush 滞后），reclaimed 的那批
+// 「永远不会有了」（得去查为什么保留期内的数据没落库、或者接受空洞）。只落一个合并数时，
+// 运维看到「skipped=200」既不知道该等还是该修，也无法判断缺口是不是永久性的。
+func TestAgentMetricsRollupTaskExposesReclaimedHoursInJobLog(t *testing.T) {
+	// 200 = 一批已超出保留期的小时；1 = 仍在保留期内、被等待窗口扣住的那一个。
+	fake := &fakeAgentService{rollupStats: service.RollupStats{
+		HoursScanned: 205, HoursWritten: 4, HoursSkipped: 1, HoursReclaimed: 200,
+	}}
+	lg, buf := newCaptureLogger(t)
+
+	tk := NewAgentMetricsRollupTask(fake, lg)
+	if err := tk.Execute(context.Background(), nil); err != nil {
+		t.Fatalf("Execute: %v（永久空洞是事实，不是错误）", err)
+	}
+
+	lines := capturedLines(t, buf)
+	done := mustLineWith(t, lines, "本轮完成")
+	if got, ok := logInt(done, "hoursReclaimed"); !ok || got != 200 {
+		t.Fatalf("本轮完成日志的 hoursReclaimed = %v(存在=%v), want 200：缺了它，「200 个空小时」"+
+			"究竟是等一等就好还是永久没了就无法区分（这两个读数的处置完全相反）。实际日志：\n%s",
+			done["hoursReclaimed"], ok, buf.String())
+	}
+	if got, ok := logInt(done, "hoursSkipped"); !ok || got != 1 {
+		t.Fatalf("本轮完成日志的 hoursSkipped = %v(存在=%v), want 1（两个计数器必须**各自**落在"+
+			"日志上：合成一个数就是本任务修掉的那一版）。实际日志：\n%s", done["hoursSkipped"], ok, buf.String())
+	}
+	if lvl := logLevel(done); lvl != "info" {
+		t.Fatalf("承载 hoursReclaimed 的日志级别 = %q, want info（Debug 在部署的 info 阈值下不可见）", lvl)
+	}
+
+	// 失败行同样要挂：部分失败的那一轮才是告警真正盯的那一行，若读数只挂成功分支，
+	// 最需要它的场景恰好没有。
+	failFake := &fakeAgentService{
+		rollupStats: service.RollupStats{HoursScanned: 205, HoursSkipped: 1, HoursReclaimed: 200, Errors: 1},
+		rollupErr:   errBoomRollup,
+	}
+	lg2, buf2 := newCaptureLogger(t)
+	tk2 := NewAgentMetricsRollupTask(failFake, lg2)
+	if err := tk2.Execute(context.Background(), nil); err == nil {
+		t.Fatal("服务错误必须上抛（调度器按它记 failed）")
+	}
+	fail := mustLineWith(t, capturedLines(t, buf2), "本轮部分失败")
+	if got, ok := logInt(fail, "hoursReclaimed"); !ok || got != 200 {
+		t.Fatalf("失败轮的 hoursReclaimed = %v(存在=%v), want 200。实际日志：\n%s",
+			fail["hoursReclaimed"], ok, buf2.String())
+	}
+}
+
+// TestAgentMetricsRollupTaskReclaimedIsZeroOnOrdinaryRound：**普通轮**（没有任何空洞）必须
+// 显式写出 `hoursReclaimed: 0`。
+//
+// 为什么「0 也要落字段」：缺字段与「这一轮恰好是 0」在采集端是两件事 —— 前者读作
+// 「这个版本还没有这个读数」，后者才是「本轮没有永久空洞」。二者混起来，面板上会出现
+// 「0/缺失」无法区分的空洞期。
+func TestAgentMetricsRollupTaskReclaimedIsZeroOnOrdinaryRound(t *testing.T) {
+	fake := &fakeAgentService{rollupStats: service.RollupStats{
+		HoursScanned: 5, HoursWritten: 5,
+	}}
+	lg, buf := newCaptureLogger(t)
+
+	tk := NewAgentMetricsRollupTask(fake, lg)
+	if err := tk.Execute(context.Background(), nil); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	done := mustLineWith(t, capturedLines(t, buf), "本轮完成")
+	for key, want := range map[string]int{"hoursReclaimed": 0, "hoursSkipped": 0} {
+		if got, ok := logInt(done, key); !ok || got != want {
+			t.Fatalf("普通轮的 %s = %v(存在=%v), want %d（为 0 也必须显式落字段：缺字段 = 采集端"+
+				"读不到「这一轮没有发生这件事」）。实际日志：\n%s", key, done[key], ok, want, buf.String())
+		}
+	}
+}
+
 // ── 工具：把捕获到的 JSON 日志摊成可逐字段断言的记录 ──────────────
 
 // capturedLines 把 capture logger 的输出拆成一行一条记录（JSON object → map）。

@@ -449,15 +449,14 @@ func (s *AgentMetricsFlushService) markRewindPending(ctx context.Context, device
 // 决定（withConfiguredRetention），保留期被调短（例如 7 天）时，写死的 30 天会让回退
 // 越过真实的回收边界、退出一段白扫的窗口；配置键缺失或非法（<=0）回落默认值，
 // 与 withConfiguredRetention 同一取向。
+//
+// 读法本身走 agentHistoryRetentionDays（agent_metrics_timing.go 的单一读点）：同一个
+// 保留期还决定了 rollup 里「空小时是暂时空还是永久空洞」的判定，两处必须是**同一个数**。
 func (s *AgentMetricsFlushService) rewindBoundHours(res agentmetrics.Resolution) int {
 	if res != agentmetrics.Resolution1h {
 		return defaultBackfillHours
 	}
-	days := s.cfg.GetInt(context.Background(),
-		configAgentHistoryRetentionDays, defaultAgentHistoryRetentionDays)
-	if days <= 0 {
-		days = defaultAgentHistoryRetentionDays
-	}
+	days := agentHistoryRetentionDays(s.cfg)
 	return days * 24
 }
 

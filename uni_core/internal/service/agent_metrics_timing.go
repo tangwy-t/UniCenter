@@ -58,3 +58,28 @@ func agentReportInterval(cfg AgentConfigGetter) time.Duration {
 func agentCloseGrace(cfg AgentConfigGetter) time.Duration {
 	return 2 * agentReportInterval(cfg)
 }
+
+// agentHistoryRetentionDays 返回 **5m 档的保留期（天）**：`sys.agent.historyRetentionDays`
+// （v008 种子 30；非法/缺失回落默认值）。
+//
+// 为什么把它收进本文件（而不是让每个消费方各读一次配置）：本文件是「指标链路时间参数推导的
+// 唯一来源」，而保留期就是这条链上**另一个**决定边界的时间量。它有两个消费方：
+//
+//  1. 回退窗口的上界（flush 的 rewindBoundHours：1h 重算读的是库里的 5m 行，退到没有
+//     5m 行的地方必然什么都算不出来）；
+//  2. 「空小时是**暂时**空还是**永久**空洞」的判定（rollup 的 hourBeyondRetention：
+//     超出保留期的 5m 行已被分区回收，那些小时永远补不回来）。
+//
+// 两处各读一次配置看着无害，但缺省值一旦被复制成两个不同的数（30 / 45），症状是
+// 「回退能退到的下界」与「判定永久空洞的边界」不一致 —— 两边各自都自洽，只有交叉看才
+// 看得出来（与本文件开头那段「宽限必须在两处同源」是同一类问题）。故这**不是**新增事实
+// 来源：配置键与缺省值仍然只有 agent_metrics_partition.go 里那一对常量，
+// 本函数只是把它变成一个可复用的读法。
+func agentHistoryRetentionDays(cfg AgentConfigGetter) int {
+	days := cfg.GetInt(context.Background(),
+		configAgentHistoryRetentionDays, defaultAgentHistoryRetentionDays)
+	if days <= 0 {
+		days = defaultAgentHistoryRetentionDays
+	}
+	return days
+}

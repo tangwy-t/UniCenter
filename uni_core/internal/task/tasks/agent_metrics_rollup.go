@@ -39,11 +39,28 @@ func (t *AgentMetricsRollupTask) Execute(ctx context.Context, params json.RawMes
 	}
 
 	stats, err := t.svc.RollupOnce(ctx)
+	// ─ 关于「job_log」的一处歧义（务必先读这一句）────────────────────────────
+	// 下面这些读数是**结构化 zap 日志字段**（本函数的两条 log.Info/log.Error 里），
+	// **不是** `sys_job_log` 表的列 —— 那张表只有 name/status/耗时/错误串一类的通用列，
+	// 没有 hours* 统计列。于是：
+	//   - 控制台「任务日志」页面**看不到**这些读数（它渲染的是 sys_job_log 的行）；
+	//   - 能取到它们的地方只有结构化日志流本身（按字段检索、采集端、日志面板）。
+	// 要让它们真正入表，需要改实体（加列）+ 迁移 + **写入方**（任务层拿不到仓储，
+	// job_log 的写入在调度器那一侧），属另一个任务（见计划「后续」表里的「统计入表」）。
+	// 在这条注释之前，本文件多处把「进 job_log」当成「进 sys_job_log 表」来写，
+	// 那会让下一个人去控制台找一个永远不存在的东西。
 	fields := []zap.Field{
 		zap.Int("hoursScanned", stats.HoursScanned),
 		zap.Int("hoursWritten", stats.HoursWritten),
 		zap.Int("hoursRepaired", stats.HoursRepaired),
+		// hoursSkipped / hoursReclaimed 是「没有 5m 行、故不写行」的**两种语义**，
+		// 互斥且其和 = 本轮所有空小时数（口径见 service.RollupStats 的字段注释）：
+		//   hoursSkipped   —— 仍在 5m 保留期内（设备离线、flush 滞后）：等一等就可能出现；
+		//   hoursReclaimed —— 已超出保留期（5m 行已被分区回收）：**永远补不回来**。
+		// 合成一个数时（本任务修掉的那一版），「skipped=200」既可能是「马上就好」，
+		// 也可能是「这 200 小时的数据已经永久没了」—— 两种处置完全相反。
 		zap.Int("hoursSkipped", stats.HoursSkipped),
+		zap.Int("hoursReclaimed", stats.HoursReclaimed),
 		// 按需重扫的两个读数：HoursRescanned = 按集合差送去重算的小时数、
 		// HoursBackfilled = 其中真正补出 1h 行的小时数。正常一轮两者都是 0；
 		// 它们非零是「5m 行迟到落库、1h 空洞被补上」的唯一可观测信号
