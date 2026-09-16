@@ -306,6 +306,35 @@ func isWideTable(table string) bool {
 	return table == entity.TableNameMetric5m || table == entity.TableNameMetric1h
 }
 
+// ExistingBucketTimestamps 返回某设备在某张宽表上 `[from,to]` 内**已有行的 bucket_ts**（升序）。
+//
+// 为什么需要这个入口（rollup 的「按需重扫」用它做集合差）：判断「哪些小时有 5m 行、
+// 却缺 1h 行」只需要**时间戳** —— 不需要任何值列，也不需要行数。逐小时问 CountWide 会是
+// 每设备每轮「24 小时 × 2 张表」次查询；读 ReadWideRows 则把 45 列整行搬回来
+// （24 小时 × 12 行 × 45 列，全是为了丢掉）。这里一条 `SELECT bucket_ts` 覆盖整个窗口。
+//
+// 区间是**闭区间** `[from,to]`（与 ReadWideRows / CountWide 的语义一致）。调用方要半开
+// 区间时自己把 `to` 减 1 秒 —— 重扫正是这样排除「仍在宽限期、可能还在收数据」的那个小时的。
+//
+// table 必须是两张宽表之一（_5m / _1h 是「一套结构两处表名」，见 upsertWide 的注释）；
+// 未登记的表格名**硬失败**：拼错表名若静默返回空集合，上游会把「查不到」读成「这个小时
+// 没有 5m 行」—— 那正好是重扫要补的那种空洞，于是缺陷被伪装成「本来就没有数据」。
+func (r *DeviceMetricRepo) ExistingBucketTimestamps(ctx context.Context, table string, deviceID uint64,
+	from, to int64) ([]int64, error) {
+	if !isWideTable(table) {
+		return nil, fmt.Errorf("agentmetrics: %q 不是宽表（选表即选档，必须在 6 张表内）", table)
+	}
+	var out []int64
+	err := r.db.WithContext(ctx).Table(table).
+		Where("device_id = ? AND bucket_ts BETWEEN ? AND ?", deviceID, from, to).
+		Order("bucket_ts ASC").
+		Pluck("bucket_ts", &out).Error
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // CountWide 统计某设备在某时间范围内的宽表行数（回滚时用于判断「5m 行数是否为 12」）。
 func (r *DeviceMetricRepo) CountWide(ctx context.Context, table string, deviceID uint64, from, to int64) (int64, error) {
 	var n int64

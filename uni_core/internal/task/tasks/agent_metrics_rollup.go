@@ -44,6 +44,12 @@ func (t *AgentMetricsRollupTask) Execute(ctx context.Context, params json.RawMes
 		zap.Int("hoursWritten", stats.HoursWritten),
 		zap.Int("hoursRepaired", stats.HoursRepaired),
 		zap.Int("hoursSkipped", stats.HoursSkipped),
+		// 按需重扫的两个读数：HoursRescanned = 按集合差送去重算的小时数、
+		// HoursBackfilled = 其中真正补出 1h 行的小时数。正常一轮两者都是 0；
+		// 它们非零是「5m 行迟到落库、1h 空洞被补上」的唯一可观测信号
+		//（1h 行本身只会多出一行，日志里看不出它是补出来的还是当轮滚出来的）。
+		zap.Int("hoursRescanned", stats.HoursRescanned),
+		zap.Int("hoursBackfilled", stats.HoursBackfilled),
 		zap.Int("errors", stats.Errors),
 	}
 	if err != nil {

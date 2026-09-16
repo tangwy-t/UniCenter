@@ -40,6 +40,11 @@ type RollupMetricRepo interface {
 	ReadWideRows(ctx context.Context, table string, deviceID uint64, from, to int64) ([]entity.DeviceMetricWide, error)
 	// WriteHour UPSERT 一行 1h 宽表行。
 	WriteHour(ctx context.Context, w *entity.DeviceMetricWide) error
+	// ExistingBucketTimestamps 返回某设备在某张宽表上 `[from,to]` 内已有行的 bucket_ts（升序，闭区间）。
+	//
+	// 它是「按需重扫」做集合差的那条读（见 rescanDevice）：只要时间戳，不要值列、
+	// 也不要行数 —— 视图层的理由写在仓储的同名方法注释里（`SELECT bucket_ts` 一条）。
+	ExistingBucketTimestamps(ctx context.Context, table string, deviceID uint64, from, to int64) ([]int64, error)
 }
 
 // ── 统计 ───────────────────────────────────────────────
@@ -47,8 +52,12 @@ type RollupMetricRepo interface {
 // RollupStats 是一轮的统计（任务与测试都读它）。
 type RollupStats struct {
 	// HoursScanned 是本轮被检查的小时数（普通游标区间 + repair 集合），空小时也计入。
+	//
+	// 「按需重扫」（第 3 步）**不**计入这里：它是按「集合差」记账的（见 HoursRescanned），
+	// 窗口里已齐全的小时只被两条集合查询看见、没有任何逐小时的工作。本字段的语义与既有
+	// 断言绑定，不因为多出一条路径而被摊薄。
 	HoursScanned int
-	// HoursWritten 是成功写出 1h 行的小时数（**含** repair 重算写出的那些）。
+	// HoursWritten 是成功写出 1h 行的小时数（**含** repair 重算与重扫补出的那些）。
 	HoursWritten int
 	// HoursRepaired 是本轮从 repair 集合里重算并成功写出的小时数（HoursWritten 的子集）。
 	HoursRepaired int
@@ -56,6 +65,13 @@ type RollupStats struct {
 	// （见 emptyHourGrace）会让水位停在它之前、下一轮重试它；已超出窗口的空小时
 	// 才照常让水位越过（否则一台离线设备会把水位永久卡死）。
 	HoursSkipped int
+	// HoursRescanned 是本轮「按需重扫」**实际送去重算**的小时数 —— 即「有 5m 行却缺 1h 行」
+	// 的差集大小（已与本轮的 repair 集合、普通区间去重）。窗口内**已齐全**的小时不计入：
+	// 它们只被两条集合查询看见，不产生任何重算与写入。
+	HoursRescanned int
+	// HoursBackfilled 是本轮重扫真正**补出** 1h 行的小时数（HoursRescanned 与 HoursWritten
+	// 的子集）。正常的一轮它是 0（集合差为空 = 没有空洞）；只有迟到落库的小时才会让它非零。
+	HoursBackfilled int
 	// Errors 是本轮失败次数（每台失败设备 +1）。
 	Errors int
 }
@@ -111,6 +127,40 @@ const defaultMaxRepairHours = 720
 // 还短，等于没等 —— 默认值之间差了三个数量级，不存在这个风险。
 const defaultEmptyHourGrace = 2 * time.Hour
 
+// configAgentRollupRescanHours 是「按需重扫」窗口小时数的配置键。
+//
+// 为什么做成配置而不是常量：窗口长度是运维取舍（「愿意为迟到数据兜底多久」），
+// 与保留期（sys.agent.historyRetentionDays / metrics1hRetentionDays）、上报间隔一样
+// 属于随部署环境变化的参数。
+//
+// 注意：本键**没有**迁移种子（v011 已存在，新增 v012 会影响其它任务的编号约定）。
+// 缺键时 GetInt 回落 defaultRollupRescanHours —— 与 v008/v009 种子的 sys.agent.* 键
+// 同一用法：配置面板里加一条即可覆盖，不加就是默认 24h。
+const configAgentRollupRescanHours = "sys.agent.rollupRescanHours"
+
+// defaultRollupRescanHours 是重扫窗口的缺省小时数（24 = 一天）。
+//
+// 为什么是 24：① flush 是每 5 分钟一轮、服务重启后从 **24h 前**开始补齐
+// （bootstrapWindow），故「5m 迟到」的正常上界就是一天；② 窗口越大，集合差那两条查询
+// 要读回的时间戳越多（每设备每小时 5m 12 个 + 1h 1 个），24h 是「兜住一整天的迟到」
+// 与「查询代价有界」的折中。
+//
+// 更老的空洞是**明确的能力边界**（有断言钉住，不是 bug）：需要手工回退水位再重放。
+const defaultRollupRescanHours = 24
+
+// rescanWindowHours 返回重扫窗口的小时数（配置缺键/非法值 → 默认 24）。
+//
+// 非法值（<=0）回落默认而不是「关掉重扫」：与 WithMaxRepairHours / WithEmptyHourGrace
+// 同一取向 —— 传 0 最可能的意思是「忘了填」，而静默关掉重扫等于退回「1h 空洞不自愈」
+// 的老缺陷（那正是按需重扫存在的唯一理由）。
+func (s *AgentMetricsRollupService) rescanWindowHours() int {
+	n := s.cfg.GetInt(context.Background(), configAgentRollupRescanHours, defaultRollupRescanHours)
+	if n <= 0 {
+		n = defaultRollupRescanHours
+	}
+	return n
+}
+
 // NewAgentMetricsRollupService 装配回滚服务。
 //
 // raw 是设备枚举源（生产传 `*agentmetrics.RawStore`）；metrics 是 5m 读 + 1h 写的出口
@@ -161,13 +211,18 @@ func (s *AgentMetricsRollupService) WithEmptyHourGrace(d time.Duration) *AgentMe
 	return s
 }
 
-// ErrRollupPartial 表示本轮有设备失败（水位未推进，下轮重试同一批小时）。
+// ErrRollupPartial 表示本轮有设备失败（下轮重试同一批小时）。
+//
+// 水位语义：普通区间/repair 失败 ⇒ 该设备水位留在轮初（下轮重算同一批小时）；
+// **只有按需重扫失败**时水位已经按普通区间的结果前移了 —— 重扫排在乐观 CAS 之后、
+// 不参与水位判定，而它没补上的那些小时会被下一轮的集合差重新发现（重试语义不变）。
 var ErrRollupPartial = errors.New("agentmetrics rollup: 本轮部分回滚失败")
 
-// RollupOnce 跑一轮：枚举设备 → 逐设备回滚已闭小时 → 重算 repair 集合里的小时。
+// RollupOnce 跑一轮：枚举设备 → 逐设备回滚已闭小时 → 重算 repair 集合里的小时 → 按需重扫补空洞。
 //
 // 返回的 error 是「本轮有失败」的汇总（sentinel：ErrRollupPartial），用于让任务层
-// 记日志/告警；**游标语义不受它影响** —— 失败设备的水位留在原处，下轮重试同一批小时。
+// 记日志/告警；**游标语义不受它影响** —— 失败设备的水位留在原处（唯一的例外是「只有按需重扫
+// 失败」：它排在普通区间的乐观 CAS **之后**，水位已经按普通区间前移；见 rollupDevice 的第 3 步）。
 func (s *AgentMetricsRollupService) RollupOnce(ctx context.Context) (RollupStats, error) {
 	var stats RollupStats
 
@@ -184,6 +239,8 @@ func (s *AgentMetricsRollupService) RollupOnce(ctx context.Context) (RollupStats
 		stats.HoursWritten += part.HoursWritten
 		stats.HoursRepaired += part.HoursRepaired
 		stats.HoursSkipped += part.HoursSkipped
+		stats.HoursRescanned += part.HoursRescanned
+		stats.HoursBackfilled += part.HoursBackfilled
 		if derr != nil {
 			failures++
 			stats.Errors++
@@ -192,7 +249,8 @@ func (s *AgentMetricsRollupService) RollupOnce(ctx context.Context) (RollupStats
 		}
 	}
 	if failures > 0 {
-		return stats, fmt.Errorf("%w: %d/%d 台设备回滚失败（水位未推进，下轮重试）",
+		return stats, fmt.Errorf("%w: %d/%d 台设备回滚失败（普通区间与 repair 失败的水位未推进，下轮重试；"+
+			"重扫失败的已按普通区间前移水位，但那个空洞会在下一轮被集合差重新发现）",
 			ErrRollupPartial, failures, len(devices))
 	}
 	return stats, nil
@@ -200,12 +258,13 @@ func (s *AgentMetricsRollupService) RollupOnce(ctx context.Context) (RollupStats
 
 // ─ 单设备 ─────────────────────────────────────────────
 
-// rollupDevice 处理单台设备：先重算 repair 集合里的已闭小时，再走普通游标区间。
+// rollupDevice 处理单台设备：先重算 repair 集合里的已闭小时，再走普通游标区间，最后按需重扫。
 //
-// 两个区间（与计划 Step 3 一致）：
+// 三个区间：
 //
 //	普通区间 = [cursor + 3600, upper)   —— cursor 是「已成功回滚到（含）」的小时
 //	repair   = 集合里 < upper 的小时    —— 它们的起点在游标**之前**，普通区间永远不会再碰它们
+//	重扫     = [alignDown(now,3600) − rescanHours×3600, upper) —— 见第 3 步（只补行，不碰水位）
 //
 // **水位只在「本轮所有（普通区间内的）小时都成功」后才前移**：任一步失败 → 水位留在
 // 轮初的值，下轮从同一个小时重来；因此一旦出错就立即返回、绝不继续往后写（继续写只会让
@@ -214,6 +273,8 @@ func (s *AgentMetricsRollupService) RollupOnce(ctx context.Context) (RollupStats
 //     （它的 5m 行可能只是迟到，越过它就等于制造 1h 表的永久空洞）；
 //   - 已超出等待窗口 → 视为确实没有数据（设备离线等），照常让水位越过它，
 //     否则一台离线设备会把水位永久卡死在第一个空小时上。
+//
+// 唯一不参与水位判定的失败是第 3 步（按需重扫，排在乐观 CAS 之后）。
 func (s *AgentMetricsRollupService) rollupDevice(ctx context.Context, deviceID uint64,
 	upper int64) (RollupStats, error) {
 
@@ -225,6 +286,11 @@ func (s *AgentMetricsRollupService) rollupDevice(ctx context.Context, deviceID u
 		return stats, err
 	}
 
+	// already 记「本轮已经算过的小时」（repair 集合 ∪ 普通区间）：第 3 步按集合差挑出待补的
+	// 小时后先用它去重 —— 同一小时一轮只写一次（写虽是幂等 UPSERT，但重复写是白费的代价，
+	// 也会让 HoursWritten / HoursRescanned 的计数失真）。
+	already := make(map[int64]bool)
+
 	// 1) repair 优先：这些小时的水位已经在游标之前，不主动重算就永远不会被更新。
 	//
 	// 空小时的等待窗口（emptyHourGrace）在这里**不适用**：repair 里的小时都在游标之前，
@@ -235,6 +301,7 @@ func (s *AgentMetricsRollupService) rollupDevice(ctx context.Context, deviceID u
 		return stats, err
 	}
 	for _, h := range repairs {
+		already[h] = true
 		stats.HoursScanned++
 		written, skipped, herr := s.rollupHour(ctx, deviceID, h, true)
 		if herr != nil {
@@ -264,6 +331,7 @@ func (s *AgentMetricsRollupService) rollupDevice(ctx context.Context, deviceID u
 	last := cursor
 	blockedAt := int64(-1) // 本轮第一个被扣住的小时（-1 = 没有）
 	for h := cursor + hourSec; h < upper; h += hourSec {
+		already[h] = true
 		stats.HoursScanned++
 		written, skipped, herr := s.rollupHour(ctx, deviceID, h, false)
 		if herr != nil {
@@ -302,6 +370,29 @@ func (s *AgentMetricsRollupService) rollupDevice(ctx context.Context, deviceID u
 		if err := s.writeCursor(ctx, deviceID, cursor, last); err != nil {
 			return stats, err
 		}
+	}
+
+	// 3) 按需重扫：把**迟到落库**的 5m 行补成 1h 行（只补行，不碰水位）。
+	//
+	// 为什么排在**水位 CAS 之后**：硬约束是「重扫只补行，水位由普通区间与 repair 管」。
+	// CAS 在前意味着水位是**普通区间结果的纯函数** —— 重扫无论成功、失败、还是什么都没补，
+	// 都不可能让它动一格。（若排在 CAS 之前，重扫失败会让本该前移的水位停住，水位就又变成
+	// 三条路径共同决定的量了。）
+	//
+	// 代价（刻意接受、且已写入 ErrRollupPartial 的注释与文案）：只有重扫失败时，本轮会以
+	// ErrRollupPartial 上报，而水位已按普通区间前移 —— 重扫只补历史空洞，不影响「已回滚到
+	// 哪个小时」的记账；它没补上的小时会被下一轮的集合差重新发现。
+	rescanned, backfilled, rerr := s.rescanDevice(ctx, deviceID, upper, already)
+	stats.HoursRescanned += rescanned
+	stats.HoursBackfilled += backfilled
+	stats.HoursWritten += backfilled
+	if rescanned > 0 {
+		s.log.Debug("agentmetrics rollup: 按需重扫发现迟到落库的 1h 空洞",
+			zap.Uint64("deviceId", deviceID), zap.Int("hoursRescanned", rescanned),
+			zap.Int("hoursBackfilled", backfilled))
+	}
+	if rerr != nil {
+		return stats, rerr
 	}
 	return stats, nil
 }
@@ -398,6 +489,114 @@ func (s *AgentMetricsRollupService) rollupHour(ctx context.Context, deviceID uin
 		}
 	}
 	return true, false, nil
+}
+
+// ─ 按需重扫（让 1h 空洞自愈）────────────────────────────
+
+// rescanDevice 是「按需重扫」：把**迟到落库**的 5m 行补成 1h 行。只补行，**绝不碰水位**。
+//
+// 为什么必须有它（这是本方法存在的全部理由）：普通区间对「当时一行 5m 都没有」的小时是
+// 「在 emptyHourGrace 内等，等不到就**越过它**」—— 那一步是必要的（否则一台离线设备会把
+// 水位永久卡死在第一个空小时上）。可那些 5m 行**可能后来才落库**（flush 因故停顿数小时后
+// 补上、积压的原始点首轮才落库，都晚于 2 小时的等待窗口）：普通区间的下界恒为
+// `cursor+3600`，永远不会回头看它；repair 集合也兜不住它（repair 只装「写出过残缺行」的
+// 小时）。于是那个小时在 1h 表里**永久缺失** —— 而 >30 天的窗口**只有 1h 表可查**，
+// 那段时间在控制台上就是一片静默的空洞。
+//
+// 为什么用「集合差」而不是「无脑重扫窗口里的 K 个小时」：无脑重扫每轮对每设备写 K 个
+// 1h 行（500 台 × 24 小时 = **12000 次 UPSERT / 5 分钟**，全是把已经正确的值原样写回去），
+// 而集合差只要**两次读**（_5m 与 _1h 各一条 `SELECT bucket_ts`），且只为**真正缺失**的小时
+// 写 —— 完全正常的一轮是 0 次写。
+//
+// 窗口 = `[alignDown(now,3600) − rescanHours×3600, alignDown(now,3600))`（rescanHours 见
+// configAgentRollupRescanHours，默认 24）：上界就是**当前正在填充的那个小时**，它不在窗口里。
+// 「只补**已闭合**的小时」这件事由 missingHours 的 `h >= upper` 过滤保证 —— 那里是**唯一**的
+// 守卫（纯函数、有单测、端到端也有断言）：在「当前小时的头 CloseGrace 秒」里
+// alignDown(now,3600) 会比 upper 大 1 小时，那 1 个小时正是靠那条过滤挡掉的；否则重扫会为
+// 仍在宽限期、随时可能再收到数据的小时写出一个残缺的 1h 行。
+//
+// 返回 (实际送去重算的小时数, 其中补出 1h 行的小时数, 错误)。
+func (s *AgentMetricsRollupService) rescanDevice(ctx context.Context, deviceID uint64,
+	upper int64, already map[int64]bool) (rescanned, backfilled int, err error) {
+
+	if upper <= 0 {
+		return 0, 0, nil
+	}
+	hourSec := resolutionSeconds(agentmetrics.Resolution1h)
+	from := alignDown(s.now().Unix(), hourSec) - int64(s.rescanWindowHours())*hourSec
+	// 仓储是**闭区间** [from,to]，故 to 取「窗口上界 − 1」把半开区间 [from, alignDown(now,3600))
+	// 还原出来（少减这 1 秒会把正好落在上界的那一批行也读回来）。
+	to := alignDown(s.now().Unix(), hourSec) - 1
+	if to < from {
+		return 0, 0, nil
+	}
+
+	// 两条集合查询（不 COUNT(*)、不读整行）：一边是「有 5m 行的小时」，一边是「已有 1h 行的小时」。
+	fiveMin, err := s.metrics.ExistingBucketTimestamps(ctx, entity.TableNameMetric5m, deviceID, from, to)
+	if err != nil {
+		return 0, 0, fmt.Errorf("重扫读 5m 桶集合 device=%d: %w", deviceID, err)
+	}
+	if len(fiveMin) == 0 {
+		// 窗口里一条 5m 行都没有 → 差集必然为空：省掉第二条查询。
+		// 真离线/新设备（没有任何 5m 行）走的就是这条早退，每轮代价只有一次索引区间扫描。
+		return 0, 0, nil
+	}
+	oneHour, err := s.metrics.ExistingBucketTimestamps(ctx, entity.TableNameMetric1h, deviceID, from, to)
+	if err != nil {
+		return 0, 0, fmt.Errorf("重扫读 1h 桶集合 device=%d: %w", deviceID, err)
+	}
+
+	for _, h := range missingHours(fiveMin, oneHour, upper, already) {
+		rescanned++
+		// fromRepair=false：这些小时**不在** repair 集合里（在的话第 1 步已经算过、已被 already
+		// 排除）。传 false 让 rollupHour 不去动集合 —— 重扫只补行，repair 集合的增删仍只由
+		// 「写侧发现残缺」与「repair 侧重算」决定。
+		written, skipped, herr := s.rollupHour(ctx, deviceID, h, false)
+		if herr != nil {
+			return rescanned, backfilled, fmt.Errorf("重扫补 1h 行 device=%d hour=%d: %w", deviceID, h, herr)
+		}
+		switch {
+		case written:
+			backfilled++
+		case skipped:
+			// 差集说这个小时有 5m 行，rollupHour 却读回空：只可能是两次读之间那批行被删了
+			// （分区保留期回收、设备被清理）。这不是错误 —— 下一轮的集合差自然不再包含它。
+			s.log.Debug("agentmetrics rollup: 重扫的小时按集合差应有 5m 行，读回却是空（可能是保留期回收）",
+				zap.Uint64("deviceId", deviceID), zap.Int64("hour", h))
+		}
+	}
+	return rescanned, backfilled, nil
+}
+
+// missingHours 返回「有 5m 行、却没有 1h 行」的小时（升序）—— 重扫的**差集**。
+//
+// 做成未导出的纯函数：它把「该怎么算缺失」这件事从 I/O 里摘出来，四条过滤规则因此
+// 可以被逐条钉住（而不是只能靠一个端到端场景间接覆盖）。
+//   - `alignDown(ts, 3600)`：5m 行的 bucket_ts 是 300 的倍数，必须落到小时上；
+//     1h 行本就是小时起点，对齐是无害的归一（两张表共用同一段区间查询）。
+//   - `h >= upper` 丢弃：只补**已闭合**的小时（与普通区间/repair 同一口径）。这是
+//     「不碰未闭合小时」的**唯一**守卫（窗口上界是 alignDown(now,3600)，在「当前小时的头
+//     CloseGrace 秒」里它比 upper 大 1 小时），故它必须留在本函数里、不依赖调用方的区间算术。
+//   - `already[h]` 丢弃：本轮已经算过的小时（repair 集合 ∪ 普通区间）绝不重复写。
+//   - `seen[h]`：同一小时的多行 5m 只产出一个小时（差集是**小时的集合**，不是行集合）。
+func missingHours(fiveMin, oneHour []int64, upper int64, already map[int64]bool) []int64 {
+	hourSec := resolutionSeconds(agentmetrics.Resolution1h)
+	have := make(map[int64]bool, len(oneHour))
+	for _, ts := range oneHour {
+		have[alignDown(ts, hourSec)] = true
+	}
+	seen := make(map[int64]bool, len(fiveMin))
+	out := make([]int64, 0, len(fiveMin))
+	for _, ts := range fiveMin {
+		h := alignDown(ts, hourSec)
+		if h >= upper || seen[h] || have[h] || already[h] {
+			continue
+		}
+		seen[h] = true
+		out = append(out, h)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
 }
 
 // ─ repair 集合 ───────────────────────────────────────

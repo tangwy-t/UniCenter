@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"slices"
 	"sort"
 	"strconv"
 	"testing"
@@ -70,6 +71,13 @@ type fakeHourWriter struct {
 func (f *fakeHourWriter) ReadWideRows(ctx context.Context, table string, deviceID uint64,
 	from, to int64) ([]entity.DeviceMetricWide, error) {
 	return f.inner.ReadWideRows(ctx, table, deviceID, from, to)
+}
+
+// ExistingBucketTimestamps 必须照样委托：重扫（第 3 步）用的是这条读，
+// 替身若把它截住，重扫会静默看到「窗口里没有 5m 行」而永远不补 —— 正是要防的那种失效。
+func (f *fakeHourWriter) ExistingBucketTimestamps(ctx context.Context, table string, deviceID uint64,
+	from, to int64) ([]int64, error) {
+	return f.inner.ExistingBucketTimestamps(ctx, table, deviceID, from, to)
 }
 
 func (f *fakeHourWriter) WriteHour(ctx context.Context, w *entity.DeviceMetricWide) error {
@@ -216,6 +224,15 @@ func (f *rollupFixture) seed5m(t *testing.T, rows ...fiveMin) {
 func (f *rollupFixture) drop5mRange(t *testing.T, from, to int64) {
 	t.Helper()
 	if err := f.db.Exec("DELETE FROM "+entity.TableNameMetric5m+
+		" WHERE device_id = ? AND bucket_ts BETWEEN ? AND ?", rollupDevID, from, to).Error; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// drop1hRange 删掉某段 1h 行：用于制造「有 5m 行、却缺 1h 行」的状态（重扫正是为它存在）。
+func (f *rollupFixture) drop1hRange(t *testing.T, from, to int64) {
+	t.Helper()
+	if err := f.db.Exec("DELETE FROM "+entity.TableNameMetric1h+
 		" WHERE device_id = ? AND bucket_ts BETWEEN ? AND ?", rollupDevID, from, to).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -951,5 +968,484 @@ func TestRollupDeviceEnumerationErrorIsReturned(t *testing.T) {
 	}
 	if stats.HoursScanned != 0 {
 		t.Fatalf("stats = %+v, want 零值", stats)
+	}
+}
+
+// ── Task 2：按需重扫（迟到落库的 5m 行补出 1h 空洞）──────────────
+
+// rollupCfg 是**按配置键回值**的配置替身。
+//
+// 为什么不复用 flush 测试的 fakeConfig：它对任何键都回 reportSec（10），于是
+// `sys.agent.rollupRescanHours` 会读成 10 —— 本任务要断言的是**窗口边界**（几个小时
+// 之前的小时补、再老的不补），窗口长度必须由测试显式给定；而 fakeConfig 是 flush 的夹具，
+// 不该为了 rollup 的断言去改它。
+type rollupCfg struct {
+	// rescanHours = 0 表示**缺键**（回落到调用方给的默认值，模拟「配置面板里没加这条」）。
+	rescanHours int
+}
+
+func (c rollupCfg) GetString(_ context.Context, _ string, def string) string { return def }
+
+func (c rollupCfg) GetInt(_ context.Context, key string, def int) int {
+	switch key {
+	case configAgentRollupRescanHours:
+		if c.rescanHours == 0 {
+			return def
+		}
+		return c.rescanHours
+	case configAgentReportInterval:
+		return rollupReportSec
+	default:
+		return def
+	}
+}
+
+// withRescanHours 把 fixture 的服务换成「重扫窗口 = n 小时」的那一份（其余装配逐字相同）。
+func (f *rollupFixture) withRescanHours(n int) *rollupFixture {
+	var metrics RollupMetricRepo = f.repo
+	if f.writer != nil {
+		metrics = f.writer
+	}
+	f.svc = NewAgentMetricsRollupService(metrics, fakeDeviceSource{ids: []uint64{rollupDevID}},
+		rollupCfg{rescanHours: n}, f.log).
+		WithCursorStore(f.rdb).
+		WithClock(f.clock.now)
+	return f
+}
+
+// bucketSetFailer 让**重扫的集合读**失败，其余读写走真仓储（普通区间照常成功）。
+type bucketSetFailer struct {
+	RollupMetricRepo
+	err error
+}
+
+func (b bucketSetFailer) ExistingBucketTimestamps(context.Context, string, uint64, int64, int64) ([]int64, error) {
+	return nil, b.err
+}
+
+// TestRollupMissingHoursSetDifference 逐条钉住重扫「集合差」的规则（纯函数，无 I/O）：
+// 只有「有 5m 行却没有 1h 行」的小时被选出、升序、同小时的多行只算一个小时、
+// 未闭合的小时不选、**本轮已算过的小时（repair ∪ 普通区间）不选**。
+func TestRollupMissingHoursSetDifference(t *testing.T) {
+	hour := rollupBaseTS
+	upper := hour + 10*rollupHourSec
+
+	fiveMin := []int64{hour + 300, hour, hour + 3300, hour + rollupHourSec, hour + rollupHourSec + 300, hour + 2*rollupHourSec}
+	oneHour := []int64{hour}
+
+	got := missingHours(fiveMin, oneHour, upper, nil)
+	want := []int64{hour + rollupHourSec, hour + 2*rollupHourSec}
+	if !slices.Equal(got, want) {
+		t.Fatalf("missingHours = %v, want %v（有 5m 无 1h 的小时：升序、同小时去重）", got, want)
+	}
+
+	// ① 本轮已算过的小时（repair 集合 ∪ 普通区间）必须被排除 —— 同一小时一轮只写一次。
+	got = missingHours(fiveMin, oneHour, upper, map[int64]bool{hour + rollupHourSec: true})
+	if !slices.Equal(got, []int64{hour + 2*rollupHourSec}) {
+		t.Fatalf("missingHours(已算过 %d) = %v, want [%d]（去重：同一小时只写一次）",
+			hour+rollupHourSec, got, hour+2*rollupHourSec)
+	}
+
+	// ② 未闭合的小时（h >= upper）不选：重扫绝不碰尚未闭合、可能还在收数据的小时。
+	// （upper 取 h+2h：此时 h 已有 1h 行、h+3600 已闭合且缺失、h+2h 尚未闭合。）
+	closed := missingHours(fiveMin, oneHour, hour+2*rollupHourSec, nil)
+	if !slices.Equal(closed, []int64{hour + rollupHourSec}) {
+		t.Fatalf("missingHours(upper=%d) = %v, want [%d]（只补已闭合的小时）",
+			hour+2*rollupHourSec, closed, hour+rollupHourSec)
+	}
+
+	// ③ 边界与空输入
+	if out := missingHours(nil, nil, upper, nil); len(out) != 0 {
+		t.Fatalf("无 5m 行时 missingHours = %v, want 空（没有 5m 行就不可能有缺失的 1h 行）", out)
+	}
+	if out := missingHours([]int64{hour + 60}, []int64{hour}, upper, nil); len(out) != 0 {
+		t.Fatalf("该小时已有 1h 行时 missingHours = %v, want 空", out)
+	}
+}
+
+// TestRollupRescanHoursConfigFallback 钉住重扫窗口的配置键与缺省值：
+// 键名是契约字面量、缺省 24，且非法值（0/负数）**回落默认**而不是静默关掉重扫
+// （关掉就等于退回 Plan 2D 遗留的「1h 空洞不自愈」）。
+func TestRollupRescanHoursConfigFallback(t *testing.T) {
+	if configAgentRollupRescanHours != "sys.agent.rollupRescanHours" {
+		t.Fatalf("配置键 = %q, want sys.agent.rollupRescanHours", configAgentRollupRescanHours)
+	}
+	if defaultRollupRescanHours != 24 {
+		t.Fatalf("defaultRollupRescanHours = %d, want 24（计划给定）", defaultRollupRescanHours)
+	}
+	svc := NewAgentMetricsRollupService(nil, nil, rollupCfg{}, nil)
+	// 缺键（配置面板里没有这条）→ 默认 24。
+	if got := svc.rescanWindowHours(); got != defaultRollupRescanHours {
+		t.Fatalf("缺键时重扫窗口 = %d, want %d", got, defaultRollupRescanHours)
+	}
+	// 非法值（<=0，含被误改成负数）→ 同样回落默认，而不是静默把重扫关掉
+	// （显式配成 "0" 在效果上等同于缺键：两种都落在同一处默认值上，由 `n <= 0` 兜住）。
+	for _, bad := range []int{-1, -3} {
+		neg := NewAgentMetricsRollupService(nil, nil, rollupCfg{rescanHours: bad}, nil)
+		if got := neg.rescanWindowHours(); got != defaultRollupRescanHours {
+			t.Fatalf("配置为 %d 时重扫窗口 = %d, want 默认 %d（非法值不得静默关掉重扫）",
+				bad, got, defaultRollupRescanHours)
+		}
+	}
+	// 显式配置生效
+	on := NewAgentMetricsRollupService(nil, nil, rollupCfg{rescanHours: 6}, nil)
+	if got := on.rescanWindowHours(); got != 6 {
+		t.Fatalf("配置为 6 时重扫窗口 = %d, want 6", got)
+	}
+}
+
+// TestRollupRescanBackfillsLateHourAfterCursorPassed 是**本任务的核心断言**：
+// 一个「当时一行 5m 都没有」的小时——水位已经越过它（超出 emptyHourGrace）——
+// 在它的 5m 行**迟到落库**之后，下一轮必须把它补成 1h 行；且这条路径不推进水位、幂等。
+//
+// 为什么修前必须红：普通区间的下界恒为 `cursor+3600`，永远不会回头看它；repair 集合也
+// 不含它（repair 只装「写出过残缺行」的小时）。那个小时因此在 1h 表里永久缺失，
+// 而 >30 天的窗口只有 1h 表可查。
+func TestRollupRescanBackfillsLateHourAfterCursorPassed(t *testing.T) {
+	now := rollupBaseTS + 6*rollupHourSec + 60 // upper = base+6h
+	f := newRollupFixture(t, now, true, 0)     // spy：数清这一轮到底写了几行
+	f.withRescanHours(12)
+
+	// 一开始只有 base 有 5m 行：base+1h / base+2h 当时都空 → 水位越过它们（设备离线一小时）
+	f.seed5m(t, fullHourRows(rollupBaseTS, func(int) fiveMin {
+		return fiveMin{samples: 30, cpu: 20}
+	})...)
+	if _, err := f.svc.RollupOnce(context.Background()); err != nil {
+		t.Fatalf("RollupOnce(1): %v", err)
+	}
+	const lateHour = rollupBaseTS + 2*rollupHourSec
+	cur1, ok := f.cursor(t)
+	if !ok || cur1 < lateHour {
+		t.Fatalf("前置不成立：水位 = %d(ok=%v) 尚未越过 %d（水位没越过去就测不到「迟到」这件事）",
+			cur1, ok, lateHour)
+	}
+	if f.hourRow(t, lateHour) != nil {
+		t.Fatal("前置不成立：lateHour 此刻不该有 1h 行")
+	}
+
+	// 迟到落库：lateHour 的 12 行 5m 行在等待窗口**之后**才到（flush 停顿数小时后补上）
+	f.seed5m(t, fullHourRows(lateHour, func(int) fiveMin {
+		return fiveMin{samples: 30, cpu: 42}
+	})...)
+	f.writer.calls = 0
+	stats2, err := f.svc.RollupOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RollupOnce(2): %v", err)
+	}
+	row := f.hourRow(t, lateHour)
+	if row == nil {
+		t.Fatal("迟到落库的 5m 行没有补出 1h 行：正是本修复要闭合的永久空洞" +
+			"（>30 天的窗口只有 1h 表可查）")
+	}
+	if row.Samples != 360 || row.CPUUsedPercent == nil || *row.CPUUsedPercent != 42 {
+		t.Fatalf("补出来的 1h 行 = samples %d / cpu %v, want 360 / 42（口径不变：按 samples 加权）",
+			row.Samples, row.CPUUsedPercent)
+	}
+	if stats2.HoursRescanned != 1 || stats2.HoursBackfilled != 1 || stats2.HoursWritten != 1 {
+		t.Fatalf("stats(2) = %+v, want 1 rescanned / 1 backfilled / 1 written", stats2)
+	}
+	if f.writer.calls != 1 {
+		t.Fatalf("本轮 WriteHour 调用 = %d, want 1（只为那个缺失的小时写一次）", f.writer.calls)
+	}
+	// 不推进水位：重扫只补行，水位由普通区间与 repair 管（本轮普通区间里的小时都是空且仍在等待窗口内）
+	if cur2, _ := f.cursor(t); cur2 != cur1 {
+		t.Fatalf("cursor_1h = %d, want %d（重扫不得改动水位）", cur2, cur1)
+	}
+
+	// 幂等：第三轮按集合差算出「无缺失」→ 一次写都不产生、1h 行数不变
+	f.writer.calls = 0
+	stats3, err := f.svc.RollupOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RollupOnce(3): %v", err)
+	}
+	if stats3.HoursRescanned != 0 || stats3.HoursBackfilled != 0 {
+		t.Fatalf("stats(3) = %+v, want 0 rescanned / 0 backfilled（补齐后集合差为空）", stats3)
+	}
+	if f.writer.calls != 0 {
+		t.Fatalf("补齐之后的轮次不得再写：WriteHour 调用 = %d, want 0（幂等）", f.writer.calls)
+	}
+	if n := f.count1h(t); n != 2 {
+		t.Fatalf("1h 行数 = %d, want 2（base + lateHour）", n)
+	}
+}
+
+// TestRollupRescanOnlyWritesMissingHours 钉住**代价有界**（本任务的选型理由）：
+// 一轮里已齐全的小时**不得**被重写，WriteHour 的调用次数必须恰好等于缺失的小时数。
+//
+// 反向对照是「无脑重扫窗口里的 K 个小时」：那会在本轮把 base / base+2h 两个已正确的小时
+// 原样重写一遍（3 次写而不是 1 次），并把这条断言打红。
+func TestRollupRescanOnlyWritesMissingHours(t *testing.T) {
+	now := rollupBaseTS + 6*rollupHourSec + 60
+	f := newRollupFixture(t, now, true, 0)
+	f.withRescanHours(12)
+
+	// base 与 base+2h 是**完整**小时；base+1h 当时一行 5m 都没有（水位越过它）
+	f.seed5m(t, fullHourRows(rollupBaseTS, func(int) fiveMin {
+		return fiveMin{samples: 30, cpu: 10}
+	})...)
+	f.seed5m(t, fullHourRows(rollupBaseTS+2*rollupHourSec, func(int) fiveMin {
+		return fiveMin{samples: 30, cpu: 30}
+	})...)
+	stats1, err := f.svc.RollupOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RollupOnce(1): %v", err)
+	}
+	const lateHour = rollupBaseTS + rollupHourSec
+	if stats1.HoursWritten != 2 || stats1.HoursBackfilled != 0 {
+		t.Fatalf("stats(1) = %+v, want 2 written / 0 backfilled（已齐全的一轮：重扫一次写都没有）", stats1)
+	}
+	if f.writer.calls != 2 {
+		t.Fatalf("stats(1) 轮 WriteHour 调用 = %d, want 2：正常一轮不得有任何多余的写", f.writer.calls)
+	}
+	if f.hourRow(t, lateHour) != nil {
+		t.Fatal("前置不成立：lateHour 此刻不该有 1h 行")
+	}
+
+	// 迟到落库：只有 lateHour 是缺失的
+	f.seed5m(t, fullHourRows(lateHour, func(int) fiveMin {
+		return fiveMin{samples: 30, cpu: 20}
+	})...)
+	f.writer.calls = 0
+	stats2, err := f.svc.RollupOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RollupOnce(2): %v", err)
+	}
+	if f.writer.calls != 1 {
+		t.Fatalf("WriteHour 调用 = %d, want 1 —— 只为**真正缺失**的小时写；"+
+			"已齐全的小时（base / base+2h）不得被重写", f.writer.calls)
+	}
+	if stats2.HoursRescanned != 1 || stats2.HoursBackfilled != 1 {
+		t.Fatalf("stats(2) = %+v, want 1 rescanned / 1 backfilled", stats2)
+	}
+	row := f.hourRow(t, lateHour)
+	if row == nil || row.Samples != 360 || row.CPUUsedPercent == nil || *row.CPUUsedPercent != 20 {
+		t.Fatalf("补齐的 1h 行 = %+v, want samples 360 / cpu 20", row)
+	}
+	// 已齐全的两个小时仍是**原值**（没有被重算扰动）
+	for _, c := range []struct {
+		hour int64
+		cpu  float64
+	}{{rollupBaseTS, 10}, {rollupBaseTS + 2*rollupHourSec, 30}} {
+		got := f.hourRow(t, c.hour)
+		if got == nil || got.CPUUsedPercent == nil || *got.CPUUsedPercent != c.cpu {
+			t.Fatalf("小时 %d 的 1h 行 = %+v, want cpu %v（已齐全的小时不得被重写）", c.hour, got, c.cpu)
+		}
+	}
+}
+
+// TestRollupRescanWindowBoundary 钉住重扫窗口的**边界**（这是明确的能力边界，不是 bug）：
+// 窗口 `[alignDown(now,3600) − rescanHours×3600, upper)` 内缺失的小时补、
+// 窗口外（更老）的不补、当前正在填充的小时**绝不**碰；且重扫不改动水位。
+func TestRollupRescanWindowBoundary(t *testing.T) {
+	now := rollupBaseTS + 8*rollupHourSec + 60 // alignDown(now) = base+8h，upper = base+8h
+	f := newRollupFixture(t, now, false, 0)
+	f.withRescanHours(4) // 窗口 = [base+4h, base+8h)
+	// 水位显式放到 base+7h：普通区间退化为空区间，本轮唯一的写入只可能来自重扫。
+	f.setCursor(t, rollupBaseTS+7*rollupHourSec)
+
+	const (
+		tooOld  = rollupBaseTS + 3*rollupHourSec // 窗口**之外**（更老 1 小时）
+		oldest  = rollupBaseTS + 4*rollupHourSec // 恰在窗口下界（含）
+		mid     = rollupBaseTS + 5*rollupHourSec // 窗口内
+		current = rollupBaseTS + 8*rollupHourSec // 当前正在填充的小时（窗口上界之外）
+	)
+	seed := func(hour int64, cpu float64) {
+		f.seed5m(t, fullHourRows(hour, func(int) fiveMin {
+			return fiveMin{samples: 30, cpu: cpu}
+		})...)
+	}
+	seed(tooOld, 31)
+	seed(oldest, 41)
+	seed(mid, 51)
+	seed(current, 61)
+
+	stats, err := f.svc.RollupOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RollupOnce: %v", err)
+	}
+	if stats.HoursScanned != 0 {
+		t.Fatalf("stats = %+v, want 0 scanned（水位已在 base+7h，普通区间为空）", stats)
+	}
+	if stats.HoursRescanned != 2 || stats.HoursBackfilled != 2 {
+		t.Fatalf("stats = %+v, want 2 rescanned / 2 backfilled（窗口内两个缺失小时）", stats)
+	}
+	for _, c := range []struct {
+		hour int64
+		cpu  float64
+	}{{oldest, 41}, {mid, 51}} {
+		row := f.hourRow(t, c.hour)
+		if row == nil {
+			t.Fatalf("小时 %d 在窗口内且缺 1h 行，必须被补出来", c.hour)
+		}
+		if row.Samples != 360 || row.CPUUsedPercent == nil || *row.CPUUsedPercent != c.cpu {
+			t.Fatalf("小时 %d 的 1h 行 = samples %d / cpu %v, want 360 / %v", c.hour, row.Samples, row.CPUUsedPercent, c.cpu)
+		}
+	}
+	if f.hourRow(t, tooOld) != nil {
+		t.Fatal("超出 rollupRescanHours 的更老小时不得被重扫：这是**明确的能力边界**" +
+			"（更老的空洞需手工回退水位再重放），必须被钉住而不是被当成 bug")
+	}
+	if f.hourRow(t, current) != nil {
+		t.Fatal("当前正在填充的小时不得被重扫（窗口不含它；写了就会把还在收数据的小时落成权威值）")
+	}
+	if cur, _ := f.cursor(t); cur != rollupBaseTS+7*rollupHourSec {
+		t.Fatalf("cursor_1h = %d, want %d（重扫不得改动水位）", cur, rollupBaseTS+7*rollupHourSec)
+	}
+
+	// ── (b) 闭合边界：h == upper（刚结束、仍在 CloseGrace 内）的小时**不得**被重扫。
+	// 计划把窗口写成 [alignDown(now,3600) − K×3600, alignDown(now,3600))，而两者只在
+	// 「当前小时的头 CloseGrace 秒」里不同：那时 alignDown(now,3600) 会把一个**刚结束、
+	// 随时可能再收到数据**的小时纳进来，重扫就会为它写出一个可能残缺的 1h 行 ——
+	// 而 CloseGrace 的纪律恰恰是「还在收数据的小时不得被写成权威值」
+	// （见 TestRollupCloseGraceSkipsStillOpenHour）。这一条把该边界端到端钉死：
+	// 未闭合的小时不补、已闭合且缺失的照补。
+	f2 := newRollupFixture(t, rollupBaseTS+8*rollupHourSec+10, false, 0) // 进入小时 10s（CloseGrace = 20s）
+	f2.withRescanHours(4)
+	f2.setCursor(t, rollupBaseTS+7*rollupHourSec) // 普通区间为空：断言只看重扫
+	const (
+		inGrace = rollupBaseTS + 7*rollupHourSec // == upper：刚结束 10s，仍在宽限期内
+		closed  = rollupBaseTS + 5*rollupHourSec // 已闭合且缺 1h 行 → 必须补（证明重扫确实跑了）
+	)
+	seedB := func(hour int64, cpu float64) {
+		f2.seed5m(t, fullHourRows(hour, func(int) fiveMin {
+			return fiveMin{samples: 30, cpu: cpu}
+		})...)
+	}
+	seedB(inGrace, 71)
+	seedB(closed, 81)
+	stats2, err := f2.svc.RollupOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RollupOnce(宽限期内的小时): %v", err)
+	}
+	if f2.hourRow(t, closed) == nil {
+		t.Fatal("已闭合且缺 1h 行的小时在窗口内，必须被补出来（证明重扫真的跑了）")
+	}
+	if f2.hourRow(t, inGrace) != nil {
+		t.Fatal("h == upper（刚结束、仍在 CloseGrace 内）的小时不得被重扫：" +
+			"只补**已闭合**的小时，否则会把还在收数据的小时落成权威值")
+	}
+	if stats2.HoursRescanned != 1 || stats2.HoursBackfilled != 1 {
+		t.Fatalf("stats = %+v, want 1 rescanned / 1 backfilled（只剩已闭合的那个缺失小时）", stats2)
+	}
+	if cur, _ := f2.cursor(t); cur != rollupBaseTS+7*rollupHourSec {
+		t.Fatalf("cursor_1h = %d, want %d（重扫不得改动水位）", cur, rollupBaseTS+7*rollupHourSec)
+	}
+}
+
+// TestRollupRescanWritesRepairHourOnce 钉住与 repair 的关系：
+//   - repair 集合里的小时**同样**要参与本轮（它缺 1h 行时会被重算写出）；
+//   - 当同一个小时同时落在 repair 与重扫两条路径上时，一轮**只写一次**（去重）；
+//   - 另一个**只属于重扫**的迟到小时同轮被补出来 —— 这一条保证「重扫真的跑了」，
+//     否则本测试会因为「repair 自己写了那一次」而变成一条与重扫无关的恒绿断言。
+func TestRollupRescanWritesRepairHourOnce(t *testing.T) {
+	now := rollupBaseTS + 6*rollupHourSec + 60
+	f := newRollupFixture(t, now, true, 0)
+	f.withRescanHours(12)
+
+	// 一个**残缺**小时（7 行）：1h 行被写出来并进 repair 集合
+	const repairHour = rollupBaseTS + 2*rollupHourSec
+	f.seed5m(t, fullHourRows(repairHour, func(int) fiveMin {
+		return fiveMin{samples: 30, cpu: 10}
+	})[:7]...)
+	if _, err := f.svc.RollupOnce(context.Background()); err != nil {
+		t.Fatalf("RollupOnce(1): %v", err)
+	}
+	if !f.inRepair(t, repairHour) {
+		t.Fatal("前置不成立：残缺小时必须已进 repair 集合")
+	}
+	// 让这个小时同时满足「有 5m 行 + 在重扫窗口内 + 缺 1h 行」——两条路径都指向它
+	f.drop1hRange(t, repairHour, repairHour)
+	// 另一个**只属于重扫**的迟到小时（普通区间已经越过它，repair 集合里也没有它）
+	const lateHour = rollupBaseTS + rollupHourSec
+	f.seed5m(t, fullHourRows(lateHour, func(int) fiveMin {
+		return fiveMin{samples: 30, cpu: 20}
+	})...)
+
+	f.writer.calls = 0
+	f.writer.written = nil
+	stats, err := f.svc.RollupOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RollupOnce(2): %v", err)
+	}
+	// 两次写：repairHour（repair 路径）+ lateHour（重扫路径）
+	if f.writer.calls != 2 {
+		t.Fatalf("WriteHour 调用 = %d, want 2（repair 小时一次 + 只属于重扫的迟到小时一次）", f.writer.calls)
+	}
+	writes := map[int64]int{}
+	for _, w := range f.writer.written {
+		writes[w.BucketTS]++
+	}
+	if writes[repairHour] != 1 {
+		t.Fatalf("小时 %d 本轮写了 %d 次，want 1：它同时属于 repair 与重扫，一轮只能写一次（去重）",
+			repairHour, writes[repairHour])
+	}
+	if writes[lateHour] != 1 {
+		t.Fatalf("小时 %d 本轮写了 %d 次，want 1（它只属于重扫：必须被补出来，证明重扫真的跑了）",
+			lateHour, writes[lateHour])
+	}
+	if stats.HoursRepaired != 1 || stats.HoursBackfilled != 1 {
+		t.Fatalf("stats = %+v, want 1 repaired / 1 backfilled", stats)
+	}
+	if stats.HoursRescanned != 1 {
+		t.Fatalf("stats = %+v, want 1 rescanned（repair 那个小时不得被重扫重复计入）", stats)
+	}
+	if !f.inRepair(t, repairHour) {
+		t.Fatal("重扫不得替 repair 做决定：小时仍残缺，必须留在集合里等下一轮重算")
+	}
+	if row := f.hourRow(t, repairHour); row == nil || row.Samples != 210 {
+		t.Fatalf("1h 行 = %+v, want samples 210（7 行 × 30，残缺值好过空洞）", row)
+	}
+	if row := f.hourRow(t, lateHour); row == nil || row.Samples != 360 {
+		t.Fatalf("迟到小时 %d 的 1h 行 = %+v, want samples 360", lateHour, row)
+	}
+}
+
+// TestRollupRescanReadFailureSurfacesAndKeepsCursor 钉住重扫的失败语义：
+// 集合读失败**必须上抛**（静默吞掉 = 空洞永远补不上且无人知道），而且它**不参与水位判定**
+// —— 同场景、重扫读正常时水位落在同一处。
+func TestRollupRescanReadFailureSurfacesAndKeepsCursor(t *testing.T) {
+	now := rollupBaseTS + 6*rollupHourSec + 60
+	f := newRollupFixture(t, now, false, 0)
+	seed := func(x *rollupFixture) {
+		x.seed5m(t, fullHourRows(rollupBaseTS, func(int) fiveMin {
+			return fiveMin{samples: 30, cpu: 20}
+		})...)
+	}
+	seed(f)
+	f.svc = NewAgentMetricsRollupService(
+		bucketSetFailer{RollupMetricRepo: f.repo, err: errors.New("db down")},
+		fakeDeviceSource{ids: []uint64{rollupDevID}}, rollupCfg{rescanHours: 12}, f.log).
+		WithCursorStore(f.rdb).WithClock(f.clock.now)
+
+	stats, err := f.svc.RollupOnce(context.Background())
+	if err == nil {
+		t.Fatal("重扫的集合读失败必须上抛（静默吞掉 = 1h 空洞不补且无人知道）")
+	}
+	if !errors.Is(err, ErrRollupPartial) {
+		t.Fatalf("err = %v, want ErrRollupPartial", err)
+	}
+	if stats.Errors != 1 {
+		t.Fatalf("stats = %+v, want 1 error", stats)
+	}
+	// 普通区间已成功：1h 行照写出（重扫失败不得连坐已经写好的行）
+	if f.hourRow(t, rollupBaseTS) == nil {
+		t.Fatal("重扫失败不得影响普通区间已写出的 1h 行")
+	}
+	cur, ok := f.cursor(t)
+	if !ok {
+		t.Fatal("cursor_1h 键丢失：重扫失败不得删除游标")
+	}
+
+	// 对照：同场景、重扫读正常时水位落在同一处 —— 直接证明重扫不参与水位判定。
+	f2 := newRollupFixture(t, now, false, 0)
+	seed(f2)
+	f2.withRescanHours(12)
+	if _, err := f2.svc.RollupOnce(context.Background()); err != nil {
+		t.Fatalf("RollupOnce(对照): %v", err)
+	}
+	cur2, _ := f2.cursor(t)
+	if cur != cur2 {
+		t.Fatalf("重扫读失败时水位 = %d，重扫正常时 = %d（必须相同：重扫只补行，水位由普通区间与 repair 管）",
+			cur, cur2)
 	}
 }

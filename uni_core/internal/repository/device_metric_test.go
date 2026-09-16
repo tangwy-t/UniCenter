@@ -753,3 +753,108 @@ func TestReadWideRows(t *testing.T) {
 		t.Fatal("未知表名必须硬失败，不得静默返回空")
 	}
 }
+
+// sqlSpy 记录此后通过该 DB 执行过的**查询** SQL（断言「一条 SELECT bucket_ts」用）。
+//
+// 为什么用 GORM 回调而不是日志替身：仓储自己 `db.WithContext(ctx)` 起会话，测试拿不到
+// 那条会话的 logger 配置；回调挂在 DB 上，任何会话都会经过它。
+type sqlSpy struct{ queries []string }
+
+func (s *sqlSpy) reset() { s.queries = nil }
+
+// newMetricTestDBWithSQLSpy 起一个带查询记录的测试库（建表路径与 newMetricTestDB 逐字相同）。
+func newMetricTestDBWithSQLSpy(t *testing.T) (*gorm.DB, *sqlSpy) {
+	t.Helper()
+	db := newMetricTestDB(t)
+	spy := &sqlSpy{}
+	if err := db.Callback().Query().After("gorm:query").Register("test:sql_spy", func(tx *gorm.DB) {
+		spy.queries = append(spy.queries, tx.Statement.SQL.String())
+	}); err != nil {
+		t.Fatalf("注册 SQL 记录回调: %v", err)
+	}
+	return db, spy
+}
+
+// TestExistingBucketTimestamps 覆盖「按需重扫」用的桶集合查询（Plan 2E Task 2 新增）：
+// 闭区间、升序、设备隔离、表隔离、未知宽表名硬失败，以及**查询形状**
+// —— 一条 `SELECT bucket_ts`，既不数行数也不读整行。
+//
+// 为什么「形状」也要断言：这条查询存在的全部意义就是**便宜地**拿到集合。退化成
+// `SELECT *`（45 列整行）或退化成每轮每设备 2×24 次查询，功能断言会全绿，
+// 而重扫的代价放大十几倍 —— 那正是 Plan 2E 要消除的那类读放大。
+func TestExistingBucketTimestamps(t *testing.T) {
+	db, spy := newMetricTestDBWithSQLSpy(t)
+	repo := NewDeviceMetricRepository(db)
+	ctx := context.Background()
+
+	// 刻意乱序写入，让「升序」来自 ORDER BY 而不是写入顺序。
+	for _, ts := range []int64{1300, 1000, 1600} {
+		if err := repo.WriteBucket(ctx, sampleWide(ts, float64(ts)/100), MetricSubRows{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 另一台设备的同区间行：不得串进来
+	other := &entity.DeviceMetricWide{DeviceID: 2002, BucketTS: 1300, Samples: 1}
+	if err := repo.WriteBucket(ctx, other, MetricSubRows{}); err != nil {
+		t.Fatal(err)
+	}
+	// _1h 上同设备的一行：两张表各自独立（同一套结构两处表名，靠显式表名切换）
+	if err := repo.WriteHour(ctx, &entity.DeviceMetricWide{DeviceID: 1001, BucketTS: 3600, Samples: 12}); err != nil {
+		t.Fatal(err)
+	}
+
+	spy.reset()
+	got, err := repo.ExistingBucketTimestamps(ctx, entity.TableNameMetric5m, 1001, 1000, 1600)
+	if err != nil {
+		t.Fatalf("ExistingBucketTimestamps: %v", err)
+	}
+	if !slices.Equal(got, []int64{1000, 1300, 1600}) {
+		t.Fatalf("桶集合 = %v, want [1000 1300 1600]（升序、只含本设备、闭区间端点在内）", got)
+	}
+	// 形状：**一条** `SELECT bucket_ts`
+	if len(spy.queries) != 1 {
+		t.Fatalf("本次调用执行的查询数 = %d, want 1（重扫的代价就是这一条读）：%v", len(spy.queries), spy.queries)
+	}
+	// 断言前先归一：GORM 会按方言给标识符加引号（sqlite 是反引号），
+	// 直接比字面量会把「换方言」变成一条假红灯。
+	q := strings.NewReplacer("`", "", `"`, "").Replace(spy.queries[0])
+	if !strings.Contains(q, "SELECT bucket_ts FROM "+entity.TableNameMetric5m) {
+		t.Fatalf("SQL = %q，want 一条 `SELECT bucket_ts FROM %s`", q, entity.TableNameMetric5m)
+	}
+	if strings.Contains(q, "*") || strings.Contains(strings.ToUpper(q), "COUNT(") {
+		t.Fatalf("SQL = %q：不得读整行（SELECT *）、也不得数行数（COUNT(*)）—— 重扫只要时间戳集合", q)
+	}
+
+	// 闭区间：单点区间也必须取到端点
+	edge, err := repo.ExistingBucketTimestamps(ctx, entity.TableNameMetric5m, 1001, 1300, 1300)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(edge, []int64{1300}) {
+		t.Fatalf("单点区间 [1300,1300] 桶集合 = %v, want [1300]（闭区间）", edge)
+	}
+
+	// 区间内没有行 → 空集合且**无错**（调用方把「空」读成「这段时间没有 5m 行」，
+	// 这正是「表名拼错必须硬失败」的理由：否则缺表会被伪装成「本来没有数据」）。
+	none, err := repo.ExistingBucketTimestamps(ctx, entity.TableNameMetric5m, 1001, 9000, 9999)
+	if err != nil || len(none) != 0 {
+		t.Fatalf("空区间 = %v/%v, want 空集合且无错", none, err)
+	}
+
+	// _1h 表：同设备的 1h 行必须单独可见（重扫要用它做差集的一侧）
+	one, err := repo.ExistingBucketTimestamps(ctx, entity.TableNameMetric1h, 1001, 0, 9999)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(one, []int64{3600}) {
+		t.Fatalf("_1h 桶集合 = %v, want [3600]（两张表各自独立）", one)
+	}
+
+	// 明细子表名与拼错的表名必须硬失败
+	if _, err := repo.ExistingBucketTimestamps(ctx, entity.TableNameMetricDisk, 1001, 0, 9999); err == nil {
+		t.Fatal("明细子表名必须被拒绝（本查询只读两张宽表）")
+	}
+	if _, err := repo.ExistingBucketTimestamps(ctx, "device_metric_5m_typo", 1001, 0, 9999); err == nil {
+		t.Fatal("未知表名必须硬失败，不得静默返回空集合")
+	}
+}
