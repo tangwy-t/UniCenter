@@ -1,0 +1,35 @@
+// uni_core 的「require uni_protocol 预备补丁」。
+//
+// 本文件名刻意**不是** go.mod，因此 Go 工具链不会把它当模块定义读取，
+// 也不参与任何构建/测试（已在本环境核实：go build ./... 与 go test ./internal/... 均不受影响）。
+//
+// ─ 为什么它是一个独立文件 ───────────────────────────────
+// 现在 **不能**把下面这行直接写进 uni_core/go.mod：`uni_protocol` 模块路径在当前环境
+// 不可 fetch（git ls-remote 报 `could not read Username for 'https://github.com'`），
+// 写进去只会得到一个谁也无法解析的幻影版本，并让 uni_core/go.mod 处于半发布状态。
+// 因此先把它冻结在这里，等远端就绪后原样追加。详见 RELEASING.md §2 / §5。
+//
+// ── 用法（远端就绪后）───────────────────────────────────
+//   1. 先按 RELEASING.md §4 的 tag 方案发布协议模块：
+//        git tag uni_protocol/v1.0.0 && git push <远端> uni_protocol/v1.0.0
+//      （目录前缀 tag：uni_protocol 位于仓库子目录，裸 tag vX.Y.Z 不会被它认领，
+//        实测报错为 `invalid version: unknown revision uni_protocol/vX.Y.Z`。）
+//   2. 把下面这一行 require **原样追加**到 uni_core/go.mod：
+//
+//        require github.com/tangwy-t/UniCenter/uni_protocol v1.0.0
+//
+//   3. 收敛依赖并提交（这一步之前 go.sum 里不会有 uni_protocol 条目，属正常）：
+//
+//        cd uni_core && go mod tidy && git add go.mod go.sum
+//
+//   4. 逐字节核对版本号与已发布的 tag 一致（`v1.0.0` ↔ `uni_protocol/v1.0.0`）。
+//
+// ── 注意 ──────────────────────────────────────────────
+// · 版本号必须与已发布的 uni_protocol tag 的**版本部分**完全一致；上面写的 `v1.0.0`
+//   是**待发布**的首个协议版本，不是既成事实 —— 发布时若改了版本号，这里必须同步改。
+// · 本行**不要**带 `// indirect`：`uni_core` 的生产代码直接 import 了该模块
+//   （internal/pkg/agenthub、internal/pkg/agentmetrics 等），它是**直接依赖**。
+// · 追加后必须用 `GOWORK=off` 验证真发布形态（RELEASING.md §5 第 5 步）；
+//   若仍走 go.work，验到的是工作区，不是发布形态。
+
+require github.com/tangwy-t/UniCenter/uni_protocol v1.0.0
