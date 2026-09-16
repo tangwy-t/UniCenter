@@ -25,8 +25,12 @@ import (
 type FlushRawReader interface {
 	// Index 返回活跃设备（枚举源）。
 	Index(ctx context.Context) ([]uint64, error)
-	// Bucket 读取 [fromMs, toMs) 内的原始样本，按 T 升序。
-	Bucket(ctx context.Context, deviceID uint64, fromMs, toMs int64) ([]agentproto.MetricsSample, error)
+	// BucketRange 读取 [fromMs, toMs) 内的原始样本一次（按 T 升序返回）。
+	//
+	// 面是「整段」而不是「单桶」：flushDevice 读一次覆盖整轮待处理区间、再在内存里切桶
+	// （见那里的注释）。查询服务的资源下钻用的是另一条面（agentmetrics.RawStore.Bucket，
+	// 单窗口），两处接口各自独立。
+	BucketRange(ctx context.Context, deviceID uint64, fromMs, toMs int64) ([]agentproto.MetricsSample, error)
 }
 
 // DeviceMetricWriter 是 flush 写宽表+子表的唯一出口。
@@ -110,7 +114,7 @@ func NewAgentMetricsFlushService(raw FlushRawReader, metrics DeviceMetricWriter,
 //
 // 游标与热层原始窗**必须落在同一个 Redis**（都是「agent 上报链路」的键族），
 // 故 wireup 传的是同一个客户端；显式注入而不是从 raw 反查，是为了让游标这一层
-// 不依赖 FlushRawReader 的具体实现（接口只要 Index/Bucket 两个能力）。
+// 不依赖 FlushRawReader 的具体实现（接口只要 Index/BucketRange 两个能力）。
 func (s *AgentMetricsFlushService) WithCursorStore(rdb goredis.Cmdable) *AgentMetricsFlushService {
 	s.cursors = agentmetrics.NewCursorStore(rdb)
 	return s
@@ -275,14 +279,24 @@ func (s *AgentMetricsFlushService) flushDevice(ctx context.Context, deviceID uin
 		return 0, 0, 0, nil
 	}
 
+	// 读一次覆盖**整段**待处理区间的原始点，再在内存里切桶。
+	//
+	// 为什么不能逐桶读（Plan 2E Task 1）：fetch 由「最新点离请求起点多远」推出
+	// （见 agentmetrics.BucketRange 的注释）——逐桶读时每个桶都要为「自己离最新点多远」
+	// 付一次满额读取，积压越久每桶读得越多：积压 24h 的首轮 288 个桶最坏各读 MaxPoints
+	// （10368）条 ≈ 2.5M 条 JSON，且其中绝大多数点被重复读 288 遍。整段读一次时 fetch
+	// 只由**最老**的那个桶推出，天然覆盖后面每个桶：读多少与「有几个桶」解耦。
+	pts, rerr := s.raw.BucketRange(ctx, deviceID, from*1000, upper*1000)
+	if rerr != nil {
+		// 读失败**立即返回**：水位留在轮初（下面那句 writeCursor 不会被执行）。
+		return written, skipped, upserted, fmt.Errorf("读区间 device=%d [%d,%d): %w",
+			deviceID, from, upper, rerr)
+	}
+	byBucket := groupByBucket(pts, bucketSec)
+
 	lastBucketed := cursor
 	for b := from; b < upper; b += bucketSec {
-		pts, berr := s.raw.Bucket(ctx, deviceID, b*1000, (b+bucketSec)*1000)
-		if berr != nil {
-			// 读失败**立即返回**：水位留在轮初（下面那句 writeCursor 不会被执行）。
-			return written, skipped, upserted, fmt.Errorf("读桶 device=%d bucket=%d: %w", deviceID, b, berr)
-		}
-		wide, subs, ok := agentmetrics.Downsample(deviceID, b, pts)
+		wide, subs, ok := agentmetrics.Downsample(deviceID, b, byBucket[b])
 		if !ok {
 			// 空桶**照常推进**（它确实没有数据，算「处理成功」）：把空桶当失败
 			// 会让一台长期没有明细上报的设备永远卡在第一个空桶上，水位再也不动。
@@ -319,6 +333,27 @@ func (s *AgentMetricsFlushService) flushDevice(ctx context.Context, deviceID uin
 		return written, skipped, upserted, err
 	}
 	return written, skipped, upserted, nil
+}
+
+// groupByBucket 把一批原始点按 `T/1000/bucketSec*bucketSec` 归到桶起点上（纯函数，便于单测）。
+//
+// 为什么按**绝对时间对齐**而不是「相对 from 的偏移」：桶起点活在全局 5min 栅格上
+// （水位游标也在同一条栅格上），只有按绝对栅格对齐才能保证「同一个点在逐桶读与整段读里
+// 落进同一个桶」——这正是改造后行为等价的前提。
+//
+// 为什么这里**不再判界**：BucketRange 已按 [fromMs, toMs) 过滤（只有区间内的点会被返回），
+// 在这里再写一遍判界等于给同一件事留第二份会漂移的口径。切桶时用到的桶起点 b 一定是
+// 区间内的 5min 栅格点（循环本身就是 `from + k×bucketSec`），故 byBucket[b] 不会漏。
+//
+// 每个切片保持输入顺序：BucketRange 已按 T 升序返回，于是桶内也是升序 ——
+// Downsample 的 LAST（桶内 T 最大的样本）正好落在切片末尾。
+func groupByBucket(pts []agentproto.MetricsSample, bucketSec int64) map[int64][]agentproto.MetricsSample {
+	out := make(map[int64][]agentproto.MetricsSample)
+	for _, p := range pts {
+		b := p.T / 1000 / bucketSec * bucketSec
+		out[b] = append(out[b], p)
+	}
+	return out
 }
 
 // writeBucket 把纯逻辑层的 Wide/Subs 解析成 id 化行并落库，返回 upsert 的资源行数。

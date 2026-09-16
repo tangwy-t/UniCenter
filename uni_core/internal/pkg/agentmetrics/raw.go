@@ -97,6 +97,17 @@ func (s *RawStore) Append(ctx context.Context, deviceID uint64, sample *agentpro
 
 // Bucket 读取某设备在 [fromMs, toMs) 内的原始样本，按 T 升序返回。
 //
+// 它是 BucketRange 的**一行薄封装**（签名与语义都不变）：查询服务的资源下钻
+// （AgentRawBucketReader，见 agent_metrics_query.go 的 ≤24h 下钻）按**单个窗口**取点，
+// 与 flush 的「读一次覆盖整段」是两种消费面，故两条入口各自保留 —— 下钻不需要整段读，
+// flush 不该按桶切开来读（理由见 BucketRange 的注释）。
+func (s *RawStore) Bucket(ctx context.Context, deviceID uint64, fromMs, toMs int64) ([]agentproto.MetricsSample, error) {
+	return s.BucketRange(ctx, deviceID, fromMs, toMs)
+}
+
+// BucketRange 读取某设备在 [fromMs, toMs) 内的原始样本，按 T 升序返回：一次 LRange
+// 覆盖**整段**（而不是每个桶各读一次），调用方再在内存里按桶切分。
+//
 // 这里**不用** Window.Query：Query 是「拖尾窗口」语义（相对 now 的窗口 + 查询时聚合），
 // 而 flush 需要的是「固定的已闭桶」，故直接 LRange 读取并按 T 过滤。
 //
@@ -104,6 +115,13 @@ func (s *RawStore) Append(ctx context.Context, deviceID uint64, sample *agentpro
 // 原因在窗的写侧：metricshistory.Window.Append 用 LPUSH + LTRIM 写入，**index 0 是最新点**，
 // 于是「读多少条」等价于「从最新点往回覆盖多远」。一次 LRange 只能从头部往后取，
 // 想读到 fromMs 附近的点，就必须至少取到 (最新点T − fromMs) 这段时间的点数。
+//
+// 为什么入口是「整段」而不是「单桶」（Plan 2E Task 1）：fetch 由 fromMs 推出，于是
+// **请求起点越老、读得越多**。flush 逐桶回填积压时（首轮 288 个桶）每个桶都要为
+// 「自己离最新点多远」付一次满额读取，最坏各读 MaxPoints 条 ≈ 2.5M 条 JSON，
+// 而其中绝大多数点被重复读 288 遍。整段读一次时 fetch 只由**最老**的那个桶推出，
+// 它天然覆盖后面每个桶（fetch 随起点变老单调不减），把「读多少」与「有几个桶」解耦：
+// 逐桶调用 Bucket 的语义仍等价（同一批点、同样的过滤），只是把重复读变成一次读。
 //
 // 曾经写作 ((toMs-fromMs)/Step)*2 —— 只按**请求窗口宽度**估算。它对「贴着 now 的窗口」
 // （热层 Query 的拖尾窗口、下钻的相对区间查询）恰好成立，却与「这个桶离现在有多远」
@@ -116,7 +134,7 @@ func (s *RawStore) Append(ctx context.Context, deviceID uint64, sample *agentpro
 //
 // 保留 ×2 余量：真实上报节奏可能快于 Step（墙钟步进、reportInterval 被改小），
 // 少读会真的漏点，多读只是多取几条、由下面的 T 过滤与 MaxPoints 上限兜住。
-func (s *RawStore) Bucket(ctx context.Context, deviceID uint64, fromMs, toMs int64) ([]agentproto.MetricsSample, error) {
+func (s *RawStore) BucketRange(ctx context.Context, deviceID uint64, fromMs, toMs int64) ([]agentproto.MetricsSample, error) {
 	key := historyKey(deviceID)
 	stepMs := s.opts.Step.Milliseconds()
 

@@ -3,6 +3,7 @@ package agentmetrics
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
 
@@ -305,5 +306,159 @@ func TestRawStoreBucketEmptyWindowIssuesSingleRedisCall(t *testing.T) {
 	}
 	if d := mr.CommandCount() - before; d != 1 {
 		t.Fatalf("空窗必须只发 1 次 Redis 请求（LINDEX），实际 %d", d)
+	}
+}
+
+// ── BucketRange：一次读覆盖整段（消除逐桶读取的读放大，Plan 2E Task 1）─────
+//
+// 背景：flush 曾**逐桶**调用 Bucket，而 fetch（= LRange 取多少条）由「最新点离该桶起点
+// 多远」推出（见 BucketRange 的注释）——于是积压越久、每桶读得越多：积压 24h 的首轮
+// 288 个桶最坏各读 MaxPoints（10368）条 ≈ 2.5M 条 JSON，且同一批点被重复读 288 遍。
+// BucketRange 让「读多少」只取决于**最老**的那个桶，一次 LRange 覆盖整段。
+
+// TestBucketRangeMatchesPerBucketReadsExactly 守卫等价性：同一段区间上，
+// 「一次 BucketRange + 按 T 切出的每桶子集」必须与「逐桶调用 Bucket」**逐条相同**
+// ——同样的左闭右开边界、同样的升序、同样的脏数据跳过、同样的字段值。
+//
+// 这是 flush 改造（读一次 + 内存切桶）的行为等价依据：取点方式变了，取到的点不能变。
+func TestBucketRangeMatchesPerBucketReadsExactly(t *testing.T) {
+	_, rdb := newTestRedis(t)
+	store := NewRawStore(rdb, RawOptions{Step: 10 * time.Second, MaxPoints: 1000})
+	ctx := context.Background()
+
+	const (
+		pointsPerBucket = 30
+		bucketCount     = 10
+	)
+	total := pointsPerBucket * bucketCount
+	for i := 0; i < total; i++ {
+		ts := rawTestBase + int64(i)*rawTestStepMs
+		if err := store.Append(ctx, 1001, sample(t, ts, float64(i%90))); err != nil {
+			t.Fatalf("Append #%d: %v", i, err)
+		}
+	}
+	// 请求区间**之外**的两个点（左外一个、右外一个）：必须被 [fromMs,toMs) 过滤掉，
+	// 且不得混进任何桶。
+	span := int64(bucketCount) * rawTestBucketMs
+	for _, ts := range []int64{rawTestBase - rawTestStepMs, rawTestBase + span} {
+		if err := store.Append(ctx, 1001, sample(t, ts, 7)); err != nil {
+			t.Fatalf("Append 区间外点 %d: %v", ts, err)
+		}
+	}
+	// 两条脏 JSON（只可能来自旧版本协议）：直接替换列表中间的两条（index 从头部数，
+	// 即最新在前）。逐桶读会跳过它们，整段读必须同样跳过 —— 而不是整段失败。
+	for _, idx := range []int64{5, 155} {
+		if err := rdb.LSet(ctx, historyKey(1001), idx, "{不是 JSON").Err(); err != nil {
+			t.Fatalf("LSet #%d: %v", idx, err)
+		}
+	}
+
+	whole, err := store.BucketRange(ctx, 1001, rawTestBase, rawTestBase+span)
+	if err != nil {
+		t.Fatalf("BucketRange: %v", err)
+	}
+	// 区间内的点 = 300 − 2 条脏数据；区间外的 2 个点不得混进来。
+	if len(whole) != total-2 {
+		t.Fatalf("整段点数 = %d, want %d（脏数据必须跳过、区间外的点必须过滤）", len(whole), total-2)
+	}
+	for i := 1; i < len(whole); i++ {
+		if whole[i-1].T >= whole[i].T {
+			t.Fatalf("整段必须按 T 严格升序: [%d]=%d, [%d]=%d", i-1, whole[i-1].T, i, whole[i].T)
+		}
+	}
+
+	var seen int
+	for k := 0; k < bucketCount; k++ {
+		from := rawTestBase + int64(k)*rawTestBucketMs
+		to := from + rawTestBucketMs
+		perBucket, err := store.Bucket(ctx, 1001, from, to)
+		if err != nil {
+			t.Fatalf("桶 #%d 逐桶读: %v", k, err)
+		}
+		// 用 T 判界从整段里切出该桶：**不复用被测的 groupByBucket**（那在 service 包），
+		// 这里只信「整段一次读」的结果。
+		var sliced []agentproto.MetricsSample
+		for _, p := range whole {
+			if p.T >= from && p.T < to {
+				sliced = append(sliced, p)
+			}
+		}
+		if len(sliced) != len(perBucket) {
+			t.Fatalf("桶 #%d 点数：整段切桶 = %d, 逐桶读 = %d（取点方式不得改变结果）",
+				k, len(sliced), len(perBucket))
+		}
+		for i := range sliced {
+			if !reflect.DeepEqual(sliced[i], perBucket[i]) {
+				t.Fatalf("桶 #%d 第 %d 条：整段切桶 = %+v, 逐桶读 = %+v",
+					k, i, sliced[i], perBucket[i])
+			}
+		}
+		seen += len(sliced)
+	}
+	if seen != len(whole) {
+		t.Fatalf("逐桶切出的点数之和 = %d, 整段 = %d（有点落在所有桶之外或漏桶）", seen, len(whole))
+	}
+}
+
+// TestBucketRangeCovers288BucketsWithConstantRedisCommands 直接钉住「读放大被消除」：
+// 覆盖 288 个桶（= 24h 积压）的一次 BucketRange 调用，miniredis 的命令增量必须是
+// **常数级**（1 次 LINDEX 探最新点 + 1 次 LRange），而不是 288（或 576）次。
+func TestBucketRangeCovers288BucketsWithConstantRedisCommands(t *testing.T) {
+	mr, rdb := newTestRedis(t)
+	store := NewRawStore(rdb, RawOptions{Step: 10 * time.Second, MaxPoints: 10000})
+	ctx := context.Background()
+
+	const (
+		bucketCount = 288 // 24h / 5min
+		perBucket   = 3   // 每桶 3 个点：命令数只取决于「读几次」，不取决于点密度
+	)
+	for k := 0; k < bucketCount; k++ {
+		base := rawTestBase + int64(k)*rawTestBucketMs
+		for i := 0; i < perBucket; i++ {
+			if err := store.Append(ctx, 1001, sample(t, base+int64(i)*rawTestStepMs, 50)); err != nil {
+				t.Fatalf("Append 桶 #%d 点 #%d: %v", k, i, err)
+			}
+		}
+	}
+	span := int64(bucketCount) * rawTestBucketMs
+
+	// 预热一次：把建连时的握手命令排除在计数之外。
+	if _, err := store.BucketRange(ctx, 1001, rawTestBase, rawTestBase+1); err != nil {
+		t.Fatalf("预热调用: %v", err)
+	}
+
+	before := mr.CommandCount()
+	got, err := store.BucketRange(ctx, 1001, rawTestBase, rawTestBase+span)
+	if err != nil {
+		t.Fatalf("BucketRange: %v", err)
+	}
+	all := mr.CommandCount() - before
+	if all != 2 {
+		t.Fatalf("覆盖 %d 个桶的 BucketRange 必须只发 2 次 Redis 请求（LINDEX + LRange），实际 %d",
+			bucketCount, all)
+	}
+	if len(got) != bucketCount*perBucket {
+		t.Fatalf("一次读必须覆盖全部 %d 个桶: 返回 %d 条, want %d",
+			bucketCount, len(got), bucketCount*perBucket)
+	}
+
+	// 对照（读数放大本体）：逐桶读取的请求数随桶数**线性增长**。
+	before = mr.CommandCount()
+	var perBucketPts int
+	for k := 0; k < bucketCount; k++ {
+		from := rawTestBase + int64(k)*rawTestBucketMs
+		pts, err := store.Bucket(ctx, 1001, from, from+rawTestBucketMs)
+		if err != nil {
+			t.Fatalf("逐桶读 #%d: %v", k, err)
+		}
+		perBucketPts += len(pts)
+	}
+	each := mr.CommandCount() - before
+	if perBucketPts != len(got) {
+		t.Fatalf("逐桶读取的点数之和 = %d, 整段读 = %d（两者必须取到同一批点）", perBucketPts, len(got))
+	}
+	if each < bucketCount {
+		t.Fatalf("逐桶读取的请求数 = %d，应随桶数线性增长（≥ %d 次）；整段读 = %d 次",
+			each, bucketCount, all)
 	}
 }

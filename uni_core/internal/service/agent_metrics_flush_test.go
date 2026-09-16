@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -584,5 +585,240 @@ func TestFlushCloseGraceFollowsReportInterval(t *testing.T) {
 	// 上界 = alignDown(base+300, 300) = base+300 → 区间 [base, base+300) 仍包含该桶
 	if stats.BucketsWritten != 1 {
 		t.Fatalf("BucketsWritten = %d, want 1（CloseGrace 必须随 reportInterval 变化）", stats.BucketsWritten)
+	}
+}
+
+// ── 读一次 + 内存切桶（Plan 2E Task 1）────────────────────────────────
+//
+// 缺陷本体：flushDevice 的 `for b := from; b < upper; b += bucketSec` 里**每个桶各调一次**
+// 原始读；而 fetch（= LRange 取多少条）由「最新点离该桶起点多远」推出（见
+// agentmetrics.BucketRange 的注释）→ 积压越久每桶读得越多：积压 24h 的首轮 288 个桶
+// 最坏各读 MaxPoints（10000）条 ≈ 2.5M 条 JSON，且同一批点被重复读 288 遍。
+// 下面两条断言分别钉住「读一次」与「结果逐行不变」。
+
+// flushBacklogBuckets 是夹具的积压量：24h / 5min = 288 个已闭桶。
+const flushBacklogBuckets = 288
+
+// flushBacklogClockSec 返回「恰好积压 flushBacklogBuckets 个已闭桶」的 now（unix 秒）。
+//
+// 推导（全部按实现口径）：上界 = alignDown(now − CloseGrace, 300)、封锁下界 = cursor+300。
+// cursor = base−300，CloseGrace = 2×10s = 20s，故取 now = base + 288×300 + 100
+// 使 alignDown(now−20, 300) = base + 86400 = base + 288×300：区间 = [base, base+86400)，
+// 恰好 288 个桶。
+func flushBacklogClockSec() int64 { return flushBaseTS + flushBacklogBuckets*300 + 100 }
+
+// readCall 是一次原始读的区间（用来断言「读了且只读了一次」「读的正是整段」）。
+type readCall struct {
+	deviceID     uint64
+	fromMs, toMs int64
+}
+
+// countingRawReader 是 FlushRawReader 的替身：统计 BucketRange 的调用次数与区间参数，
+// 真正的读取**透传给真 RawStore** —— 读路径必须与生产同源，否则统计到的不是生产的调用方式
+// （同 rewindingReader 用「包装真实现」而不是替身读的逻辑）。
+type countingRawReader struct {
+	inner FlushRawReader
+	calls []readCall
+}
+
+func (c *countingRawReader) Index(ctx context.Context) ([]uint64, error) {
+	return c.inner.Index(ctx)
+}
+
+func (c *countingRawReader) BucketRange(ctx context.Context, deviceID uint64,
+	fromMs, toMs int64) ([]agentproto.MetricsSample, error) {
+
+	c.calls = append(c.calls, readCall{deviceID: deviceID, fromMs: fromMs, toMs: toMs})
+	return c.inner.BucketRange(ctx, deviceID, fromMs, toMs)
+}
+
+// TestFlushReadsWindowOnceForBackloggedBuckets 是读放大的**直接**守卫：
+// 积压 24h（288 个桶）时，一轮 flush 对原始窗的读取调用次数必须是 **1**，
+// 且这一次读的区间恰好是整段 [from×1000, upper×1000)。
+func TestFlushReadsWindowOnceForBackloggedBuckets(t *testing.T) {
+	f := newFlushFixture(t, flushBacklogClockSec(), 10, nil)
+	ctx := context.Background()
+	f.setCursor(t, flushBaseTS-300)
+	// 每个桶各一个点：288 个桶全部有数据（否则「桶比预期少」会让本测试在错误的区间上假绿）。
+	for k := 0; k < flushBacklogBuckets; k++ {
+		f.seed(t, flushSample((flushBaseTS+int64(k)*300)*1000, 10, "/", 20, 60))
+	}
+
+	cr := &countingRawReader{inner: f.raw}
+	f.svc = NewAgentMetricsFlushService(cr, f.repo, f.res, f.cfg, logger.NewNop()).
+		WithCursorStore(f.rdb).
+		WithClock(f.clock.now)
+
+	stats, err := f.svc.FlushOnce(ctx)
+	if err != nil {
+		t.Fatalf("FlushOnce: %v", err)
+	}
+	if stats.BucketsWritten != flushBacklogBuckets {
+		t.Fatalf("夹具失效：BucketsWritten = %d, want %d（必须真的积压 288 个有数据的桶）",
+			stats.BucketsWritten, flushBacklogBuckets)
+	}
+	if len(cr.calls) != 1 {
+		t.Fatalf("原始窗读取调用次数 = %d, want 1（每设备读一次整段后在内存里切桶；\n"+
+			"逐桶读会让积压期的每个桶各自读到最新 MaxPoints 条，且同一批点被重复读 %d 遍）",
+			len(cr.calls), flushBacklogBuckets)
+	}
+	wantFrom := flushBaseTS * 1000
+	wantTo := (flushBaseTS + flushBacklogBuckets*300) * 1000
+	if c := cr.calls[0]; c.deviceID != flushDevID || c.fromMs != wantFrom || c.toMs != wantTo {
+		t.Fatalf("唯一那次读取的区间 = device=%d [%d,%d), want device=%d [%d,%d)（必须覆盖整段，而不是某个桶）",
+			c.deviceID, c.fromMs, c.toMs, flushDevID, wantFrom, wantTo)
+	}
+}
+
+// jsonOf 把一行渲染成 JSON：宽/子表行都有 json tag，逐行比对用它才不会漏字段
+// （手挑几个字段比对会漏掉「没被挑中」的列）。
+func jsonOf(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	return string(b)
+}
+
+// flushPerBucketReference 是**修复前**取点方式（逐桶调用 RawStore.Bucket）的参考实现。
+//
+// 它刻意只替换「取点来源」：桶区间（cursor+300 → closedBucketUpper）与写路径
+// （writeBucket）都复用生产代码，故它与 flushDevice 的差异只可能来自
+// 「读一次切桶 vs 逐桶读」。
+// 返回 (落库桶数, 空桶数, 写出的宽表行, 写出的子表行)。
+func flushPerBucketReference(ctx context.Context, t *testing.T, f *flushFixture) (
+	written, skipped int, wide []*entity.DeviceMetricWide, subs []repository.MetricSubRows) {
+
+	t.Helper()
+	bucketSec := resolutionSeconds(agentmetrics.Resolution5m)
+	cur, err := f.svc.readCursor(ctx, flushDevID)
+	if err != nil {
+		t.Fatalf("参考实现读游标: %v", err)
+	}
+	upper := f.svc.closedBucketUpper()
+	for b := cur + bucketSec; b < upper; b += bucketSec {
+		pts, err := f.raw.Bucket(ctx, flushDevID, b*1000, (b+bucketSec)*1000)
+		if err != nil {
+			t.Fatalf("参考实现逐桶读 device=%d bucket=%d: %v", flushDevID, b, err)
+		}
+		w, s, ok := agentmetrics.Downsample(flushDevID, b, pts)
+		if !ok {
+			skipped++
+			continue
+		}
+		if _, err := f.svc.writeBucket(ctx, flushDevID, b, w, s); err != nil {
+			t.Fatalf("参考实现写桶 device=%d bucket=%d: %v", flushDevID, b, err)
+		}
+		written++
+	}
+	return written, skipped, f.writer.written, f.writer.subs
+}
+
+// TestFlushGroupedReadMatchesPerBucketRows 是「行为等价」的**逐行**证据：
+// 同一批数据、同一个 DB、同一个记录式写替身 —— 先按修复前的取点方式（逐桶读）跑一遍
+// 参考实现，再复位游标与记录、跑生产的新路径（读一次 + groupByBucket），
+// 把两次写出的宽表行与子表行**逐行**比对。
+func TestFlushGroupedReadMatchesPerBucketRows(t *testing.T) {
+	writer := &fakeBucketWriter{}
+	f := newFlushFixture(t, flushBacklogClockSec(), 10, writer)
+	ctx := context.Background()
+	f.setCursor(t, flushBaseTS-300)
+
+	// 每 7 个桶一个「有数据的桶」，每桶 3 个点（含桶内最后 1ms 的边缘点），其余桶留空
+	// —— 空桶也要同口径跳过并推进水位，故夹具必须同时含空桶与非空桶。
+	var seededBuckets int
+	for k := 0; k < flushBacklogBuckets; k++ {
+		if k%7 != 0 {
+			continue
+		}
+		seededBuckets++
+		baseMs := (flushBaseTS + int64(k)*300) * 1000
+		f.seed(t,
+			flushSample(baseMs, float64(10+k%50), "/", 20, 60),
+			flushSample(baseMs+10_000, float64(20+k%50), "/data", 30, 66),
+			flushSample(baseMs+299_000, float64(30+k%50), "/", 25, 63),
+		)
+	}
+	// 区间两端各一个点：恰落在起点（= 第一个桶的左端点）上的点必须属于第一个桶；
+	// 落在上界前 1ms 的点必须属于最后一个桶。
+	f.seed(t, flushSample(flushBaseTS*1000, 1, "/", 10, 50))
+	f.seed(t, flushSample((flushBaseTS+flushBacklogBuckets*300)*1000-1, 99, "/", 99, 99))
+
+	// ① 修复前的取点方式。
+	refWritten, refSkipped, refWide, refSubs := flushPerBucketReference(ctx, t, f)
+
+	// ② 复位记录与游标，用**同一批数据**跑生产的新路径。
+	writer.written, writer.subs = nil, nil
+	f.setCursor(t, flushBaseTS-300)
+	stats, err := f.svc.FlushOnce(ctx)
+	if err != nil {
+		t.Fatalf("FlushOnce: %v", err)
+	}
+
+	// 夹具前提：两次都得真的写出足够多的行，否则逐行比对量不到东西。
+	if refWritten < 40 || len(refWide) != refWritten {
+		t.Fatalf("夹具失效：逐桶读取只写了 %d 行（记录 %d 行），等价断言量不到东西",
+			refWritten, len(refWide))
+	}
+	if stats.BucketsWritten != refWritten || stats.BucketsSkipped != refSkipped {
+		t.Fatalf("桶计数不一致：新路径 written=%d skipped=%d, 逐桶读取 written=%d skipped=%d",
+			stats.BucketsWritten, stats.BucketsSkipped, refWritten, refSkipped)
+	}
+	if len(writer.written) != len(refWide) {
+		t.Fatalf("宽表行数不一致：新路径 = %d, 逐桶读取 = %d", len(writer.written), len(refWide))
+	}
+	for i := range refWide {
+		got, want := jsonOf(t, writer.written[i]), jsonOf(t, refWide[i])
+		if got != want {
+			t.Fatalf("第 %d 行宽表不一致（新路径 / 逐桶读取）：\n  %s\n  %s", i, got, want)
+		}
+	}
+	if len(writer.subs) != len(refSubs) {
+		t.Fatalf("子表批次数不一致：新路径 = %d, 逐桶读取 = %d", len(writer.subs), len(refSubs))
+	}
+	for i := range refSubs {
+		got, want := jsonOf(t, writer.subs[i]), jsonOf(t, refSubs[i])
+		if got != want {
+			t.Fatalf("第 %d 批子表不一致（新路径 / 逐桶读取）：\n  %s\n  %s", i, got, want)
+		}
+	}
+	if seededBuckets != refWritten {
+		t.Fatalf("夹具失效：种了 %d 个有数据的桶，但只写出 %d 行", seededBuckets, refWritten)
+	}
+}
+
+// TestGroupByBucketAlignsPointsToAbsoluteBucketStart 守卫纯函数的对齐口径：
+// 桶起点 = T/1000/bucketSec*bucketSec（绝对 5min 栅格），左闭右开，
+// 且桶内保持输入顺序（BucketRange 已按 T 升序，故桶内也是升序 —— Downsample 的 LAST 语义依赖它）。
+func TestGroupByBucketAlignsPointsToAbsoluteBucketStart(t *testing.T) {
+	const bucketSec = int64(300)
+	base := flushBaseTS
+	pts := []agentproto.MetricsSample{
+		{T: base * 1000},           // 桶起点本身（左闭）
+		{T: (base+299)*1000 + 999}, // 桶内最后 1ms
+		{T: (base + 300) * 1000},   // 下一个桶的起点
+		{T: (base+300)*1000 + 1},   // 下一个桶内
+		{T: (base + 600) * 1000},   // 再下一个桶
+	}
+
+	got := groupByBucket(pts, bucketSec)
+	if len(got) != 3 {
+		t.Fatalf("桶数 = %d, want 3（对齐必须落在绝对 300s 栅格上）", len(got))
+	}
+	if n := len(got[base]); n != 2 {
+		t.Fatalf("桶 %d 的点数 = %d, want 2（桶起点本身属于本桶、最后 1ms 也属于本桶）", base, n)
+	}
+	if got[base][0].T != base*1000 || got[base][1].T != (base+299)*1000+999 {
+		t.Fatalf("桶 %d 内的顺序必须保持输入序: %d, %d", base, got[base][0].T, got[base][1].T)
+	}
+	if n := len(got[base+300]); n != 2 {
+		t.Fatalf("桶 %d 的点数 = %d, want 2（下一个桶的起点不属于上一个桶）", base+300, n)
+	}
+	if n := len(got[base+600]); n != 1 {
+		t.Fatalf("桶 %d 的点数 = %d, want 1", base+600, n)
+	}
+	if m := groupByBucket(nil, bucketSec); len(m) != 0 {
+		t.Fatalf("空输入应返回空 map, got %v", m)
 	}
 }

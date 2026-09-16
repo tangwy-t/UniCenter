@@ -15,8 +15,12 @@ import (
 // 「backfill 并发把水位回退到更早」（唯一起点就是 flush 与 backfill 的 cron
 // 同时唤醒：flush 已经读到轮初水位，backfill 正在回退）。
 //
-// 为什么用「包装真 RawStore」而不是替身：flush 的设备枚举（Index）与桶读取（Bucket）
+// 为什么用「包装真 RawStore」而不是替身：flush 的设备枚举（Index）与区间读取（BucketRange）
 // 必须与生产同源，否则断言的不是真实的读路径。这里只插入一个**时序钩子**。
+//
+// 钩子按「请求起点落在 fireOnBucket 上」触发：改造后 flush 每设备只发**一次**读取，
+// 起点就是本轮第一个待处理桶（= fireOnBucket），故触发时机仍是「处理那个桶之前」——
+// 回退依然发生在 readCursor 之后、writeCursor 之前，本测试要构造的时序没有被改动。
 //
 // 回退本身用裸 SET 写（而不是 CursorStore.Rewind）：它就是**一个并发写者**，
 // 并发者不会等我们的 Lua；用裸 SET 才能真的构造出「水位在两步之间被改动」。
@@ -31,7 +35,7 @@ type rewindingReader struct {
 
 func (r *rewindingReader) Index(ctx context.Context) ([]uint64, error) { return r.inner.Index(ctx) }
 
-func (r *rewindingReader) Bucket(ctx context.Context, deviceID uint64,
+func (r *rewindingReader) BucketRange(ctx context.Context, deviceID uint64,
 	fromMs, toMs int64) ([]agentproto.MetricsSample, error) {
 
 	if !r.fired && deviceID == r.deviceID && fromMs/1000 == r.fireOnBucket {
@@ -40,7 +44,7 @@ func (r *rewindingReader) Bucket(ctx context.Context, deviceID uint64,
 			return nil, err
 		}
 	}
-	return r.inner.Bucket(ctx, deviceID, fromMs, toMs)
+	return r.inner.BucketRange(ctx, deviceID, fromMs, toMs)
 }
 
 // TestFlushDoesNotPushBackCursorAfterConcurrentRewind 是 S1 缺陷的**端到端最小复现**。
