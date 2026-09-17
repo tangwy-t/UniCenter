@@ -74,3 +74,6 @@ uni_core/configs/config.docker.yaml
 .gocache/
 .gopath/
 go.work.sum
+
+# 部署私钥(沙箱内生成的 GitHub push 用)。绝不入库、绝不推送。
+.deploy-keys/

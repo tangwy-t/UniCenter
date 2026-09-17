@@ -147,27 +147,19 @@ uni_protocol-deps: ## 断言协议模块零第三方依赖
 uni_protocol-contract: uni_protocol-deps ## 协议契约门禁(形状漂移+单源守卫+golden+零依赖)
 	cd $(PROTO_DIR) && go test ./... -count=1 -v -run 'TestJSONTagConventions|TestUnknownFieldsAreTolerated|TestShapeDriftAdditiveOnly|TestGoldenFilesRoundTrip|TestRegistryIsCompleteAndConsistent|TestVersionsAreConsistent|TestCloseCodesAreExhaustivelyMapped|TestSnapshotDTORegistryCoversAllPayloads'
 
-# 脱工作区可构建门禁(发布前置代理)。
-# 真发布形态靠「已发布的 uni_protocol tag + go.mod 里的 require + go.sum」解析;
-# 本仓库暂无已发布版本(实测该模块路径不可 fetch)→ 用「隔离副本 + 本地 replace」代理。
+# 脱工作区可构建门禁(发布态)。
+# 「发布态」= uni_core/go.mod 自带 require + go.sum 有真校验和,不再依赖 go.work。
 #
-# 关键:必须 GOWORK=off。`go env GOWORK` 是按**文件名**沿祖先链查找的,副本即便建在
-# 仓库内的 .tmp-iso/ 也仍会命中根 go.work;此时 go build 报的是**模块归属**错误
-# (directory prefix . does not contain modules listed in go.work),与 require/go.sum/replace
-# 无关 —— 门禁会在「解析路径根本没被检验」的情况下变绿变红皆失真,成为假阳性。
-uni_protocol-release-precheck: ## 断言 uni_core 脱工作区仍可构建(发布前置代理)
-	@echo "── 脱工作区可构建代理(隔离副本 + 本地 replace + GOWORK=off)──"
-	@# 用绝对路径:目标中途会 cd 进副本,相对路径的清理会失效并留下残留。
-	@iso="$$(pwd)/.tmp-iso"; set -e; rm -rf "$$iso"; mkdir -p "$$iso"; \
-	trap 'rm -rf "$$iso"' EXIT; \
-	cp -r $(SERVER_DIR) "$$iso/uni_core"; cp -r $(PROTO_DIR) "$$iso/uni_protocol"; \
-	rm -rf "$$iso/uni_core/.gocache" "$$iso/uni_protocol/.gocache"; \
-	printf '\nrequire github.com/tangwy-t/UniCenter/uni_protocol v0.0.0\n\nreplace github.com/tangwy-t/UniCenter/uni_protocol => ../uni_protocol\n' >> "$$iso/uni_core/go.mod"; \
-	gw=$$(cd "$$iso/uni_core" && GOWORK=off go env GOWORK); \
-	echo "隔离副本 go env GOWORK=$$gw(必须为 off;否则副本被根 go.work 接管、代理无效)"; \
-	if [ "$$gw" != "off" ]; then echo "GOWORK 未关闭 → 代理无效,拒绝放行"; exit 1; fi; \
-	cd "$$iso/uni_core"; GOWORK=off go build ./...; GOWORK=off go test ./... -count=1; \
-	echo "uni_core 脱工作区可构建(隔离副本 + 本地 replace)✓"
+# 两个关键点(均由实测确立,勿凭直觉改):
+#  1) 必须 GOWORK=off。`go env GOWORK` 是按**文件名**沿祖先链查找的,副本即便建在
+#     仓库内的 .tmp-iso/ 也仍会命中根 go.work;此时 go build 报的是**模块归属**错误
+#     (directory prefix . does not contain modules listed in go.work),与 require/go.sum
+#     无关 —— 门禁会在「解析路径根本没被检验」的情况下变绿变红皆失真,成为假阳性。
+#  2) GOPROXY 指向仓库内的离线载荷 uni_core/.goproxy(仅含 uni_protocol 一个模块,
+#     72K),故本门禁**不需要网络**。该载荷正是「已发布模块」的本地镜像;
+#     远端 tag 就绪后可整体删除、改指真实 proxy。
+uni_protocol-release-precheck: ## 断言 uni_core 脱工作区(发布态)仍可构建
+	@bash scripts/release-precheck.sh
 
 uni_protocol-fuzz: ## 协议模块模糊测试短跑(Decode + Encode 两个目标)
 	cd $(PROTO_DIR) && go test ./... -run FuzzDecodeEnvelope -fuzz FuzzDecodeEnvelope -fuzztime 10s

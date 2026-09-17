@@ -132,3 +132,5 @@ require (
 	modernc.org/memory v1.5.0 // indirect
 	modernc.org/sqlite v1.23.1 // indirect
 )
+
+require github.com/tangwy-t/UniCenter/uni_protocol v1.0.0
