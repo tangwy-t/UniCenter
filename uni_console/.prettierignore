@@ -11,3 +11,9 @@
 # 但 prettier 不认文件级豁免 —— 实测 `pnpm lint:prettier` 会把它从 d94c0632 改写成
 # e8ecd57b(与生成器输出不再一致),故在此显式排除。与上一条同属"生成物"类。
 /src/types/import/auto-imports.d.ts
+# 生成物:由 vite.config.ts 的 unplugin-vue-components 生成(Components.dts,见 L85),
+# 与上一条同为 unplugin 的 dts 输出、每次 dev/build 重写。
+# 实测它当前**不会**被 prettier 改写(生成器输出恰好已合规,md5 4aa9f6c2 不变),
+# 但仍显式排除:它与 auto-imports.d.ts 同机制,一旦生成器输出格式变化或 prettier
+# 升级就会开始被改写 —— 这里排除的是**未来同类漂移**,不是当前缺陷。
+/src/types/import/components.d.ts
