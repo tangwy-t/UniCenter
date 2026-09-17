@@ -22,9 +22,16 @@ ARG COMMIT_HASH=
 WORKDIR /src
 ENV CGO_ENABLED=0 GOOS=linux
 
-# 先拷贝依赖清单，利用构建缓存
+# 先拷贝依赖清单**与离线模块载荷**，利用构建缓存。
+#
+# 为什么需要 .goproxy：uni_core 现在处于「发布态」——go.mod 自带
+# `require github.com/tangwy-t/UniCenter/uni_protocol`（不再依赖仓库根 go.work，
+# 容器里也没有 go.work）。该模块尚未推送到远端，无法从任何公共 proxy 取，
+# 故仓库内烘焙了一份**仅含该模块**的离线载荷（4 文件/72K），此处作为
+# GOPROXY 的第一顺位；若把它换成真实 proxy，构建阶段无需其它改动。
 COPY go.mod go.sum ./
-RUN go mod download
+COPY .goproxy ./.goproxy
+RUN GOPROXY="file:///src/.goproxy,${GOPROXY}" GOSUMDB=off GOFLAGS=-mod=mod go mod download
 
 # 再拷贝源码（含 docs 包，main.go 编译依赖）
 COPY cmd ./cmd
@@ -34,10 +41,11 @@ COPY docs ./docs
 # ldflags 注入版本信息（与 Makefile 一致）。
 # RUN 指令不做 Dockerfile 解析期变量替换,${VAR:-default} 全部由 shell 求值;
 # ARG 值以环境变量形式进入 RUN:非空 → 用传入值,空/未传 → 走兜底。
+# 注意 GOPROXY 同样要带上本地载荷（上一步的 ENV 不会带到此处）。
 RUN VERSION="${VERSION:-docker}" && \
     BUILD_TIME="${BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" && \
     COMMIT_HASH="${COMMIT_HASH:-unknown}" && \
-    go build \
+    GOPROXY="file:///src/.goproxy,${GOPROXY}" GOSUMDB=off GOFLAGS=-mod=mod go build \
       -ldflags "-s -w \
         -X 'github.com/tangwy-t/UniCenter/uni_core/internal/pkg/version.Version=${VERSION}' \
         -X 'github.com/tangwy-t/UniCenter/uni_core/internal/pkg/version.BuildTime=${BUILD_TIME}' \
