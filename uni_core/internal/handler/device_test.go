@@ -292,7 +292,7 @@ func TestDeviceHandlerHasSwagAnnotations(t *testing.T) {
 		t.Fatalf("扫描到 %d 个 DeviceHandler 方法，want 8（方法增删时本守卫必须同步）", checked)
 	}
 	want := map[string]bool{
-		"/devices get":                true,
+		"/devices get": true,
 		// 总览是与 "/devices/{id}" 并列的**静态兄弟路由**（见 handler 注释）。
 		// 它在 want 里显式登记，故「总览被误改成 /devices 的 query 变体」或
 		// 「注解被误删」都会让本守卫红灯。

@@ -111,7 +111,7 @@ func TestColumnValueNilPassthrough(t *testing.T) {
 func TestLatestToWatermarkCoversFields(t *testing.T) {
 	// 每个字段给唯一值，且与列名一一对应（列名 = 字段的 json tag 去掉 omitempty）。
 	w := &LatestSummary{
-		T: 1700000000000,
+		T:              1700000000000,
 		CPUUsedPercent: f64p(1), Load1: f64p(2),
 		MemUsedPercent: f64p(3), MemUsedMB: f64p(4),
 		DiskTotalGB: f64p(5), DiskUsedGB: f64p(6), DiskUsedPercent: f64p(7),

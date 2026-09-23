@@ -108,9 +108,9 @@ type DeviceOverviewItem struct {
 	Platform string `json:"platform,omitempty"`
 	OS       string `json:"os,omitempty"`
 
-	Online bool  `json:"online"`
-	Status int8  `json:"status"`
-	Stale  bool  `json:"stale"`
+	Online bool `json:"online"`
+	Status int8 `json:"status"`
+	Stale  bool `json:"stale"`
 	// LastSeenAt 是最后上报时刻（unix 秒）；从未上报则不出现。
 	LastSeenAt *int64 `json:"lastSeenAt,omitempty"`
 	// WatermarkAt 是水位（最新样本）的采样时刻（unix 秒）。
