@@ -43,7 +43,7 @@ func newDeviceTestEnv(t *testing.T) (*DeviceService, *gorm.DB, *agentmetrics.Raw
 	raw := agentmetrics.NewRawStore(rdb, agentmetrics.RawOptions{Step: 10 * time.Second, MaxPoints: 100})
 	latest := agentmetrics.NewLatestStore(rdb)
 	svc := NewDeviceService(repository.NewDeviceRepository(db), repository.NewDeviceResourceRepository(db),
-		raw, latest, stubCfg{}, logger.NewNop())
+		raw, latest, stubCfg{}, nil, logger.NewNop())
 	return svc, db, raw, latest
 }
 
@@ -269,7 +269,7 @@ func TestDeviceReadPathsMapRepositoryFailureToInternal(t *testing.T) {
 	for _, tc := range calls {
 		t.Run(tc.name+"_故障→500", func(t *testing.T) {
 			repo := &stubDeviceRepo{findErr: dbDown}
-			svc := NewDeviceService(repo, &stubResourceRepo{}, stubPurger{}, stubLatestReader{}, stubCfg{}, logger.NewNop())
+			svc := NewDeviceService(repo, &stubResourceRepo{}, stubPurger{}, stubLatestReader{}, stubCfg{}, nil, logger.NewNop())
 
 			err := tc.call(svc)
 			if err == nil {
@@ -285,7 +285,7 @@ func TestDeviceReadPathsMapRepositoryFailureToInternal(t *testing.T) {
 
 		t.Run(tc.name+"_未命中→404", func(t *testing.T) {
 			repo := &stubDeviceRepo{findErr: repository.ErrNotFound}
-			svc := NewDeviceService(repo, &stubResourceRepo{}, stubPurger{}, stubLatestReader{}, stubCfg{}, logger.NewNop())
+			svc := NewDeviceService(repo, &stubResourceRepo{}, stubPurger{}, stubLatestReader{}, stubCfg{}, nil, logger.NewNop())
 
 			if status := appErrStatus(tc.call(svc)); status != 404 {
 				t.Fatalf("仓储未命中必须映射为 404 NotFound, got status=%d", status)
@@ -388,7 +388,7 @@ func TestDeviceEnableDisableMapsRepositoryMissToNotFound(t *testing.T) {
 
 	// 未命中（设备不存在）：仓储返回 repository.ErrNotFound 哨兵 → 必须是 404
 	miss := &stubDeviceRepo{setStatusErr: repository.ErrNotFound}
-	svcMiss := NewDeviceService(miss, &stubResourceRepo{}, stubPurger{}, stubLatestReader{}, stubCfg{}, logger.NewNop())
+	svcMiss := NewDeviceService(miss, &stubResourceRepo{}, stubPurger{}, stubLatestReader{}, stubCfg{}, nil, logger.NewNop())
 	if err := svcMiss.Enable(ctx, 999999); appErrStatus(err) != 404 {
 		t.Fatalf("未命中必须映射为 404 NotFound, got status=%d err=%v", appErrStatus(err), err)
 	}
@@ -415,7 +415,7 @@ func TestDeviceEnableDisableMapsRepositoryFailureToInternal(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			repo := &stubDeviceRepo{setStatusErr: dbDown}
-			svc := NewDeviceService(repo, &stubResourceRepo{}, stubPurger{}, stubLatestReader{}, stubCfg{}, logger.NewNop())
+			svc := NewDeviceService(repo, &stubResourceRepo{}, stubPurger{}, stubLatestReader{}, stubCfg{}, nil, logger.NewNop())
 
 			err := tc.call(svc)
 			if err == nil {

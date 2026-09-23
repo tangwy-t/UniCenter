@@ -48,7 +48,20 @@ type DeviceService struct {
 	raw       DeviceRedisPurger
 	latest    DeviceLatestReader
 	cfg       AgentConfigGetter
-	log       logger.LoggerInterface
+	// upgrade 是升级域的信息面（生效目标 / 未终结尝试 / 终态 / 一键回滚版本）。
+	//
+	// 可空：nil 时设备响应里不带升级字段（升级域未装配的部署形态仍要能工作）。
+	// 之所以由设备服务去**问**升级域而不是自己算：生效目标与「一次尝试」的口径
+	// 只有升级域那一份（ResolveTargetVersion），这里再算一遍就是第二份实现。
+	upgrade DeviceUpgradeInfoProvider
+	log     logger.LoggerInterface
+}
+
+// DeviceUpgradeInfoProvider 是设备服务需要的升级域信息（由 DeviceUpgradeService 实现）。
+type DeviceUpgradeInfoProvider interface {
+	ResolveTargetVersion(ctx context.Context, dev *entity.Device) string
+	Snapshot(ctx context.Context, devices []entity.Device) (map[uint64]DeviceUpgradeSnapshot, error)
+	RollbackVersion(ctx context.Context, deviceID uint64) (string, error)
 }
 
 // 消费方窄接口。
@@ -79,8 +92,10 @@ type DeviceLatestReader interface {
 }
 
 func NewDeviceService(repo DeviceRepository, resources DeviceResourceRepository,
-	raw DeviceRedisPurger, latest DeviceLatestReader, cfg AgentConfigGetter, log logger.LoggerInterface) *DeviceService {
-	return &DeviceService{repo: repo, resources: resources, raw: raw, latest: latest, cfg: cfg, log: log}
+	raw DeviceRedisPurger, latest DeviceLatestReader, cfg AgentConfigGetter,
+	upgrade DeviceUpgradeInfoProvider, log logger.LoggerInterface) *DeviceService {
+	return &DeviceService{repo: repo, resources: resources, raw: raw, latest: latest,
+		cfg: cfg, upgrade: upgrade, log: log}
 }
 
 // offlineThresholdSec 返回**实际生效**的离线判定阈值（秒）。
@@ -130,9 +145,12 @@ func (s *DeviceService) List(ctx context.Context, q *request.DeviceQuery) (*app.
 		watermarks = nil
 	}
 
+	// 升级信息**批量**取（一次查询算全页的「是不是升级中」），失败不阻断列表：
+	// 升级字段缺失比整个列表打不开轻得多（与水位失败同一取向）。
+	snaps := s.upgradeSnapshots(ctx, list)
 	items := make([]response.DeviceListItem, 0, len(list))
 	for i := range list {
-		items = append(items, s.toListItem(&list[i], watermarks[list[i].ID], since))
+		items = append(items, s.toListItem(&list[i], watermarks[list[i].ID], since, snaps[list[i].ID]))
 	}
 
 	page, size := q.GetPage(), q.GetPageSize()
@@ -173,10 +191,19 @@ func (s *DeviceService) GetByID(ctx context.Context, id uint64) (*response.Devic
 	watermarks, _ := s.latest.GetMany(ctx, []uint64{id})
 	// 阈值只读一次，同时喂给 online 判定与响应字段（见 offlineThresholdSec 的说明）。
 	thresholdSec := s.offlineThresholdSec(ctx)
-	item := s.toListItem(d, watermarks[id], time.Now().Add(-time.Duration(thresholdSec)*time.Second))
+	snaps := s.upgradeSnapshots(ctx, []entity.Device{*d})
+	item := s.toListItem(d, watermarks[id], time.Now().Add(-time.Duration(thresholdSec)*time.Second), snaps[id])
+	// 一键回滚目标：由升级域从升级记录推导（「升级前是什么版本」不该让运维回忆）。
+	var rollback string
+	if s.upgrade != nil {
+		if v, err := s.upgrade.RollbackVersion(ctx, id); err == nil {
+			rollback = v
+		}
+	}
 	detail := response.DeviceResp{
-		DeviceListItem: item,
-		Platform:       d.Platform, PlatformVer: d.PlatformVer, Kernel: d.Kernel,
+		DeviceListItem:  item,
+		RollbackVersion: rollback,
+		Platform:        d.Platform, PlatformVer: d.PlatformVer, Kernel: d.Kernel,
 		CPUModel: d.CPUModel, CPUCores: d.CPUCores, MemTotalMB: d.MemTotalMB,
 		BootTime: d.BootTime, CreatedAt: d.CreatedAt.Unix(),
 		// 观测到的来源 IP（服务端取值，见 entity.Device.PrimaryIP 与 handler）。
@@ -298,11 +325,20 @@ func normalizedIP(raw string) string {
 //
 // onlineSince 由调用方算好传入：同一请求内在线阈值只取一次配置，
 // 避免「列表里两台设备用了不同阈值」（跨秒边界时会真的不一致）。
-func (s *DeviceService) toListItem(d *entity.Device, w *agentmetrics.LatestSummary, onlineSince time.Time) response.DeviceListItem {
+func (s *DeviceService) toListItem(d *entity.Device, w *agentmetrics.LatestSummary,
+	onlineSince time.Time, snap DeviceUpgradeSnapshot) response.DeviceListItem {
 	item := response.DeviceListItem{
 		ID: d.ID, Hostname: d.Hostname, OS: d.OS, Arch: d.Arch,
 		AgentVersion: d.AgentVersion, Status: d.Status,
 		Online: d.LastSeenAt != nil && d.LastSeenAt.After(onlineSince),
+		// 升级字段全部来自升级域的同一份快照（含读时推导的相位）。
+		AgentUpgradeSupported: d.AgentUpgradeSupported == 1,
+		TargetVersion:         snap.EffectiveTargetVersion,
+		TargetFromGlobal:      snap.TargetFromGlobal,
+		UpgradePhase:          upgradePhaseOf(d, snap),
+		UpgradeResult:         snap.TerminalState,
+		UpgradeReason:         snap.TerminalReason,
+		UpgradeAt:             unixPtr(snap.TerminalAt),
 	}
 	if d.LastSeenAt != nil {
 		v := d.LastSeenAt.Unix()
@@ -316,4 +352,38 @@ func (s *DeviceService) toListItem(d *entity.Device, w *agentmetrics.LatestSumma
 		item.WatermarkAt = &sec
 	}
 	return item
+}
+
+// upgradeSnapshots 取一批设备的升级快照（升级域未装配时返回空 map，字段自然为空）。
+func (s *DeviceService) upgradeSnapshots(ctx context.Context,
+	devices []entity.Device) map[uint64]DeviceUpgradeSnapshot {
+	if s.upgrade == nil || len(devices) == 0 {
+		return nil
+	}
+	snaps, err := s.upgrade.Snapshot(ctx, devices)
+	if err != nil {
+		s.log.Warn("device upgrade snapshot failed")
+		return nil
+	}
+	return snaps
+}
+
+// upgradePhaseOf 推导设备在列表上的升级相位（**读时计算、不落库**，设计 §3.4）。
+//
+// 三态：achieved（版本与生效目标一致）/ running（有未终结尝试且在跑）/ pending（有目标待升）。
+// 无目标时返回空串（页面显示「—」，而不是伪造一个「待升级」）。
+//
+// 注意 running 与 pending 的区分：尝试存在但仍是 pending（设备还没上线或没开工）
+// 属于**待升级**，把它显示成「升级中」会让人去等一台根本没开始的机器。
+func upgradePhaseOf(d *entity.Device, snap DeviceUpgradeSnapshot) string {
+	if snap.EffectiveTargetVersion == "" {
+		return ""
+	}
+	if d.AgentVersion == snap.EffectiveTargetVersion {
+		return "achieved"
+	}
+	if snap.Running() {
+		return "running"
+	}
+	return "pending"
 }

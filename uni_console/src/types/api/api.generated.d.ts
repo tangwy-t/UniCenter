@@ -609,6 +609,13 @@ declare namespace Api {
       memUsedPercent?: number | null
       diskUsedPercent?: number | null
       watermarkAt?: number | null
+      agentUpgradeSupported: boolean
+      targetVersion?: string
+      targetFromGlobal?: boolean
+      upgradePhase?: string
+      upgradeResult?: number
+      upgradeReason?: string
+      upgradeAt?: number | null
     }
 
     interface DeviceResp {
@@ -624,6 +631,13 @@ declare namespace Api {
       memUsedPercent?: number | null
       diskUsedPercent?: number | null
       watermarkAt?: number | null
+      agentUpgradeSupported: boolean
+      targetVersion?: string
+      targetFromGlobal?: boolean
+      upgradePhase?: string
+      upgradeResult?: number
+      upgradeReason?: string
+      upgradeAt?: number | null
       platform?: string
       platformVer?: string
       kernel?: string
@@ -634,6 +648,7 @@ declare namespace Api {
       createdAt?: number
       primaryIp?: string
       offlineThresholdSec?: number
+      rollbackVersion?: string
     }
 
     interface DeviceMetricPoint {

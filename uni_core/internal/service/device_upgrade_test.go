@@ -2,8 +2,6 @@ package service
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -38,6 +36,11 @@ type upgradeEnv struct {
 	notifier *stubNotifier
 	// uploadDir 是发布物落盘根目录（sys.file.upload.path）。
 	uploadDir string
+	// ingest 是设备入站服务：有了它，测试才能走**真实时序**
+	// （Authenticate 刷新静态信息 → ReconcileOnHello 对账），而不是只调对账那一半。
+	ingest *AgentIngestService
+	// tokens 是各设备的明文 agent token（seedDevice 生成，供 simulateHello 使用）。
+	tokens map[uint64]string
 }
 
 func newUpgradeTestEnv(t *testing.T, cfg stubCfg) *upgradeEnv {
@@ -75,6 +78,7 @@ func newUpgradeTestEnv(t *testing.T, cfg stubCfg) *upgradeEnv {
 		svc: NewDeviceUpgradeService(devices, attempts, tasks, releases, cfg,
 			setter, notifier, nil, logger.NewNop()),
 		release:   NewAgentReleaseService(releases, attempts, cfg, logger.NewNop()),
+		ingest:    NewAgentIngestService(devices, stubAgentRaw{}, stubAgentLatest{}, cfg, logger.NewNop()),
 		db:        db,
 		devices:   devices,
 		attempts:  attempts,
@@ -83,7 +87,34 @@ func newUpgradeTestEnv(t *testing.T, cfg stubCfg) *upgradeEnv {
 		setter:    setter,
 		notifier:  notifier,
 		uploadDir: uploadDir,
+		tokens:    map[uint64]string{},
 	}
+}
+
+// simulateHello 走**真实的握手时序**：先 Authenticate（刷新设备自述的静态信息，
+// 包括 agent_version），再 ReconcileOnHello（对账 + 解析指令）。
+//
+// 为什么测试必须走这两步而不是只调对账：agent_version 是刷新写进去的，而「已达成」
+// 的推导（版本 == 目标）与成功判定都要用**库里的**版本号。只调对账等于假设了一个
+// 「重连不刷新版本」的世界 —— 那正是这个特性修掉的缺口（升级成功观测不到）。
+func (e *upgradeEnv) simulateHello(t *testing.T, deviceID uint64,
+	version string) *agentproto.UpgradeDirective {
+	t.Helper()
+	ctx := context.Background()
+	h := helloFrom(version)
+	h.EnrollToken = ""
+	h.AgentToken = e.tokens[deviceID]
+	if h.AgentToken == "" {
+		t.Fatalf("设备 %d 没有登记明文 token（必须由 seedDevice 创建）", deviceID)
+	}
+	if _, err := e.ingest.Authenticate(ctx, h); err != nil {
+		t.Fatalf("鉴权失败: %v", err)
+	}
+	d, err := e.svc.ReconcileOnHello(ctx, deviceID, h)
+	if err != nil {
+		t.Fatalf("对账失败: %v", err)
+	}
+	return d
 }
 
 // seedDevice 造一台 linux/amd64 的设备（支持远程升级）。
@@ -93,16 +124,20 @@ func newUpgradeTestEnv(t *testing.T, cfg stubCfg) *upgradeEnv {
 func (e *upgradeEnv) seedDevice(t *testing.T, version string) *entity.Device {
 	t.Helper()
 	inst := fmt.Sprintf("inst-%d", deviceSeq.Add(1))
-	sum := sha256.Sum256([]byte(inst))
+	token := fmt.Sprintf("tok-%s-%d", t.Name(), deviceSeq.Load())
 	d := &entity.Device{
 		InstanceID: inst,
 		Hostname:   "web-01", OS: "linux", Arch: "amd64",
 		AgentVersion: version, Status: entity.DeviceStatusEnabled,
-		TokenHash: hex.EncodeToString(sum[:]), AgentUpgradeSupported: 1,
+		TokenHash: hashToken(token), AgentUpgradeSupported: 1,
 	}
 	if err := e.devices.Create(context.Background(), d); err != nil {
 		t.Fatal(err)
 	}
+	if e.tokens == nil {
+		e.tokens = map[uint64]string{}
+	}
+	e.tokens[d.ID] = token
 	return d
 }
 

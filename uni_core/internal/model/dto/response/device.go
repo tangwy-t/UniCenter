@@ -20,6 +20,27 @@ type DeviceListItem struct {
 	DiskUsedPercent *float64 `json:"diskUsedPercent,omitempty"`
 	// WatermarkAt 是水位采样时刻（unix 秒）。
 	WatermarkAt *int64 `json:"watermarkAt,omitempty"`
+
+	// ── Agent 升级（**读时推导**，见设计 §3.4）─────────────────────────
+	//
+	// 这组字段全部来自升级域的同一份快照；页面据此渲染版本列与升级标记。
+	// 目标与相位缺省省略（omitempty）：无目标时页面显示「—」而不是伪造一个相位。
+
+	// AgentUpgradeSupported 是设备自报的「我这一版能被远程升级」。
+	// false 时页面禁用升级按钮并给结论式提示（现场存量 0.1.0 属于这一档）。
+	AgentUpgradeSupported bool `json:"agentUpgradeSupported"`
+	// TargetVersion 是**生效目标**（设备级指定优先，否则全站目标）。
+	TargetVersion string `json:"targetVersion,omitempty"`
+	// TargetFromGlobal 表示该目标来自全站（页面标注「跟随全站」/「设备指定」）。
+	TargetFromGlobal bool `json:"targetFromGlobal,omitempty"`
+	// UpgradePhase 是**推导**出来的相位：achieved | running | pending（空 = 无目标）。
+	UpgradePhase string `json:"upgradePhase,omitempty"`
+	// UpgradeResult 是最近一次终态（0 无 / 1 已达成 / 2 失败 / 3 已回滚）。
+	UpgradeResult int8 `json:"upgradeResult,omitempty"`
+	// UpgradeReason 是终态的原因码（展示层翻译成结论）。
+	UpgradeReason string `json:"upgradeReason,omitempty"`
+	// UpgradeAt 是最近一次终态的时刻（unix 秒）。
+	UpgradeAt *int64 `json:"upgradeAt,omitempty"`
 }
 
 // DeviceResp 是设备详情。
@@ -54,6 +75,10 @@ type DeviceResp struct {
 	// 其实已按 60 秒算。这比不显示阈值更糟：它看起来是个可信的数字。
 	// 与 onlineSince 同源下发，保证「响应里的 online」与「UI 文案」永远同口径。
 	OfflineThresholdSec int `json:"offlineThresholdSec,omitempty"`
+
+	// RollbackVersion 是「一键回滚」的目标版本：该设备最近一次成功升级的**起始版本**，
+	// 由升级域从升级记录推导。空串 = 没有成功历史（页面禁用回滚按钮）。
+	RollbackVersion string `json:"rollbackVersion,omitempty"`
 }
 
 // DeviceMetricPoint 是趋势/下钻的一个桶。

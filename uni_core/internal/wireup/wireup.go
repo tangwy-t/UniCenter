@@ -324,37 +324,6 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 	agentPolicy := newAgentIntervalPolicy(configSvc)
 	agentQuerySvc := service.NewAgentMetricsQueryService(
 		rawStore, deviceMetricRepo, deviceResourceRepo, agentPolicy, log)
-	deviceSvc := service.NewDeviceService(deviceRepo, deviceResourceRepo, rawStore, latestStore, configSvc, log)
-	// 总览服务复用**同一批**依赖实例（deviceRepo/latestStore/rawStore/agentPolicy/
-	// configSvc），故总览与详情页对同一 range/同一列/同一在线阈值的解释必然一致。
-	// 注入 agentPolicy（而不是另建一个 policy）是关键：它内部每次调用都读配置，
-	// 与 agentQuerySvc 共享后，改 reportInterval 会**同时**影响两页的栅格。
-	deviceOverviewSvc := service.NewDeviceOverviewService(
-		deviceRepo, latestStore, deviceMetricRepo, rawStore, agentPolicy, configSvc, log)
-	// 升级域的两个服务在 agentHub 之后构造（编排服务要用 hub 的薄适配器催办，
-	// 见下方「Agent 升级」段）。
-
-	// ── Agent 后台服务（5m 落库 / 1h 回滚 / 6 张表分区对账）─────────────
-	// flush 与 rollup **显式**注入同一个 Redis 客户端：两者消费同一族水位
-	// （cursor_5m / cursor_1h）与同一个 repair 集合，注入两个不同的 Redis 会让
-	// 两个档位的水位互不相认（见各自 WithCursorStore 的说明）。
-	agentFlushSvc := service.NewAgentMetricsFlushService(
-		rawStore, deviceMetricRepo, deviceResourceRepo, configSvc, log).WithCursorStore(redis)
-	agentRollupSvc := service.NewAgentMetricsRollupService(
-		deviceMetricRepo, rawStore, configSvc, log).WithCursorStore(redis)
-	// 分区协调器自带锁键、锁租约与每表超时（**不复用** SysJob 的 job 锁，见其
-	// PartitionLocker 说明），锁走同一个 Redis。
-	//
-	// 第四个参数是**审计流水仓储**（spec §7.3 的 agent_metric_partition_log）：
-	// 分区被补/被回收之后各写一行，供「图上少了一块」的缺口归因倒查。
-	// 审计表是**普通表**、由 AutoMigrate 清单建（migration/autoMigrateEntities），
-	// 不经过指标表那条分区建表钩子 —— 这里只注入仓储，不建表。
-	// 漏注入不是无声的：协调器会把「审计仓储缺失」记成审计失败（log.Error +
-	// AuditFailures + ErrPartitionPartial），见 auditFailure 的说明。
-	agentPartitionSvc := service.NewAgentMetricsPartitionService(
-		repository.NewDeviceMetricSchemaRepository(db), configSvc, locker,
-		repository.NewAgentPartitionLogRepository(db), log)
-
 	// ── Agent Hub（agent 侧 WS 注册表 + 单连接状态机的依赖束）───────────
 	// PingInterval/PongWait 由 sys.agent.heartbeatInterval 推导：服务端 ping 必须
 	// **不慢于** agent 的心跳节奏（conn.pingInterval 取两者中较小者），而「多久没
@@ -385,6 +354,41 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 		agentReleaseSvc = service.NewAgentReleaseServiceWithRemoteS3(
 			agentReleaseRepo, agentUpgradeAttemptRepo, configSvc, log, s3Backend)
 	}
+
+	// 设备服务注入**升级域的信息面**（生效目标 / 未终结尝试 / 一键回滚版本）：
+	// 列表与详情上的升级字段全部由它供给，设备服务自己不算第二份口径。
+	deviceSvc := service.NewDeviceService(deviceRepo, deviceResourceRepo, rawStore, latestStore,
+		configSvc, deviceUpgradeSvc, log)
+	// 总览服务复用**同一批**依赖实例（deviceRepo/latestStore/rawStore/agentPolicy/
+	// configSvc），故总览与详情页对同一 range/同一列/同一在线阈值的解释必然一致。
+	// 注入 agentPolicy（而不是另建一个 policy）是关键：它内部每次调用都读配置，
+	// 与 agentQuerySvc 共享后，改 reportInterval 会**同时**影响两页的栅格。
+	deviceOverviewSvc := service.NewDeviceOverviewService(
+		deviceRepo, latestStore, deviceMetricRepo, rawStore, agentPolicy, configSvc, log)
+	// 升级域的两个服务在 agentHub 之后构造（编排服务要用 hub 的薄适配器催办，
+	// 见下方「Agent 升级」段）。
+
+	// ── Agent 后台服务（5m 落库 / 1h 回滚 / 6 张表分区对账）─────────────
+	// flush 与 rollup **显式**注入同一个 Redis 客户端：两者消费同一族水位
+	// （cursor_5m / cursor_1h）与同一个 repair 集合，注入两个不同的 Redis 会让
+	// 两个档位的水位互不相认（见各自 WithCursorStore 的说明）。
+	agentFlushSvc := service.NewAgentMetricsFlushService(
+		rawStore, deviceMetricRepo, deviceResourceRepo, configSvc, log).WithCursorStore(redis)
+	agentRollupSvc := service.NewAgentMetricsRollupService(
+		deviceMetricRepo, rawStore, configSvc, log).WithCursorStore(redis)
+	// 分区协调器自带锁键、锁租约与每表超时（**不复用** SysJob 的 job 锁，见其
+	// PartitionLocker 说明），锁走同一个 Redis。
+	//
+	// 第四个参数是**审计流水仓储**（spec §7.3 的 agent_metric_partition_log）：
+	// 分区被补/被回收之后各写一行，供「图上少了一块」的缺口归因倒查。
+	// 审计表是**普通表**、由 AutoMigrate 清单建（migration/autoMigrateEntities），
+	// 不经过指标表那条分区建表钩子 —— 这里只注入仓储，不建表。
+	// 漏注入不是无声的：协调器会把「审计仓储缺失」记成审计失败（log.Error +
+	// AuditFailures + ErrPartitionPartial），见 auditFailure 的说明。
+	agentPartitionSvc := service.NewAgentMetricsPartitionService(
+		repository.NewDeviceMetricSchemaRepository(db), configSvc, locker,
+		repository.NewAgentPartitionLogRepository(db), log)
+
 	agentDeps := agenthub.Deps{
 		// 五个入站能力面由**同一个** AgentIngestService 满足（方法集逐字匹配上面
 		// 列出的五个窄接口，已逐个 go doc 核对）；名字写反在这里是编译错误，

@@ -473,9 +473,6 @@ func TestTaskListAndDetail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	list, ok := page.List.([]interface{})
-	_ = list
-	_ = ok
 	if page.Total != 1 {
 		t.Fatalf("任务数不符: %+v", page)
 	}

@@ -25,14 +25,23 @@ type DeviceUpgradeSnapshot struct {
 	EffectiveTargetVersion string
 	// TargetFromGlobal 表示生效目标来自全站（设备级为空而全站有值）。
 	TargetFromGlobal bool
-	// Running 表示存在未终结尝试（= 页面上的「升级中」）。
-	Running bool
+	// OpenAttemptState 是未终结尝试的当前状态（空 = 没有未终结尝试）。
+	//
+	// 刻意给**状态**而不是一个 bool：`pending`（下发时插入、设备还没开工）
+	// 与真的在跑（downloading…）在页面上是不同的东西 —— 前者是「等待」，
+	// 后者是「升级中」。给 bool 就必然把两者混成一种。
+	OpenAttemptState string
 	// Unsupported 是 agent 自报位（0 = 该版本不支持远程升级）。
 	Unsupported bool
 	// TerminalState / TerminalReason / TerminalAt 是最近一次终态（无/已达成/失败/已回滚）。
 	TerminalState  int8
 	TerminalReason string
 	TerminalAt     *time.Time
+}
+
+// Running 报告这台设备是否真的在升级（有未终结尝试且已开工）。
+func (s DeviceUpgradeSnapshot) Running() bool {
+	return s.OpenAttemptState != "" && s.OpenAttemptState != entity.AttemptStatePending
 }
 
 // ResolveTargetVersion 见同名导出的方法说明（此处是接口视图）。
@@ -59,10 +68,14 @@ func (s *DeviceUpgradeService) Snapshot(ctx context.Context,
 		if target == "" && global != "" {
 			target, fromGlobal = global, true
 		}
+		state := ""
+		if a := open[dev.ID]; a != nil {
+			state = a.State
+		}
 		out[dev.ID] = DeviceUpgradeSnapshot{
 			EffectiveTargetVersion: target,
 			TargetFromGlobal:       fromGlobal,
-			Running:                open[dev.ID] != nil,
+			OpenAttemptState:       state,
 			Unsupported:            dev.AgentUpgradeSupported != 1,
 			TerminalState:          dev.AgentUpgradeState,
 			TerminalReason:         dev.AgentUpgradeReason,
