@@ -995,10 +995,18 @@ func TestExplicitMetricsRejectsColumnsTheResponseModelCannotCarry(t *testing.T) 
 				t.Fatalf("必须在查库/查热层之前拒绝（不白跑一次查询）: col=%s db=%d raw=%d",
 					col, reader.calls, raw.calls)
 			}
-			// 错误信息必须说清「表里有、响应装不下」，而不是含糊的「列非法」
+			// 错误信息必须说清「这列有数据、只是本接口不返回它」，而不是含糊的
+			// 「列非法」—— 含糊会让调用方以为是自己拼错了列名，去改一个没拼错的参数。
+			// 同时不得为了「说清楚」而把响应模型名、表名、spec 章节号写进消息：它会被
+			// 前端原样显示在页面上（见 TestUserFacingErrorsSpeakHuman）。
 			var ae *apperror.AppError
-			if errors.As(err, &ae) && !strings.Contains(ae.Message, "不承接") {
-				t.Fatalf("400 的说明必须点明原因（响应模型不承接该列）, got %q", ae.Message)
+			if errors.As(err, &ae) {
+				if !strings.Contains(ae.Message, "不返回") {
+					t.Fatalf("400 的说明必须点明原因（该列有数据但接口不返回它）, got %q", ae.Message)
+				}
+				if strings.Contains(ae.Message, "不是有效的指标列") {
+					t.Fatalf("400 的说明退回了「列非法」的含糊说法, got %q", ae.Message)
+				}
 			}
 		}
 	}
@@ -1881,4 +1889,51 @@ func TestServiceHasNoHardcodedMetricTableNames(t *testing.T) {
 		t.Fatal("没有扫描到任何生产文件，守卫会空转通过（vacuous）")
 	}
 	t.Logf("已扫描 %d 个生产文件，无硬编码表名", scanned)
+}
+
+// TestUserFacingErrorsSpeakHuman 守卫：这几条 400 的 msg 会被前端**原样**显示在
+// 页面上（uni_console/src/modules/device/utils/error.ts 把 badRequest 的 msg 当
+// 标题展示），故消息里不得出现参数名、原始秒数、表名与响应模型名 —— 那些是实现的
+// 语言，而读者要的是「能看多远、怎么改」。
+//
+// 与前端 `__tests__/copy-no-internals.test.ts` 同一口径：那边扫页面文案，这边扫
+// 后端消息文本；两处都留一条守卫，是因为文案会**从两边长出来**（前端的提示与后端
+// 的报错最终显示在同一个位置）。
+func TestUserFacingErrorsSpeakHuman(t *testing.T) {
+	forbidden := []string{"range", "秒之间", "device_metric", "5min", "TrendPoint", "spec §", "白名单"}
+
+	assertHuman := func(what, msg string) {
+		t.Helper()
+		for _, bad := range forbidden {
+			if strings.Contains(msg, bad) {
+				t.Fatalf("%s 的消息「%s」含内部术语 %q（该消息会原样出现在页面上）", what, msg, bad)
+			}
+		}
+	}
+
+	// 出口 1：时间范围越界（消息里写「1 小时 ~ 180 天」，不写 [3600, 15552000] 秒）
+	_, err := SelectTier(1, 30)
+	assertBadRequest(t, "range=1 越界", err)
+	assertHuman("时间范围越界", err.Error())
+
+	// 出口 2～4：列不可用的三条分支（5min-only 列落在 1h 档 / 表里有但响应装不下 /
+	// 列名非法）。四个列名覆盖三条分支：前两个只存在于 5min 档、cpu_used_percent 在
+	// 两档的表里都有、not_a_column 谁都没有。
+	oneHour := TierSelection{Source: SourceDB, Table: entity.TableNameMetric1h, RangeSeconds: 40 * 86400}
+	fiveMin := TierSelection{Source: SourceDB, Table: entity.TableNameMetric5m, RangeSeconds: 7 * 86400}
+	for _, col := range []string{"tcp_time_wait", "agent_mem_resident_mb", "cpu_used_percent", "not_a_column"} {
+		assertHuman("1h 档的列 "+col, unavailableColumnReason(oneHour, col))
+		assertHuman("5min 档的列 "+col, unavailableColumnReason(fiveMin, col))
+	}
+
+	// humanSpan 必须与前端 formatDurationText 同口径：两边写法不一致（「1 小时」与
+	// 「3600 秒」）会让人以为是两个不同的限制。
+	for _, c := range []struct {
+		sec  int64
+		want string
+	}{{3600, "1 小时"}, {180 * 86400, "180 天"}, {900, "15 分钟"}, {45, "45 秒"}} {
+		if got := humanSpan(c.sec); got != c.want {
+			t.Fatalf("humanSpan(%d) = %q，期望 %q", c.sec, got, c.want)
+		}
+	}
 }

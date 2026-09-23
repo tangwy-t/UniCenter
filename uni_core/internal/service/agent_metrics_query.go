@@ -90,8 +90,11 @@ func (t TierSelection) BucketCount() int64 {
 // 不可查询却可校验的值。
 func SelectTier(rangeSec int64, redisNativeSec int64) (TierSelection, error) {
 	if rangeSec < request.DeviceRangeMin || rangeSec > request.DeviceRangeMax {
-		return TierSelection{}, apperror.BadRequest(fmt.Sprintf("range 必须在 [%d, %d] 秒之间",
-			request.DeviceRangeMin, request.DeviceRangeMax))
+		// 消息给人看，不写参数名与原始秒数：这条 400 会被前端**原样**展示在页面上
+		// （device/utils/error.ts 把 badRequest 的 msg 当标题），而「[3600, 15552000]
+		// 秒之间」对使用者不构成信息 —— 他要的是「能看多长」。
+		return TierSelection{}, apperror.BadRequest(fmt.Sprintf("时间范围必须在 %s ~ %s之间",
+			humanSpan(request.DeviceRangeMin), humanSpan(request.DeviceRangeMax)))
 	}
 
 	const day = int64(24 * 3600)
@@ -444,17 +447,36 @@ func unavailableColumnReason(sel TierSelection, col string) string {
 	table := trendColumnsTable(sel)
 	if allowed, err := repository.MetricQueryColumns(table); err == nil {
 		if sel.Source == SourceDB && sel.Table == entity.TableNameMetric1h && isFiveMinOnlyColumn(col) {
-			return fmt.Sprintf(
-				"列 %q 只存在于 5min 档（range > 30d 走 1h 档，该档不产出此列），请把 range 缩短到 30 天以内", col)
+			// 该列只在 5min 档产出，而 5min 档覆盖 ≤30 天；消息写「能看多远 + 怎么改」。
+			return fmt.Sprintf("列 %q 只在 30 天以内的时间范围可用，请把时间范围缩短到 30 天以内", col)
 		}
 		if slices.Contains(allowed, col) {
-			return fmt.Sprintf(
-				"列 %q 在 %s 中存在，但响应模型（agentmetrics.TrendPoint / DeviceMetricPoint）不承接该列，"+
-					"显式请求只会得到恒为空的曲线 —— 本接口按 spec §8 的口径返回 400 而不是静默给 nil；"+
-					"请从 metrics 中移除该列", col, table)
+			// 消息必须**具体**：说清「这列有数据、只是本接口不返回它」，否则调用方
+			// 会以为是自己拼错了列名，去改一个没拼错的参数。但具体不等于泄漏实现 ——
+			// 响应模型名（TrendPoint/DeviceMetricPoint）、表名与 spec 章节号留在本注释里，
+			// 因为这条 400 会被前端原样显示在页面上（见 TestUserFacingErrorsSpeakHuman）。
+			return fmt.Sprintf("列 %q 有数据，但本接口不返回该列（当前档位不提供），请从指标里移除该列", col)
 		}
 	}
-	return fmt.Sprintf("列 %q 不在 %s 的白名单内（列名非法或该表无此列）", col, table)
+	return fmt.Sprintf("列 %q 不是有效的指标列（列名拼写错误，或该列在当前时间范围不可用）", col)
+}
+
+// humanSpan 把秒数写成用户能读的跨度（「1 小时」「180 天」），供 400 消息使用。
+//
+// 与前端 uni_console/src/modules/device/utils/metrics.ts 的 formatDurationText
+// **同口径**：这些消息会被前端原样显示，两边说法不一致会让人以为是两个不同的
+// 限制（「1 小时」与「3600 秒」）。
+func humanSpan(sec int64) string {
+	switch {
+	case sec%86400 == 0:
+		return fmt.Sprintf("%d 天", sec/86400)
+	case sec%3600 == 0:
+		return fmt.Sprintf("%d 小时", sec/3600)
+	case sec%60 == 0:
+		return fmt.Sprintf("%d 分钟", sec/60)
+	default:
+		return fmt.Sprintf("%d 秒", sec)
+	}
 }
 
 // trendColumnsTable 返回该档位用来解析列集的表名。
@@ -563,8 +585,9 @@ func (s *AgentMetricsQueryService) ResourceMetrics(ctx context.Context, deviceID
 		return nil, err
 	}
 	if sel.Source == SourceDB && sel.Table != entity.TableNameMetric5m {
-		// 子表只有 5min 档；>30d 没有明细可查
-		return nil, apperror.BadRequest("资源明细只保留 30 天（5min 档），请把 range 缩短到 30 天以内")
+		// 子表只有 5min 档；>30d 没有明细可查。
+		// 消息只讲结论（能看多久 + 怎么改）：档位与表结构是实现，进注释。
+		return nil, apperror.BadRequest("资源明细只保留 30 天，请把时间范围缩短到 30 天以内")
 	}
 
 	now := time.Now().Unix()
