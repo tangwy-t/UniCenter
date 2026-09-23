@@ -4,9 +4,12 @@ package wireup
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
+
+	agentproto "github.com/tangwy-t/UniCenter/uni_protocol"
 
 	"github.com/tangwy-t/UniCenter/uni_core/internal/handler"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/middleware"
@@ -215,8 +218,12 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 	// 存储后端默认本地盘;配置 storage.backend=s3 时构造 S3 兼容后端(新上传走
 	// 对象存储,历史 local 文件仍按 StorageType 路由到本地盘读取)。
 	fileSvc := service.NewFileService(fileRepo, configSvc, log)
+	// s3Backend 提到外层：发布物服务（agent 程序包）与文件模块共用同一个对象存储
+	// 后端实例 —— 两处各建一个会让同一份配置出现两个客户端（连接数翻倍，
+	// 且「存储是否可用」变成两个独立的判断）。
+	var s3Backend storage.Backend
 	if cfg.Storage.Backend == "s3" {
-		s3Backend, err := storage.NewS3(storage.S3Options{
+		s3Backend, err = storage.NewS3(storage.S3Options{
 			Endpoint:  cfg.Storage.S3.Endpoint,
 			AccessKey: cfg.Storage.S3.AccessKey,
 			SecretKey: cfg.Storage.S3.SecretKey,
@@ -324,10 +331,8 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 	// 与 agentQuerySvc 共享后，改 reportInterval 会**同时**影响两页的栅格。
 	deviceOverviewSvc := service.NewDeviceOverviewService(
 		deviceRepo, latestStore, deviceMetricRepo, rawStore, agentPolicy, configSvc, log)
-	// 升级域的唯一写入口：agent 通道（对账/上报）与控制台 HTTP（下发/任务/发布物）
-	// 共用同一个实例 —— 生效目标与「一次尝试」的口径必须只有一份（设计 §3.1）。
-	deviceUpgradeSvc := service.NewDeviceUpgradeService(
-		deviceRepo, agentUpgradeAttemptRepo, agentUpgradeTaskRepo, agentReleaseRepo, configSvc, log)
+	// 升级域的两个服务在 agentHub 之后构造（编排服务要用 hub 的薄适配器催办，
+	// 见下方「Agent 升级」段）。
 
 	// ── Agent 后台服务（5m 落库 / 1h 回滚 / 6 张表分区对账）─────────────
 	// flush 与 rollup **显式**注入同一个 Redis 客户端：两者消费同一族水位
@@ -362,6 +367,24 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 		PingInterval: agentHeartbeat,
 		PongWait:     3 * agentHeartbeat,
 	}, log)
+
+	// ── Agent 升级（编排 + 发布物）─────────────────────────────────────
+	// 编排服务是升级域的**唯一写入口**：agent 通道（对账/上报）与控制台 HTTP
+	// （下发/任务/汇总）共用同一个实例 —— 生效目标与「一次尝试」的口径只有一份。
+	// setter 复用 configSvc（全站目标就存在 sys.agent.targetVersion 这个配置行：
+	// 页面专用入口写它、通用配置页也能看到它）；notifier 是 hub 的薄适配器，
+	// 升级域因此不必直接持有 socket（设计 §3.1 边界规矩 1）。
+	deviceUpgradeSvc := service.NewDeviceUpgradeService(
+		deviceRepo, agentUpgradeAttemptRepo, agentUpgradeTaskRepo, agentReleaseRepo,
+		configSvc, configSvc, newAgentUpgradeNotifier(agentHub, log), userRepo, log)
+	// 发布物服务（上传 / 发布 / 撤回 / 删除 / 按设备平台解析下载）。存储后端与
+	// 文件模块同源：s3Backend 未配置时留在本地盘，读取始终按行上的 StorageType 路由。
+	agentReleaseSvc := service.NewAgentReleaseService(
+		agentReleaseRepo, agentUpgradeAttemptRepo, configSvc, log)
+	if s3Backend != nil {
+		agentReleaseSvc = service.NewAgentReleaseServiceWithRemoteS3(
+			agentReleaseRepo, agentUpgradeAttemptRepo, configSvc, log, s3Backend)
+	}
 	agentDeps := agenthub.Deps{
 		// 五个入站能力面由**同一个** AgentIngestService 满足（方法集逐字匹配上面
 		// 列出的五个窄接口，已逐个 go doc 核对）；名字写反在这里是编译错误，
@@ -465,6 +488,11 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 	// 设备 handler 注入两个依赖：管理域 deviceSvc + 查询域 agentQuerySvc。
 	// 两者不能混用（管理域不查指标表，查询域不查设备表），故不合并成一个大接口。
 	deviceHdl := handler.NewDeviceHandler(deviceSvc, agentQuerySvc, deviceOverviewSvc)
+	// 升级域的两个 HTTP 侧处理器：命令/查询（UpgradeHdl）与发布物管理（ReleaseHdl）。
+	// auth 复用 agentIngestSvc：下载端点的鉴权与 WS 首帧同一套凭据、同一条
+	// 「三种失败不可区分」纪律，两处各写一份必然在边界上分叉。
+	deviceUpgradeHdl := handler.NewDeviceUpgradeHandler(deviceUpgradeSvc)
+	agentReleaseHdl := handler.NewAgentReleaseHandler(agentReleaseSvc, agentIngestSvc)
 	serverMonitorHdl := handler.NewServerMonitorHandler(log, serverstats.NewHistoryStore(redis))
 
 	// 服务器监控的采样协程随进程退出:drain 阶段优雅停止(幂等 Close)。
@@ -584,7 +612,9 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 			FileHdl: fileHdl,
 		},
 		Device: router.DeviceDeps{
-			DeviceHdl: deviceHdl,
+			DeviceHdl:  deviceHdl,
+			UpgradeHdl: deviceUpgradeHdl,
+			ReleaseHdl: agentReleaseHdl,
 		},
 		// agent WS 入口：hub 与依赖束都是**完整装配**（enroll / 鉴权 / 入湖 /
 		// touch / 策略六个能力面全部接上，且 hub 与 4 个后台任务共享同一批
@@ -737,4 +767,53 @@ func frameCountOf(v any) int64 {
 	default:
 		return 0
 	}
+}
+
+// ── Agent 升级：催办适配器 ───────────────────────────────────────────
+
+// agentUpgradeNotifier 把升级指令推给在线设备（满足 service.UpgradeNotifier）。
+//
+// 它把「升级域不许直接摸 socket」这条边界规矩落成一个 30 行的适配器：Hub 属于
+// agent 通道，让 HTTP 侧直接调用它会让两条链路的生命周期纠缠在一起。
+//
+// 两条语义要点：
+//   - **设备离线** → 返回 service.ErrDeviceOffline（不是故障）：声明式目标会在
+//     它下次重连的 hello_ack 里生效，催办只是「不必等下一次重连」的加速；
+//   - **背压丢弃**（发送队列满）→ 用 CloseUpgradeRetry(4009) 主动断连：agent 约
+//     1 秒后重连，从 hello_ack 拿到同一份目标。用一次连接抖动换「立即生效」，
+//     比让操作员对着「点了没动静」的界面猜要诚实得多。
+type agentUpgradeNotifier struct {
+	hub *agenthub.Hub
+	log logger.LoggerInterface
+}
+
+func newAgentUpgradeNotifier(hub *agenthub.Hub, log logger.LoggerInterface) *agentUpgradeNotifier {
+	return &agentUpgradeNotifier{hub: hub, log: log}
+}
+
+// 编译期断言：适配器必须满足升级域的窄接口（签名漂移时红灯落在这里）。
+var _ service.UpgradeNotifier = (*agentUpgradeNotifier)(nil)
+
+func (n *agentUpgradeNotifier) NotifyUpgrade(ctx context.Context, deviceID uint64,
+	d *agentproto.UpgradeDirective) error {
+	_ = ctx // hub 的发送不阻塞、也不接受 ctx（队列满即返回错误，见其实现）
+	// 信封 id 复用 request_id：它已经是本次尝试的十进制标识，且被设备在状态上报里
+	// 原样带回 —— 用同一个值让「指令 → 上报」在日志里可以直接对上。
+	msg, err := agentproto.NewMessage(d.RequestID, agentproto.TypeCoreAgentUpgrade, d)
+	if err != nil {
+		return fmt.Errorf("wireup: build upgrade directive: %w", err)
+	}
+	err = n.hub.SendToDevice(deviceID, msg)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, agenthub.ErrDeviceOffline):
+		return service.ErrDeviceOffline
+	}
+	// 走到这里说明消息进了队列但被丢弃（或写失败）：断连促它重连拿目标。
+	if n.hub.CloseDevice(deviceID, agentproto.CloseUpgradeRetry, "upgrade target changed") {
+		n.log.Info("agent upgrade nudge dropped, connection closed for re-sync",
+			zap.Uint64("device_id", deviceID), zap.Error(err))
+	}
+	return err
 }

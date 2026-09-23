@@ -131,6 +131,23 @@ func (h *Hub) DeviceIDs() []uint64 {
 	return out
 }
 
+// ErrDeviceOffline 表示目标设备当前没有在线连接。
+var ErrDeviceOffline = errors.New("agenthub: device offline")
+
+// SendToDevice 向指定在线设备推一条消息。
+//
+// 它是升级催办的唯一出路（升级域不许直接摸 socket，见设计 §3.1 边界规矩）：
+// 返回 ErrDeviceOffline 表示设备没连（调用方无需处理 —— 声明式目标会在它
+// 下次重连的 hello_ack 里生效），其余错误表示消息进了发送队列但**可能被背压丢弃**，
+// 调用方据此决定是否断连促重连。
+func (h *Hub) SendToDevice(deviceID uint64, msg *agentproto.Message) error {
+	c, ok := h.Get(deviceID)
+	if !ok {
+		return ErrDeviceOffline
+	}
+	return c.SendMessage(msg)
+}
+
 // CloseDevice 向指定设备的连接下发关闭码；设备不在线返回 false。
 //
 // reason 只是日志细节：线上 reason 由 CloseWith 取 `agentproto.CloseReason(code)`。

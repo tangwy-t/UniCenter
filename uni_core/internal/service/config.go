@@ -248,6 +248,40 @@ func (s *ConfigService) GetBool(ctx context.Context, key string, defaultVal bool
 	return lower == "true" || lower == "1"
 }
 
+// SetString 写入字符串类型配置值（与 SetBool 同款：先落 DB 再回写 Redis 并广播）。
+//
+// 场景：全站目标版本这类「由专用页面写入、但存储仍是配置行」的键 ——
+// 页面不该为了写一个值而去通用配置接口里查 ID 再改（两次请求、两处口径），
+// 而通用配置页也仍能编辑它（它是配置行，可见可审计）。
+func (s *ConfigService) SetString(ctx context.Context, key, value string) error {
+	cfg, err := s.repo.FindByKey(ctx, key)
+	if err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		status := int8(1)
+		cfg = &entity.SysConfig{
+			ConfigKey:   key,
+			ConfigValue: value,
+			ConfigType:  "S",
+			Status:      &status,
+		}
+		if err := s.repo.Create(ctx, cfg); err != nil {
+			s.logger.Error("ConfigService.SetString create failed", zap.String("key", key), zap.Error(err))
+			return apperror.Internal("写入配置失败")
+		}
+		s.configWarm(ctx, key, value)
+		return nil
+	}
+	cfg.ConfigValue = value
+	if err := s.repo.Update(ctx, cfg); err != nil {
+		s.logger.Error("ConfigService.SetString update failed", zap.String("key", key), zap.Error(err))
+		return apperror.Internal("写入配置失败")
+	}
+	s.configWarm(ctx, key, value)
+	return nil
+}
+
 // SetBool 写入 bool 类型配置值:先落 DB(真相源),再回写 Redis Hash
 // 并发布变更通知。此前只写 Redis:config-cache-sync 任务
 // (FindAllEnabled 全量回写 hash)会静默回滚该值,Redis 重启也会丢。

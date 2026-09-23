@@ -11,6 +11,7 @@ import (
 
 	agentproto "github.com/tangwy-t/UniCenter/uni_protocol"
 
+	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/request"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/entity"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/repository"
@@ -21,6 +22,8 @@ import (
 // UpgradeDeviceRepository 是本服务用到的设备仓储方法集。
 type UpgradeDeviceRepository interface {
 	FindByID(ctx context.Context, id uint64) (*entity.Device, error)
+	FindByIDs(ctx context.Context, ids []uint64) ([]entity.Device, error)
+	FindByUpgradeFilter(ctx context.Context, q *request.DeviceQuery, onlineSince time.Time) ([]entity.Device, error)
 	SetUpgradeTarget(ctx context.Context, id uint64, target string) error
 	SetUpgradeTerminal(ctx context.Context, id uint64, state int8, reasonCode string, at time.Time) error
 }
@@ -30,19 +33,31 @@ type UpgradeAttemptRepository interface {
 	Create(ctx context.Context, a *entity.AgentUpgradeAttempt) error
 	FindByRequestID(ctx context.Context, deviceID uint64, requestID string) (*entity.AgentUpgradeAttempt, error)
 	FindOpenByDevice(ctx context.Context, deviceID uint64) (*entity.AgentUpgradeAttempt, error)
+	FindOpenByDevices(ctx context.Context, deviceIDs []uint64) (map[uint64]*entity.AgentUpgradeAttempt, error)
 	ListByDevice(ctx context.Context, deviceID uint64, limit int) ([]entity.AgentUpgradeAttempt, error)
+	FindPageByTask(ctx context.Context, taskID uint64, q *request.AgentUpgradeAttemptQuery) ([]entity.AgentUpgradeAttempt, int64, error)
+	FindLastSucceededFrom(ctx context.Context, deviceID uint64) (string, error)
+	SupersedeOpen(ctx context.Context, deviceID uint64, at time.Time) (int64, error)
 	UpdateReport(ctx context.Context, a *entity.AgentUpgradeAttempt) error
 	FinishOpen(ctx context.Context, deviceID uint64, state, reasonCode string, at time.Time) (int64, error)
 }
 
-// UpgradeTaskSettler 是任务收口所需的最小面。
-type UpgradeTaskSettler interface {
+// UpgradeTaskRepository 是任务面的方法集（建任务 / 列表 / 明细聚合 / 收口）。
+type UpgradeTaskRepository interface {
+	Create(ctx context.Context, t *entity.AgentUpgradeTask) error
+	FindByID(ctx context.Context, id uint64) (*entity.AgentUpgradeTask, error)
+	FindPage(ctx context.Context, q *request.AgentUpgradeTaskQuery) ([]entity.AgentUpgradeTask, int64, error)
+	CountsByTask(ctx context.Context, taskID uint64) (map[string]int, error)
 	MarkFinishedIfSettled(ctx context.Context, taskID uint64, at time.Time) (bool, error)
 }
 
-// UpgradeReleaseRepository 是发布物查询面（对账时解析产物）。
+// UpgradeReleaseRepository 是发布物查询面（对账解析产物 / 下发前判断影响面）。
+//
+// 写面（上传 / 发布 / 删除）在 AgentReleaseService，不在这里：本服务是**升级编排**，
+// 它只需要读产物元数据。
 type UpgradeReleaseRepository interface {
 	FindByPlatform(ctx context.Context, version, os, arch string, onlyPublished bool) (*entity.AgentRelease, error)
+	ListByVersion(ctx context.Context, version string) ([]entity.AgentRelease, error)
 }
 
 const (
@@ -73,17 +88,24 @@ const (
 type DeviceUpgradeService struct {
 	devices  UpgradeDeviceRepository
 	attempts UpgradeAttemptRepository
-	tasks    UpgradeTaskSettler
+	tasks    UpgradeTaskRepository
 	releases UpgradeReleaseRepository
 	cfg      AgentConfigGetter
+	// setter / notifier / actors 都是可选装配：setter 缺省时全站目标不可改（返回错误），
+	// notifier 缺省时催办不发生（设备仍会在下次重连对账），actors 缺省时任务里不记发起人
+	// （操作日志仍有记录）。三者都不是上报主链路的依赖。
+	setter   UpgradeConfigSetter
+	notifier UpgradeNotifier
+	actors   UpgradeActorResolver
 	log      logger.LoggerInterface
 }
 
 func NewDeviceUpgradeService(devices UpgradeDeviceRepository, attempts UpgradeAttemptRepository,
-	tasks UpgradeTaskSettler, releases UpgradeReleaseRepository, cfg AgentConfigGetter,
+	tasks UpgradeTaskRepository, releases UpgradeReleaseRepository, cfg AgentConfigGetter,
+	setter UpgradeConfigSetter, notifier UpgradeNotifier, actors UpgradeActorResolver,
 	log logger.LoggerInterface) *DeviceUpgradeService {
 	return &DeviceUpgradeService{devices: devices, attempts: attempts, tasks: tasks,
-		releases: releases, cfg: cfg, log: log}
+		releases: releases, cfg: cfg, setter: setter, notifier: notifier, actors: actors, log: log}
 }
 
 // ResolveTargetVersion 返回设备的**生效目标版本**（空串 = 无目标）。

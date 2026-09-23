@@ -105,6 +105,10 @@ type FileDeps struct {
 // DeviceDeps holds device management handler dependencies.
 type DeviceDeps struct {
 	DeviceHdl *handler.DeviceHandler
+	// UpgradeHdl 是升级命令与查询（/devices/upgrade/* 与 /devices/:id/upgrade）。
+	UpgradeHdl *handler.DeviceUpgradeHandler
+	// ReleaseHdl 是发布物管理与 **agent 下载**（下载端点挂在 JWT 之外，见其注册处）。
+	ReleaseHdl *handler.AgentReleaseHandler
 }
 
 // AgentDeps holds agent channel handler dependencies.
@@ -479,6 +483,30 @@ func Setup(deps Dependencies) *gin.Engine {
 			devices.POST("/:id/enable", perm(permission.PermDeviceEnable), deps.Device.DeviceHdl.Enable)
 			devices.POST("/:id/disable", perm(permission.PermDeviceDisable), deps.Device.DeviceHdl.Disable)
 			devices.DELETE("/:id", perm(permission.PermDeviceDelete), deps.Device.DeviceHdl.Delete)
+			// ── Agent 升级 ──────────────────────────────────────────────
+			// 权限分档：单台/批量下发用 device:upgrade；**全站目标单独一个
+			// device:upgrade:global**（一次影响所有设备、含之后新注册的，
+			// 「能给一台机器升级」与「能全站升级」不是同一种权限）；查询面沿用
+			// device:query（与详情页同一批数据的不同视角，另立新码只会让口径分裂）。
+			//
+			// 路由树形状：`upgrade`/`releases`（静态段）与 `:id`（参数段）是兄弟，
+			// gin 静态段优先；upgrade 下的 preview/global/summary/tasks 与 :id 下的
+			// upgrade 分属两支，不存在冲突。
+			devices.POST("/upgrade/preview", perm(permission.PermDeviceUpgrade), deps.Device.UpgradeHdl.Preview)
+			devices.POST("/upgrade", perm(permission.PermDeviceUpgrade), deps.Device.UpgradeHdl.Dispatch)
+			devices.POST("/upgrade/global", perm(permission.PermDeviceUpgradeGlobal), deps.Device.UpgradeHdl.SetGlobalTarget)
+			devices.GET("/upgrade/summary", perm(permission.PermDeviceQuery), deps.Device.UpgradeHdl.Summary)
+			devices.GET("/upgrade/tasks", perm(permission.PermDeviceQuery), deps.Device.UpgradeHdl.TaskList)
+			devices.GET("/upgrade/tasks/:id", perm(permission.PermDeviceQuery), deps.Device.UpgradeHdl.TaskDetail)
+			devices.POST("/:id/upgrade", perm(permission.PermDeviceUpgrade), deps.Device.UpgradeHdl.SetTarget)
+			devices.DELETE("/:id/upgrade", perm(permission.PermDeviceUpgrade), deps.Device.UpgradeHdl.ClearTarget)
+			devices.GET("/:id/upgrade/records", perm(permission.PermDeviceQuery), deps.Device.UpgradeHdl.DeviceRecords)
+			// ── 发布物管理 ──────────────────────────────────────────────
+			devices.GET("/releases", perm(permission.PermDeviceReleaseList), deps.Device.ReleaseHdl.List)
+			devices.POST("/releases", perm(permission.PermDeviceReleaseUpload), deps.Device.ReleaseHdl.Upload)
+			devices.POST("/releases/:id/publish", perm(permission.PermDeviceReleasePublish), deps.Device.ReleaseHdl.Publish)
+			devices.POST("/releases/:id/unpublish", perm(permission.PermDeviceReleasePublish), deps.Device.ReleaseHdl.Unpublish)
+			devices.DELETE("/releases/:id", perm(permission.PermDeviceReleaseDelete), deps.Device.ReleaseHdl.Delete)
 		}
 	}
 
@@ -491,6 +519,13 @@ func Setup(deps Dependencies) *gin.Engine {
 	// 握手阶段不做任何鉴权，全部校验在首帧上做（见 handler.AgentWSHandler）。
 	if deps.Agent.AgentWSHdl != nil {
 		api.GET("/agent/ws", deps.Agent.AgentWSHdl.Serve)
+	}
+
+	// agent 下载通道：同样是**未鉴权升级**入口（凭据是请求头里的 agent token），
+	// 故与 /agent/ws 一样挂在 api 组 —— 挪进 auth 组会让所有 agent 收到 401。
+	// 鉴权在处理器内做（service.AuthenticateDownload），三种失败不可区分。
+	if deps.Device.ReleaseHdl != nil {
+		api.GET("/agent/releases/:version/download", deps.Device.ReleaseHdl.Download)
 	}
 
 	return r

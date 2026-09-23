@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"gorm.io/gorm"
@@ -279,6 +280,27 @@ func (r *AgentUpgradeAttemptRepo) VersionWasUsed(ctx context.Context, version st
 		return false, err
 	}
 	return n > 0, nil
+}
+
+// FindLastSucceededFrom 返回该设备**最近一次成功升级的起始版本** —— 也就是
+// 「一键回滚」要回退到的目标。
+//
+// 由服务端推导而不是让运维回忆「这台机器升级前是什么版本」：升级出问题时人在
+// 着急，把系统本该记住的事实推给人，就是设计缺陷。
+// 没有成功历史（例如引导安装的机器）时返回空串与 nil（这不是错误）。
+func (r *AgentUpgradeAttemptRepo) FindLastSucceededFrom(ctx context.Context,
+	deviceID uint64) (string, error) {
+	var row entity.AgentUpgradeAttempt
+	err := r.db.WithContext(ctx).
+		Where("device_id = ? AND state = ?", deviceID, entity.AttemptStateSucceeded).
+		Order("id DESC").First(&row).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", nil
+		}
+		return "", err
+	}
+	return row.FromVersion, nil
 }
 
 // FindStale 巡检：**已开始**但超过阈值没动静的未终结尝试。

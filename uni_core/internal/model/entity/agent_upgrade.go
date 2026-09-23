@@ -13,12 +13,18 @@ const (
 )
 
 // 任务来源。取值直接进库并展示（展示层翻译成中文）。
+//
+// **由服务端推导，不接受客户端传**：来源是「这次操作从哪个入口进来」的客观事实，
+// 让调用方自报只会得到一批自相矛盾的记录。
+//
+// 刻意**没有 rollback**：「回滚」不是一种操作入口，而是**版本关系**（目标低于当前）。
+// 给它单开入口只会逼着 API 多一个只为标签存在的端点，而它的实质与一次普通下发
+// 完全相同 —— 任务明细里 from→to 两个版本已经把这个事实说清楚了。
 const (
-	AgentUpgradeSourceManual   = "manual"   // 单台
-	AgentUpgradeSourceBatch    = "batch"    // 多选
-	AgentUpgradeSourceFilter   = "filter"   // 按筛选全量
-	AgentUpgradeSourceGlobal   = "global"   // 全站目标变更
-	AgentUpgradeSourceRollback = "rollback" // 回滚（批量回滚到统一版本）
+	AgentUpgradeSourceManual = "manual" // 单台
+	AgentUpgradeSourceBatch  = "batch"  // 多选
+	AgentUpgradeSourceFilter = "filter" // 按筛选全量
+	AgentUpgradeSourceGlobal = "global" // 全站目标变更
 )
 
 // 尝试状态。

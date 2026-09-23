@@ -28,11 +28,16 @@ import (
 // 唯一索引、节流后的列取值），桩会把它们全部测不到。
 type upgradeEnv struct {
 	svc      *DeviceUpgradeService
+	release  *AgentReleaseService
 	db       *gorm.DB
 	devices  *repository.DeviceRepo
 	attempts *repository.AgentUpgradeAttemptRepo
 	tasks    *repository.AgentUpgradeTaskRepo
 	releases *repository.AgentReleaseRepo
+	setter   *stubConfigSetter
+	notifier *stubNotifier
+	// uploadDir 是发布物落盘根目录（sys.file.upload.path）。
+	uploadDir string
 }
 
 func newUpgradeTestEnv(t *testing.T, cfg stubCfg) *upgradeEnv {
@@ -54,13 +59,30 @@ func newUpgradeTestEnv(t *testing.T, cfg stubCfg) *upgradeEnv {
 	attempts := repository.NewAgentUpgradeAttemptRepository(db)
 	tasks := repository.NewAgentUpgradeTaskRepository(db)
 	releases := repository.NewAgentReleaseRepository(db)
+
+	// 发布物落盘到临时目录：上传/下载路径必须真的碰文件系统（摘要、O_EXCL、
+	// ServeContent 的 Range 都只在真实文件上才有意义）。
+	uploadDir := t.TempDir()
+	if cfg == nil {
+		cfg = stubCfg{}
+	}
+	if _, ok := cfg["sys.file.upload.path"]; !ok {
+		cfg["sys.file.upload.path"] = uploadDir
+	}
+	setter := &stubConfigSetter{cfg: cfg}
+	notifier := &stubNotifier{}
 	return &upgradeEnv{
-		svc:      NewDeviceUpgradeService(devices, attempts, tasks, releases, cfg, logger.NewNop()),
-		db:       db,
-		devices:  devices,
-		attempts: attempts,
-		tasks:    tasks,
-		releases: releases,
+		svc: NewDeviceUpgradeService(devices, attempts, tasks, releases, cfg,
+			setter, notifier, nil, logger.NewNop()),
+		release:   NewAgentReleaseService(releases, attempts, cfg, logger.NewNop()),
+		db:        db,
+		devices:   devices,
+		attempts:  attempts,
+		tasks:     tasks,
+		releases:  releases,
+		setter:    setter,
+		notifier:  notifier,
+		uploadDir: uploadDir,
 	}
 }
 
@@ -135,6 +157,35 @@ func (e *upgradeEnv) deviceRow(t *testing.T, id uint64) entity.Device {
 		t.Fatal(err)
 	}
 	return d
+}
+
+// stubConfigSetter 是可观测的配置写入桩（全站目标走它）。
+//
+// **写回同一个 map**：真实的 ConfigService 写库后会回写 Redis 缓存，因此
+// 「写完之后再读」必须立刻看到新值。若桩只记下调用而不改 cfg，测试就会在
+// 「已设置的全站目标读出来还是空」这种假环境下跑 —— 那正好会掩盖真实缺陷。
+type stubConfigSetter struct {
+	cfg        stubCfg
+	key, value string
+}
+
+func (s *stubConfigSetter) SetString(_ context.Context, key, value string) error {
+	s.key, s.value = key, value
+	if s.cfg != nil {
+		s.cfg[key] = value
+	}
+	return nil
+}
+
+// stubNotifier 记录催办过的设备（不碰 socket）。
+type stubNotifier struct {
+	notified []uint64
+}
+
+func (n *stubNotifier) NotifyUpgrade(_ context.Context, deviceID uint64,
+	_ *agentproto.UpgradeDirective) error {
+	n.notified = append(n.notified, deviceID)
+	return nil
 }
 
 // ── 对账（ReconcileOnHello）────────────────────────────────────────────

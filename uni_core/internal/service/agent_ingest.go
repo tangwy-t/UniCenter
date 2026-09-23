@@ -222,6 +222,30 @@ func (s *AgentIngestService) refreshStatic(ctx context.Context, d *entity.Device
 	return s.repo.RefreshStaticFromHello(ctx, d)
 }
 
+// AuthenticateDownload 用 agent token 鉴权一次**下载请求**（与 WS 首帧同一套凭据）。
+//
+// 与 WS 侧同一条纪律：三种失败（无此 token / 设备已删 / 设备停用）返回**同一个**
+// 结论式错误，调用方映射成同一个状态码 —— 否则状态码会泄露「该设备是否存在」，
+// 而设备存在与否本身就是攻击者想要的信息。
+//
+// token 本身绝不进日志（只记 device_id 与「鉴权失败」）。
+func (s *AgentIngestService) AuthenticateDownload(ctx context.Context, token string) (*entity.Device, error) {
+	if token == "" {
+		return nil, apperror.BadRequest("凭据无效")
+	}
+	d, err := s.repo.FindByTokenHash(ctx, hashToken(token))
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, apperror.BadRequest("凭据无效")
+		}
+		return nil, apperror.Internal("内部错误", err)
+	}
+	if d == nil || d.Status != entity.DeviceStatusEnabled {
+		return nil, apperror.BadRequest("凭据无效")
+	}
+	return d, nil
+}
+
 // IsAccepting 报告设备是否处于可接受上报的状态（启用态）。
 //
 // 错误必须**上抛**（S5）：原先 `if err != nil || d == nil { return false, nil }`

@@ -748,6 +748,137 @@ declare namespace Api {
       present: number
       missing: number
     }
+
+    interface AgentReleaseItem {
+      id: string
+      version: string
+      os: string
+      arch: string
+      fileName?: string
+      sizeBytes: number
+      sha256: string
+      status: number
+      notes?: string
+      createdAt: number
+      publishedAt?: number | null
+      deletable: boolean
+    }
+
+    interface AgentReleaseListResp {
+      list: Api.Device.AgentReleaseItem[]
+      publishedVersions: string[]
+    }
+
+    interface DeviceUpgradeSkip {
+      alreadyOnTarget: number
+      unsupported: number
+      noArtifact: number
+      disabled: number
+    }
+
+    interface DeviceUpgradePreviewResp {
+      targetVersion: string
+      matched: number
+      willUpgrade: number
+      skip: Api.Device.DeviceUpgradeSkip
+    }
+
+    interface DeviceUpgradeDispatchResp {
+      targetVersion: string
+      taskId: string
+      dispatched: number
+      skip: Api.Device.DeviceUpgradeSkip
+    }
+
+    interface DeviceUpgradeGlobalResp {
+      targetVersion: string
+      affected: number
+      pinnedDevices: number
+      taskId?: string
+    }
+
+    interface AgentUpgradeCounts {
+      pending: number
+      running: number
+      succeeded: number
+      failed: number
+      rolledBack: number
+      timeout: number
+      superseded: number
+    }
+
+    interface AgentUpgradeTaskItem {
+      id: string
+      targetVersion: string
+      source: string
+      actor?: string
+      total: number
+      counts: Api.Device.AgentUpgradeCounts
+      createdAt: number
+      finishedAt?: number | null
+    }
+
+    interface AgentUpgradeAttemptItem {
+      id: string
+      taskId?: string
+      deviceId: string
+      hostname: string
+      deviceDeleted: boolean
+      primaryIp?: string
+      fromVersion?: string
+      toVersion: string
+      state: string
+      progress?: number | null
+      reasonCode?: string
+      createdAt: number
+      startedAt?: number | null
+      lastReportAt?: number | null
+      finishedAt?: number | null
+    }
+
+    interface AgentUpgradeTaskDetailResp {
+      task: Api.Device.AgentUpgradeTaskItem
+      list: Api.Device.AgentUpgradeAttemptItem[]
+      total: number
+      page: number
+      pageSize: number
+    }
+
+    interface DeviceUpgradeBucket {
+      targetVersion: string
+      total: number
+      achieved: number
+      running: number
+      pending: number
+      failed: number
+      rolledBack: number
+      unsupported: number
+      noArtifact: number
+      disabled: number
+    }
+
+    interface DeviceVersionCount {
+      version: string
+      count: number
+    }
+
+    interface DeviceUpgradeSummaryResp {
+      total: number
+      globalTargetVersion?: string
+      pinnedDevices: number
+      buckets: Api.Device.DeviceUpgradeBucket[]
+      versionDistribution: Api.Device.DeviceVersionCount[]
+    }
+
+    interface DeviceUpgradeRecord {
+      id: string
+      fromVersion?: string
+      toVersion: string
+      state: string
+      reasonCode?: string
+      createdAt: number
+      finishedAt?: number | null
+    }
   }
 
   namespace File {
