@@ -80,7 +80,10 @@
         <span v-if="!availableColumns.includes(column)" class="mp-chip__flag">本档位无</span>
       </button>
 
-      <ElDropdown trigger="click" :hide-on-click="false">
+      <!-- 24 个列分 10 组，必须限高并滚动：max-height 是 ElDropdown 的官方口子
+             （它会套一层带滚动的容器），不设的话菜单能拉到 1000px 以上、直接顶出屏幕。
+             vh 而不是固定 px：菜单贴着芯片行展开，视口矮时按比例收窄才不会又出屏。 -->
+      <ElDropdown trigger="click" :hide-on-click="false" max-height="50vh">
         <button type="button" class="mp-chip mp-chip--action">+ 添加指标</button>
         <template #dropdown>
           <ElDropdownMenu class="mp-colmenu">
@@ -194,7 +197,14 @@
 
   // 列名展示元数据（F-8）：中文名 / 单位 / 分组。
   // 必须在这里以普通 import 引入（不能 `export … from` 中转）—— 理由见本块顶部注释。
-  import { groupMetricColumns, metricLabel, metricTipLine, metricUnit } from '../utils/column-meta'
+  import {
+    groupColumnsByUnit,
+    groupMetricColumns,
+    metricLabel,
+    metricTipLine,
+    metricUnit
+  } from '../utils/column-meta'
+  import { formatAxisTickByUnit } from '../utils/display'
 
   // 既有 import 方（resource-drill.vue 与单测）照旧走组件路径，故一并再导出。
   export {
@@ -379,6 +389,11 @@
 
   function buildChartOption(frames: SeriesFrame[]): EChartsOption {
     const range = meta.value?.rangeSeconds ?? DEFAULT_RANGE_SECONDS
+    // 按**量纲**分轴：混选（% + B/s + °C…）时共用一根轴会让小量纲被压平 ——
+    // 线上实测 760000 B/s 与 0.01 的 load1 同轴，三条百分比折线一条都看不见。
+    // 每根轴各自 scale，故每条线都按自身量程铺开（详见 groupColumnsByUnit）。
+    const axes = groupColumnsByUnit(frames.map((f) => f.name))
+    const axisIndexByUnit = new Map(axes.map((g, i) => [g.unit, i]))
     return {
       animation: false,
       grid: { top: 16, right: 16, bottom: 8, left: 8, containLabel: true },
@@ -391,8 +406,11 @@
           const at = Array.isArray(firstValue) ? firstValue[0] : null
           const lines = list.map((p) => {
             const v = Array.isArray(p.value) ? p.value[1] : null
-            // seriesName 是列名（系列标识）；展示走中文名 + 单位。
-            return metricTipLine(p.seriesName ?? '', formatMetricValue(v))
+            // seriesName 是列名（系列标识）；**单位换算与精度统一由 metricTipLine 负责**
+            // （column-meta → display.formatByUnit），此处不再自己格式化 ——
+            // 曾经这里用 formatMetricValue（纯数字），于是网卡速率显示成 761286.09，
+            // 而同一个值在总览页是 743.4 KB/s。
+            return metricTipLine(p.seriesName ?? '', v)
           })
           const head = typeof at === 'number' ? formatBucketTime(at) : ''
           return [head, ...lines].filter((s) => s !== '').join('<br/>')
@@ -406,11 +424,36 @@
           formatter: (value: number) => formatAxisTick(value, range)
         }
       },
-      yAxis: { type: 'value', scale: true },
+      // 主量纲的轴**可见**（带刻度与轴名）；其余量纲的轴 `show: false` —— 只用来
+      // 给该量纲的折线提供各自的自适应量程，不画刻度、不画轴名、不画网格线。
+      //
+      // 为什么不做成「多根轴都带刻度然后错开排布」（前一版就是这样，已废弃）：
+      //   1. 刻度必然互相挤 —— 实测 800,000 紧贴 300、轴名在顶部叠成一团；
+      //   2. 给每根轴都留足刻度宽度就会挤压绘图区，选列一多图表被撑窄；
+      //   3. 横向网格线只能有一根轴的刻度语义，多套并存本身就是误导。
+      // 于是绝对值改由 tooltip 提供（那里逐条带中文名与单位）。**show:false 不影响
+      // 缩放** —— 已用 SSR 渲染实测：隐藏与可见两种配置下，同一系列的数据点落点
+      // 逐字相同（760000/1200/800000 → y=29/272/16）。
+      yAxis: axes.map((group, i) =>
+        i === 0
+          ? {
+              type: 'value' as const,
+              scale: true,
+              // 刻度**自带单位**（`20%`、`743.4 KB/s`），故不写轴名 —— 轴名只能写
+              // 基础单位（写 B/s 还是 KB/s？），而刻度一旦随量级进位就与它打架。
+              axisLabel: {
+                fontSize: 11,
+                formatter: (v: number) => formatAxisTickByUnit(group.unit, v)
+              }
+            }
+          : { type: 'value' as const, scale: true, show: false }
+      ),
       series: frames.map((frame) => ({
         name: frame.name,
         type: 'line' as const,
         showSymbol: false,
+        // 挂到本列量纲对应的轴上；查不到时回到 0（主量纲）——绝不画出没有轴的线。
+        yAxisIndex: axisIndexByUnit.get(metricUnit(frame.name)) ?? 0,
         // 既有封装 ArtLineChart **不支持** connectNulls（无该 prop、且是 category
         // 轴 + number[] 数据，无法表达 [t, value] 对），故这里直接用同一套
         // useChart/echarts 基础设施，并**显式**关掉连线：
@@ -721,6 +764,40 @@
 
     &--action {
       border-color: var(--el-border-color);
+    }
+  }
+
+  /* 「+ 添加指标」下拉（24 列 / 10 组）。
+     此前这个菜单**没有任何样式**：分组标题是浏览器默认的 <p>（上下各 1em 外边距，
+     10 个组合计吃掉约 320px），菜单整体能拉到 1000px 以上、直接顶出屏幕。限高由
+     ElDropdown 的 max-height 负责（见模板），这里只把内容压紧，并让分组标题在滚动时
+     吸顶 —— 否则滚到中段就不知道自己在哪一组。 */
+  .mp-colmenu {
+    &__group-name {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      margin: 0;
+      padding: 6px 16px 4px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--el-text-color-secondary);
+      /* 吸顶标题必须有实底，否则滚动的条目会从它下面透出来 */
+      background: var(--el-bg-color-overlay);
+    }
+
+    &__unit {
+      color: var(--el-text-color-secondary);
+    }
+
+    /* 与芯片上的同一字样（.mp-chip.is-missing）保持同一套语义色 */
+    &__na {
+      color: var(--el-color-warning);
+    }
+
+    /* 条目一律单行：换行会把菜单拉长，正是要修的毛病 */
+    :deep(.el-dropdown-menu__item) {
+      white-space: nowrap;
     }
   }
 

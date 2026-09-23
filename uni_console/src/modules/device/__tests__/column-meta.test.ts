@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   METRIC_GROUP_ORDER,
+  groupColumnsByUnit,
   groupMetricColumns,
   metricGroup,
   metricLabel,
@@ -135,5 +136,59 @@ describe('分组完整性', () => {
     const groups = groupMetricColumns(columns)
     const covered = groups.flatMap((g) => g.columns)
     expect(covered.sort()).toEqual(columns.sort())
+  })
+})
+
+/**
+ * 按量纲分轴（`groupColumnsByUnit`）钉住的是**每条折线都要看得见**：
+ * 同轴混选时 10^6 量级的网卡速率会把 0~100 的百分比折线压成贴着 0 的直线
+ * （线上实测：760000 B/s 与 0.01 的 load1 同图，三条百分比线全不可见）。
+ */
+describe('按量纲分轴', () => {
+  it('单量纲只出一组，且保持传入顺序', () => {
+    expect(
+      groupColumnsByUnit(['cpu_used_percent', 'mem_used_percent', 'disk_used_percent'])
+    ).toEqual([
+      {
+        unit: '%',
+        columns: ['cpu_used_percent', 'mem_used_percent', 'disk_used_percent']
+      }
+    ])
+  })
+
+  it('混选：主量纲（系列最多）排第一，其余按出现顺序', () => {
+    const groups = groupColumnsByUnit([
+      'nic_rx_bytes_sec',
+      'cpu_used_percent',
+      'load1',
+      'mem_used_percent',
+      'disk_used_percent'
+    ])
+    expect(groups.map((g) => g.unit)).toEqual(['%', 'B/s', ''])
+    expect(groups[0].columns).toEqual(['cpu_used_percent', 'mem_used_percent', 'disk_used_percent'])
+    // 右侧轴的顺序 = 首次出现的顺序（B/s 先于无单位被选中），不是按量纲名排序
+    expect(groups[1].columns).toEqual(['nic_rx_bytes_sec'])
+    expect(groups[2].columns).toEqual(['load1'])
+  })
+
+  it('平票时主量纲取先出现的（不按量纲名排序）', () => {
+    // 两个量纲各一列时，谁占左轴由选择顺序决定 —— 若改成按量纲名排序，
+    // 「%」会永远占左轴，用户真正在看的那组被挤到右边，主次颠倒。
+    expect(groupColumnsByUnit(['nic_rx_bytes_sec', 'cpu_used_percent'])[0].unit).toBe('B/s')
+    expect(groupColumnsByUnit(['cpu_used_percent', 'nic_rx_bytes_sec'])[0].unit).toBe('%')
+  })
+
+  it('无单位的列（负载/进程数/TCP 计数）归入同一组', () => {
+    expect(groupColumnsByUnit(['load1', 'proc_count', 'tcp_total'])).toEqual([
+      { unit: '', columns: ['load1', 'proc_count', 'tcp_total'] }
+    ])
+  })
+
+  it('未登记的列沿用展示层回退（unit = 空串），不会消失', () => {
+    expect(groupColumnsByUnit(['not_a_column'])).toEqual([{ unit: '', columns: ['not_a_column'] }])
+  })
+
+  it('空输入返回空数组（不产出没有系列的空轴）', () => {
+    expect(groupColumnsByUnit([])).toEqual([])
   })
 })

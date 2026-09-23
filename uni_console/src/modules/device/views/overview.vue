@@ -33,8 +33,35 @@
       </div>
 
       <!-- ============ 全局过滤条 ============ -->
+      <!-- 概览磁贴放**最前**：这一页第一眼要回答的是「几台设备、几台在线、
+           有没有离线」，不是筛选条件（筛选条紧随其后，且它常驻 —— 见下）。
+           只在 state === 'ready' 时渲染：加载/错误/空态下没有数字可给，
+           此时筛选条自然落到第一位，不会先渲染再被顶下去。 -->
+      <div
+        v-if="state === 'ready'"
+        class="do-stats kpi-grid grid grid-cols-2 gap-4 md:grid-cols-3 2xl:grid-cols-5"
+      >
+        <div
+          v-for="s in stats"
+          :key="s.key"
+          class="do-card do-stats__card kpi-tile"
+          :title="s.hint"
+        >
+          <div class="kpi-tile__icon flex-cc" :style="{ '--tile': s.tile, '--tile2': s.tile2 }">
+            <ArtSvgIcon :icon="s.icon" />
+          </div>
+          <div class="min-w-0 flex-1">
+            <div class="kpi-tile__value truncate" :class="{ 'is-alert': s.alert }">{{
+              s.value
+            }}</div>
+            <div class="kpi-tile__label">{{ s.label }}</div>
+            <div class="kpi-tile__sub truncate">{{ s.hint ?? '&nbsp;' }}</div>
+          </div>
+        </div>
+      </div>
+
       <!-- 「所有设备 × 各类指标」的总览页里，过滤条件是**页面级**的：
-         它同时作用于概览条、快照表以及**每一张**图。故它必须常驻在页面顶部
+         它同时作用于概览条、快照表以及**每一张**图。故它必须常驻
          （而不是像列表页那样可折叠），并且带显式的「当前生效的筛选」摘要 ——
          否则用户看到一张只有 2 条线的图时，无法判断是「只有 2 台设备」
          还是「筛选把其它设备滤掉了」。 -->
@@ -179,28 +206,6 @@
 
       <!-- ============ 正常 ============ -->
       <template v-else>
-        <!-- 页面级概览：设备总数 / 在线 / 离线 / 陈旧 / 停用 -->
-        <!-- 页面级概览磁贴：对齐服务监控 .kpi-tile（图标方块 + 数值 + 标签 + 说明） -->
-        <div class="do-stats kpi-grid grid grid-cols-2 gap-4 md:grid-cols-3 2xl:grid-cols-5">
-          <div
-            v-for="s in stats"
-            :key="s.key"
-            class="do-card do-stats__card kpi-tile"
-            :title="s.hint"
-          >
-            <div class="kpi-tile__icon flex-cc" :style="{ '--tile': s.tile, '--tile2': s.tile2 }">
-              <ArtSvgIcon :icon="s.icon" />
-            </div>
-            <div class="min-w-0 flex-1">
-              <div class="kpi-tile__value truncate" :class="{ 'is-alert': s.alert }">{{
-                s.value
-              }}</div>
-              <div class="kpi-tile__label">{{ s.label }}</div>
-              <div class="kpi-tile__sub truncate">{{ s.hint ?? '&nbsp;' }}</div>
-            </div>
-          </div>
-        </div>
-
         <!-- 设备快照表：每台设备一行，列出关键水位指标。
            它承担「横向对比」的精确读数职责 —— 图表看趋势，表格看当前值。 -->
         <div class="do-card do-snapshot">

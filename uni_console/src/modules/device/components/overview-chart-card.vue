@@ -56,8 +56,8 @@
   import type { EChartsOption } from '@/plugins/echarts'
   import { useChart, useChartOps } from '@/hooks/core/useChart'
 
-  import { metricLabel, metricUnit } from '../utils/column-meta'
-  import { EMPTY_TEXT, formatBytesPerSec, formatPercent } from '../utils/display'
+  import { formatMetricText, metricLabel } from '../utils/column-meta'
+  import { EMPTY_TEXT, formatByUnit } from '../utils/display'
   import type { OverviewChart } from '../utils/overview'
 
   defineOptions({ name: 'DeviceOverviewChartCard' })
@@ -150,13 +150,10 @@
     const num = typeof v === 'number' ? v : Number(v)
     if (!Number.isFinite(num)) return EMPTY_TEXT
     const col = seriesColumn.get(seriesName)
-    const unit = col ? metricUnit(col) : ''
-    if (unit === '%') return formatPercent(num)
-    if (unit === 'B/s') return formatBytesPerSec(num)
-    if (unit === 'GB') return `${num} GB`
-    if (unit === 'MB') return `${num} MB`
-    if (unit === '°C') return `${num} °C`
-    return String(num)
+    // 单位换算走全站唯一映射（formatMetricText → display.formatByUnit）：
+    // 此前这里自己 switch 了一遍，GB 写死成 `{num} GB`（1795 GB 而不是 1.75 TB），
+    // 与详情页的进位规则不一致。
+    return col ? formatMetricText(col, num) : formatByUnit('', num)
   }
 
   /**

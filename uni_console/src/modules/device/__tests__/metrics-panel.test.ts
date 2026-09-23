@@ -290,36 +290,41 @@ describe('isSparseData', () => {
 // ─────────────────────────────────────────────────────────────
 
 describe('tipLineFor', () => {
-  it('展示层给出中文名 + 单位，而不是列名', () => {
+  it('展示层给出中文名，而不是列名', () => {
     // 回归用例：此前 tooltip 直接打印 series.name（= 列名），
     // 悬浮框里出现的是 `cpu_used_percent: 30.8` 这种英文键名。
-    const line = tipLineFor('cpu_used_percent', '30.80')
-    expect(line).toBe('CPU 使用率（%）: 30.80')
+    const line = tipLineFor('cpu_used_percent', 30.8)
+    expect(line).toBe('CPU 使用率: 30.8%')
     expect(line).not.toContain('cpu_used_percent')
   })
 
-  it('带单位的列一律给出单位', () => {
-    // 只给数字会让读图的人无法判断 1024 是 B/s 还是 KB/s —— 单位缺失是误读主因
-    expect(tipLineFor('disk_io_read_bytes_sec', '512')).toBe('磁盘读速率（B/s）: 512')
-    expect(tipLineFor('mem_used_mb', '8000')).toBe('内存已用（MB）: 8000')
+  it('单位由**值**承担，标签里不再重复写（否则「（B/s）: 743.4 KB/s」自相矛盾）', () => {
+    // 只给数字会让读图的人无法判断 1024 是 B/s 还是 KB/s —— 单位缺失是误读主因；
+    // 但把基础单位写死在标签里、值又按量级换算成别的单位，同样说不通。
+    expect(tipLineFor('disk_io_read_bytes_sec', 512)).toBe('磁盘读速率: 512 B/s')
+    expect(tipLineFor('nic_rx_bytes_sec', 761286.09)).toBe('网卡接收速率: 743.4 KB/s')
+    expect(tipLineFor('mem_used_mb', 8000)).toBe('内存已用: 7.81 GB')
+    expect(tipLineFor('disk_used_gb', 1795.05)).toBe('磁盘已用: 1.75 TB')
+    expect(tipLineFor('uptime_sec', 7975803)).toBe('开机时长: 92 天 7 时')
   })
 
-  it('无量纲列不加空括号', () => {
-    expect(tipLineFor('load1', '0.42')).toBe('负载 1 分钟: 0.42')
-    expect(tipLineFor('proc_count', '128')).toBe('进程数: 128')
+  it('无量纲列就是纯数字', () => {
+    expect(tipLineFor('load1', 0.42)).toBe('负载 1 分钟: 0.42')
+    expect(tipLineFor('proc_count', 128)).toBe('进程数: 128')
   })
 
   it('下钻子表列名同样中文化（两套列名都要覆盖）', () => {
-    expect(tipLineFor('used_percent', '50.00')).toBe('使用率（%）: 50.00')
-    expect(tipLineFor('read_bytes_per_sec', '1024')).toBe('读速率（B/s）: 1024')
+    expect(tipLineFor('used_percent', 50)).toBe('使用率: 50.0%')
+    expect(tipLineFor('read_bytes_per_sec', 1024)).toBe('读速率: 1.0 KB/s')
   })
 
   it('未登记列回退列名本身（不显示空白，也不隐藏）', () => {
     // 后端新增列时，宁可显示英文列名（可搜到），也不要显示成「未知指标」
-    expect(tipLineFor('brand_new_col', '1')).toBe('brand_new_col: 1')
+    expect(tipLineFor('brand_new_col', 1)).toBe('brand_new_col: 1')
   })
 
-  it('缺值行仍带单位与中文名（值是「—」而不是 0）', () => {
-    expect(tipLineFor('mem_used_percent', '—')).toBe('内存使用率（%）: —')
+  it('缺值显示「—」而不是 0', () => {
+    expect(tipLineFor('mem_used_percent', null)).toBe('内存使用率: —')
+    expect(tipLineFor('mem_used_percent', 0)).toBe('内存使用率: 0.0%')
   })
 })

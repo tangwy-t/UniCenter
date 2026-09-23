@@ -18,6 +18,7 @@
  *
  * 映射表未命中时的行为统一为：`label = 原名`、`unit = ''`、`group = '其他'`。
  */
+import { formatByUnit } from './display'
 
 /** 指标列的展示分组（下拉分组顺序 = 本数组顺序）。 */
 export const METRIC_GROUP_ORDER = ['CPU', '内存', '磁盘', '网络', '进程', '其他'] as const
@@ -181,6 +182,41 @@ export function groupMetricColumns(columns: readonly string[]): MetricGroupBucke
   }))
 }
 
+/** 一条纵轴：一个量纲 + 挂在它上面的列。 */
+export interface UnitAxisGroup {
+  /** 量纲（`''` = 无单位：负载、进程数、TCP 计数等）。 */
+  unit: string
+  /** 该量纲下的列，保持传入顺序。 */
+  columns: string[]
+}
+
+/**
+ * 把列按**量纲**分组，供「整机趋势」分轴使用（一条量纲一根 Y 轴）。
+ *
+ * 为什么必须分组而不是共用一根轴（线上实测）：网卡速率是 10^5~10^6 B/s，而
+ * CPU / 内存 / 磁盘是 0~100 %、负载是 0~10 —— 同轴线性刻度下后者被压成贴着 0 的
+ * 直线，三条百分比折线一条都看不见。分轴后每条线有自己的刻度。
+ *
+ * **主量纲排第一**（系列最多者；平票取先出现的）—— 它占左轴，其余按出现顺序在
+ * 右侧依次排开。不按量纲名排序：那样「%」永远占左轴，而用户真正在看的那组可能在
+ * 右，主次颠倒。平票时的顺序依赖 `Array.prototype.sort` 的**稳定性**（ES2019 起
+ * 规范保证），故不能改成会打乱顺序的实现。
+ *
+ * 未登记的列沿用 `metricMeta` 的回退（unit = `''`），与展示层同一套口径。
+ */
+export function groupColumnsByUnit(columns: readonly string[]): UnitAxisGroup[] {
+  const byUnit = new Map<string, string[]>()
+  for (const column of columns) {
+    const unit = metricUnit(column)
+    const list = byUnit.get(unit)
+    if (list) list.push(column)
+    else byUnit.set(unit, [column])
+  }
+  return [...byUnit.entries()]
+    .map(([unit, cols]) => ({ unit, columns: cols }))
+    .sort((a, b) => b.columns.length - a.columns.length)
+}
+
 /**
  * 悬浮框 / 图例里的单行文本：**中文名（单位）** + 值。
  *
@@ -201,8 +237,31 @@ export function groupMetricColumns(columns: readonly string[]): MetricGroupBucke
  * @param column   系列标识（列名）
  * @param rawValue 已格式化的值文本（缺值应为「—」）
  */
-export function metricTipLine(column: string, rawValue: string): string {
-  const unit = metricUnit(column)
-  const label = unit ? `${metricLabel(column)}（${unit}）` : metricLabel(column)
-  return `${label}: ${rawValue}`
+/**
+ * 列名 + 原始数值 → 展示文案（**全站唯一入口**）。
+ *
+ * 单位换算全部委托给 `display.formatByUnit`（那份映射是单一事实源），本函数
+ * 只负责「列名 → 量纲」这一步。调用方**永远不该**自己 switch 单位或写
+ * `toFixed` —— 之前正是各处自己格式化，才让同一条指标在不同界面上精度与单位
+ * 都不一致（详情 tooltip 显示 `761286.09`，总览页却显示 `743.4 KB/s`）。
+ */
+export function formatMetricText(column: string, value: number | null | undefined): string {
+  return formatByUnit(metricUnit(column), value)
+}
+
+/**
+ * tooltip 单行文案：`中文名: 值`。
+ *
+ * 单位必须跟着中文名一起给出 —— 只给数字时读图的人无法判断 1024 是 B/s 还是
+ * KB/s，单位缺失是误读的主要来源。
+ *
+ * 但**不再**把基础单位写进括号：值本身已经带了（换算后的）单位，写成
+ * 「网卡接收速率（B/s）: 743.4 KB/s」是自相矛盾。无量纲列（负载、进程数）
+ * 本来就是纯数字，标签同样只有中文名。
+ *
+ * @param column 系列标识（列名）
+ * @param value  原始数值（缺值传 null，展示为「—」）
+ */
+export function metricTipLine(column: string, value: number | null | undefined): string {
+  return `${metricLabel(column)}: ${formatMetricText(column, value)}`
 }

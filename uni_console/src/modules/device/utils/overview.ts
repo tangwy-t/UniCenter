@@ -18,8 +18,7 @@
  * 直接喂响应对象断言。渲染层（views/overview.vue）只负责把这里的输出交给图表。
  */
 
-import { METRIC_META, metricLabel, metricUnit } from './column-meta'
-import { EMPTY_TEXT, formatBytesPerSec, formatPercent } from './display'
+import { METRIC_META, formatMetricText, metricLabel, metricUnit } from './column-meta'
 
 /** 后端列名常量。**只在此处出现一次**，避免字面量散落。 */
 export const COL = {
@@ -533,27 +532,21 @@ export function deviceIssueText(dev: DeviceOverviewLike, thresholdSec?: number):
 
 // ── 展示格式化 ────────────────────────────────────────────
 
-/** 格式化单个数值（用于快照卡片与表格），缺值一律「—」。 */
+/**
+ * 格式化单个数值（用于快照卡片与表格），缺值一律「—」。
+ *
+ * 单位换算**不在本文件**：委托给 `column-meta.formatMetricText`（→
+ * `display.formatByUnit`），那是全站唯一映射。此处曾自己 switch 一遍单位，
+ * 结果是总览页与详情页对同一条指标给出不同精度与单位（`1795 GB` vs `1.75 TB`、
+ * `7523.4 MB` vs `7.34 GB`）。
+ */
 export function formatMetric(column: string, value: number | null | undefined): string {
-  if (value === null || value === undefined) return EMPTY_TEXT
-  const unit = metricUnit(column)
-  if (unit === '%') return formatPercent(value)
-  if (unit === 'B/s') return formatBytesPerSec(value)
-  if (unit === 'GB') return `${roundTo(value, 2)} GB`
-  if (unit === 'MB') return `${roundTo(value, 1)} MB`
-  if (unit === '°C') return `${roundTo(value, 1)} °C`
-  return String(roundTo(value, 2))
+  return formatMetricText(column, value)
 }
 
 /** 图表 Y 轴/Tooltip 的数值格式化（与 formatMetric 同口径，供 ECharts 回调使用）。 */
 export function formatAxisValue(column: string, value: number | null | undefined): string {
-  return formatMetric(column, value)
-}
-
-/** 保留 n 位小数（去掉尾随 0，让整数不显示成 12.00）。 */
-export function roundTo(v: number, digits: number): number {
-  const f = 10 ** digits
-  return Math.round(v * f) / f
+  return formatMetricText(column, value)
 }
 
 /**

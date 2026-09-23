@@ -284,6 +284,8 @@
     EMPTY_TEXT,
     clampPercent,
     deviceIcon,
+    formatCapacityMb,
+    formatGb,
     formatPercent,
     formatRelative,
     formatUnixSeconds,
@@ -482,10 +484,12 @@
     diskTotalGb?: number | null
   }) {
     if (typeof payload.memUsedMb === 'number' && typeof payload.memTotalMb === 'number') {
-      memAbsolute.value = `${(payload.memUsedMb / 1024).toFixed(1)}/${(payload.memTotalMb / 1024).toFixed(1)} GB`
+      // 走统一单位映射（≥1024MB 转 GB）：此前这里手写 /1024 与 toFixed(1)，
+      // 与图例、表格里的换算规则各写一套（实测出现过「7.3 GB」与「7523.4 MB」并存）。
+      memAbsolute.value = `${formatCapacityMb(payload.memUsedMb)} / ${formatCapacityMb(payload.memTotalMb)}`
     }
     if (typeof payload.diskUsedGb === 'number' && typeof payload.diskTotalGb === 'number') {
-      diskAbsolute.value = `${payload.diskUsedGb.toFixed(0)}/${payload.diskTotalGb.toFixed(0)} GB`
+      diskAbsolute.value = `${formatGb(payload.diskUsedGb)} / ${formatGb(payload.diskTotalGb)}`
     }
   }
 

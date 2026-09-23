@@ -3,7 +3,10 @@ import {
   EMPTY_TEXT,
   clampPercent,
   deviceIcon,
+  formatAxisTickByUnit,
+  formatByUnit,
   formatBytesPerSec,
+  formatCapacityMb,
   formatMb,
   formatPercent,
   formatRelative,
@@ -228,5 +231,71 @@ describe('水位单元格：缺值 / 配色 / 条长', () => {
     expect(formatPercent(50)).toBe('50.0%')
     expect(formatPercent(35.83)).toBe('35.8%')
     expect(formatPercent(100)).toBe('100.0%')
+  })
+})
+
+/**
+ * 单位换算的**单一事实源**（`formatByUnit`）。
+ *
+ * 这些用例钉住的核心是「只在数字大到难读时才进位」：
+ * 此前三套实现并存，同一条指标在不同界面上精度与单位都不一样
+ * （详情 tooltip `761286.09`、总览页 `743.4 KB/s`、内存 `7523.4 MB` vs `7.34 GB`）。
+ */
+describe('formatByUnit · 量纲 → 文案', () => {
+  it('字节速率按量级进位（B/s → KB/s → MB/s → GB/s）', () => {
+    expect(formatByUnit('B/s', 512)).toBe('512 B/s')
+    expect(formatByUnit('B/s', 761286.09)).toBe('743.4 KB/s')
+    expect(formatByUnit('B/s', 5 * 1024 * 1024)).toBe('5.0 MB/s')
+    expect(formatByUnit('B/s', 3 * 1024 ** 3)).toBe('3.00 GB/s')
+  })
+
+  it('容量：MB ≥1024 转 GB、GB ≥1024 转 TB，且不向下换算', () => {
+    expect(formatByUnit('MB', 7523.4)).toBe('7.35 GB')
+    expect(formatByUnit('MB', 512)).toBe('512 MB')
+    expect(formatByUnit('GB', 1795.05)).toBe('1.75 TB')
+    expect(formatByUnit('GB', 10.5)).toBe('10.5 GB')
+    // 不向下换算：0.4 GB 不显示成 409.6 MB（容量读数要保住量级感）
+    expect(formatByUnit('GB', 0.4)).toBe('0.4 GB')
+  })
+
+  it('时长（秒）走天/时/分文案，而不是裸秒数', () => {
+    expect(formatByUnit('s', 7975803)).toBe('92 天 7 时')
+    expect(formatByUnit('s', 3700)).toBe('1 时 1 分')
+    expect(formatByUnit('s', 300)).toBe('5 分')
+    expect(formatByUnit('s', 45)).toBe('45 秒')
+  })
+
+  it('计数类速率大数进位（次/s、包/s）', () => {
+    expect(formatByUnit('包/s', 1234)).toBe('1234 包/s')
+    expect(formatByUnit('包/s', 1234567)).toBe('1.23M 包/s')
+    expect(formatByUnit('次/s', 23456)).toBe('23.5K 次/s')
+  })
+
+  it('百分比 / 温度 / 无量纲', () => {
+    expect(formatByUnit('%', 30.8)).toBe('30.8%')
+    expect(formatByUnit('°C', 55.25)).toBe('55.3 °C')
+    expect(formatByUnit('', 0.42)).toBe('0.42')
+    expect(formatByUnit('', 128)).toBe('128')
+  })
+
+  it('缺值是「—」，而 0 是合法值（两者必须可区分）', () => {
+    expect(formatByUnit('MB', null)).toBe(EMPTY_TEXT)
+    expect(formatByUnit('B/s', undefined)).toBe(EMPTY_TEXT)
+    expect(formatByUnit('GB', 0)).toBe('0 GB')
+    expect(formatByUnit('MB', 0)).toBe('0 MB')
+    expect(formatByUnit('B/s', 0)).toBe('0 B/s')
+  })
+
+  it('实测容量允许 0，设备规格用的 formatMb 仍把 0 当缺值（两者语义不同）', () => {
+    // formatMb 服务「内存总量」（0 = 未知）；formatCapacityMb 服务实测读数（0 合法）
+    expect(formatMb(0)).toBe(EMPTY_TEXT)
+    expect(formatCapacityMb(0)).toBe('0 MB')
+    expect(formatCapacityMb(16384)).toBe('16 GB')
+  })
+
+  it('轴刻度去掉无意义的尾随零（密排的小数会重复出现）', () => {
+    expect(formatAxisTickByUnit('%', 20)).toBe('20%')
+    expect(formatAxisTickByUnit('%', 47.56)).toBe('47.6%')
+    expect(formatAxisTickByUnit('B/s', 761286.09)).toBe('743.4 KB/s')
   })
 })
