@@ -418,7 +418,7 @@
         kind: 'percent' as const,
         label: 'CPU 使用率',
         icon: 'ri:cpu-line',
-        tip: '来自 Redis 热层最新水位（Agent 上报）',
+        tip: '设备最近一次上报的实时值',
         value: d?.cpuUsedPercent ?? null,
         hasValue: typeof d?.cpuUsedPercent === 'number',
         text: formatPercent(d?.cpuUsedPercent),
@@ -431,7 +431,7 @@
         kind: 'percent' as const,
         label: '内存使用率',
         icon: 'ri:ram-2-line',
-        tip: '百分比为水位口径；绝对值取自趋势最新采样点',
+        tip: '百分比来自最近一次上报，绝对值来自趋势数据，两者可能不是同一时刻',
         value: d?.memUsedPercent ?? null,
         hasValue: typeof d?.memUsedPercent === 'number',
         text: formatPercent(d?.memUsedPercent),
@@ -458,7 +458,7 @@
         kind: 'text' as const,
         label: '运行时长',
         icon: 'ri:time-line',
-        tip: '由 Agent 上报的开机时刻推算',
+        tip: '根据设备上报的开机时刻推算',
         value: null,
         hasValue: false,
         text: formatUptime(d?.bootTime),
@@ -820,7 +820,6 @@
     background: var(--el-color-warning);
     animation-duration: 0.9s;
   }
-
 
   /* ══════════ 异常块（F-5）═════════ */
   .dd-error-box {

@@ -6,29 +6,23 @@
         <ArtSvgIcon :icon="drillMode ? 'ri:pie-chart-2-line' : 'ri:line-chart-line'" />
         <span>{{ drillMode ? `${kindLabel} · ${props.name}` : '整机趋势' }}</span>
       </div>
-      <!-- 主行只说人话：粒度 / 数据源 / 采样点数。
-           range_seconds、resolution_seconds、source 这三个技术参数收进 tooltip —— 
-           它们对排障有用，但对「这图能信吗」没有帮助，不该占据主视线。 -->
+      <!-- 主行只说人话：粒度 / 数据点数。
+           range_seconds、resolution_seconds、source 这些技术参数**哪里都不出现**
+           —— 只「收进 tooltip」不够：页面上摆字段名与内部常量（桶数上限之类），
+           读者既看不懂也用不上，那是在向用户解释实现。要交代的口径一律写成
+           结论句（见 tooltip 四行）。 -->
       <div v-if="meta" class="mp-head__meta">
         <span class="mp-head__summary">{{ metaSummary }}</span>
-        <!-- 采样点数远低于该窗口应有桶数 → 显式标注「数据稀疏」，
+        <!-- 数据点数远低于该窗口应有桶数 → 显式标注「数据稀疏」，
              避免用户把断线当成系统故障（或反过来，把稀疏曲线当成真实负载）。 -->
         <ElTag v-if="isSparse" size="small" type="warning" effect="light">数据稀疏</ElTag>
         <ElTooltip placement="top">
           <template #content>
             <div class="mp-tip">
-              <div
-                >窗口 {{ formatDurationText(meta.rangeSeconds) }}（range_seconds={{
-                  meta.rangeSeconds
-                }}）</div
-              >
-              <div
-                >粒度 {{ formatResolution(meta.resolutionSeconds) }}（resolution_seconds={{
-                  meta.resolutionSeconds
-                }}）</div
-              >
-              <div>数据源 {{ meta.source }}（redis=热层 / db=历史表）</div>
-              <div>桶数上限 {{ MAX_BUCKETS }}，超出时后端自动升档（粒度变粗）</div>
+              <div>时间窗 {{ formatDurationText(meta.rangeSeconds) }}</div>
+              <div>每个数据点代表 {{ formatDurationText(meta.resolutionSeconds) }}</div>
+              <div v-if="sourceLabel">数据来源 {{ sourceLabel }}</div>
+              <div>数据点过多时会自动变粗，即相邻两点的时间间隔变大</div>
             </div>
           </template>
           <ArtSvgIcon class="mp-head__info" icon="ri:information-line" />
@@ -56,15 +50,10 @@
           </span>
         </ElTooltip>
       </ElRadioGroup>
-      <div class="mp-ranges__hint">
-        <template v-if="drillMode">
-          资源下钻只保留 30 天（子表只有 5min 档）：range&gt;{{ DRILL_MAX_RANGE_SECONDS }}
-          秒会被后端 400 拒绝，故 90 天 / 180 天档位在下钻场景已禁用。
-        </template>
-        <template v-else>
-          档位按「整机趋势」口径可用：1 小时 ~ 180 天（后端 range 允许区间
-          {{ RANGE_MIN_SECONDS }} ~ {{ RANGE_MAX_SECONDS }} 秒）。
-        </template>
+      <!-- 只有下钻需要一句解释（90/180 为什么点不了）；整机趋势的档位可用性在
+           按钮上就看得到，不需要旁白，更不需要把 range 的秒数区间写出来。 -->
+      <div v-if="drillMode" class="mp-ranges__hint">
+        资源明细仅保留 30 天，故 90 天 / 180 天不可选。
       </div>
     </div>
 
@@ -137,18 +126,17 @@
       </button>
     </div>
 
-    <!-- ============ 「该档位无此指标」 vs 「未采集」：两种状态必须可区分 ============ -->
+    <!-- ============ 「该档位不产此指标」 vs 「未采集」：两种缺数据必须可区分 ============ -->
+    <!-- 页面上只说结论**哪些列没有**；为什么没有（该档位不产该列、列不在响应
+         的 available_metrics 内）是实现原理，留在代码里即可。 -->
     <div v-if="built.unavailableColumns.length" class="mp-note mp-note--tier">
       <ArtSvgIcon icon="ri:information-line" />
-      <span>
-        该档位无此指标：<b>{{ unavailableLabels }}</b
-        >——这些列不在本响应 available_metrics 内（该档位根本不产出该列），与「未采集」不是一回事。
-      </span>
+      <span
+        >当前档位不产出这些指标：<b>{{ unavailableLabels }}</b></span
+      >
     </div>
-    <div class="mp-note mp-note--legend">
-      断线 / 显示「—」= <b>未采集</b>（列在 available_metrics 内，但该桶没有样本；后端空桶不产行，故
-      <code>t</code> 有洞）。上方「该档位无此指标」的列不会进入图表。
-    </div>
+    <!-- 图例只保留一句结论：断线 / 「—」是「没采到」，不是 0。 -->
+    <div class="mp-note mp-note--legend">断线或「—」表示该时刻未采集到数据。</div>
 
     <!-- ============ 图表 + 三态 ============ -->
     <div class="mp-chart-wrap">
@@ -163,7 +151,7 @@
       </div>
       <div v-else-if="!rows.length" class="mp-state">
         <ArtSvgIcon icon="ri:line-chart-line" />
-        <span>该窗口暂无数据（后端在此时段没有产桶，不是加载失败）</span>
+        <span>该窗口暂无数据（不是加载失败）</span>
       </div>
       <div v-else-if="!selectedColumns.length" class="mp-state">
         <ArtSvgIcon icon="ri:checkbox-multiple-blank-line" />
@@ -181,7 +169,6 @@
     BUCKET_TS_COLUMN,
     DEFAULT_RANGE_SECONDS,
     DRILL_MAX_RANGE_SECONDS,
-    MAX_BUCKETS,
     METRICS_ALL,
     PREFERRED_COLUMNS,
     RANGE_MAX_SECONDS,
@@ -189,6 +176,7 @@
     RESOURCE_KINDS,
     buildSeries,
     cellOf,
+    dataSourceLabel,
     defaultColumns,
     expectedBucketCount,
     formatAxisTick,
@@ -219,6 +207,7 @@
     RANGE_MIN_SECONDS,
     RESOURCE_KINDS,
     buildSeries,
+    dataSourceLabel,
     defaultColumns,
     expectedBucketCount,
     formatAxisTick,
@@ -333,13 +322,21 @@
   /** 分组后的可选列（F-8）：仅对「可用列」分组，未登记列会在 chips 里单独出现。 */
   const groupedColumns = computed(() => groupMetricColumns(availableColumns.value))
 
-  /** 头部摘要（人话，F-3）：粒度 · 数据源 · 采样点数。 */
+  /**
+   * 头部摘要（人话，F-3）：粒度 · 数据点数。
+   *
+   * 数的是**响应返回的桶数**，故称「数据点」而不是「采样点」—— 后者会让人
+   * 以为是 Agent 的上报条数（一个桶可能聚合了多条上报）。数据来源也移出主行：
+   * 「热层」是内部叫法，读者看不懂，需要时看 tooltip 的「数据来源」一行。
+   */
   const metaSummary = computed(() => {
     const m = meta.value
     if (!m) return ''
-    const src = m.source === 'redis' ? '热层' : '历史表'
-    return `粒度 ${formatResolution(m.resolutionSeconds)} · 数据源 ${src} · ${rows.value.length} 个采样点`
+    return `粒度 ${formatResolution(m.resolutionSeconds)} · ${rows.value.length} 个数据点`
   })
+
+  /** 数据来源（人话）。未知来源返回空串 → 该行不显示。 */
+  const sourceLabel = computed(() => dataSourceLabel(meta.value?.source))
 
   /** 数据是否稀疏（F-3）：让「断线图」有解释，而不是让人以为系统坏了。 */
   const isSparse = computed(() => {
@@ -354,7 +351,7 @@
     const unit = metricUnit(column)
     const head = unit ? `${name}（${unit}）` : name
     if (!availableColumns.value.includes(column)) {
-      return `${head}：该档位不产出此指标（列不在本响应的 available_metrics 内）`
+      return `${head}：该档位不产出此指标`
     }
     return `${head}：点击取消显示`
   }
@@ -662,6 +659,12 @@
     &__summary {
       @include t.pill;
       font-variant-numeric: tabular-nums;
+    }
+
+    /* 口径说明的 ⓘ：给个手型光标（与服务监控、总览页的 ⓘ 一致）——
+       此前它没有任何样式规则，看起来只是个装饰图标，没人会想到去悬停。 */
+    &__info {
+      cursor: help;
     }
   }
 

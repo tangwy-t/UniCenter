@@ -103,10 +103,7 @@
       <div v-else class="rd-placeholder">
         <ArtSvgIcon icon="ri:cursor-line" />
         <p class="rd-placeholder__title">从左侧选择一项资源</p>
-        <p class="rd-placeholder__hint">
-          下钻数据只保留 30 天（后端子表仅有 5min 档），因此 90 天 / 180 天档位在下钻中不可选 ——
-          提前禁用比点了再吃 400 更好。
-        </p>
+        <p class="rd-placeholder__hint">选中后展示该资源的指标趋势。</p>
       </div>
     </section>
   </div>

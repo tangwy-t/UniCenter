@@ -82,7 +82,15 @@ export interface ChartBlockSpec {
   span: ChartSpan
   /** 图块用途说明（渲染为副标题/悬浮提示，让读者知道这张图回答什么问题）。 */
   purpose: string
-  /** 选型理由（渲染为图块右上角的「?」提示，把设计决策暴露给使用者）。 */
+  /**
+   * 选型理由：**仅供维护者，不得渲染到页面**。
+   *
+   * 曾经渲染在图块右上角的「?」里，已撤下：把设计论证（「刻意不用堆叠柱：
+   * 状态之间不构成部分-整体关系」）摆在界面上，等于把设计文档混进产品页面 ——
+   * 读者是来看数据的人，评审选型不是他的任务。论证留在此处，是为了让
+   * 「为什么这么画」有处可查（并有守卫测试要求每个图块都能说清），
+   * 而不是为了展示。回归由 `__tests__/copy-no-internals.test.ts` 拦住。
+   */
   rationale: string
   /** 单位覆盖：本图块所有列共用该单位时的显示单位（不设则由列的元数据决定）。 */
   unit?: string
@@ -130,8 +138,7 @@ export const CHART_BLOCKS: ChartBlockSpec[] = [
     type: 'line',
     span: 'half',
     purpose: '1/5/15 分钟平均负载，反映排队长度而不仅是瞬时占用',
-    rationale:
-      '同为时间序列 → 折线；三者同量纲可共用 Y 轴，且 5/15 分钟的平滑特性天然适合同图对比'
+    rationale: '同为时间序列 → 折线；三者同量纲可共用 Y 轴，且 5/15 分钟的平滑特性天然适合同图对比'
   },
   {
     key: 'mem',
@@ -311,7 +318,10 @@ export const FALLBACK_CHART_KEY = 'other'
  * 值原样透传（含 `null`）—— **绝不** `?? 0`：
  * 0 是合法观测值，用它填「没数据」会让图上出现一条虚假的零线。
  */
-export function seriesPoints(axis: number[], values: (number | null)[] | undefined): [number, number | null][] {
+export function seriesPoints(
+  axis: number[],
+  values: (number | null)[] | undefined
+): [number, number | null][] {
   if (!Array.isArray(values) || values.length === 0) {
     return axis.map((t) => [t * 1000, null])
   }
@@ -461,7 +471,11 @@ export type OverviewState = 'loading' | 'error' | 'empty' | 'ready'
  * 注意 `ready` 也可能「部分可用」：有设备但个别设备带 error，此时仍渲染页面，
  * 由图块与表格就地提示（见 deviceIssueText）。
  */
-export function overviewState(hasError: boolean, loading: boolean, deviceCount: number): OverviewState {
+export function overviewState(
+  hasError: boolean,
+  loading: boolean,
+  deviceCount: number
+): OverviewState {
   if (loading) return 'loading'
   if (hasError) return 'error'
   if (deviceCount === 0) return 'empty'
@@ -637,7 +651,13 @@ export function buildOverviewStats(summary: {
       hint: '心跳正常但指标未更新',
       ...STAT_TILE.stale
     },
-    { key: 'disabled', label: '已停用', value: summary.disabled, alert: false, ...STAT_TILE.disabled }
+    {
+      key: 'disabled',
+      label: '已停用',
+      value: summary.disabled,
+      alert: false,
+      ...STAT_TILE.disabled
+    }
   ]
 }
 

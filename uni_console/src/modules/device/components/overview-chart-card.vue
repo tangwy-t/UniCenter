@@ -1,6 +1,6 @@
 <template>
   <div class="oc-card do-card">
-    <!-- ============ 头部：标题 + 用途 + 选型理由 ============ -->
+    <!-- ============ 头部：标题 + 用途/指标说明 ============ -->
     <div class="oc-card__head">
       <div class="oc-card__title">
         <span class="oc-card__name">{{ chart.title }}</span>
@@ -19,12 +19,14 @@
       </div>
 
       <div class="oc-card__tools">
-        <!-- 选型理由：不把设计决策藏在代码里，放出来让使用者能质疑它。 -->
+        <!-- 只留「用途」与「指标」。图表选型的论证（为什么用折线而不是堆叠柱）
+             留在 CHART_BLOCKS 的 rationale 里 —— 那是给维护者的论证，不是页面
+             文案：读者是来看数据的人，评审设计不是他的任务，把两者混在一处
+             只会让页面变成设计文档。 -->
         <ElTooltip placement="top" :show-after="200">
           <template #content>
             <div class="oc-tip">
               <div class="oc-tip__line">用途：{{ chart.purpose }}</div>
-              <div class="oc-tip__line">选型：{{ chart.rationale }}</div>
               <div class="oc-tip__line oc-tip__line--dim">
                 指标：{{ columnLabels }}（共 {{ chart.columns.length }} 列）
               </div>
@@ -192,9 +194,7 @@
         sampling: 'lttb' as const,
         // 淡出：降透明度 + 变细，而不是隐藏 —— 用户仍能看到全貌，
         // 只是被选中的那几台更突出（隐藏会让「对比」失去参照）。
-        lineStyle: dimmed
-          ? { width: 1, opacity: 0.18 }
-          : { width: 1.6, color: colorOf(s.name) },
+        lineStyle: dimmed ? { width: 1, opacity: 0.18 } : { width: 1.6, color: colorOf(s.name) },
         itemStyle: { color: colorOf(s.name), opacity: dimmed ? 0.18 : 1 },
         emphasis: { focus: 'series' as const }
       }
@@ -318,7 +318,9 @@
     const date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
     const time = `${pad(d.getHours())}:${pad(d.getMinutes())}`
     // 桶宽 ≥ 60s 时秒位没有信息量（同一桶内的秒都是桶起点），反而占宽度。
-    return props.resolutionSeconds >= 60 ? `${date} ${time}` : `${date} ${time}:${pad(d.getSeconds())}`
+    return props.resolutionSeconds >= 60
+      ? `${date} ${time}`
+      : `${date} ${time}:${pad(d.getSeconds())}`
   }
 
   const { chartRef, initChart, updateChart } = useChart({

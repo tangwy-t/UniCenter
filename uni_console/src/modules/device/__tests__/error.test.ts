@@ -64,7 +64,7 @@ describe('业务码优先于 HTTP 状态', () => {
 
 describe('参数错误保留后端原文', () => {
   it('下钻 range 越界的 msg 应原样展示（它可操作）', () => {
-    const msg = '资源明细只保留 30 天（5min 档），请把范围缩短到 30 天以内'
+    const msg = '资源明细只保留 30 天，请把时间范围缩短到 30 天以内'
     const info = classifyDeviceError(httpErr(msg, ApiStatus.error, BizCode.badRequest))
     expect(info.kind).toBe('badRequest')
     // 这条 msg 比「请求参数不被接受」有用得多：它直接告诉用户怎么改

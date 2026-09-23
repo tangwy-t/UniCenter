@@ -134,10 +134,14 @@ describe('buildOverviewCharts', () => {
 
   it('多列图块的系列名 = 主机名 · 指标名（否则分不清 1m/5m/15m 负载）', () => {
     // CPU 图块声明了 cpu_used_percent + cpu_iowait 两列 → 必须带指标名。
-    const charts = buildOverviewCharts(AXIS, [COL.cpu, COL.cpuIowait, COL.load1], [
-      dev('1', 'alpha', { cpu_used_percent: [1, 2, 3], load1: [0.4, 0.5, 0.6] }),
-      dev('2', 'beta', { cpu_used_percent: [4, 5, 6] })
-    ])
+    const charts = buildOverviewCharts(
+      AXIS,
+      [COL.cpu, COL.cpuIowait, COL.load1],
+      [
+        dev('1', 'alpha', { cpu_used_percent: [1, 2, 3], load1: [0.4, 0.5, 0.6] }),
+        dev('2', 'beta', { cpu_used_percent: [4, 5, 6] })
+      ]
+    )
     const cpuNames = charts.find((c) => c.key === 'cpu')!.series.map((s) => s.name)
     expect(cpuNames).toContain('alpha · CPU 使用率')
     expect(cpuNames).toContain('beta · CPU 使用率')
@@ -146,10 +150,14 @@ describe('buildOverviewCharts', () => {
   it('单列图块的系列名只写主机名（图例拥挤的直接对策）', () => {
     // 「磁盘使用率趋势」只有 1 列 → 整张图都是同一指标，再给每台设备加
     // 「· 磁盘使用率」是纯噪声，会把图例挤到换行/分页（总览常同时画十余台）。
-    const charts = buildOverviewCharts(AXIS, [COL.diskUsedPercent], [
-      dev('1', 'alpha', { disk_used_percent: [10, 11, 12] }),
-      dev('2', 'beta', { disk_used_percent: [20, 21, 22] })
-    ])
+    const charts = buildOverviewCharts(
+      AXIS,
+      [COL.diskUsedPercent],
+      [
+        dev('1', 'alpha', { disk_used_percent: [10, 11, 12] }),
+        dev('2', 'beta', { disk_used_percent: [20, 21, 22] })
+      ]
+    )
     const names = charts.find((c) => c.key === 'disk-usage')!.series.map((s) => s.name)
     expect(names).toEqual(['alpha', 'beta'])
   })
@@ -159,7 +167,11 @@ describe('buildOverviewCharts', () => {
     // 有设备但该设备这些列全无数据 → 图块被过滤掉，而不是渲染一屏空坐标轴
     expect(buildOverviewCharts(AXIS, ['cpu_used_percent'], [dev('1', 'a', {})])).toEqual([])
     expect(
-      buildOverviewCharts(AXIS, ['cpu_used_percent'], [dev('1', 'a', { cpu_used_percent: [null, null, null] })])
+      buildOverviewCharts(
+        AXIS,
+        ['cpu_used_percent'],
+        [dev('1', 'a', { cpu_used_percent: [null, null, null] })]
+      )
     ).toEqual([])
   })
 
@@ -322,15 +334,15 @@ describe('hasDrawableSeries', () => {
       devicesTotal: 1
     }
     expect(hasDrawableSeries(blank)).toBe(false)
-    expect(
-      hasDrawableSeries({ ...blank, series: [{ ...blank.series[0], present: 1 }] })
-    ).toBe(true)
+    expect(hasDrawableSeries({ ...blank, series: [{ ...blank.series[0], present: 1 }] })).toBe(true)
   })
 
   it('构建出的图块一定至少有一条非空曲线（过滤规则的不变量）', () => {
-    const charts = buildOverviewCharts(AXIS, ['cpu_used_percent'], [
-      dev('1', 'a', { cpu_used_percent: [null, 5, null] })
-    ])
+    const charts = buildOverviewCharts(
+      AXIS,
+      ['cpu_used_percent'],
+      [dev('1', 'a', { cpu_used_percent: [null, 5, null] })]
+    )
     expect(charts).toHaveLength(1)
     expect(hasDrawableSeries(charts[0])).toBe(true)
   })
@@ -356,10 +368,7 @@ describe('deviceIssueText', () => {
   })
 
   it('取数失败与离线可叠加，且失败先说', () => {
-    const txt = deviceIssueText(
-      dev('1', 'a', {}, { online: false, error: 'boom' }),
-      30
-    )
+    const txt = deviceIssueText(dev('1', 'a', {}, { online: false, error: 'boom' }), 30)
     expect(txt).toContain('趋势数据获取失败：boom')
     expect(txt).toContain('已离线')
     expect(txt.indexOf('失败')).toBeLessThan(txt.indexOf('离线'))

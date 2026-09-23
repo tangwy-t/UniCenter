@@ -1,298 +1,331 @@
 <template>
   <div class="device-overview art-full-height overflow-y-auto">
     <div class="device-overview__inner p-4 pb-8 md:p-5">
-    <!-- ============ 页头：标题 + 实时状态 + 自动刷新（对齐服务监控 .sv-hero）============ -->
-    <div class="do-hero mb-4 flex flex-wrap items-center gap-3">
-      <div class="do-hero__icon flex-cc">
-        <ArtSvgIcon icon="ri:dashboard-3-line" />
-      </div>
-      <div class="min-w-0">
-        <h2 class="text-lg font-semibold text-[var(--el-text-color-primary)]">设备监控总览</h2>
-        <p class="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-g-600">
-          <span
-            class="live-dot inline-block h-1.5 w-1.5 rounded-full bg-success"
-            :class="{ 'is-loading': loading }"
+      <!-- ============ 页头：标题 + 实时状态 + 自动刷新（对齐服务监控 .sv-hero）============ -->
+      <div class="do-hero mb-4 flex flex-wrap items-center gap-3">
+        <div class="do-hero__icon flex-cc">
+          <ArtSvgIcon icon="ri:dashboard-3-line" />
+        </div>
+        <div class="min-w-0">
+          <h2 class="text-lg font-semibold text-[var(--el-text-color-primary)]">设备监控总览</h2>
+          <p class="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-g-600">
+            <span
+              class="live-dot inline-block h-1.5 w-1.5 rounded-full bg-success"
+              :class="{ 'is-loading': loading }"
+            />
+            <span>{{ overviewSubtitle }}</span>
+          </p>
+        </div>
+        <div class="ml-auto flex items-center gap-1">
+          <ArtButtonTable
+            :icon="'ri:timer-2-line'"
+            :iconClass="autoRefresh ? 'bg-theme text-white shadow-sm' : 'bg-theme/12 text-theme'"
+            :title="autoRefresh ? `关闭自动刷新（每 ${autoIntervalSec} 秒）` : '开启自动刷新'"
+            @click="autoRefresh = !autoRefresh"
           />
-          <span>{{ overviewSubtitle }}</span>
-        </p>
+          <ArtButtonTable
+            icon="ri:refresh-line"
+            iconClass="bg-theme/12 text-theme"
+            title="刷新"
+            @click="reload"
+          />
+        </div>
       </div>
-      <div class="ml-auto flex items-center gap-1">
-        <ArtButtonTable
-          :icon="'ri:timer-2-line'"
-          :iconClass="autoRefresh ? 'bg-theme text-white shadow-sm' : 'bg-theme/12 text-theme'"
-          :title="autoRefresh ? `关闭自动刷新（每 ${autoIntervalSec} 秒）` : '开启自动刷新'"
-          @click="autoRefresh = !autoRefresh"
-        />
-        <ArtButtonTable
-          icon="ri:refresh-line"
-          iconClass="bg-theme/12 text-theme"
-          title="刷新"
-          @click="reload"
-        />
-      </div>
-    </div>
 
-    <!-- ============ 全局过滤条 ============ -->
-    <!-- 「所有设备 × 各类指标」的总览页里，过滤条件是**页面级**的：
+      <!-- ============ 全局过滤条 ============ -->
+      <!-- 「所有设备 × 各类指标」的总览页里，过滤条件是**页面级**的：
          它同时作用于概览条、快照表以及**每一张**图。故它必须常驻在页面顶部
          （而不是像列表页那样可折叠），并且带显式的「当前生效的筛选」摘要 ——
          否则用户看到一张只有 2 条线的图时，无法判断是「只有 2 台设备」
          还是「筛选把其它设备滤掉了」。 -->
-    <div class="do-card do-filter">
-      <div class="do-filter__row">
-        <div class="do-filter__fields">
-          <ElInput
-            v-model="filters.hostname"
-            class="do-filter__host"
-            placeholder="主机名（模糊匹配）"
-            clearable
-            @keyup.enter="reload"
-          />
-          <ElSelect v-model="filters.status" class="do-filter__status" placeholder="全部状态" clearable>
-            <ElOption label="启用" :value="1" />
-            <ElOption label="停用" :value="0" />
-          </ElSelect>
-          <ElSelect v-model="filters.online" class="do-filter__status" placeholder="在线状态" clearable>
-            <ElOption label="在线" :value="true" />
-            <ElOption label="离线" :value="false" />
-          </ElSelect>
+      <div class="do-card do-filter">
+        <div class="do-filter__row">
+          <div class="do-filter__fields">
+            <ElInput
+              v-model="filters.hostname"
+              class="do-filter__host"
+              placeholder="主机名（模糊匹配）"
+              clearable
+              @keyup.enter="reload"
+            />
+            <ElSelect
+              v-model="filters.status"
+              class="do-filter__status"
+              placeholder="全部状态"
+              clearable
+            >
+              <ElOption label="启用" :value="1" />
+              <ElOption label="停用" :value="0" />
+            </ElSelect>
+            <ElSelect
+              v-model="filters.online"
+              class="do-filter__status"
+              placeholder="在线状态"
+              clearable
+            >
+              <ElOption label="在线" :value="true" />
+              <ElOption label="离线" :value="false" />
+            </ElSelect>
+          </div>
+
+          <div class="do-filter__actions">
+            <ElButton type="primary" :loading="loading" @click="reload">查询</ElButton>
+            <ElButton :disabled="loading" @click="resetFilters">重置</ElButton>
+          </div>
         </div>
 
-        <div class="do-filter__actions">
-          <ElButton type="primary" :loading="loading" @click="reload">查询</ElButton>
-          <ElButton :disabled="loading" @click="resetFilters">重置</ElButton>
-        </div>
-      </div>
-
-      <div class="do-filter__row do-filter__row--ranges">
-        <!-- 时间窗：与详情页**同一套**档位（后端同一个选档函数），
+        <div class="do-filter__row do-filter__row--ranges">
+          <!-- 时间窗：与详情页**同一套**档位（后端同一个选档函数），
              故这里选 90 天与在详情页选 90 天得到的是同一批桶。 -->
-        <ElRadioGroup v-model="rangeSeconds" size="small" @change="reload">
-          <ElRadioButton v-for="r in rangeChoices" :key="r.seconds" :value="r.seconds">
-            {{ r.label }}
-          </ElRadioButton>
-        </ElRadioGroup>
+          <ElRadioGroup v-model="rangeSeconds" size="small" @change="reload">
+            <ElRadioButton v-for="r in rangeChoices" :key="r.seconds" :value="r.seconds">
+              {{ r.label }}
+            </ElRadioButton>
+          </ElRadioGroup>
 
-        <div class="do-filter__auto">
-          <!-- 自动刷新：总览页的核心使用方式是「盯一眼」，
+          <div class="do-filter__auto">
+            <!-- 自动刷新：总览页的核心使用方式是「盯一眼」，
                手动刷新会让用户看到过时数据而不自知。 -->
-          <ElSwitch v-model="autoRefresh" size="small" />
-          <span class="do-filter__auto-label">自动刷新</span>
-          <ElSelect v-model="autoIntervalSec" size="small" class="do-filter__interval" :disabled="!autoRefresh">
-            <ElOption v-for="s in AUTO_INTERVALS" :key="s" :label="`每 ${s} 秒`" :value="s" />
-          </ElSelect>
-          <ElButton size="small" :loading="loading" @click="reload">
-            <ArtSvgIcon icon="ri:refresh-line" />
-          </ElButton>
+            <ElSwitch v-model="autoRefresh" size="small" />
+            <span class="do-filter__auto-label">自动刷新</span>
+            <ElSelect
+              v-model="autoIntervalSec"
+              size="small"
+              class="do-filter__interval"
+              :disabled="!autoRefresh"
+            >
+              <ElOption v-for="s in AUTO_INTERVALS" :key="s" :label="`每 ${s} 秒`" :value="s" />
+            </ElSelect>
+            <ElButton size="small" :loading="loading" @click="reload">
+              <ArtSvgIcon icon="ri:refresh-line" />
+            </ElButton>
+          </div>
+        </div>
+
+        <!-- 生效条件摘要 + 数据口径说明：把「当前在看什么」写清楚。 -->
+        <div class="do-filter__summary">
+          <span class="do-pill">
+            <ArtSvgIcon icon="ri:filter-3-line" />
+            <span>{{ effectiveSummary }}</span>
+          </span>
+          <ElTag v-if="meta?.downsampled" size="small" type="warning" effect="light">
+            已抽样（每点 {{ resolutionText }}）
+          </ElTag>
+          <ElTag v-if="meta?.truncated" size="small" type="warning" effect="light">
+            仅显示前 {{ meta.max_devices }} 台
+          </ElTag>
+          <ElTooltip v-if="meta" placement="top">
+            <template #content>
+              <div class="do-tip">
+                <div>时间窗 {{ formatDurationText(meta.range_seconds) }}</div>
+                <div>每个数据点代表 {{ resolutionText }}</div>
+                <div v-if="sourceLabel">数据来源 {{ sourceLabel }}</div>
+                <div>可选指标 {{ meta.available_metrics.length }} 列</div>
+                <div>设备过多时只展示前 {{ meta.max_devices }} 台</div>
+              </div>
+            </template>
+            <ArtSvgIcon class="do-filter__info" icon="ri:information-line" />
+          </ElTooltip>
         </div>
       </div>
 
-      <!-- 生效条件摘要 + 数据口径说明：把「当前在看什么」写清楚。 -->
-      <div class="do-filter__summary">
-        <span class="do-pill">
-          <ArtSvgIcon icon="ri:filter-3-line" />
-          <span>{{ effectiveSummary }}</span>
-        </span>
-        <ElTag v-if="meta?.downsampled" size="small" type="warning" effect="light">
-          已抽样（桶宽 {{ resolutionText }}）
-        </ElTag>
-        <ElTag v-if="meta?.truncated" size="small" type="warning" effect="light">
-          仅显示前 {{ meta.max_devices }} 台
-        </ElTag>
-        <ElTooltip v-if="meta" placement="top">
-          <template #content>
-            <div class="do-tip">
-              <div>时间窗 {{ formatDurationText(meta.range_seconds) }}（range={{ meta.range_seconds }}）</div>
-              <div>桶宽 {{ resolutionText }}（resolution_seconds={{ meta.resolution_seconds }}）</div>
-              <div>数据源 {{ meta.source }}（redis=热层 / db=历史表）</div>
-              <div>可用指标列 {{ meta.available_metrics.length }} 列</div>
-              <div>设备上限 {{ meta.max_devices }} 台，截断时如实标注</div>
-            </div>
+      <!-- ============ 加载中 ============ -->
+      <div v-if="state === 'loading'" class="do-card do-empty flex-cc flex-col gap-3 py-16">
+        <div class="do-empty__icon flex-cc">
+          <ArtSvgIcon icon="ri:loader-4-line" class="do-empty__spin" />
+        </div>
+        <div class="text-sm font-medium text-[var(--el-text-color-regular)]">正在加载设备指标…</div>
+        <div class="text-xs text-g-600">首次加载需要聚合全部设备，请稍候</div>
+      </div>
+
+      <!-- ============ 错误 ============ -->
+      <div v-else-if="state === 'error'" class="do-card do-state">
+        <ElResult
+          :icon="errorInfo?.retryable ? 'warning' : 'error'"
+          :title="errorInfo?.title"
+          :sub-title="errorInfo?.hint"
+        >
+          <template #extra>
+            <ElButton v-if="errorInfo?.retryable" type="primary" @click="reload">重试</ElButton>
+            <ElButton @click="resetFilters">重置筛选</ElButton>
+            <ElButton v-if="errorInfo?.raw" text type="info" @click="showRawError = !showRawError">
+              {{ showRawError ? '收起详情' : '查看详情' }}
+            </ElButton>
           </template>
-          <ArtSvgIcon class="do-filter__info" icon="ri:information-line" />
-        </ElTooltip>
-      </div>
-    </div>
-
-    <!-- ============ 加载中 ============ -->
-    <div v-if="state === 'loading'" class="do-card do-empty flex-cc flex-col gap-3 py-16">
-      <div class="do-empty__icon flex-cc">
-        <ArtSvgIcon icon="ri:loader-4-line" class="do-empty__spin" />
-      </div>
-      <div class="text-sm font-medium text-[var(--el-text-color-regular)]">正在加载设备指标…</div>
-      <div class="text-xs text-g-600">首次加载需聚合全部设备的时间序列，请稍候</div>
-    </div>
-
-    <!-- ============ 错误 ============ -->
-    <div v-else-if="state === 'error'" class="do-card do-state">
-      <ElResult :icon="errorInfo?.retryable ? 'warning' : 'error'" :title="errorInfo?.title" :sub-title="errorInfo?.hint">
-        <template #extra>
-          <ElButton v-if="errorInfo?.retryable" type="primary" @click="reload">重试</ElButton>
-          <ElButton @click="resetFilters">重置筛选</ElButton>
-          <ElButton v-if="errorInfo?.raw" text type="info" @click="showRawError = !showRawError">
-            {{ showRawError ? '收起详情' : '查看详情' }}
-          </ElButton>
-        </template>
-      </ElResult>
-      <!--
+        </ElResult>
+        <!--
         技术细节**不能**写在 ElResult 内部：ElResult 只渲染
         icon/title/sub-title/extra 四个具名插槽，**没有 default 插槽**
         （见 element-plus/es/components/result/src/result2.mjs）。
         写在里面会被静默丢弃 —— 按钮能点、标题会变「收起详情」，
         但内容永远不出现。故放在 ElResult 之后的兄弟节点。
       -->
-      <div v-if="showRawError && errorInfo?.raw" class="do-state__raw">{{ errorInfo.raw }}</div>
-    </div>
+        <div v-if="showRawError && errorInfo?.raw" class="do-state__raw">{{ errorInfo.raw }}</div>
+      </div>
 
-    <!-- ============ 空态 ============ -->
-    <div v-else-if="state === 'empty'" class="do-card do-state">
-      <!--
+      <!-- ============ 空态 ============ -->
+      <div v-else-if="state === 'empty'" class="do-card do-state">
+        <!--
         注意插槽名：ElEmpty 渲染 description/image/**default** 三个插槽
         （见 element-plus/es/components/empty/src/empty2.mjs），
         额外的操作按钮要塞进 **default**，没有 `#extra` 插槽。
         写成 `#extra` 会被静默丢弃 —— 空态下就再也无法「一键清除筛选」，
         而空态恰恰是用户最需要这个按钮的时刻。
       -->
-      <ElEmpty :description="emptyDescription">
-        <ElButton v-if="hasActiveFilter" @click="resetFilters">清除筛选条件</ElButton>
-      </ElEmpty>
-    </div>
-
-    <!-- ============ 正常 ============ -->
-    <template v-else>
-      <!-- 页面级概览：设备总数 / 在线 / 离线 / 陈旧 / 停用 -->
-      <!-- 页面级概览磁贴：对齐服务监控 .kpi-tile（图标方块 + 数值 + 标签 + 说明） -->
-      <div class="do-stats kpi-grid grid grid-cols-2 gap-4 md:grid-cols-3 2xl:grid-cols-5">
-        <div
-          v-for="s in stats"
-          :key="s.key"
-          class="do-card do-stats__card kpi-tile"
-          :title="s.hint"
-        >
-          <div class="kpi-tile__icon flex-cc" :style="{ '--tile': s.tile, '--tile2': s.tile2 }">
-            <ArtSvgIcon :icon="s.icon" />
-          </div>
-          <div class="min-w-0 flex-1">
-            <div class="kpi-tile__value truncate" :class="{ 'is-alert': s.alert }">{{ s.value }}</div>
-            <div class="kpi-tile__label">{{ s.label }}</div>
-            <div class="kpi-tile__sub truncate">{{ s.hint ?? '&nbsp;' }}</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- 设备快照表：每台设备一行，列出关键水位指标。
-           它承担「横向对比」的精确读数职责 —— 图表看趋势，表格看当前值。 -->
-      <div class="do-card do-snapshot">
-        <div class="do-section__head">
-          <span class="do-section__title">设备实时快照</span>
-          <span class="do-section__sub">{{ snapshotSummary }}</span>
-          <div class="do-section__spacer"></div>
-          <ElButton size="small" text @click="clearSelection" v-if="selectedDeviceIds.length">
-            清除选择（已选 {{ selectedDeviceIds.length }} 台）
-          </ElButton>
-        </div>
-
-        <ElTable :data="snapshotRows" size="small" max-height="20rem">
-          <ElTableColumn label="设备" min-width="180" fixed>
-            <template #default="{ row }">
-              <div class="do-dev">
-                <ElCheckbox
-                  :model-value="selectedDeviceIds.includes(row.id)"
-                  @change="toggleDevice(row.id)"
-                />
-                <ArtSvgIcon :icon="deviceIcon(row.os, row.platform)" class="do-dev__icon" />
-                <div class="do-dev__text">
-                  <div class="do-dev__name">{{ row.hostname || row.id }}</div>
-                  <div class="do-dev__meta">{{ row.id }}</div>
-                </div>
-              </div>
-            </template>
-          </ElTableColumn>
-
-          <ElTableColumn label="状态" width="120">
-            <template #default="{ row }">
-              <ElTag :type="row.online ? 'success' : 'danger'" size="small" effect="light">
-                {{ row.online ? '在线' : '离线' }}
-              </ElTag>
-              <ElTag v-if="row.stale" type="warning" size="small" effect="light">陈旧</ElTag>
-              <ElTag v-if="row.status === 0" type="info" size="small" effect="plain">停用</ElTag>
-            </template>
-          </ElTableColumn>
-
-          <ElTableColumn label="水位时间" width="110">
-            <template #default="{ row }">
-              <span :title="row.watermarkAt ? formatUnixSeconds(row.watermarkAt) : ''">
-                {{ formatRelative(row.watermarkAt) }}
-              </span>
-            </template>
-          </ElTableColumn>
-
-          <!-- 关键水位列：CPU / 内存 / 磁盘 使用率带进度条（一眼看紧张度），
-               其余为数值。缺值一律「—」，绝不为 0。 -->
-          <ElTableColumn v-for="c in SNAPSHOT_COLUMNS" :key="c.column" :label="c.label" width="150">
-            <template #default="{ row }">
-              <div v-if="c.bar" class="do-usage">
-                <ElProgress
-                  :percentage="clampPercent(row.watermark?.[c.column])"
-                  :stroke-width="6"
-                  :show-text="false"
-                  :color="usageColor(row.watermark?.[c.column])"
-                />
-                <span class="do-usage__text">{{ formatMetric(c.column, row.watermark?.[c.column]) }}</span>
-              </div>
-              <span v-else>{{ formatMetric(c.column, row.watermark?.[c.column]) }}</span>
-            </template>
-          </ElTableColumn>
-
-          <ElTableColumn label="提示" min-width="180">
-            <template #default="{ row }">
-              <span v-if="deviceIssueText(row, meta?.summary.offline_threshold_sec)" class="do-issue">
-                {{ deviceIssueText(row, meta?.summary.offline_threshold_sec) }}
-              </span>
-              <span v-else class="do-ok">正常</span>
-            </template>
-          </ElTableColumn>
-
-          <ElTableColumn label="操作" width="100" fixed="right">
-            <template #default="{ row }">
-              <ElButton link type="primary" size="small" @click="gotoDetail(row.id)">详情下钻</ElButton>
-            </template>
-          </ElTableColumn>
-        </ElTable>
-      </div>
-
-      <!-- ============ 各指标类别的图表块 ============ -->
-      <!-- 这是本页的主体：每张图回答一个独立的问题（见 CHART_BLOCKS 的 purpose）。
-           栅格：宽图占满一行，窄图两列并排；窄屏一律单列。 -->
-      <div v-if="chartBlocks.length" class="do-charts">
-        <div
-          v-for="chart in chartBlocks"
-          :key="chart.key"
-          class="do-charts__item"
-          :class="`do-charts__item--${chart.span}`"
-        >
-          <OverviewChartCard
-            :chart="chart"
-            :axis="axis"
-            :range-seconds="meta?.range_seconds ?? rangeSeconds"
-            :resolution-seconds="meta?.resolution_seconds ?? 0"
-            :highlighted-device-ids="selectedDeviceIds"
-          />
-        </div>
-      </div>
-
-      <!-- 有设备但画不出任何曲线：显式说明，而不是一屏空白 -->
-      <div v-else class="do-card do-state">
-        <!-- 同样用 ElEmpty 的 default 插槽（它没有 #extra）。 -->
-        <ElEmpty description="所选设备在该时间窗内没有任何指标数据">
-          <div class="do-state__hint">
-            常见原因：设备刚注册尚未上报、所选时间窗内 agent 未提交指标，
-            或筛选条件过滤掉了所有设备。
-          </div>
-          <ElButton type="primary" @click="reload">重新加载</ElButton>
+        <ElEmpty :description="emptyDescription">
+          <ElButton v-if="hasActiveFilter" @click="resetFilters">清除筛选条件</ElButton>
         </ElEmpty>
       </div>
-    </template>
+
+      <!-- ============ 正常 ============ -->
+      <template v-else>
+        <!-- 页面级概览：设备总数 / 在线 / 离线 / 陈旧 / 停用 -->
+        <!-- 页面级概览磁贴：对齐服务监控 .kpi-tile（图标方块 + 数值 + 标签 + 说明） -->
+        <div class="do-stats kpi-grid grid grid-cols-2 gap-4 md:grid-cols-3 2xl:grid-cols-5">
+          <div
+            v-for="s in stats"
+            :key="s.key"
+            class="do-card do-stats__card kpi-tile"
+            :title="s.hint"
+          >
+            <div class="kpi-tile__icon flex-cc" :style="{ '--tile': s.tile, '--tile2': s.tile2 }">
+              <ArtSvgIcon :icon="s.icon" />
+            </div>
+            <div class="min-w-0 flex-1">
+              <div class="kpi-tile__value truncate" :class="{ 'is-alert': s.alert }">{{
+                s.value
+              }}</div>
+              <div class="kpi-tile__label">{{ s.label }}</div>
+              <div class="kpi-tile__sub truncate">{{ s.hint ?? '&nbsp;' }}</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 设备快照表：每台设备一行，列出关键水位指标。
+           它承担「横向对比」的精确读数职责 —— 图表看趋势，表格看当前值。 -->
+        <div class="do-card do-snapshot">
+          <div class="do-section__head">
+            <span class="do-section__title">设备实时快照</span>
+            <span class="do-section__sub">{{ snapshotSummary }}</span>
+            <div class="do-section__spacer"></div>
+            <ElButton size="small" text @click="clearSelection" v-if="selectedDeviceIds.length">
+              清除选择（已选 {{ selectedDeviceIds.length }} 台）
+            </ElButton>
+          </div>
+
+          <ElTable :data="snapshotRows" size="small" max-height="20rem">
+            <ElTableColumn label="设备" min-width="180" fixed>
+              <template #default="{ row }">
+                <div class="do-dev">
+                  <ElCheckbox
+                    :model-value="selectedDeviceIds.includes(row.id)"
+                    @change="toggleDevice(row.id)"
+                  />
+                  <ArtSvgIcon :icon="deviceIcon(row.os, row.platform)" class="do-dev__icon" />
+                  <div class="do-dev__text">
+                    <div class="do-dev__name">{{ row.hostname || row.id }}</div>
+                    <div class="do-dev__meta">{{ row.id }}</div>
+                  </div>
+                </div>
+              </template>
+            </ElTableColumn>
+
+            <ElTableColumn label="状态" width="120">
+              <template #default="{ row }">
+                <ElTag :type="row.online ? 'success' : 'danger'" size="small" effect="light">
+                  {{ row.online ? '在线' : '离线' }}
+                </ElTag>
+                <ElTag v-if="row.stale" type="warning" size="small" effect="light">陈旧</ElTag>
+                <ElTag v-if="row.status === 0" type="info" size="small" effect="plain">停用</ElTag>
+              </template>
+            </ElTableColumn>
+
+            <ElTableColumn label="水位时间" width="110">
+              <template #default="{ row }">
+                <span :title="row.watermarkAt ? formatUnixSeconds(row.watermarkAt) : ''">
+                  {{ formatRelative(row.watermarkAt) }}
+                </span>
+              </template>
+            </ElTableColumn>
+
+            <!-- 关键水位列：CPU / 内存 / 磁盘 使用率带进度条（一眼看紧张度），
+               其余为数值。缺值一律「—」，绝不为 0。 -->
+            <ElTableColumn
+              v-for="c in SNAPSHOT_COLUMNS"
+              :key="c.column"
+              :label="c.label"
+              width="150"
+            >
+              <template #default="{ row }">
+                <div v-if="c.bar" class="do-usage">
+                  <ElProgress
+                    :percentage="clampPercent(row.watermark?.[c.column])"
+                    :stroke-width="6"
+                    :show-text="false"
+                    :color="usageColor(row.watermark?.[c.column])"
+                  />
+                  <span class="do-usage__text">{{
+                    formatMetric(c.column, row.watermark?.[c.column])
+                  }}</span>
+                </div>
+                <span v-else>{{ formatMetric(c.column, row.watermark?.[c.column]) }}</span>
+              </template>
+            </ElTableColumn>
+
+            <ElTableColumn label="提示" min-width="180">
+              <template #default="{ row }">
+                <span
+                  v-if="deviceIssueText(row, meta?.summary.offline_threshold_sec)"
+                  class="do-issue"
+                >
+                  {{ deviceIssueText(row, meta?.summary.offline_threshold_sec) }}
+                </span>
+                <span v-else class="do-ok">正常</span>
+              </template>
+            </ElTableColumn>
+
+            <ElTableColumn label="操作" width="100" fixed="right">
+              <template #default="{ row }">
+                <ElButton link type="primary" size="small" @click="gotoDetail(row.id)"
+                  >详情下钻</ElButton
+                >
+              </template>
+            </ElTableColumn>
+          </ElTable>
+        </div>
+
+        <!-- ============ 各指标类别的图表块 ============ -->
+        <!-- 这是本页的主体：每张图回答一个独立的问题（见 CHART_BLOCKS 的 purpose）。
+           栅格：宽图占满一行，窄图两列并排；窄屏一律单列。 -->
+        <div v-if="chartBlocks.length" class="do-charts">
+          <div
+            v-for="chart in chartBlocks"
+            :key="chart.key"
+            class="do-charts__item"
+            :class="`do-charts__item--${chart.span}`"
+          >
+            <OverviewChartCard
+              :chart="chart"
+              :axis="axis"
+              :range-seconds="meta?.range_seconds ?? rangeSeconds"
+              :resolution-seconds="meta?.resolution_seconds ?? 0"
+              :highlighted-device-ids="selectedDeviceIds"
+            />
+          </div>
+        </div>
+
+        <!-- 有设备但画不出任何曲线：显式说明，而不是一屏空白 -->
+        <div v-else class="do-card do-state">
+          <!-- 同样用 ElEmpty 的 default 插槽（它没有 #extra）。 -->
+          <ElEmpty description="所选设备在该时间窗内没有任何指标数据">
+            <div class="do-state__hint">
+              常见原因：设备刚注册尚未上报、所选时间窗内 agent 未提交指标，
+              或筛选条件过滤掉了所有设备。
+            </div>
+            <ElButton type="primary" @click="reload">重新加载</ElButton>
+          </ElEmpty>
+        </div>
+      </template>
     </div>
   </div>
 </template>
@@ -311,7 +344,12 @@
     formatUnixSeconds,
     usageTone
   } from '../utils/display'
-  import { DEFAULT_RANGE_SECONDS, formatDurationText, rangeOptions } from '../utils/metrics'
+  import {
+    DEFAULT_RANGE_SECONDS,
+    dataSourceLabel,
+    formatDurationText,
+    rangeOptions
+  } from '../utils/metrics'
   import {
     abnormalDeviceCount,
     buildOverviewCharts,
@@ -344,7 +382,9 @@
   const rangeSeconds = ref(DEFAULT_RANGE_SECONDS)
 
   /** 时间窗档位复用详情页的 rangeOptions（同一套后端选档口径）。 */
-  const rangeChoices = computed(() => rangeOptions(false).map((r) => ({ label: r.label, seconds: r.seconds })))
+  const rangeChoices = computed(() =>
+    rangeOptions(false).map((r) => ({ label: r.label, seconds: r.seconds }))
+  )
 
   // ── 自动刷新 ────────────────────────────────────────────
   const AUTO_INTERVALS = [10, 30, 60, 300]
@@ -397,9 +437,11 @@
     const m = meta.value
     if (!m) return loading.value ? '正在加载…' : '暂无数据'
     const parts: string[] = []
-    parts.push(`共 ${m.summary.total} 台设备 · 在线 ${m.summary.online} / 离线 ${m.summary.offline}`)
-    parts.push(`时间窗 ${formatDurationText(m.range_seconds)} · ${axis.value.length} 桶`)
-    if (autoRefresh.value) parts.push(`每 ${autoIntervalSec} 秒自动刷新`)
+    parts.push(
+      `共 ${m.summary.total} 台设备 · 在线 ${m.summary.online} / 离线 ${m.summary.offline}`
+    )
+    parts.push(`时间窗 ${formatDurationText(m.range_seconds)} · ${axis.value.length} 个数据点`)
+    if (autoRefresh.value) parts.push(`每 ${autoIntervalSec.value} 秒自动刷新`)
     return parts.join(' · ')
   })
 
@@ -420,7 +462,11 @@
   const deviceCountForState = computed(() => (meta.value === null ? -1 : devices.value.length))
 
   const state = computed(() =>
-    overviewState(hasError.value, loading.value && meta.value === null, Math.max(deviceCountForState.value, 0))
+    overviewState(
+      hasError.value,
+      loading.value && meta.value === null,
+      Math.max(deviceCountForState.value, 0)
+    )
   )
 
   const hasActiveFilter = computed(
@@ -434,6 +480,9 @@
     if (r < 3600) return `${r / 60} 分钟`
     return `${r / 3600} 小时`
   })
+
+  /** 数据来源（人话）。未知来源返回空串 → 该行不显示。 */
+  const sourceLabel = computed(() => dataSourceLabel(meta.value?.source))
 
   /** 生效条件摘要：把「现在看的是哪一批设备」用一句话讲清。 */
   const effectiveSummary = computed(() => {
@@ -454,10 +503,13 @@
 
   const snapshotSummary = computed(() => {
     const total = devices.value.length
-    const withData = devices.value.filter((d) => d.watermark && Object.keys(d.watermark).length > 0).length
+    const withData = devices.value.filter(
+      (d) => d.watermark && Object.keys(d.watermark).length > 0
+    ).length
     if (total === 0) return ''
     const bits = [`${total} 台`, `其中 ${withData} 台有指标快照`]
-    if (selectedDeviceIds.value.length > 0) bits.push(`已选 ${selectedDeviceIds.value.length} 台（图表已同步高亮）`)
+    if (selectedDeviceIds.value.length > 0)
+      bits.push(`已选 ${selectedDeviceIds.value.length} 台（图表已同步高亮）`)
     return bits.join(' · ')
   })
 

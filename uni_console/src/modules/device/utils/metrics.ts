@@ -61,6 +61,10 @@ export interface RangeChoice extends RangeOption {
 /**
  * 可用档位。下钻（`isDrill`）排除 >30d 的档位，并给出**禁用原因**，
  * 使用户不可能「点了再吃 400」。
+ *
+ * 禁用原因**只写结论**（「能看多远」），页面上不解释「为什么只有 30 天」——
+ * 子表档位、400 的秒数边界都是实现原理，读者要的是可用范围。原理见上方
+ * `DRILL_MAX_RANGE_SECONDS` 与 `RANGE_MAX_SECONDS` 的注释。
  */
 export function rangeOptions(isDrill: boolean): RangeChoice[] {
   return RANGE_DEFS.map((r) => {
@@ -68,9 +72,7 @@ export function rangeOptions(isDrill: boolean): RangeChoice[] {
     return {
       ...r,
       disabled,
-      disabledReason: disabled
-        ? `资源明细只保留 30 天（子表只有 5min 档），range>${DRILL_MAX_RANGE_SECONDS} 秒会被后端拒绝（400）`
-        : ''
+      disabledReason: disabled ? '资源明细仅保留 30 天' : ''
     }
   })
 }
@@ -94,6 +96,22 @@ export function formatDurationText(seconds: number): string {
 export function formatResolution(seconds: number): string {
   const text = formatDurationText(seconds)
   return text === '—' ? text : `每 ${text}`
+}
+
+/**
+ * 数据来源的**人话**文案（页面用）。
+ *
+ * 响应里的 `source` 只有 `redis` / `db` 两个原始值；「热层」是内部叫法，
+ * 页面上不该出现（它既不是标准术语，也解释不了「这图能不能信」）。
+ * 收敛在这里而不是各组件各写一份：此前 `redis=热层 / db=历史表` 这句
+ * 在三处重复，三份措辞迟早漂移。
+ *
+ * 未知取值返回空串——宁可不显示来源，也不给用户编一个，调用方据此省略该项。
+ */
+export function dataSourceLabel(source?: string): string {
+  if (source === 'redis') return '实时缓存'
+  if (source === 'db') return '历史库'
+  return ''
 }
 
 /** 图表一个系列：x 是桶的**真实 unix 时刻（ms）**，不是下标。 */

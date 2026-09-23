@@ -124,7 +124,9 @@ export function classifyDeviceError(e: unknown): DeviceErrorInfo {
       return {
         kind,
         // badRequest 保留后端 msg：它通常是具体且可操作的
-        // （如「资源明细只保留 30 天（5min 档），请把 range 缩短到 30 天以内」）。
+        // （如「资源明细只保留 30 天，请把时间范围缩短到 30 天以内」）。
+        // 后端那些消息本身已按「只讲结论」的口径写过（后端侧守卫见
+        // service.TestUserFacingErrorsSpeakHuman），故此处理解为原样透传。
         title: kind === 'badRequest' && raw ? raw : base.title,
         hint: base.hint,
         retryable: base.retryable,
