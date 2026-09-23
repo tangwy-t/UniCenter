@@ -24,6 +24,24 @@ const plugin: PluginManifest = {
       }
     },
     {
+      // 总览页：与后端菜单 `/device/overview` **逐字一致**（v012 种子播种）。
+      // 它是本模块的「聚合视图」入口，与列表页并列（都在侧边栏一级）。
+      //
+      // 权限码用 PermDeviceQuery 而不是 PermDeviceList：总览展示的是
+      // 与详情页同一批指标的聚合（CPU/内存/磁盘/网络的时序与水位），
+      // 其数据面与 `/devices/overview` 后端接口一致（那个接口用 device:query）。
+      // 若这里写 PermDeviceList，会出现「有列表权限的用户看得到菜单，
+      // 点进去却因接口 403 而满屏错误」的割裂。
+      path: '/device/overview',
+      name: 'DeviceOverview',
+      component: () => import('./views/overview.vue'),
+      meta: {
+        title: '设备监控总览',
+        icon: 'ri:dashboard-3-line',
+        authMark: PermDeviceQuery
+      }
+    },
+    {
       // 详情页**闭合** views/index.vue 的 openDetail 悬空引用：
       // 那里 `router.push({ name: 'DeviceDetail', params: { id: row.id } })`，
       // 而此前本模块只注册了 DeviceList —— 点「详情」会因 name 不存在而报错。

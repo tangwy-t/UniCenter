@@ -14,8 +14,12 @@ import {
   formatResolution,
   rangeOptions,
   resourceRows,
-  trendRows
+  trendRows,
+  expectedBucketCount,
+  isSparseData
 } from '../utils/metrics'
+
+import { metricTipLine as tipLineFor } from '../utils/column-meta'
 
 const BASE = 1758000000 // 一个固定的 unix 秒基准
 
@@ -233,5 +237,89 @@ describe('defaultColumns · 偏好集只是顺序，可用性仍由响应决定'
       'tcp_total',
       'proc_count'
     ])
+  })
+})
+
+// ─────────────────────────────────────────────────────────────
+// F-3 数据稀疏判定（新增）
+// ─────────────────────────────────────────────────────────────
+
+describe('expectedBucketCount', () => {
+  it('按 range / resolution 算理论满桶数', () => {
+    expect(expectedBucketCount(86400, 10)).toBe(8640)
+    expect(expectedBucketCount(2592000, 900)).toBe(2880)
+  })
+
+  it('非法输入返回 0（不抛、不返回 NaN）', () => {
+    expect(expectedBucketCount(0, 10)).toBe(0)
+    expect(expectedBucketCount(86400, 0)).toBe(0)
+    expect(expectedBucketCount(Number.NaN, 10)).toBe(0)
+  })
+})
+
+describe('isSparseData', () => {
+  it('填充率低于 20% 判为稀疏', () => {
+    // 线上实测：range=86400/res=10 → 应 8640 桶，实际只有约 350（fill≈4%）
+    expect(isSparseData(350, 86400, 10)).toBe(true)
+  })
+
+  it('接近满桶不判稀疏', () => {
+    expect(isSparseData(8600, 86400, 10)).toBe(false)
+  })
+
+  it('严格边界：恰好 20% 不算稀疏', () => {
+    // 容差刻意宽松：桶边界对齐会让正常数据少一两个桶，
+    // 用严格相等会把正常数据误标成稀疏
+    expect(isSparseData(2000, 10000, 1)).toBe(false)
+  })
+
+  it('期望桶数太少时不做判断（比值无统计意义）', () => {
+    // 180 天档：range=15552000/res=7200 → 只有 2160 桶，且实测就是 2 桶，
+    // 但这里刻意用更小的窗口验证 <10 的短路
+    expect(isSparseData(1, 5, 1)).toBe(false)
+    expect(isSparseData(0, 9, 1)).toBe(false)
+  })
+
+  it('0 桶且期望很多 → 判为稀疏（设备完全没上报）', () => {
+    expect(isSparseData(0, 86400, 10)).toBe(true)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────
+// 悬浮框文案中文化
+// ─────────────────────────────────────────────────────────────
+
+describe('tipLineFor', () => {
+  it('展示层给出中文名 + 单位，而不是列名', () => {
+    // 回归用例：此前 tooltip 直接打印 series.name（= 列名），
+    // 悬浮框里出现的是 `cpu_used_percent: 30.8` 这种英文键名。
+    const line = tipLineFor('cpu_used_percent', '30.80')
+    expect(line).toBe('CPU 使用率（%）: 30.80')
+    expect(line).not.toContain('cpu_used_percent')
+  })
+
+  it('带单位的列一律给出单位', () => {
+    // 只给数字会让读图的人无法判断 1024 是 B/s 还是 KB/s —— 单位缺失是误读主因
+    expect(tipLineFor('disk_io_read_bytes_sec', '512')).toBe('磁盘读速率（B/s）: 512')
+    expect(tipLineFor('mem_used_mb', '8000')).toBe('内存已用（MB）: 8000')
+  })
+
+  it('无量纲列不加空括号', () => {
+    expect(tipLineFor('load1', '0.42')).toBe('负载 1 分钟: 0.42')
+    expect(tipLineFor('proc_count', '128')).toBe('进程数: 128')
+  })
+
+  it('下钻子表列名同样中文化（两套列名都要覆盖）', () => {
+    expect(tipLineFor('used_percent', '50.00')).toBe('使用率（%）: 50.00')
+    expect(tipLineFor('read_bytes_per_sec', '1024')).toBe('读速率（B/s）: 1024')
+  })
+
+  it('未登记列回退列名本身（不显示空白，也不隐藏）', () => {
+    // 后端新增列时，宁可显示英文列名（可搜到），也不要显示成「未知指标」
+    expect(tipLineFor('brand_new_col', '1')).toBe('brand_new_col: 1')
+  })
+
+  it('缺值行仍带单位与中文名（值是「—」而不是 0）', () => {
+    expect(tipLineFor('mem_used_percent', '—')).toBe('内存使用率（%）: —')
   })
 })

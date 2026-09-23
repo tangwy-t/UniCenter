@@ -1,24 +1,38 @@
 <template>
-  <ElCard class="mp-panel" shadow="never">
+  <div class="mp-panel dd-surface">
     <!-- ============ 头部：标题 + 窗口/粒度（均来自响应字段） ============ -->
     <div class="mp-head">
       <div class="mp-head__title">
         <ArtSvgIcon :icon="drillMode ? 'ri:pie-chart-2-line' : 'ri:line-chart-line'" />
         <span>{{ drillMode ? `${kindLabel} · ${props.name}` : '整机趋势' }}</span>
       </div>
+      <!-- 主行只说人话：粒度 / 数据源 / 采样点数。
+           range_seconds、resolution_seconds、source 这三个技术参数收进 tooltip —— 
+           它们对排障有用，但对「这图能信吗」没有帮助，不该占据主视线。 -->
       <div v-if="meta" class="mp-head__meta">
-        <!-- 把 resolution_seconds 与所选 range **一起**显示：
-             「30 天 实际是 15 分钟一桶」这件事必须一眼可见。 -->
-        <ElTag size="small" effect="plain">
-          窗口 {{ formatDurationText(meta.rangeSeconds) }}（range_seconds={{ meta.rangeSeconds }}）
-        </ElTag>
-        <ElTag size="small" effect="plain" type="info">
-          粒度 {{ formatResolution(meta.resolutionSeconds) }}（resolution_seconds={{
-            meta.resolutionSeconds
-          }}）
-        </ElTag>
-        <!-- source（redis/db）仅供调试与观测，业务不依赖；用极轻的 tag 展示。 -->
-        <ElTag size="small" effect="plain" type="info">数据源 {{ meta.source }}</ElTag>
+        <span class="mp-head__summary">{{ metaSummary }}</span>
+        <!-- 采样点数远低于该窗口应有桶数 → 显式标注「数据稀疏」，
+             避免用户把断线当成系统故障（或反过来，把稀疏曲线当成真实负载）。 -->
+        <ElTag v-if="isSparse" size="small" type="warning" effect="light">数据稀疏</ElTag>
+        <ElTooltip placement="top">
+          <template #content>
+            <div class="mp-tip">
+              <div
+                >窗口 {{ formatDurationText(meta.rangeSeconds) }}（range_seconds={{
+                  meta.rangeSeconds
+                }}）</div
+              >
+              <div
+                >粒度 {{ formatResolution(meta.resolutionSeconds) }}（resolution_seconds={{
+                  meta.resolutionSeconds
+                }}）</div
+              >
+              <div>数据源 {{ meta.source }}（redis=热层 / db=历史表）</div>
+              <div>桶数上限 {{ MAX_BUCKETS }}，超出时后端自动升档（粒度变粗）</div>
+            </div>
+          </template>
+          <ArtSvgIcon class="mp-head__info" icon="ri:information-line" />
+        </ElTooltip>
       </div>
     </div>
 
@@ -54,9 +68,12 @@
       </div>
     </div>
 
-    <!-- ============ 列选择：列名**全部来自响应** available_metrics ============ -->
+    <!-- ============ 列选择（F-8）============ -->
+    <!-- 已选列以 chips 常驻显示（点击即取消）；「+ 添加指标」打开分组下拉。
+         chips 与下拉共用同一份 selectedColumns —— 单一事实源，不会出现
+         「下拉里勾了但 chips 没变」的双重真相。 -->
     <div v-if="chipColumns.length" class="mp-columns">
-      <span class="mp-columns__label">指标列</span>
+      <span class="mp-columns__label">指标</span>
       <button
         v-for="column in chipColumns"
         :key="column"
@@ -67,20 +84,56 @@
           'is-missing': !availableColumns.includes(column)
         }"
         :aria-pressed="selectedColumns.includes(column)"
-        :title="
-          availableColumns.includes(column)
-            ? '切换此列'
-            : '该档位无此指标（列不在本响应的 available_metrics 内）'
-        "
+        :title="chipTitle(column)"
         @click="toggleColumn(column)"
       >
-        {{ column }}
+        {{ metricLabel(column) }}
+        <span v-if="!availableColumns.includes(column)" class="mp-chip__flag">本档位无</span>
       </button>
+
+      <ElDropdown trigger="click" :hide-on-click="false">
+        <button type="button" class="mp-chip mp-chip--action">+ 添加指标</button>
+        <template #dropdown>
+          <ElDropdownMenu class="mp-colmenu">
+            <div v-for="bucket in groupedColumns" :key="bucket.group" class="mp-colmenu__group">
+              <p class="mp-colmenu__group-name">{{ bucket.group }}</p>
+              <ElDropdownItem
+                v-for="column in bucket.columns"
+                :key="column"
+                :disabled="!availableColumns.includes(column)"
+                @click="toggleColumn(column)"
+              >
+                <span class="mp-colmenu__item">
+                  <ArtSvgIcon
+                    :icon="
+                      selectedColumns.includes(column)
+                        ? 'ri:checkbox-line'
+                        : 'ri:checkbox-blank-line'
+                    "
+                  />
+                  <span>{{ metricLabel(column) }}</span>
+                  <span v-if="metricUnit(column)" class="mp-colmenu__unit">
+                    ({{ metricUnit(column) }})
+                  </span>
+                  <span v-if="!availableColumns.includes(column)" class="mp-colmenu__na">
+                    本档位无
+                  </span>
+                </span>
+              </ElDropdownItem>
+            </div>
+          </ElDropdownMenu>
+        </template>
+      </ElDropdown>
+
       <button type="button" class="mp-chip mp-chip--action" @click="selectAllColumns()">
-        全量（{{ availableColumns.length }} 列）
+        全量（{{ availableColumns.length }}）
       </button>
       <button type="button" class="mp-chip mp-chip--action" @click="selectDefaultColumns()">
-        常用列
+        常用
+      </button>
+      <!-- F-18 导出：把当前已选列 + 桶时间导出成 CSV（纯前端） -->
+      <button v-if="rows.length" type="button" class="mp-chip mp-chip--action" @click="exportCsv()">
+        导出 CSV
       </button>
     </div>
 
@@ -88,7 +141,7 @@
     <div v-if="built.unavailableColumns.length" class="mp-note mp-note--tier">
       <ArtSvgIcon icon="ri:information-line" />
       <span>
-        该档位无此指标：<b>{{ built.unavailableColumns.join('、') }}</b
+        该档位无此指标：<b>{{ unavailableLabels }}</b
         >——这些列不在本响应 available_metrics 内（该档位根本不产出该列），与「未采集」不是一回事。
       </span>
     </div>
@@ -117,7 +170,7 @@
         <span>请至少选择一个指标列</span>
       </div>
     </div>
-  </ElCard>
+  </div>
 </template>
 
 <script lang="ts">
@@ -128,24 +181,32 @@
     BUCKET_TS_COLUMN,
     DEFAULT_RANGE_SECONDS,
     DRILL_MAX_RANGE_SECONDS,
+    MAX_BUCKETS,
     METRICS_ALL,
     PREFERRED_COLUMNS,
     RANGE_MAX_SECONDS,
     RANGE_MIN_SECONDS,
     RESOURCE_KINDS,
     buildSeries,
+    cellOf,
     defaultColumns,
+    expectedBucketCount,
     formatAxisTick,
     formatBucketTime,
     formatDurationText,
     formatMetricValue,
     formatResolution,
+    isSparseData,
     kindLabelOf,
     rangeOptions,
     resourceRows,
     trendRows
   } from '../utils/metrics'
   import type { RangeChoice, RangeOption, SeriesBuild, SeriesFrame } from '../utils/metrics'
+
+  // 列名展示元数据（F-8）：中文名 / 单位 / 分组。
+  // 必须在这里以普通 import 引入（不能 `export … from` 中转）—— 理由见本块顶部注释。
+  import { groupMetricColumns, metricLabel, metricTipLine, metricUnit } from '../utils/column-meta'
 
   // 既有 import 方（resource-drill.vue 与单测）照旧走组件路径，故一并再导出。
   export {
@@ -159,12 +220,17 @@
     RESOURCE_KINDS,
     buildSeries,
     defaultColumns,
+    expectedBucketCount,
     formatAxisTick,
     formatBucketTime,
     formatDurationText,
     formatMetricValue,
     formatResolution,
+    groupMetricColumns,
+    isSparseData,
     kindLabelOf,
+    metricLabel,
+    metricUnit,
     rangeOptions,
     resourceRows,
     trendRows
@@ -173,7 +239,7 @@
 </script>
 
 <script setup lang="ts">
-  import { computed, nextTick, onMounted, ref, watch } from 'vue'
+  import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
   import type { EChartsOption } from '@/plugins/echarts'
   import type { SetOptionOpts } from 'echarts/core'
   import { useChart } from '@/hooks/core/useChart'
@@ -188,6 +254,31 @@
     kind?: string
     /** 资源名（挂载点/设备名/网卡名/传感器名）。 */
     name?: string
+    /**
+     * 后端下发的离线判定阈值（秒）。
+     *
+     * 面板本身**不用**它做判定（趋势的稀疏/空洞由 buckets 直接反映），
+     * 仅在 tooltip 里解释「多久没上报算离线」时引用，保持与详情页同口径。
+     */
+    offlineThresholdSec?: number
+  }>()
+
+  const emit = defineEmits<{
+    /**
+     * 最新采样点（F-7）。
+     *
+     * 详情页用它把「9.9/16 GB」这类绝对量回填到水位卡 —— 这些值本来就在
+     * 趋势桶里（mem_used_mb / mem_total_mb / disk_used_gb / disk_total_gb），
+     * 复用同一个响应的**最后一个非空桶**即可，不需要任何额外接口。
+     */
+    latest: [
+      payload: {
+        memUsedMb?: number | null
+        memTotalMb?: number | null
+        diskUsedGb?: number | null
+        diskTotalGb?: number | null
+      }
+    ]
   }>()
 
   /** 有 kind + name = 资源下钻（同一个端点两种语义）。 */
@@ -226,6 +317,48 @@
     return out
   })
 
+  /**
+   * 「该档位无此指标」里的中文列名列表。
+   *
+   * 保留列名在括号里（`内存使用率(mem_used_percent)`）是刻意的：这条提示的
+   * 读者通常是要去查后端列清单或对日志的开发者，只给中文会让他找不到对应
+   * 的字段名；只给英文又会让纯使用者看不懂。
+   */
+  const unavailableLabels = computed(() =>
+    built.value.unavailableColumns
+      .map((c) => (metricLabel(c) === c ? c : `${metricLabel(c)}(${c})`))
+      .join('、')
+  )
+
+  /** 分组后的可选列（F-8）：仅对「可用列」分组，未登记列会在 chips 里单独出现。 */
+  const groupedColumns = computed(() => groupMetricColumns(availableColumns.value))
+
+  /** 头部摘要（人话，F-3）：粒度 · 数据源 · 采样点数。 */
+  const metaSummary = computed(() => {
+    const m = meta.value
+    if (!m) return ''
+    const src = m.source === 'redis' ? '热层' : '历史表'
+    return `粒度 ${formatResolution(m.resolutionSeconds)} · 数据源 ${src} · ${rows.value.length} 个采样点`
+  })
+
+  /** 数据是否稀疏（F-3）：让「断线图」有解释，而不是让人以为系统坏了。 */
+  const isSparse = computed(() => {
+    const m = meta.value
+    if (!m) return false
+    return isSparseData(rows.value.length, m.rangeSeconds, m.resolutionSeconds)
+  })
+
+  /** chip 的 tooltip：区分「未采集」与「该档位无此列」。 */
+  function chipTitle(column: string): string {
+    const name = metricLabel(column)
+    const unit = metricUnit(column)
+    const head = unit ? `${name}（${unit}）` : name
+    if (!availableColumns.value.includes(column)) {
+      return `${head}：该档位不产出此指标（列不在本响应的 available_metrics 内）`
+    }
+    return `${head}：点击取消显示`
+  }
+
   /** 核心：由响应驱动构造 series，并区分「该档位无此指标」。 */
   const built = computed(() =>
     buildSeries(rows.value, selectedColumns.value, meta.value?.availableMetrics ?? [])
@@ -261,7 +394,8 @@
           const at = Array.isArray(firstValue) ? firstValue[0] : null
           const lines = list.map((p) => {
             const v = Array.isArray(p.value) ? p.value[1] : null
-            return `${p.seriesName ?? ''}: ${formatMetricValue(v)}`
+            // seriesName 是列名（系列标识）；展示走中文名 + 单位。
+            return metricTipLine(p.seriesName ?? '', formatMetricValue(v))
           })
           const head = typeof at === 'number' ? formatBucketTime(at) : ''
           return [head, ...lines].filter((s) => s !== '').join('<br/>')
@@ -288,6 +422,48 @@
         data: frame.points
       }))
     }
+  }
+
+  /**
+   * 导出当前已选列为 CSV（F-18）。
+   *
+   * 只用**已经拿到的** rows，不重新请求：导出的必须与屏幕上是同一份数据，
+   * 否则用户会拿到一份与所见不一致的文件（而且没有任何提示）。
+   *
+   * 列头用中文名 + 原始列名（`CPU 使用率(cpu_used_percent)`）：中文便于人读，
+   * 原始名便于再导入/对日志。时间列导出为 `yyyy-MM-dd HH:mm:ss`。
+   */
+  function exportCsv() {
+    if (!rows.value.length) return
+    const cols = selectedColumns.value.filter((c) => c !== BUCKET_TS_COLUMN)
+    if (!cols.length) return
+    const header = ['时间', ...cols.map((c) => `${metricLabel(c)}(${c})`)]
+    const lines = [header.join(',')]
+    for (const row of rows.value) {
+      const t = row[BUCKET_TS_COLUMN]
+      const cells = [
+        csvCell(typeof t === 'number' ? formatBucketTime(t) : ''),
+        ...cols.map((c) => {
+          const v = cellOf(row, c)
+          return csvCell(v === null || v === undefined ? '' : String(v))
+        })
+      ]
+      lines.push(cells.join(','))
+    }
+    // BOM：Excel 打开 UTF-8 CSV 不乱码（缺了它中文列头会变乱码）。
+    const blob = new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '')
+    a.href = url
+    a.download = `device-metrics-${props.kind || 'machine'}-${props.name || ''}-${stamp}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  /** CSV 单元格转义：含逗号/引号/换行时用双引号包裹（RFC 4180）。 */
+  function csvCell(v: string): string {
+    return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v
   }
 
   function renderChart() {
@@ -324,6 +500,39 @@
     // 首次加载给「常用列」；之后切换档位**保留**用户的 pin —— 这样某档位
     // 不再产某列时，它会出现在「该档位无此指标」里，而不是静默消失。
     if (!selectedColumns.value.length) selectedColumns.value = defaultColumns(available)
+    emitLatestSample()
+  }
+
+  /**
+   * 把最新（最后一个）桶里的绝对量回传给父组件（F-7）。
+   *
+   * 只取**最后一个桶**：桶是稀疏的，最后一个桶就是最新的采样点。
+   * 各列**分别**向前回溯找最近一个有值的桶（`findLastFilled`）—— 因为
+   * mem_used_mb 与 mem_total_mb 未必出现在同一个桶里（缺列不写 key），
+   * 只看最后一个桶会让本可显示的值变成空。
+   */
+  function emitLatestSample() {
+    // 内存总量**不能**取 mem_total_mb：该列不在整机宽表的产出清单里
+    // （见 available_metrics 实测：有 mem_used_mb / mem_available_mb，
+    //  但没有 mem_total_mb）。总量由 已用 + 可用 推出 —— 这两个都在清单内，
+    // 且语义上 available 是「还能给新进程用的量」，两者相加即总容量。
+    const memUsed = findLastFilled('mem_used_mb')
+    const memAvail = findLastFilled('mem_available_mb')
+    emit('latest', {
+      memUsedMb: memUsed,
+      memTotalMb: memUsed !== null && memAvail !== null ? memUsed + memAvail : null,
+      diskUsedGb: findLastFilled('disk_used_gb'),
+      diskTotalGb: findLastFilled('disk_total_gb')
+    })
+  }
+
+  /** 从最新桶往前找该列最近一次有值的样本。 */
+  function findLastFilled(column: string): number | null {
+    for (let i = rows.value.length - 1; i >= 0; i -= 1) {
+      const v = cellOf(rows.value[i], column)
+      if (v !== null) return v
+    }
+    return null
   }
 
   async function load() {
@@ -388,14 +597,40 @@
     nextTick(renderChart)
   })
 
+  /**
+   * 面板滚入视口时把当前 option 应用于 canvas。
+   *
+   * 与 overview-chart-card.vue 同一个原因：useChart 对首屏之外的容器懒初始化，
+   * 只 echarts.init() 并派发 chartVisible，**应用 option 是消费方责任**
+   * （useChartComponent 就是靠注册该事件完成的）。详情页的图表区在首屏之下，
+   * 漏听会让它变成「有标题、无 canvas」的空白卡片。
+   */
+  const onChartVisible = () => renderChart()
+
   onMounted(() => {
     load()
+    chartRef.value?.addEventListener('chartVisible', onChartVisible)
+  })
+
+  onBeforeUnmount(() => {
+    chartRef.value?.removeEventListener('chartVisible', onChartVisible)
   })
 </script>
 
 <style lang="scss" scoped>
+  /* 与设备模块其余页面共用同一套令牌 */
+  @use '../views/device-tokens' as t;
+
   .mp-panel {
     --mp-gap: 12px;
+    /* 自带卡片外观：本组件可被独立复用，不依赖父级 .dd-surface 规则
+       （scoped 样式不会跨组件传递，父级类名只在父模板的 DOM 上生效）。 */
+    @include t.card;
+    @include t.rise;
+  }
+
+  .dark .mp-panel {
+    @include t.card-dark;
   }
 
   .mp-head {
@@ -408,7 +643,7 @@
       display: flex;
       align-items: center;
       gap: 6px;
-      font-size: 15px;
+      font-size: 14px;
       font-weight: 600;
       color: var(--el-text-color-primary);
     }
@@ -416,8 +651,17 @@
     &__meta {
       display: flex;
       flex-wrap: wrap;
+      align-items: center;
       gap: 6px;
       margin-left: auto;
+    }
+
+    /* 数据口径摘要 → 胶囊标签（对齐服务监控 .sv-summary-pill）。
+       此前该 span 没有任何样式规则，直接以正文 16px 呈现，
+       在 14px 的标题旁边显得比标题还重，视觉层级是反的。 */
+    &__summary {
+      @include t.pill;
+      font-variant-numeric: tabular-nums;
     }
   }
 

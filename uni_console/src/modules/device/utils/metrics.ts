@@ -112,12 +112,16 @@ export interface SeriesBuild {
 /**
  * 读一个桶的值列。
  *
+ * F-18（CSV 导出）后**由 panel 直接调用**，故公开。公开而不是在 panel 里
+ * 复制一份：`in` 判断是这里唯一的微妙点（见下），两份实现迟早会漂移，
+ * 而漂移的后果是「导出文件里的空值语义与图表不一致」，极难被发现。
+ *
  * **存在性用 `in` 判断，不用 `!= null`**：后端保证「值为 nil 的列不出现」
  * （`DeviceResourcePoint.Values` 的 omitempty；宽表同理），故「键不存在」
  * 与「值为 nil」在语义上都是「该桶无该列样本」，但用 `in` 判断才不会把
  * 「缺」与「nil」混同（Task 1 报告点名的坑）。
  */
-function cellOf(row: Record<string, unknown>, column: string): number | null {
+export function cellOf(row: Record<string, unknown>, column: string): number | null {
   if (!(column in row)) return null
   const value = row[column]
   return typeof value === 'number' && Number.isFinite(value) ? value : null
@@ -272,4 +276,50 @@ export function formatSeenAt(v?: number | null): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(
     d.getMinutes()
   )}`
+}
+
+// ─────────────────────────────────────────────────────────────
+// 数据稀疏判定（F-3）
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * 采样点数的「应有桶数」上限，与后端 `service.MaxBuckets` 同值。
+ *
+ * 用于判断数据是否稀疏：实际桶数远小于 range/resolution 时说明设备/Agent
+ * 上报有大量空洞。它是**展示判据**而不是分页参数，故在前端复制一份常量即可
+ * —— 真正的桶数上限由后端强制，前端这个值只影响「数据稀疏」标记是否出现，
+ * 偏大偏小都不会让用户看到错误的数据。
+ */
+export const MAX_BUCKETS = 4000
+
+/**
+ * 期望桶数 = ceil(range / resolution)。
+ *
+ * 注意这是**理论满桶数**，不是 MaxBuckets 钳制后的值：我们想知道的是
+ * 「这个窗口本该有多少个采样点」，再与后端实际返回的桶数比较。
+ */
+export function expectedBucketCount(rangeSeconds: number, resolutionSeconds: number): number {
+  if (!Number.isFinite(rangeSeconds) || !Number.isFinite(resolutionSeconds)) return 0
+  if (rangeSeconds <= 0 || resolutionSeconds <= 0) return 0
+  return Math.ceil(rangeSeconds / resolutionSeconds)
+}
+
+/**
+ * 判定数据是否稀疏。
+ *
+ * 阈值取「填充率 < 20%」：正常设备在热层档位应当接近满桶；低于两成说明
+ * 设备长时间没有上报（离线、Agent 挂掉、或刚接入）。
+ *
+ * **容差刻意宽松**：桶边界对齐、窗口起止差几秒都会让桶数少一两个，
+ * 用严格相等做判定会把正常数据误标成稀疏，那比不标更糟。
+ */
+export function isSparseData(
+  bucketCount: number,
+  rangeSeconds: number,
+  resolutionSeconds: number
+): boolean {
+  const expected = expectedBucketCount(rangeSeconds, resolutionSeconds)
+  // 期望少于 10 个桶时不做判断：样本太少，比值没有统计意义。
+  if (expected < 10) return false
+  return bucketCount / expected < 0.2
 }

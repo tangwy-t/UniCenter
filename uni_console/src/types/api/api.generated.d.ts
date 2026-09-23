@@ -632,6 +632,8 @@ declare namespace Api {
       memTotalMb?: number
       bootTime?: number
       createdAt?: number
+      primaryIp?: string
+      offlineThresholdSec?: number
     }
 
     interface DeviceMetricPoint {
@@ -695,6 +697,56 @@ declare namespace Api {
 
     interface DeviceResourcesResp {
       list: Api.Device.DeviceResourceItem[]
+    }
+
+    interface DeviceOverviewResp {
+      range_seconds: number
+      resolution_seconds: number
+      source: string
+      available_metrics: string[]
+      axis: number[]
+      axis_step_seconds: number
+      downsampled: boolean
+      summary: Api.Device.DeviceOverviewSummary
+      devices: Api.Device.DeviceOverviewItem[]
+      truncated: boolean
+      max_devices: number
+      device_total: number
+    }
+
+    interface DeviceOverviewSummary {
+      total: number
+      online: number
+      offline: number
+      disabled: number
+      stale: number
+      offline_threshold_sec: number
+    }
+
+    interface DeviceOverviewItem {
+      id: string
+      hostname: string
+      platform?: string
+      os?: string
+      online: boolean
+      status: number
+      stale: boolean
+      lastSeenAt?: number | null
+      watermarkAt?: number | null
+      watermark?: Record<string, number>
+      series?: Api.Device.DeviceOverviewSeries[]
+      error?: string
+    }
+
+    interface DeviceOverviewSeries {
+      metric: string
+      values: (number | null)[]
+      last?: number | null
+      min?: number | null
+      max?: number | null
+      avg?: number | null
+      present: number
+      missing: number
     }
   }
 

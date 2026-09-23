@@ -44,6 +44,7 @@
   import { operationColumn } from '@/components/core/tables/operation-column'
   import ArtButtonTable from '@/components/core/forms/art-button-table/index.vue'
   import ArtButtonMore from '@/components/core/forms/art-button-more/index.vue'
+  import WatermarkBar from '../components/watermark-bar.vue'
   import { disableDevice, enableDevice, fetchDevices, removeDevice } from '../api'
 
   defineOptions({ name: 'DeviceList' })
@@ -130,12 +131,6 @@
     )}:${p(d.getSeconds())}`
   }
 
-  /** 水位百分比：后端缺值时不返回该字段（omitempty），一律显示「—」。 */
-  function fmtPercent(v?: number | null) {
-    if (v === undefined || v === null) return '—'
-    return `${v.toFixed(1)}%`
-  }
-
   function openDetail(row: Api.Device.DeviceListItem) {
     // 用路由 name 跳转，不拼路径：详情路由是插件的隐藏路由（isHide），
     // 后端菜单里没有它，拼路径会在菜单模式切换时悄悄失效。
@@ -188,46 +183,28 @@
 
   const { columns, columnChecks } = useTableColumns<Api.Device.DeviceListItem>(() => {
     const operationColumnConfig = operationColumn<Api.Device.DeviceListItem>({
+      // 列宽按「实际渲染的按钮位」计算（助手公式：max(80, count×44+16)）。
+      // 这里 = 1 个常驻图标按钮（详情）+ 1 个「更多」下拉按钮 = 2 位。
+      // 注意：下拉**内部**的条目不再各占一位 —— 它们共享「更多」那一个按钮位。
       count:
-        // 详情
         (hasAuth(PermDeviceQuery) ? 1 : 0) +
-        // 启用 / 停用（按当前状态只会出现其中一个，但对一台设备而言
-        // 「启停」最多贡献一个按钮位）
-        (hasAuth(PermDeviceEnable) || hasAuth(PermDeviceDisable) ? 1 : 0) +
-        (hasAuth(PermDeviceDelete) ? 1 : 0),
+        (hasAuth(PermDeviceEnable) || hasAuth(PermDeviceDisable) || hasAuth(PermDeviceDelete)
+          ? 1
+          : 0),
       formatter: (row) => {
         const enabled = row.status === 1
-        const busy = togglingId.value === row.id
         return h('div', { class: 'flex items-center' }, [
+          // 主操作放外面
           h(ArtButtonTable, {
             type: 'view',
             title: '详情',
             auth: PermDeviceQuery,
             onClick: () => openDetail(row)
           }),
-          h(ArtButtonTable, {
-            icon: enabled ? 'ri:stop-circle-line' : 'ri:play-circle-line',
-            iconClass: enabled ? 'bg-warning/12 text-warning' : 'bg-success/12 text-success',
-            title: enabled ? '停用' : '启用',
-            auth: enabled ? PermDeviceDisable : PermDeviceEnable,
-            disabled: busy,
-            onClick: () => onToggleStatus(row)
-          }),
-          h(ArtButtonTable, {
-            type: 'delete',
-            title: '删除',
-            auth: PermDeviceDelete,
-            disabled: busy,
-            onClick: () => onRemove(row)
-          }),
+          // 次要操作收进「更多」——与外部按钮**不重复**（此前详情/启停/删除
+          // 既在外面又在下拉里，内容重复且宽度不够，导致「更多」被截一半）
           h(ArtButtonMore, {
             list: [
-              {
-                key: 'detail',
-                label: '详情',
-                icon: 'ri:eye-line',
-                auth: PermDeviceQuery
-              },
               enabled
                 ? {
                     key: 'toggle',
@@ -287,26 +264,25 @@
       },
       // 水位三列来自列表接口拼的 Redis latest：缺值时**整个字段不出现**
       // （omitempty），一律显示「—」，不得把缺值当成 0。
+      // 渲染成「条 + 数值」：多列并排时**条**负责一眼比高低，**数值**负责精确值，
+      // 缺值则由组件渲染「—」且不画空条（空条会被误读成 0%）。见 watermark-bar.vue。
       {
         prop: 'cpuUsedPercent',
         label: 'CPU 使用率',
         width: 120,
-        align: 'right',
-        formatter: (row) => fmtPercent(row.cpuUsedPercent)
+        formatter: (row) => h(WatermarkBar, { value: row.cpuUsedPercent })
       },
       {
         prop: 'memUsedPercent',
         label: '内存使用率',
         width: 120,
-        align: 'right',
-        formatter: (row) => fmtPercent(row.memUsedPercent)
+        formatter: (row) => h(WatermarkBar, { value: row.memUsedPercent })
       },
       {
         prop: 'diskUsedPercent',
         label: '磁盘使用率',
         width: 120,
-        align: 'right',
-        formatter: (row) => fmtPercent(row.diskUsedPercent)
+        formatter: (row) => h(WatermarkBar, { value: row.diskUsedPercent })
       },
       {
         prop: 'watermarkAt',

@@ -1,0 +1,156 @@
+/**
+ * 设备模块 · 两视图(总览 / 详情)的共享设计令牌
+ *
+ * ## 为什么需要这个文件
+ *
+ * 设备模块的两个视图原本各自维护了一份 scoped 样式,并且**自成一套视觉语言** ——
+ * 圆角 4px / 无阴影 / 卡片仅有 1px 描边,而同一产品的「服务监控」四个视图
+ * (server / cache / sql / pprof)是圆角 14px / 低扩散阴影 / 统一 1rem 内边距。
+ * 同一个后台里并排访问两个模块,能明显看出是两个人做的。
+ *
+ * 本文件把「服务监控」的视觉语言抽成设备模块可复用的令牌,**数值全部取自
+ * monitor-tokens.scss**,不另立一套:
+ *
+ *     圆角 14px        内边距 1rem        阴影 0 1px 3px rgba(16,24,40,.05)
+ *     KPI 数值 20px/650  KPI 标签 13px     辅助说明 11px
+ *     呼吸圆点 2s        入场动画 0.3s 自下淡入
+ *
+ * ## 与 monitor-tokens.scss 的关系(为什么不直接 @use 它)
+ *
+ * monitor-tokens 位于 `modules/system-monitor/views/` 目录内。跨模块
+ * `@use '../../system-monitor/views/monitor-tokens'` 会把两个业务模块编译期
+ * 绑在一起 —— 此后删改监控目录会连带编译失败,而它们本无业务依赖。
+ * 故这里**复制令牌的数值并注明出处**,而不是建立跨模块 import。
+ *
+ * 这是有意识的取舍:代价是数值有两处,好处是模块可独立移动。
+ * 若团队更在意单一事实源,可把 monitor-tokens 提升到 `@styles/` 层再双向 @use ——
+ * 那是一次跨模块重构,超出本次「视觉对齐」的范围,故未擅自改动服务监控侧。
+ *
+ * ## 边界(刻意不纳入的部分)
+ *
+ * 只收敛**跨视图逐字相同**的容器外观。设备详情页的 sticky 页头、
+ * 总览页的图表栅格、资源下钻的左右分栏等属于单个视图的领域细节,留在原文件。
+ */
+
+/// 基础卡片:与服务监控四视图逐字相同的容器外观
+@mixin card {
+  padding: 1rem;
+  border-radius: 14px;
+  border: 1px solid var(--default-border);
+  background: var(--default-box-color);
+  box-shadow: 0 1px 3px rgba(16, 24, 40, 0.05);
+}
+
+/// 卡片在暗色主题下的阴影(与 card 配套使用)
+@mixin card-dark {
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+/// KPI 磁贴:图标方块
+@mixin kpi-icon {
+  width: 40px;
+  height: 40px;
+  flex: none;
+  border-radius: 12px;
+}
+
+/// KPI 磁贴:主数值
+@mixin kpi-value {
+  font-size: 20px;
+  font-weight: 650;
+  line-height: 1.2;
+  color: var(--el-text-color-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+/// KPI 磁贴:标签
+@mixin kpi-label {
+  margin-top: 2px;
+  font-size: 13px;
+  color: var(--el-text-color-regular);
+}
+
+/// KPI 磁贴:辅助说明
+@mixin kpi-sub {
+  margin-top: 1px;
+  font-size: 11px;
+  color: var(--el-text-color-secondary);
+}
+
+/// 实时指示圆点:呼吸动画(与服务监控同一个动画名与关键帧)
+@mixin live-dot {
+  animation: monitor-pulse 2s ease-in-out infinite;
+}
+
+/// 入场动画:自下淡入
+@mixin rise($duration: 0.3s) {
+  animation: monitor-rise $duration ease both;
+}
+
+/// 呼吸圆点的关键帧
+///
+/// 关键帧名沿用 `monitor-pulse` / `monitor-rise`,**与 monitor-tokens 重名是刻意的**:
+/// 关键帧在全局作用域注册,若这里改名会得到两份内容相同的关键帧;
+/// 同名则后加载的一份覆盖前一份,而两者逐字相同,覆盖无副作用。
+@mixin pulse-keyframes {
+  @keyframes monitor-pulse {
+    0%,
+    100% {
+      opacity: 1;
+      box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.45);
+    }
+    50% {
+      opacity: 0.55;
+      box-shadow: 0 0 0 3px rgba(34, 197, 94, 0);
+    }
+  }
+}
+
+/// 入场动画的关键帧
+@mixin rise-keyframes {
+  @keyframes monitor-rise {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+}
+
+/// 无障碍:尊重"减少动态效果"偏好
+@mixin reduced-motion($selectors...) {
+  @media (prefers-reduced-motion: reduce) {
+    #{$selectors} {
+      animation: none;
+    }
+  }
+}
+
+/// 页头主图标方块(与服务监控 .sv-hero__icon 同款:渐变底 + 同色投影)
+@mixin hero-icon {
+  width: 44px;
+  height: 44px;
+  flex: none;
+  border-radius: 14px;
+  font-size: 22px;
+  color: #fff;
+  background: linear-gradient(135deg, #3b82f6 0%, #7c3aed 100%);
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.35);
+}
+
+/// 胶囊标签(与服务监控 .sv-hero-chip / .sv-summary-pill 同款)
+@mixin pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--default-border);
+  background: var(--art-gray-100);
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+}

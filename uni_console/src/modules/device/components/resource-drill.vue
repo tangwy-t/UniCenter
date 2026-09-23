@@ -1,65 +1,97 @@
 <template>
-  <ElCard class="rd-card" shadow="never">
-    <div class="rd-head">
-      <div class="rd-head__title">
-        <ArtSvgIcon icon="ri:scan-2-line" />
-        <span>资源下钻</span>
+  <!--
+    资源下钻（F-9/F-10 重设计）。
+
+    与旧版的差别（都源于实际使用中的问题）：
+     1. **不再自带 ElCard 外壳**：它现在是详情页 Tab 的内容，旧版会形成
+        「卡片套卡片」的双层边框，边框本身没有任何信息量。
+     2. **左栏常驻资源清单**：旧版是「下拉选 + 右侧大字占位」，用户必须点开
+        才知道有哪些资源；改为左栏一览，种类与资源数一眼可见。
+     3. **种类带计数**：`磁盘分区 (3)`。没有计数时，用户无法判断「这个设备
+        到底有没有传感器」，只能逐个种类点一遍。
+     4. **kind 只请求一次**：资源清单接口支持 `kind` 为空（返回全部种类），
+        故一次请求即可算出所有分类的计数 —— 不必为每个种类各打一次接口。
+  -->
+  <div class="rd">
+    <!-- ══════════ 左栏：资源清单 ══════════ -->
+    <aside class="rd-side">
+      <div class="rd-side__head">
+        <span class="rd-side__title">资源清单</span>
+        <ElTooltip content="刷新资源清单" placement="top">
+          <button
+            type="button"
+            class="rd-side__refresh"
+            :disabled="loading"
+            @click="loadResources()"
+          >
+            <ArtSvgIcon
+              :icon="loading ? 'ri:loader-4-line' : 'ri:refresh-line'"
+              :class="{ 'is-spin': loading }"
+            />
+          </button>
+        </ElTooltip>
       </div>
-      <div class="rd-head__meta" v-if="selected">
+
+      <!-- 资源清单加载失败：只影响左栏，右侧面板不受牵连（F-6 错误隔离） -->
+      <div v-if="errorText" class="rd-side__error">
+        <ArtSvgIcon icon="ri:error-warning-line" />
+        <span>{{ errorText }}</span>
+        <ElButton size="small" type="primary" plain @click="loadResources()">重试</ElButton>
+      </div>
+
+      <ElSkeleton v-else-if="loading && !allItems.length" :rows="6" animated />
+
+      <ElEmpty v-else-if="!allItems.length" description="该设备暂无资源数据" :image-size="60" />
+
+      <template v-else>
+        <div v-for="group in kindGroups" :key="group.kind" class="rd-side__group">
+          <!-- 种类标题也可点击选「第一个资源」，省一次点击 -->
+          <button
+            type="button"
+            class="rd-side__group-head"
+            :class="{ 'is-collapsed': collapsed.includes(group.kind) }"
+            @click="toggleCollapse(group.kind)"
+          >
+            <ArtSvgIcon
+              :icon="
+                collapsed.includes(group.kind) ? 'ri:arrow-right-s-line' : 'ri:arrow-down-s-line'
+              "
+            />
+            <span>{{ group.label }}</span>
+            <span class="rd-side__count">{{ group.items.length }}</span>
+          </button>
+
+          <ul v-show="!collapsed.includes(group.kind)" class="rd-side__list">
+            <li v-for="item in group.items" :key="item.name">
+              <button
+                type="button"
+                class="rd-side__item"
+                :class="{ 'is-active': isSelected(item) }"
+                @click="select(item)"
+              >
+                <span class="rd-side__name" :title="item.name">{{ item.name }}</span>
+                <!-- 已消失的资源必须可见地标出：它们仍可查历史，但别当成在采集 -->
+                <span v-if="item.stale" class="rd-side__stale" title="该资源近期未再出现"
+                  >已消失</span
+                >
+              </button>
+            </li>
+          </ul>
+        </div>
+      </template>
+    </aside>
+
+    <!-- ══════════ 右侧：下钻趋势 ══════════ -->
+    <section class="rd-main">
+      <div v-if="selected" class="rd-main__head">
         <ElTag size="small" effect="plain">{{ kindLabelOf(selected.kind) }}</ElTag>
-        <ElTag size="small" effect="plain" type="info">{{ selected.name }}</ElTag>
+        <span class="rd-main__name">{{ selected.name }}</span>
+        <span class="rd-main__seen"> 最近出现 {{ formatSeenAt(selected.lastSeenAt) }} </span>
+        <span v-if="isStaleResource(selected)" class="rd-main__stale-hint">
+          已超过标记阈值，历史数据仍可查看，但不应被当作仍在采集。
+        </span>
       </div>
-    </div>
 
-    <!-- ============ 资源种类 + 资源名：kind/name 成对传给后端 ============ -->
-    <div class="rd-picker">
-      <ElSelect v-model="kind" size="small" class="rd-picker__kind" placeholder="资源类型">
-        <ElOption v-for="k in RESOURCE_KINDS" :key="k.value" :label="k.label" :value="k.value" />
-      </ElSelect>
-
-      <ElSelect
-        v-model="name"
-        size="small"
-        class="rd-picker__name"
-        filterable
-        clearable
-        :loading="loading"
-        :placeholder="loading ? '正在加载资源…' : '请选择资源'"
-        @visible-change="onDropdownToggle"
-      >
-        <ElOption
-          v-for="item in items"
-          :key="`${item.kind}|${item.name}`"
-          :label="item.name"
-          :value="item.name"
-        >
-          <!-- stale=true 的资源必须**可见地**标出「已消失」：
-               后端专为「已卸载的挂载点不再永久堆在下拉里」而设。 -->
-          <span class="rd-option">
-            <span class="rd-option__name">{{ item.name }}</span>
-            <ElTag v-if="item.stale" size="small" type="warning" effect="light">已消失</ElTag>
-            <span class="rd-option__time">{{ formatSeenAt(item.lastSeenAt) }}</span>
-          </span>
-        </ElOption>
-      </ElSelect>
-
-      <span v-if="selected && isStaleResource(selected)" class="rd-stale-hint">
-        该资源最近一次出现于 {{ formatSeenAt(selected.lastSeenAt) }}，已超过标记阈值 ——
-        下拉中标注「已消失」的资源仍可查看其历史，但不应被当作仍在采集。
-      </span>
-    </div>
-
-    <div v-if="errorText" class="rd-error">
-      <ArtSvgIcon icon="ri:error-warning-line" />
-      <span>{{ errorText }}</span>
-      <ElButton size="small" type="primary" plain @click="loadResources()">重试</ElButton>
-    </div>
-    <div v-else-if="!loading && !items.length" class="rd-empty">
-      该资源类型下暂无可用资源（后端枚举窗口内的资源才会出现）。
-    </div>
-
-    <!-- ============ 复用**同一个** metrics-panel（传 kind + name） ============ -->
-    <div class="rd-panel">
       <DeviceMetricsPanel
         v-if="selected"
         :key="`${props.deviceId}|${selected.kind}|${selected.name}`"
@@ -67,22 +99,24 @@
         :kind="selected.kind"
         :name="selected.name"
       />
-      <div v-if="!selected" class="rd-placeholder">
-        选择左侧资源后，这里会显示该资源的下钻趋势。
+
+      <div v-else class="rd-placeholder">
+        <ArtSvgIcon icon="ri:cursor-line" />
+        <p class="rd-placeholder__title">从左侧选择一项资源</p>
         <p class="rd-placeholder__hint">
-          下钻只保留 30 天（后端子表只有 5min 档）：面板里 90 天 / 180 天档位已被禁用， 避免点了再吃
-          400。
+          下钻数据只保留 30 天（后端子表仅有 5min 档），因此 90 天 / 180 天档位在下钻中不可选 ——
+          提前禁用比点了再吃 400 更好。
         </p>
       </div>
-    </div>
-  </ElCard>
+    </section>
+  </div>
 </template>
 
 <script lang="ts">
-  // Task 5：本文件的纯逻辑（isStaleResource / formatSeenAt）连同共用常量与
-  // kindLabelOf 一起搬到了 `../utils/metrics`。这里**必须**用普通 import（而非
-  // `export … from` 中转）：经 SFC 实测，普通块的 import 才会注册为模板可见
-  // 绑定，纯再导出不会 → 模板绑定会编译报错。
+  // 本文件的纯逻辑（isStaleResource / formatSeenAt / kindLabelOf）连同共用常量
+  // 都在 `../utils/metrics`。这里**必须**用普通 import（而非 `export … from`
+  // 中转）：经 SFC 实测，普通块的 import 才会注册为模板可见绑定，纯再导出不会
+  // → 模板绑定会编译报错。
   import { RESOURCE_KINDS, formatSeenAt, isStaleResource, kindLabelOf } from '../utils/metrics'
 
   // 既有 import 方（单测）照旧走组件路径，故一并再导出。
@@ -90,7 +124,7 @@
 </script>
 
 <script setup lang="ts">
-  import { computed, onMounted, ref, watch } from 'vue'
+  import { computed, ref, watch } from 'vue'
   import { fetchDeviceResources } from '../api'
   import DeviceMetricsPanel from './metrics-panel.vue'
 
@@ -101,152 +135,312 @@
     deviceId: string
   }>()
 
-  const kind = ref<string>(RESOURCE_KINDS[0].value)
-  const name = ref<string>('')
-  const items = ref<Api.Device.DeviceResourceItem[]>([])
+  /**
+   * kind 留空的**全部**资源（一次请求覆盖四个种类）。
+   *
+   * 为什么一次拿全量而不是按种类分别请求：左栏要显示每个种类的**计数**
+   * （`磁盘分区 (3)`）。若按种类请求，进页面就得打 4 个接口，且用户每展开
+   * 一个种类又要再打 —— 而资源清单本来就不大（一个设备几十行）。
+   * 后端 `kind=""` 时不加 kind 过滤（见 repository.ListByDevice），是官方支持的用法。
+   */
+  const allItems = ref<Api.Device.DeviceResourceItem[]>([])
   const loading = ref(false)
   const errorText = ref('')
 
-  /** 当前选中项（含 stale / lastSeenAt），供下钻面板与「已消失」提示使用。 */
-  const selected = computed(() => items.value.find((i) => i.name === name.value) ?? null)
+  /** 当前选中项（含 kind/name/stale/lastSeenAt）。 */
+  const selectedKey = ref<string>('')
+
+  const collapsed = ref<string[]>([])
+
+  /** key 用 `kind|name`：不同种类的同名资源（如两个 sda）必须区分。 */
+  function keyOf(item: { kind: string; name: string }): string {
+    return `${item.kind}|${item.name}`
+  }
+
+  const selected = computed(
+    () => allItems.value.find((i) => keyOf(i) === selectedKey.value) ?? null
+  )
 
   /**
-   * 资源枚举。`kind` 变化或手动刷新时重调 —— 下拉的数据源**只有**这个接口，
-   * 前端不缓存也不推断资源清单。
+   * 按 RESOURCE_KINDS 的**固定顺序**分组（与后端种类定义一致）。
+   *
+   * 只返回**非空**种类：显示「传感器 (0)」这种空分组只会让人以为加载失败了。
+   * 某个种类在本设备上确实没有资源时，它不该出现在清单里 —— 这与「列表为空」
+   * 是两种不同的信息。
+   */
+  const kindGroups = computed(() =>
+    RESOURCE_KINDS.map((k) => ({
+      kind: k.value,
+      label: k.label,
+      items: allItems.value.filter((i) => i.kind === k.value)
+    })).filter((g) => g.items.length > 0)
+  )
+
+  function isSelected(item: Api.Device.DeviceResourceItem): boolean {
+    return keyOf(item) === selectedKey.value
+  }
+
+  function select(item: Api.Device.DeviceResourceItem) {
+    selectedKey.value = keyOf(item)
+  }
+
+  function toggleCollapse(kind: string) {
+    const i = collapsed.value.indexOf(kind)
+    if (i >= 0) collapsed.value.splice(i, 1)
+    else collapsed.value.push(kind)
+  }
+
+  /**
+   * 拉取资源清单（不传 kind → 全部种类）。
    */
   async function loadResources() {
     if (!props.deviceId) return
     loading.value = true
     errorText.value = ''
     try {
-      const res = await fetchDeviceResources(props.deviceId, kind.value)
-      items.value = res.list ?? []
-      // 当前选中项在新清单里不存在（切 kind / 资源已不在枚举窗口内）→ 清空，
-      // 避免面板拿到一个后端已经没有名字的资源去查（只会得到空图）。
-      if (name.value && !items.value.some((i) => i.name === name.value)) name.value = ''
+      const res = await fetchDeviceResources(props.deviceId)
+      allItems.value = res.list ?? []
+      // 当前选中项在新清单里已不存在 → 清空，避免拿一个后端已经不知道的
+      // (kind,name) 去查趋势（只会得到空图，且用户不知道为什么）。
+      if (selectedKey.value && !allItems.value.some((i) => keyOf(i) === selectedKey.value)) {
+        selectedKey.value = ''
+      }
+      // 默认选中第一项：进页面就能看到一张图，而不是一个占位符。
+      // 只在**用户尚未选择**时才自动选，避免刷新把用户的选中的资源顶掉。
+      if (!selectedKey.value && allItems.value.length) {
+        selectedKey.value = keyOf(allItems.value[0])
+      }
     } catch (e) {
-      items.value = []
-      name.value = ''
+      allItems.value = []
+      selectedKey.value = ''
       errorText.value = e instanceof Error && e.message ? e.message : '加载资源列表失败'
     } finally {
       loading.value = false
     }
   }
 
-  /** 首次展开下拉时若是空清单则拉一次：不在挂载时就打后端，减少无谓请求。 */
-  function onDropdownToggle(visible: boolean) {
-    if (visible && !items.value.length && !loading.value) loadResources()
-  }
+  // deviceId 变化（同一路由复用组件时）必须重取，否则会拿旧设备的资源去查新设备。
+  watch(
+    () => props.deviceId,
+    () => {
+      allItems.value = []
+      selectedKey.value = ''
+      void loadResources()
+    }
+  )
 
-  watch(kind, () => {
-    name.value = ''
-    items.value = []
-    loadResources()
-  })
-
-  onMounted(() => {
-    // 挂载即加载一次：用户常是「先选资源、再看趋势」，空下拉会让人以为没有资源。
-    loadResources()
-  })
+  void loadResources()
 </script>
 
 <style lang="scss" scoped>
-  .rd-card {
-    --rd-gap: 12px;
+  .rd {
+    display: grid;
+    grid-template-columns: 220px minmax(0, 1fr);
+    gap: 16px;
+
+    /* 窄屏：左栏折到上方，避免把图表挤成一条缝 */
+    @media (max-width: 900px) {
+      grid-template-columns: minmax(0, 1fr);
+    }
   }
 
-  .rd-head {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    align-items: center;
+  .rd-side {
+    padding-right: 12px;
+    border-right: 1px solid var(--art-card-border);
+
+    @media (max-width: 900px) {
+      padding-right: 0;
+      padding-bottom: 12px;
+      border-right: 0;
+      border-bottom: 1px solid var(--art-card-border);
+    }
+
+    &__head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
 
     &__title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--el-text-color-secondary);
+    }
+
+    &__refresh {
+      display: inline-flex;
+      padding: 2px;
+      color: var(--el-text-color-placeholder);
+      cursor: pointer;
+      background: none;
+      border: 0;
+
+      &:hover:not(:disabled) {
+        color: var(--el-color-primary);
+      }
+
+      &:disabled {
+        cursor: default;
+      }
+    }
+
+    &__error {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      align-items: flex-start;
+      font-size: 12px;
+      color: var(--el-color-danger);
+    }
+
+    &__group + &__group {
+      margin-top: 8px;
+    }
+
+    &__group-head {
+      display: flex;
+      gap: 4px;
+      align-items: center;
+      width: 100%;
+      padding: 4px 0;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--el-text-color-secondary);
+      cursor: pointer;
+      background: none;
+      border: 0;
+
+      &:hover {
+        color: var(--el-color-primary);
+      }
+    }
+
+    &__count {
+      margin-left: auto;
+      padding: 0 5px;
+      font-size: 11px;
+      font-weight: 400;
+      color: var(--el-text-color-placeholder);
+      background: var(--el-fill-color-light);
+      border-radius: 8px;
+    }
+
+    &__list {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    &__item {
       display: flex;
       gap: 6px;
       align-items: center;
-      font-size: 15px;
-      font-weight: 600;
-      color: var(--el-text-color-primary);
+      width: 100%;
+      padding: 5px 8px;
+      font-size: 13px;
+      color: var(--el-text-color-regular);
+      text-align: left;
+      cursor: pointer;
+      background: none;
+      border: 0;
+      border-radius: 4px;
+
+      &:hover {
+        background: var(--el-fill-color-light);
+      }
+
+      /* 选中态用主色左边条 + 浅底：比纯换色更能标出「当前项」 */
+      &.is-active {
+        font-weight: 600;
+        color: var(--el-color-primary);
+        background: var(--el-color-primary-light-9);
+        box-shadow: inset 2px 0 0 var(--el-color-primary);
+      }
     }
-
-    &__meta {
-      display: flex;
-      gap: 6px;
-      margin-left: auto;
-    }
-  }
-
-  .rd-picker {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    align-items: center;
-    margin-top: var(--rd-gap);
-
-    &__kind {
-      width: 140px;
-    }
-
-    &__name {
-      width: 260px;
-    }
-  }
-
-  .rd-option {
-    display: flex;
-    gap: 8px;
-    align-items: center;
 
     &__name {
       flex: 1;
       min-width: 0;
       overflow: hidden;
       text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
-    &__time {
+    &__stale {
+      flex-shrink: 0;
+      padding: 0 4px;
       font-size: 11px;
-      color: var(--el-text-color-secondary);
+      color: var(--el-color-warning-dark-2);
+      background: var(--el-color-warning-light-9);
+      border-radius: 3px;
     }
   }
 
-  .rd-stale-hint {
-    width: 100%;
-    font-size: 12px;
-    line-height: 1.6;
-    color: var(--el-color-warning-dark-2);
-  }
+  .rd-main {
+    min-width: 0;
 
-  .rd-error {
-    display: flex;
-    gap: 6px;
-    align-items: center;
-    margin-top: var(--rd-gap);
-    font-size: 12px;
-    color: var(--el-color-danger);
-  }
+    &__head {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 8px;
+    }
 
-  .rd-empty {
-    margin-top: var(--rd-gap);
-    font-size: 12px;
-    color: var(--el-text-color-secondary);
-  }
+    &__name {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--el-text-color-primary);
+    }
 
-  .rd-panel {
-    margin-top: var(--rd-gap);
+    &__seen {
+      font-size: 12px;
+      color: var(--el-text-color-placeholder);
+    }
+
+    &__stale-hint {
+      font-size: 12px;
+      color: var(--el-color-warning-dark-2);
+    }
   }
 
   .rd-placeholder {
-    padding: 24px 0;
-    font-size: 13px;
-    color: var(--el-text-color-secondary);
-    text-align: center;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    align-items: center;
+    justify-content: center;
+    min-height: 260px;
+    padding: 24px;
+    color: var(--el-text-color-placeholder);
+
+    &__title {
+      font-size: 14px;
+      color: var(--el-text-color-secondary);
+    }
 
     &__hint {
-      margin-top: 6px;
+      max-width: 420px;
       font-size: 12px;
-      color: var(--el-text-color-placeholder);
+      line-height: 1.6;
+      text-align: center;
+    }
+  }
+
+  .is-spin {
+    animation: rd-spin 1s linear infinite;
+  }
+
+  @keyframes rd-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .is-spin {
+      animation: none;
     }
   }
 </style>
