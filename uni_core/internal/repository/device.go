@@ -57,6 +57,9 @@ func (r *DeviceRepo) UpdateEnroll(ctx context.Context, d *entity.Device) error {
 			"mem_total_mb":  d.MemTotalMB,
 			"boot_time":     d.BootTime,
 			"token_hash":    d.TokenHash,
+			// agent_upgrade_supported 随 enroll 更新：重装/重注册的机器可能换了
+			// 一份带升级运行时的二进制。
+			"agent_upgrade_supported": d.AgentUpgradeSupported,
 			// primary_ip 是**每次 enroll 都刷新**的观测值（agent 换网络后重新
 			// enroll 即更新）；用 map 形式保证「置空」也能写入。
 			"primary_ip": d.PrimaryIP,
@@ -202,4 +205,109 @@ func (r *DeviceRepo) Delete(ctx context.Context, id uint64) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// ── Agent 升级（设计 §5.1）────────────────────────────────────────────
+
+// RefreshStaticFromHello 用 hello 载荷刷新**设备自述的静态信息**。
+//
+// 这条路存在的原因：此前只有 enroll 会写这些列，于是**重连鉴权不刷新任何东西** ——
+// 一台设备升级完 agent 重连，库里的 agent_version 还是旧的，「升级成功」根本观测不到。
+// 同类后果还有：换主机名、换内核、加内存后，控制台一直显示升级前的值。
+//
+// 调用时机是每次**鉴权成功**（不是每次上报）：这些字段只随进程启动变化，
+// 按上报频率写库纯属浪费。
+//
+// 只更新列出的列：不动 status（管理意图）、不动 last_seen_at（那是 Touch 的职责）、
+// 不动 target_agent_version（那是运维意图，不能被设备自述覆盖 —— 这条如果错了，
+// 一次重连就会把升级目标清掉）。
+func (r *DeviceRepo) RefreshStaticFromHello(ctx context.Context, d *entity.Device) error {
+	res := r.db.WithContext(ctx).Model(&entity.Device{}).
+		Where("id = ?", d.ID).
+		Updates(map[string]any{
+			"hostname":                d.Hostname,
+			"os":                      d.OS,
+			"arch":                    d.Arch,
+			"kernel":                  d.Kernel,
+			"agent_version":           d.AgentVersion,
+			"platform":                d.Platform,
+			"platform_ver":            d.PlatformVer,
+			"cpu_model":               d.CPUModel,
+			"cpu_cores":               d.CPUCores,
+			"mem_total_mb":            d.MemTotalMB,
+			"boot_time":               d.BootTime,
+			"agent_upgrade_supported": d.AgentUpgradeSupported,
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetUpgradeTarget 写设备级目标版本（空串 = 清空 = 恢复跟随全站）。
+//
+// 刻意**不动** agent_upgrade_state：终态字段描述「最近一次尝试的结果」，
+// 是历史事实；改目标不改变历史（设计 §3.4 的数据写入路径表）。
+func (r *DeviceRepo) SetUpgradeTarget(ctx context.Context, id uint64, target string) error {
+	res := r.db.WithContext(ctx).Model(&entity.Device{}).
+		Where("id = ?", id).Update("target_agent_version", target)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetUpgradeTerminal 写设备行的**升级终态**（无/已达成/失败/已回滚 + 原因码 + 时间）。
+//
+// 过程态（待升级/升级中）不在此列：它们是读时推导的（entity.Device 的注释）。
+func (r *DeviceRepo) SetUpgradeTerminal(ctx context.Context, id uint64, state int8,
+	reasonCode string, at time.Time) error {
+	res := r.db.WithContext(ctx).Model(&entity.Device{}).
+		Where("id = ?", id).
+		Updates(map[string]any{
+			"agent_upgrade_state":  state,
+			"agent_upgrade_reason": reasonCode,
+			"agent_upgrade_at":     at,
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// FindByIDs 按主键批量取设备（升级下发的 ids 路径；软删的设备不会返回）。
+func (r *DeviceRepo) FindByIDs(ctx context.Context, ids []uint64) ([]entity.Device, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	var list []entity.Device
+	if err := r.db.WithContext(ctx).Where("id IN ?", ids).Order("id ASC").
+		Find(&list).Error; err != nil {
+		return nil, err
+	}
+	return list, nil
+}
+
+// FindByUpgradeFilter 返回筛选命中的**全部**设备（不分页）。
+//
+// 与 FindPage / FindForOverview 共用同一个 applyFilters —— 这是「按筛选下发」
+// 防呆（preview 与下发两边数字必须一致）的底层保证：口径只有一份实现。
+// 调用方拿到结果后自行做「平台是否有产物 / 是否支持远程升级 / 是否已在该版本」的分类。
+func (r *DeviceRepo) FindByUpgradeFilter(ctx context.Context, q *request.DeviceQuery,
+	onlineSince time.Time) ([]entity.Device, error) {
+	var list []entity.Device
+	db := r.applyFilters(r.db.WithContext(ctx).Model(&entity.Device{}), q, onlineSince)
+	if err := db.Order("id ASC").Find(&list).Error; err != nil {
+		return nil, err
+	}
+	return list, nil
 }

@@ -13,4 +13,5 @@ var menuDefBatches = [][]menuDef{
 	menuDefinitions,               // v002 系统菜单
 	deviceMenuDefinitions,         // v008 设备管理菜单
 	deviceOverviewMenuDefinitions, // v012 设备监控总览菜单
+	agentUpgradeMenuDefinitions,   // v013 agent 升级菜单与按钮权限
 }

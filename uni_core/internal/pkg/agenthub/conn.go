@@ -42,6 +42,26 @@ type Toucher interface {
 	Touch(ctx context.Context, deviceID uint64) error
 }
 
+// UpgradeCoordinator 是升级域对 agent 通道暴露的**全部**能力（由
+// service.DeviceUpgradeService 实现）。
+//
+// 为什么只有两个方法：握手与状态上报是设备与升级域唯一的两个接触点 ——
+// 目标版本由谁设、任务怎么建、产物怎么管，全在 HTTP 那边，agent 通道只负责
+// 「对账」与「收回报」。窄接口让「升级坏了会不会拖垮上报通道」这个问题
+// 在类型层面就有答案：它只能在这两个方法里出错，且两个调用点都只记日志。
+type UpgradeCoordinator interface {
+	// ReconcileOnHello 在握手成功时对账：终结已结束的尝试（成功/回滚/意外版本），
+	// 并解析本次要下发的升级指令。无目标版本、或该平台无产物时返回 (nil, nil)。
+	//
+	// 它必须是**幂等**的：每次重连都会调用，而重连是常态。
+	ReconcileOnHello(ctx context.Context, deviceID uint64, h *agentproto.Hello) (*agentproto.UpgradeDirective, error)
+	// ReportUpgradeStatus 落一次状态上报（含节流与终态同步）。
+	//
+	// 实现方对「命中不到行」的上报必须**丢弃并返回 nil 或错误由调用方记日志**
+	// —— 陈旧/伪造的上报没有可归属的尝试。
+	ReportUpgradeStatus(ctx context.Context, deviceID uint64, st *agentproto.UpgradeStatus) error
+}
+
 // Policy 是下发给 agent 的运行参数。
 //
 // 注意协议现状：hello_ack 只有 ReportInterval（秒），**没有**心跳间隔字段
@@ -63,6 +83,12 @@ type Deps struct {
 	Toucher       Toucher
 	Decider       Decider
 	Policy        Policy
+	// Upgrader 是可选的升级编排面。nil = 未装配：此时 hello_ack 不带升级指令、
+	// 状态上报被丢弃 —— 与「没有目标版本」的行为一致，不影响上报主链路。
+	//
+	// 它与其余依赖的取向差别：升级是**可选能力**，装配失败不该让通道起不来，
+	// 故这里是 nil 容忍而不是 fail-closed（与 Limiter 同侧，但理由不同）。
+	Upgrader UpgradeCoordinator
 	// Limiter 是**入站帧级**限流器（窄接口见 ratelimit.go，实现由 wireup 注入）。
 	//
 	// 它是 Deps 里唯一「故障时放行」的依赖，这不是笔误：其余五个守的是**安全**
@@ -600,6 +626,7 @@ var agentHandlers = map[string]func(*Conn, context.Context, *agentproto.Message)
 	agentproto.TypeAgentHello:         (*Conn).handleHello,
 	agentproto.TypeAgentHeartbeat:     (*Conn).handleHeartbeat,
 	agentproto.TypeAgentReportMetrics: (*Conn).handleMetrics,
+	agentproto.TypeAgentUpgradeStatus: (*Conn).handleUpgradeStatus,
 }
 
 // allowFrame 询问限流器是否放行这一帧。
@@ -742,6 +769,22 @@ func (c *Conn) handleHello(ctx context.Context, m *agentproto.Message) bool {
 		// agent_token 的明文**只此一次**：DB 里只存 sha256。重连分支绝不再下发。
 		ack.AgentToken = agentToken
 	}
+	// 升级对账：发生在**握手成功之后、应答之前**，因为目标版本要随这一帧下发。
+	//
+	// 放在这里而不是等 core.agent.upgrade 推送，是声明式模型的关键：
+	// hello_ack 是每次重连都会到达的那一帧，于是离线设备一上线就自动对账，
+	// 服务端不需要记得「哪些设备还没收到」。
+	//
+	// 失败**绝不关连接**：升级域的故障（查库失败、产物缺失）不能妨碍指标上报 ——
+	// 上报是这条通道的本来职责，升级是搭便车的可选项。
+	if c.deps.Upgrader != nil {
+		directive, err := c.deps.Upgrader.ReconcileOnHello(ctx, deviceID, h)
+		if err != nil {
+			c.log.Warn("agenthub: 升级对账失败，本次不下发指令",
+				zap.Uint64("device_id", deviceID), zap.Error(err))
+		}
+		ack.Upgrade = directive
+	}
 	msg, err := agentproto.NewMessage(m.ID, agentproto.TypeCoreHelloAck, ack)
 	if err != nil {
 		c.log.Error("agenthub: 构造 hello_ack 失败", zap.Uint64("device_id", deviceID), zap.Error(err))
@@ -822,6 +865,38 @@ func (c *Conn) handleMetrics(ctx context.Context, m *agentproto.Message) bool {
 // 所以这里不再重复 Touch（重复调用只会白打一次 DB）。
 func (c *Conn) handleHeartbeat(_ context.Context, m *agentproto.Message) bool {
 	c.log.Debug("agent heartbeat", zap.Uint64("device_id", c.deviceID()), zap.Int64("ts", m.TS))
+	return true
+}
+
+// handleUpgradeStatus 处理一次升级状态上报（agent → core）。
+//
+// 取向与 handleMetrics 一致：**解码失败要关连接**（载荷语义非法是设备侧的实现
+// 错误，早暴露比静默丢弃好），但**落库失败只记日志**（服务端存不下不该让设备
+// 断线—— 设备侧会按节流继续上报，丢了这一条不影响它继续升级）。
+func (c *Conn) handleUpgradeStatus(ctx context.Context, m *agentproto.Message) bool {
+	decoded, err := agentproto.DecodeTypedFor(m, agentproto.DirAgentToCore)
+	if err != nil {
+		// 协议层已经把「progress 只许出现在 downloading」「failed 必带原因码」
+		// 这类纪律钉在 Validate 里，故这里拒绝的一定是构造错误。
+		c.CloseWith(agentproto.CloseMalformedMessage, "升级状态载荷无法解码或语义非法")
+		return false
+	}
+	st, ok := decoded.(*agentproto.UpgradeStatus)
+	if !ok {
+		c.CloseWith(agentproto.CloseMalformedMessage, "升级状态载荷类型不符")
+		return false
+	}
+	if c.deps.Upgrader == nil {
+		// 未装配升级域：静默丢弃但记录 —— 与「没有目标版本」表现一致。
+		c.log.Debug("agenthub: 升级域未装配，状态上报被丢弃",
+			zap.Uint64("device_id", c.deviceID()), zap.String("state", st.State))
+		return true
+	}
+	if err := c.deps.Upgrader.ReportUpgradeStatus(ctx, c.deviceID(), st); err != nil {
+		c.log.Warn("agent upgrade status not persisted",
+			zap.Uint64("device_id", c.deviceID()),
+			zap.String("state", st.State), zap.Error(err))
+	}
 	return true
 }
 

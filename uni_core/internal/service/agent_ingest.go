@@ -28,6 +28,7 @@ type AgentDeviceRepository interface {
 	FindByInstanceID(ctx context.Context, instanceID string) (*entity.Device, error)
 	FindByTokenHash(ctx context.Context, hash string) (*entity.Device, error)
 	UpdateEnroll(ctx context.Context, d *entity.Device) error
+	RefreshStaticFromHello(ctx context.Context, d *entity.Device) error
 	Touch(ctx context.Context, id uint64, at time.Time) error
 }
 
@@ -109,6 +110,7 @@ func (s *AgentIngestService) Enroll(ctx context.Context, h *agentproto.Hello, re
 		existing.MemTotalMB = h.MemTotalMB
 		existing.BootTime = h.BootTime
 		existing.TokenHash = hash
+		existing.AgentUpgradeSupported = boolToInt8(h.UpgradeSupported)
 		// 每次 enroll 都刷新观测 IP（设备换网络/换机房后重新注册即更新）。
 		// 空串**不覆盖**已有值：remoteIP 取不到时（测试态未接管 socket、
 		// 或某些 net.Addr 实现拿不到 host）宁可保留上次观测到的值，
@@ -132,6 +134,9 @@ func (s *AgentIngestService) Enroll(ctx context.Context, h *agentproto.Hello, re
 		MemTotalMB: h.MemTotalMB, BootTime: h.BootTime,
 		Status:    entity.DeviceStatusEnabled,
 		TokenHash: hash,
+		// 自报的升级能力：0.1.0 等老 agent 不发该字段 → 0（不支持远程升级），
+		// 控制台据此禁用按钮并给出结论式提示，而不是让人对着「点了没动静」猜。
+		AgentUpgradeSupported: boolToInt8(h.UpgradeSupported),
 		// 来源 IP 来自服务端观测（socket/代理头），不是 hello 载荷里的自述。
 		PrimaryIP: remoteIP,
 	}
@@ -183,7 +188,38 @@ func (s *AgentIngestService) Authenticate(ctx context.Context, h *agentproto.Hel
 	if d == nil {
 		return 0, apperror.BadRequest("agent token 无效")
 	}
+	// 用本次 hello 刷新设备自述的静态信息（版本 / 平台 / 主机名 / 内存…）。
+	//
+	// 此前**只有 enroll 会写这些列**，于是「agent 升级完重连」在库里完全看不见：
+	// agent_version 还是旧值，控制台据此显示的版本、以及升级成功的判定全部失真。
+	//
+	// 刷新失败**绝不影响鉴权结果**：设备能连上并上报是第一位的，
+	// 静态信息下一轮握手还有机会补上（它是可自愈的推断量，不是凭据）。
+	if err := s.refreshStatic(ctx, d, h); err != nil {
+		s.log.Warn("agent static info refresh failed",
+			zap.Uint64("deviceId", d.ID), zap.Error(err))
+	}
 	return d.ID, nil
+}
+
+// refreshStatic 把 hello 里的静态字段写到设备行。
+//
+// 只碰「设备自述」这一类列：不动 status（管理意图）、不动 target_agent_version
+// （运维意图 —— 一次重连就把升级目标清掉会是最难查的 bug 之一）。
+func (s *AgentIngestService) refreshStatic(ctx context.Context, d *entity.Device, h *agentproto.Hello) error {
+	d.Hostname = h.Hostname
+	d.OS = h.OS
+	d.Arch = h.Arch
+	d.Kernel = h.Kernel
+	d.AgentVersion = h.AgentVersion
+	d.Platform = h.Platform
+	d.PlatformVer = h.PlatformVer
+	d.CPUModel = h.CPUModel
+	d.CPUCores = h.CPUCores
+	d.MemTotalMB = h.MemTotalMB
+	d.BootTime = h.BootTime
+	d.AgentUpgradeSupported = boolToInt8(h.UpgradeSupported)
+	return s.repo.RefreshStaticFromHello(ctx, d)
 }
 
 // IsAccepting 报告设备是否处于可接受上报的状态（启用态）。

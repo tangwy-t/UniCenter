@@ -260,6 +260,63 @@ func TestAuthenticateRejectsBadToken(t *testing.T) {
 	}
 }
 
+// TestAuthenticateRefreshesStaticInfo 是「升级成功观测不到」这条缺口的回归测试。
+//
+// 背景：此前**只有 enroll** 会写 agent_version 等静态列。一台设备升级完 agent
+// 重连（带 agent_token 鉴权）时，库里的版本号还是旧的 —— 于是「新版本出现在下一次
+// hello」这条成功判定永远不成立，升级会看起来一直没完成。
+//
+// 同一缺口还覆盖：换主机名、换内核、加内存、以及 agent_upgrade_supported 的自报位。
+func TestAuthenticateRefreshesStaticInfo(t *testing.T) {
+	env := newIngestTestEnv(t)
+	svc, db := env.svc, env.db
+	ctx := context.Background()
+
+	id, token, _ := svc.Enroll(ctx, helloEnroll("inst-1"), "203.0.113.7")
+
+	// 重连时上报**升级后的**版本，以及一批变化的静态信息。
+	h := helloEnroll("inst-1")
+	h.EnrollToken = ""
+	h.AgentToken = token
+	h.AgentVersion = "0.2.0"
+	h.Hostname = "web-renamed"
+	h.MemTotalMB = 32768
+	h.UpgradeSupported = true
+
+	if _, err := svc.Authenticate(ctx, h); err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+
+	var d entity.Device
+	if err := db.First(&d, id).Error; err != nil {
+		t.Fatal(err)
+	}
+	if d.AgentVersion != "0.2.0" {
+		t.Fatalf("重连必须刷新 agent_version（升级成功的判定依据），got %q", d.AgentVersion)
+	}
+	if d.Hostname != "web-renamed" || d.MemTotalMB != 32768 {
+		t.Fatalf("静态信息未随重连刷新: hostname=%q mem=%v", d.Hostname, d.MemTotalMB)
+	}
+	if d.AgentUpgradeSupported != 1 {
+		t.Fatalf("升级能力自报位未落库: %d", d.AgentUpgradeSupported)
+	}
+
+	// 运维意图不得被设备自述覆盖：重连不碰 target（下次下发仍应生效）。
+	if err := db.Model(&entity.Device{}).Where("id = ?", id).
+		Update("target_agent_version", "0.3.0").Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Authenticate(ctx, h); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.First(&d, id).Error; err != nil {
+		t.Fatal(err)
+	}
+	if d.TargetAgentVersion != "0.3.0" {
+		t.Fatalf("重连不得清掉 target_agent_version，got %q", d.TargetAgentVersion)
+	}
+}
+
 // stubAgentRepo 是可注入错误的 AgentDeviceRepository 桩（只为触发错误分支）。
 // 其余方法返回零值即可 —— 被测方法只走 FindByID / FindByTokenHash。
 type stubAgentRepo struct {
@@ -278,7 +335,10 @@ func (s *stubAgentRepo) FindByTokenHash(context.Context, string) (*entity.Device
 	return s.findDevice, s.findErr
 }
 func (s *stubAgentRepo) UpdateEnroll(context.Context, *entity.Device) error { return nil }
-func (s *stubAgentRepo) Touch(context.Context, uint64, time.Time) error     { return nil }
+func (s *stubAgentRepo) RefreshStaticFromHello(context.Context, *entity.Device) error {
+	return nil
+}
+func (s *stubAgentRepo) Touch(context.Context, uint64, time.Time) error { return nil }
 
 // stubAgentRaw / stubAgentLatest 是热层的最小桩（错误分支不写 Redis）。
 type stubAgentRaw struct{}

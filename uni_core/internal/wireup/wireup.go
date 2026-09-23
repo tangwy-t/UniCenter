@@ -157,6 +157,9 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 	deviceRepo := repository.NewDeviceRepository(db)
 	deviceResourceRepo := repository.NewDeviceResourceRepository(db)
 	deviceMetricRepo := repository.NewDeviceMetricRepository(db)
+	agentReleaseRepo := repository.NewAgentReleaseRepository(db)
+	agentUpgradeTaskRepo := repository.NewAgentUpgradeTaskRepository(db)
+	agentUpgradeAttemptRepo := repository.NewAgentUpgradeAttemptRepository(db)
 
 	// ── DictService ────────────────────────────────────────────────────
 	dictSvc := service.NewDictService(dictTypeRepo, dictDataRepo, cacheStore, log)
@@ -321,6 +324,10 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 	// 与 agentQuerySvc 共享后，改 reportInterval 会**同时**影响两页的栅格。
 	deviceOverviewSvc := service.NewDeviceOverviewService(
 		deviceRepo, latestStore, deviceMetricRepo, rawStore, agentPolicy, configSvc, log)
+	// 升级域的唯一写入口：agent 通道（对账/上报）与控制台 HTTP（下发/任务/发布物）
+	// 共用同一个实例 —— 生效目标与「一次尝试」的口径必须只有一份（设计 §3.1）。
+	deviceUpgradeSvc := service.NewDeviceUpgradeService(
+		deviceRepo, agentUpgradeAttemptRepo, agentUpgradeTaskRepo, agentReleaseRepo, configSvc, log)
 
 	// ── Agent 后台服务（5m 落库 / 1h 回滚 / 6 张表分区对账）─────────────
 	// flush 与 rollup **显式**注入同一个 Redis 客户端：两者消费同一族水位
@@ -366,6 +373,10 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 		Decider:       agentIngestSvc,
 		// Policy 只负责「下发/校准上报与心跳节奏」，由两个配置键包成小适配器。
 		Policy: agentPolicy,
+		// Upgrader 是升级编排面（握手对账 + 状态上报落库）。
+		// nil 容忍：未装配时 hello_ack 不带指令、状态上报被丢弃，
+		// 与「没有目标版本」表现一致，不影响上报主链路。
+		Upgrader: deviceUpgradeSvc,
 		// Limiter 是**入站帧级**限流（协议登记的 CloseRateLimited=4006 至此有了实现）：
 		// 阈值取 sys.agent.maxFramesPerMin（缺省 900），计数走与上方 rateLimiter 同一个
 		// cacheStore（同一个 Redis 客户端）。未注入 = fail-open，所以这里必须接上。

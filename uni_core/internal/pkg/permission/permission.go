@@ -20,6 +20,12 @@ func All() []string {
 		PermDeviceEnable,
 		PermDeviceList,
 		PermDeviceQuery,
+		PermDeviceReleaseDelete,
+		PermDeviceReleaseList,
+		PermDeviceReleasePublish,
+		PermDeviceReleaseUpload,
+		PermDeviceUpgrade,
+		PermDeviceUpgradeGlobal,
 
 		PermCacheDelete,
 		PermCacheList,
@@ -111,6 +117,17 @@ const (
 	PermDeviceDelete  = "device:delete"
 	PermDeviceEnable  = "device:enable"
 	PermDeviceDisable = "device:disable"
+	// PermDeviceUpgrade 是「给设备下发升级/回滚目标」（单台 / 多选 / 按筛选）。
+	PermDeviceUpgrade = "device:upgrade"
+	// PermDeviceUpgradeGlobal 是「改全站目标版本」——它一次影响所有设备（含之后
+	// 新注册的），破坏面比单台升级大一个量级，故**单独一个码**：
+	// 「能给一台机器升级」与「能全站升级」不是同一种权限。
+	PermDeviceUpgradeGlobal = "device:upgrade:global"
+	// 发布物管理（上传 / 列表 / 发布撤回 / 删除）。
+	PermDeviceReleaseList    = "device:release:list"
+	PermDeviceReleaseUpload  = "device:release:upload"
+	PermDeviceReleasePublish = "device:release:publish"
+	PermDeviceReleaseDelete  = "device:release:delete"
 )
 
 // ── 缓存管理 / system:cache:* ────────────────────────────────────────────

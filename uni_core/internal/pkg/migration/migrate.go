@@ -90,6 +90,13 @@ var autoMigrateEntities = []any{
 	// 列定义（与实体字段永久有漂移风险）。
 	// 由 auto_migrate_guard_test.go 的 TestAutoMigrateIncludesPartitionLogTable 守卫。
 	&entity.AgentPartitionLog{},
+	// ── Agent 升级（设计 §5）────────────────────────────────────
+	// 发布物 / 任务 / 尝试明细三张表都是**普通表**（不分区、不清理）：
+	// 量级是「每版本几行 + 每次升级几行」，分区只会在审计上引入第二种故障。
+	// attempt 是流水（无软删），release 是清单（无软删，删除受回滚余量守卫）。
+	&entity.AgentRelease{},
+	&entity.AgentUpgradeTask{},
+	&entity.AgentUpgradeAttempt{},
 	// 指标 6 表**刻意缺席**，见上方说明。
 }
 
