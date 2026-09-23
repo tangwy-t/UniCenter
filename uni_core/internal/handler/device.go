@@ -35,14 +35,31 @@ type DeviceMetricsServiceInterface interface {
 }
 
 // DeviceHandler exposes HTTP handlers for the /devices* endpoints.
+// DeviceOverviewServiceInterface 是**总览页**的批量聚合能力面。
+//
+// 单列成第三个接口而不是并进 DeviceMetricsServiceInterface：总览是唯一
+// 需要「设备仓储 + 水位 + 趋势」三者的入口（它必须先知道有哪几台设备），
+// 而指标查询服务**刻意**不持有设备仓储（只管单台设备的指标表/Redis）。
+// 若并进同一个接口，装配处就会被迫给指标查询服务注入设备仓储，
+// 让「查询域不查设备表」这条分层约束失效 —— 那条约束正是两个服务分开的理由。
+type DeviceOverviewServiceInterface interface {
+	Overview(ctx context.Context, q *request.DeviceOverviewQuery) (*response.DeviceOverviewResp, error)
+}
+
 type DeviceHandler struct {
-	svc     DeviceServiceInterface
-	metrics DeviceMetricsServiceInterface
+	svc      DeviceServiceInterface
+	metrics  DeviceMetricsServiceInterface
+	overview DeviceOverviewServiceInterface
 }
 
 // NewDeviceHandler 注入管理域与查询域两个依赖（二者由不同服务实现，不得混用）。
-func NewDeviceHandler(svc DeviceServiceInterface, metrics DeviceMetricsServiceInterface) *DeviceHandler {
-	return &DeviceHandler{svc: svc, metrics: metrics}
+// NewDeviceHandler 注入三个依赖（管理域 / 单台指标查询 / 总览聚合）。
+//
+// 三者不合并成一个大接口：管理域不查指标表、查询域不查设备表、总览需要两者 ——
+// 合成一个接口会让每个调用点都看得见自己不该用的能力。
+func NewDeviceHandler(svc DeviceServiceInterface, metrics DeviceMetricsServiceInterface,
+	overview DeviceOverviewServiceInterface) *DeviceHandler {
+	return &DeviceHandler{svc: svc, metrics: metrics, overview: overview}
 }
 
 // 路径参数 :id 的解析统一走 app.Uint64Param（C2）。
@@ -266,4 +283,46 @@ func (h *DeviceHandler) Delete(c *gin.Context) {
 		return
 	}
 	app.Success(c, nil)
+}
+
+// Overview handles GET /api/v1/devices/overview — 设备监控总览（单页看全部设备 × 各类指标）。
+//
+// @Summary      设备监控总览
+// @Description  一次请求返回 N 台设备的最新快照（水位全字段）与多列趋势（列式，共享时间轴），按指标类别分组绘图即可得到「所有设备 × 各类指标」的总览视图
+// @Description  range 选档与 /devices/{id}/metrics **完全同口径**（≤24h Redis / ≤30d 5min / >30d 1h）；metrics 为逗号白名单，* 表示该档全部可用列
+// @Description  ids 可显式指定设备白名单（「只对比勾选的这几台」）；hostname/status/online 为页面级过滤
+// @Description  设备数超过上限时**截断并置 truncated**（不报错），单台设备的趋势取数失败降级为该设备的 error 字段（不影响其余设备）
+// @Tags         设备监控
+// @Accept       json
+// @Produce      json
+// @Param        range    query  int     false  "时间窗口(秒)"     default(86400)
+// @Param        metrics  query  string  false  "逗号分隔的指标列白名单，* 表示该档全部可用列"
+// @Param        ids      query  string  false  "设备ID白名单(逗号分隔)，用于只看选定设备"
+// @Param        hostname query  string  false  "主机名模糊匹配"
+// @Param        status   query  int     false  "启停状态(0停用/1启用)"
+// @Param        online   query  bool    false  "是否在线(在线判定依 sys.agent.offlineThreshold)"
+// @Security     BearerAuth
+// @Success      200  {object}  app.Response{data=response.DeviceOverviewResp}  "总览数据"
+// @Failure      400  {object}  app.Response  "参数错误(range 越界 / 列不在该档可用列集 / ids 含非法设备ID)"
+// @Failure      401  {object}  app.Response  "未登录"
+// @Failure      403  {object}  app.Response  "无权限"
+// @Router       /devices/overview [get]
+//
+// 路由形态说明（**重要**）：本路径与 `GET /devices/:id` 是**兄弟**关系，
+// 在 gin 的路由树上 /devices/overview 是静态段、/:id 是参数段。gin v1.12 的
+// httprouter 支持这种共存（静态优先匹配），已实测确认不会 panic 也不会误配。
+// 之所以不复用 `/devices` + 特殊 query 参数，是为了让「总览」在路由表里
+// **可见**：运维从访问日志里能一眼区分总览流量与列表流量。
+func (h *DeviceHandler) Overview(c *gin.Context) {
+	var query request.DeviceOverviewQuery
+	if err := c.ShouldBindQuery(&query); err != nil {
+		app.Error(c, apperror.BadRequest("参数错误"))
+		return
+	}
+	resp, err := h.overview.Overview(c.Request.Context(), &query)
+	if err != nil {
+		app.Error(c, err)
+		return
+	}
+	app.Success(c, resp)
 }

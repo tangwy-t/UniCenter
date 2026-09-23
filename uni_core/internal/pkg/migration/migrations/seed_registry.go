@@ -10,6 +10,7 @@ package migrations
 //
 // 新增菜单种子迁移时：把该批定义追加进来，否则守卫会红。
 var menuDefBatches = [][]menuDef{
-	menuDefinitions,       // v002 系统菜单
-	deviceMenuDefinitions, // v008 设备管理菜单
+	menuDefinitions,               // v002 系统菜单
+	deviceMenuDefinitions,         // v008 设备管理菜单
+	deviceOverviewMenuDefinitions, // v012 设备监控总览菜单
 }

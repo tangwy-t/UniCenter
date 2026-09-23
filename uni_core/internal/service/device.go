@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"errors"
+	"net"
+	"strings"
 	"time"
 
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/request"
@@ -81,13 +83,25 @@ func NewDeviceService(repo DeviceRepository, resources DeviceResourceRepository,
 	return &DeviceService{repo: repo, resources: resources, raw: raw, latest: latest, cfg: cfg, log: log}
 }
 
-// onlineSince 把「离线阈值（秒）」折算成时间点：last_seen_at >= 它即为在线。
-func (s *DeviceService) onlineSince(ctx context.Context) time.Time {
+// offlineThresholdSec 返回**实际生效**的离线判定阈值（秒）。
+//
+// 抽成独立函数是为了让「响应里下发的 offlineThresholdSec」与「online 的判定」
+// 出自**同一次配置读取、同一套缺省与钳制**。若各算一遍，一旦 cfg 在两次读之间
+// 热更（阈值是可热更配置），响应就会出现「online=true 但阈值说它该离线」这种
+// 自相矛盾的结果 —— 而调用方（前端文案）会照着那个阈值给用户解释。
+func (s *DeviceService) offlineThresholdSec(ctx context.Context) int {
 	sec := s.cfg.GetInt(ctx, ConfigOfflineThreshold, 30)
 	if sec <= 0 {
+		// <=0 视为未配置/配置错误：回落 30。不返回 0 —— 阈值 0 会让
+		// last_seen_at >= now 恒不成立，等于把**所有**设备判成离线。
 		sec = 30
 	}
-	return time.Now().Add(-time.Duration(sec) * time.Second)
+	return sec
+}
+
+// onlineSince 把「离线阈值（秒）」折算成时间点：last_seen_at >= 它即为在线。
+func (s *DeviceService) onlineSince(ctx context.Context) time.Time {
+	return time.Now().Add(-time.Duration(s.offlineThresholdSec(ctx)) * time.Second)
 }
 
 // List 返回分页列表，并**一次 pipeline** 拼上 latest 水位（不扫指标表）。
@@ -157,12 +171,18 @@ func (s *DeviceService) GetByID(ctx context.Context, id uint64) (*response.Devic
 		return nil, err
 	}
 	watermarks, _ := s.latest.GetMany(ctx, []uint64{id})
-	item := s.toListItem(d, watermarks[id], s.onlineSince(ctx))
+	// 阈值只读一次，同时喂给 online 判定与响应字段（见 offlineThresholdSec 的说明）。
+	thresholdSec := s.offlineThresholdSec(ctx)
+	item := s.toListItem(d, watermarks[id], time.Now().Add(-time.Duration(thresholdSec)*time.Second))
 	detail := response.DeviceResp{
 		DeviceListItem: item,
 		Platform:       d.Platform, PlatformVer: d.PlatformVer, Kernel: d.Kernel,
 		CPUModel: d.CPUModel, CPUCores: d.CPUCores, MemTotalMB: d.MemTotalMB,
 		BootTime: d.BootTime, CreatedAt: d.CreatedAt.Unix(),
+		// 观测到的来源 IP（服务端取值，见 entity.Device.PrimaryIP 与 handler）。
+		PrimaryIP: normalizedIP(d.PrimaryIP),
+		// 与 online 判定同源的阈值，供 UI 解释「多久没上报算离线」。
+		OfflineThresholdSec: thresholdSec,
 	}
 	return &detail, nil
 }
@@ -242,6 +262,36 @@ func (s *DeviceService) Delete(ctx context.Context, id uint64) error {
 		return apperror.Internal("内部错误", err)
 	}
 	return nil
+}
+
+// normalizedIP 归一化来源 IP，仅做**展示层**清洗。
+//
+// 处理两种真实会让 UI 显示奇怪的情况：
+//  1. IPv4-mapped IPv6：Go 的 net 在双栈监听下常给出 `::ffff:192.168.1.5`。
+//     原样展示既长又容易让人以为设备走的是 IPv6。用 To4() 归一成点分十进制。
+//  2. 杂散空白：代理头（X-Forwarded-For）可能带空格。TrimSpace 掉。
+//
+// **刻意不做**的事：
+//   - 不解析多段 XFF 取「第一个」——那是 Gin ClientIP/trustedProxies 的职责，
+//     在这一层再解析会与它形成第二份可信边界实现（安全敏感的重复实现）。
+//   - 不校验合法性并抛错：IP 只用于展示，解析失败就原样返回 txt，
+//     宁可显示一个怪字符串，也不要把「有值」变成「空值」。
+func normalizedIP(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	// 只需要对付带端口的少数情况；SplitHostPort 对裸 IP 会报错，此时用原串。
+	if host, _, err := net.SplitHostPort(s); err == nil && host != "" {
+		s = host
+	}
+	if ip := net.ParseIP(s); ip != nil {
+		if v4 := ip.To4(); v4 != nil {
+			return v4.String()
+		}
+		return ip.String()
+	}
+	return s
 }
 
 // toListItem 把实体 + 水位投影成列表项。

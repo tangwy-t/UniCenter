@@ -82,6 +82,54 @@ func TestDeviceListJoinsLatestWatermark(t *testing.T) {
 	}
 }
 
+// TestNormalizedIP 钉住展示层清洗：IPv4-mapped IPv6 必须归一成点分十进制。
+//
+// 为什么值得测：Go 在双栈监听下常给出 ::ffff:192.168.1.5，原样显示会让运维
+// 以为设备走 IPv6（进而去查错误的方向）。同时确认「无法解析」时**原样返回**
+// 而不是清空 —— IP 只用于展示，宁可显示怪字符串也不要凭空变成「—」。
+func TestNormalizedIP(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"空串", "", ""},
+		{"裸 IPv4", "192.168.1.5", "192.168.1.5"},
+		{"IPv4-mapped IPv6", "::ffff:192.168.1.5", "192.168.1.5"},
+		{"带空白", "  192.168.1.5  ", "192.168.1.5"},
+		{"带端口", "192.168.1.5:51422", "192.168.1.5"},
+		{"真 IPv6", "2001:db8::1", "2001:db8::1"},
+		{"无法解析时原样保留", "not-an-ip", "not-an-ip"},
+	}
+	for _, c := range cases {
+		if got := normalizedIP(c.in); got != c.want {
+			t.Errorf("%s: normalizedIP(%q) = %q, want %q", c.name, c.in, got, c.want)
+		}
+	}
+}
+
+// TestDeviceDetailExposesIPAndThreshold 钉住 I-1/I-5 两个字段真的进了详情响应。
+func TestDeviceDetailExposesIPAndThreshold(t *testing.T) {
+	svc, db, _, _ := newDeviceTestEnv(t)
+	ctx := context.Background()
+
+	d := &entity.Device{BaseEntity: entity.BaseEntity{ID: 1002}, InstanceID: "i-ip",
+		Hostname: "web-ip", OS: "linux", Arch: "amd64", AgentVersion: "0.1.0",
+		Status: entity.DeviceStatusEnabled, PrimaryIP: "::ffff:10.1.2.3"}
+	if err := db.Create(d).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := svc.GetByID(ctx, 1002)
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	if resp.PrimaryIP != "10.1.2.3" {
+		t.Fatalf("primaryIp = %q, want 10.1.2.3（IPv4-mapped 必须归一）", resp.PrimaryIP)
+	}
+	// stubCfg 未配置阈值 → 必须与 onlineSince 的缺省一致（30），
+	// 且**不能是 0**（0 会让 UI 文案变成「0 秒内未上报即离线」）。
+	if resp.OfflineThresholdSec != 30 {
+		t.Fatalf("offlineThresholdSec = %d, want 30（未配置时的缺省）", resp.OfflineThresholdSec)
+	}
+}
+
 func TestDeviceDeletePurgesRedisAndResources(t *testing.T) {
 	svc, db, raw, latest := newDeviceTestEnv(t)
 	ctx := context.Background()

@@ -466,6 +466,12 @@ func Setup(deps Dependencies) *gin.Engine {
 			// 详情与指标查询（趋势、下钻、资源枚举）都属查询面 → device:query，
 			// 启停/删除各自独立成码（与 users 分组同形）。
 			devices.GET("", perm(permission.PermDeviceList), deps.Device.DeviceHdl.List)
+			// 总览：与 "/:id" 是路由树上的**兄弟**（静态段 vs 参数段），
+			// gin/httprouter 静态段优先，故 /devices/overview 不会被 :id 吞掉。
+			// 权限沿用查询面 device:query —— 总览展示的是与详情页同一批指标的
+			// 聚合，给更宽的 list 或更窄的新码都会造成「能看列表却不能看总览」
+			// 或反之的口径不一致。
+			devices.GET("/overview", perm(permission.PermDeviceQuery), deps.Device.DeviceHdl.Overview)
 			devices.GET("/:id", perm(permission.PermDeviceQuery), deps.Device.DeviceHdl.GetByID)
 			// 一个端点两种语义：kind+name 同时存在 → 资源下钻，否则 → 整机趋势（见 handler）。
 			devices.GET("/:id/metrics", perm(permission.PermDeviceQuery), deps.Device.DeviceHdl.Metrics)

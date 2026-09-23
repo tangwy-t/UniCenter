@@ -17,8 +17,14 @@ import (
 // ── 消费方窄接口（仓库既有约定：接口定义在消费方）──────────────
 
 // Enroller 处理带 enroll_token 的首次注册（由 service.AgentIngestService 实现）。
+//
+// remoteIP 是**服务端观测到**的来源 IP（由 handler 在升级握手时取 ClientIP，
+// 经 NewConn 注入；代理感知，见 handler.AgentWSHandler.Serve）。它作为独立
+// 参数而不是塞进 h：h 是**客户端自述的载荷**，把服务端观测值混进载荷结构会让
+// 「这个字段到底可不可信」在阅读时失去区分度 —— 而 primary_ip 的全部价值
+// 恰恰在于它不是自述。
 type Enroller interface {
-	Enroll(ctx context.Context, h *agentproto.Hello) (deviceID uint64, agentToken string, err error)
+	Enroll(ctx context.Context, h *agentproto.Hello, remoteIP string) (deviceID uint64, agentToken string, err error)
 }
 
 // Authenticator 处理带 agent_token 的重连鉴权。
@@ -116,11 +122,17 @@ const (
 // 收尾（注销）不在这里做：CloseWith 刻意**不动注册表** —— 关闭幂等与
 // 「已关闭但尚未注销的连接仍能被 DrainAll 通知到」是 Task 1 用断言钉住的语义。
 // 注销由 handler 在 Serve 返回后按连接身份做。
-func NewConn(hub SelfUnregisterer, ws *websocket.Conn, deps Deps, log logger.LoggerInterface) *Conn {
+// observedIP 是**服务端观测到**的来源 IP（handler 在升级握手时取 ClientIP）。
+//
+// 为什么是独立参数而不是塞进 Deps：Deps 是**按 hub 复用**的依赖束（同一个对象
+// 服务所有连接），而来源 IP 是**逐连接**的事实。塞进 Deps 只能靠每次 newConn
+// 前改共享结构体的字段来实现 —— 那在并发连接下就是数据竞争
+// （已实测过这类「运行期偶发串号」的代价：拿到别的设备的 IP）。
+func NewConn(hub SelfUnregisterer, ws *websocket.Conn, deps Deps, log logger.LoggerInterface, observedIP string) *Conn {
 	if ws == nil {
-		return newConn(hub, nil, deps, log)
+		return newConn(hub, nil, deps, log, observedIP)
 	}
-	return newConn(hub, realSocket{c: ws}, deps, log)
+	return newConn(hub, realSocket{c: ws}, deps, log, observedIP)
 }
 
 // realSocket 把生产态的 *websocket.Conn 适配到 socket 窄接口。
@@ -153,7 +165,7 @@ func (s realSocket) RemoteAddr() net.Addr { return s.c.RemoteAddr() }
 var _ socket = realSocket{}
 
 // newConn 是 NewConn 的实现，并顺带接受测试态的 socket 替身。
-func newConn(hub SelfUnregisterer, ws socket, deps Deps, log logger.LoggerInterface) *Conn {
+func newConn(hub SelfUnregisterer, ws socket, deps Deps, log logger.LoggerInterface, observedIP string) *Conn {
 	opts := Options{}.withDefaults()
 	if hub != nil {
 		// opts() 是 SelfUnregisterer 的第二个（未导出）方法：它让调用方无需知道
@@ -170,6 +182,10 @@ func newConn(hub SelfUnregisterer, ws socket, deps Deps, log logger.LoggerInterf
 		send:  make(chan []byte, opts.SendQueue),
 		done:  make(chan struct{}),
 		state: StateAwaitHello,
+		// 展示用的来源 IP：**原样收下**，不在这一层做解析/规范化。
+		// 清洗（去端口、去 ::ffff: 前缀）由 handler 的 ClientIP 负责，
+		// 本包只负责把它带到 enroll 调用点。
+		observedIP: observedIP,
 	}
 	if ws != nil {
 		// 远端 IP 在这里算**一次**（而非每帧从 socket 取）：它只在未鉴权阶段的限流键上
@@ -668,7 +684,8 @@ func (c *Conn) handleHello(ctx context.Context, m *agentproto.Message) bool {
 			c.CloseWith(agentproto.CloseUnauthorized, "enroller 未装配")
 			return false
 		}
-		id, token, err := c.deps.Enroller.Enroll(ctx, h)
+		// observedIP 随 enroll 落库为 device.primary_ip（服务端观测值，非自述）。
+		id, token, err := c.deps.Enroller.Enroll(ctx, h, c.observedIP)
 		if err != nil {
 			c.log.Warn("agent enroll failed", zap.String("instance_id", h.InstanceID), zap.Error(err))
 			c.CloseWith(agentproto.CloseUnauthorized, "enroll 失败")

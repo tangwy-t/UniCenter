@@ -18,8 +18,9 @@ import (
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/apperror"
 )
 
-// stubDeviceSvc **同时**实现 DeviceServiceInterface 与 DeviceMetricsServiceInterface，
-// 因此可以 NewDeviceHandler(stub, stub) 一次注入两个依赖。
+// stubDeviceSvc **同时**实现 DeviceServiceInterface、DeviceMetricsServiceInterface
+// 与 DeviceOverviewServiceInterface，因此可以 NewDeviceHandler(stub, stub, stub)
+// 一次注入三个依赖。
 //
 // 分派证据有两层，缺一不可：
 //  1. metricsCalls / resourceCall 是**调用计数器** —— 只断言响应形状会被
@@ -32,6 +33,11 @@ type stubDeviceSvc struct {
 
 	metricsCalls int
 	resourceCall int
+
+	// 总览面：overviewQuery 记录**实际传入**的查询参数（断言 handler 没有
+	// 丢弃或改写 query），overviewCalls 计数（与上面同一个理由：防死代码）。
+	overviewQuery *request.DeviceOverviewQuery
+	overviewCalls int
 }
 
 func (s *stubDeviceSvc) List(context.Context, *request.DeviceQuery) (*app.PageResponse, error) {
@@ -63,6 +69,20 @@ func (s *stubDeviceSvc) ResourceMetrics(_ context.Context, _ uint64, q *request.
 	}, nil
 }
 
+func (s *stubDeviceSvc) Overview(_ context.Context, q *request.DeviceOverviewQuery) (*response.DeviceOverviewResp, error) {
+	s.overviewQuery = q
+	s.overviewCalls++
+	if s.err != nil {
+		return nil, s.err
+	}
+	// 判别字段：Source/RangeSeconds 直接回显 query，让「handler 是否原样透传」
+	// 可被断言；Devices 置一台，让响应形状不空。
+	return &response.DeviceOverviewResp{
+		RangeSeconds: q.Range, ResolutionSeconds: 30, Source: "redis",
+		DeviceTotal: 1,
+	}, nil
+}
+
 func (s *stubDeviceSvc) Resources(context.Context, uint64, string) (*response.DeviceResourcesResp, error) {
 	return &response.DeviceResourcesResp{}, nil
 }
@@ -81,7 +101,7 @@ func newGinCtx(method, target string) (*gin.Context, *httptest.ResponseRecorder)
 
 func TestDeviceHandlerMetricsBindsQuery(t *testing.T) {
 	svc := &stubDeviceSvc{}
-	h := NewDeviceHandler(svc, svc)
+	h := NewDeviceHandler(svc, svc, svc)
 	c, w := newGinCtx(http.MethodGet, "/devices/1001/metrics?range=86400&metrics=cpu_used_percent,load1")
 	c.Params = gin.Params{{Key: "id", Value: "1001"}}
 
@@ -100,7 +120,7 @@ func TestDeviceHandlerMetricsBindsQuery(t *testing.T) {
 
 func TestDeviceHandlerBadIDReturns400(t *testing.T) {
 	stub := &stubDeviceSvc{}
-	h := NewDeviceHandler(stub, stub)
+	h := NewDeviceHandler(stub, stub, stub)
 	c, w := newGinCtx(http.MethodGet, "/devices/not-a-number")
 	c.Params = gin.Params{{Key: "id", Value: "not-a-number"}}
 	h.GetByID(c)
@@ -114,7 +134,7 @@ func TestDeviceHandlerBadIDReturns400(t *testing.T) {
 
 func TestDeviceHandlerPropagatesAppError(t *testing.T) {
 	svc := &stubDeviceSvc{err: apperror.BadRequest("range 越界")}
-	h := NewDeviceHandler(svc, svc)
+	h := NewDeviceHandler(svc, svc, svc)
 	c, w := newGinCtx(http.MethodGet, "/devices/1001/metrics?range=10")
 	c.Params = gin.Params{{Key: "id", Value: "1001"}}
 	h.Metrics(c)
@@ -131,7 +151,7 @@ func TestDeviceHandlerPropagatesAppError(t *testing.T) {
 // kind/name 都不给 → 必须调 metrics.Metrics，且**不得**调 ResourceMetrics。
 func TestDeviceHandlerDispatchesTrendToMetrics(t *testing.T) {
 	svc := &stubDeviceSvc{}
-	h := NewDeviceHandler(svc, svc)
+	h := NewDeviceHandler(svc, svc, svc)
 	c, w := newGinCtx(http.MethodGet, "/devices/1001/metrics?range=86400&metrics=cpu_used_percent")
 	c.Params = gin.Params{{Key: "id", Value: "1001"}}
 
@@ -157,7 +177,7 @@ func TestDeviceHandlerDispatchesTrendToMetrics(t *testing.T) {
 // kind 与 name 同时存在 → 必须调 metrics.ResourceMetrics，且**不得**调 Metrics。
 func TestDeviceHandlerDispatchesDrillToResourceMetrics(t *testing.T) {
 	svc := &stubDeviceSvc{}
-	h := NewDeviceHandler(svc, svc)
+	h := NewDeviceHandler(svc, svc, svc)
 	c, w := newGinCtx(http.MethodGet, "/devices/1001/metrics?range=86400&kind=disk&name=/data")
 	c.Params = gin.Params{{Key: "id", Value: "1001"}}
 
@@ -184,7 +204,7 @@ func TestDeviceHandlerDispatchesDrillToResourceMetrics(t *testing.T) {
 
 func TestDeviceHandlerDeleteUsesParam(t *testing.T) {
 	svc := &stubDeviceSvc{}
-	h := NewDeviceHandler(svc, svc)
+	h := NewDeviceHandler(svc, svc, svc)
 	c, w := newGinCtx(http.MethodDelete, "/devices/1001")
 	c.Params = gin.Params{{Key: "id", Value: "1001"}}
 	h.Delete(c)
@@ -201,7 +221,7 @@ func TestDeviceHandlerDeleteUsesParam(t *testing.T) {
 // 的失败信息不一致 —— 客户端无法按同一套话术定位问题。
 func TestDeviceHandlerBadIDUsesSharedParamHelper(t *testing.T) {
 	stub := &stubDeviceSvc{}
-	h := NewDeviceHandler(stub, stub)
+	h := NewDeviceHandler(stub, stub, stub)
 	for name, raw := range map[string]string{"非数字": "not-a-number", "超出 uint64": "99999999999999999999999"} {
 		c, w := newGinCtx(http.MethodDelete, "/devices/"+raw)
 		c.Params = gin.Params{{Key: "id", Value: raw}}
@@ -268,11 +288,15 @@ func TestDeviceHandlerHasSwagAnnotations(t *testing.T) {
 			routers[r[1]+" "+strings.ToLower(r[2])] = true
 		}
 	}
-	if checked != 7 {
-		t.Fatalf("扫描到 %d 个 DeviceHandler 方法，want 7（方法增删时本守卫必须同步）", checked)
+	if checked != 8 {
+		t.Fatalf("扫描到 %d 个 DeviceHandler 方法，want 8（方法增删时本守卫必须同步）", checked)
 	}
 	want := map[string]bool{
 		"/devices get":                true,
+		// 总览是与 "/devices/{id}" 并列的**静态兄弟路由**（见 handler 注释）。
+		// 它在 want 里显式登记，故「总览被误改成 /devices 的 query 变体」或
+		// 「注解被误删」都会让本守卫红灯。
+		"/devices/overview get":       true,
 		"/devices/{id} get":           true,
 		"/devices/{id} delete":        true,
 		"/devices/{id}/metrics get":   true,

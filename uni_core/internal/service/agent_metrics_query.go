@@ -283,7 +283,7 @@ func (s *AgentMetricsQueryService) Metrics(ctx context.Context, deviceID uint64,
 	now := time.Now().Unix()
 	from := now - sel.RangeSeconds
 
-	cols, err := s.resolveTrendColumns(sel, q.Metrics)
+	cols, err := resolveTrendColumns(sel, q.Metrics)
 	if err != nil {
 		return nil, err
 	}
@@ -359,7 +359,19 @@ func (s *AgentMetricsQueryService) Metrics(ctx context.Context, deviceID uint64,
 // 200 并写进 `available_metrics`，前端会据此画一条恒为空的曲线；同一参数在 DB 档
 // 则被仓储白名单拒成 **500**。两档口径必须一致，且都是**400（参数错误）**——
 // 与下钻（`resolveDrillColumns`）的错误口径相同。
-func (s *AgentMetricsQueryService) resolveTrendColumns(sel TierSelection, metrics string) ([]string, error) {
+// resolveTrendColumns 解析趋势的列投影。
+//
+// **自由函数**（而非 AgentMetricsQueryService 的方法）：总览服务
+// （device_overview.go）必须用**逐字相同**的解析规则，否则「详情页能查的列
+// 总览查不了」或反之 —— 这类漂移的根源总是「同一个决策被实现了两遍」。
+// 本函数不读接收者上的任何状态（只读 sel），故提升为自由函数无副作用。
+//
+//   - 空   → 该档位的默认列集（defaultMetricColumns）
+//   - "*"  → 该档位的可用列集（tierAvailableColumns）
+//   - CSV  → 逐列白名单校验，非法列一律 400（两档同口径）
+//
+// 返回值恒含 bucket_ts（键列，见 D5），且恒在首位。
+func resolveTrendColumns(sel TierSelection, metrics string) ([]string, error) {
 	switch metrics {
 	case "":
 		return withBucketTS(defaultMetricColumns), nil
@@ -461,6 +473,23 @@ func trendColumnsTable(sel TierSelection) string {
 func withBucketTS(cols []string) []string {
 	out := make([]string, 0, len(cols)+1)
 	out = append(out, "bucket_ts")
+	for _, c := range cols {
+		if c == "bucket_ts" {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// withoutBucketTS 去掉键列 bucket_ts，得到**纯值列**清单。
+//
+// 总览响应的 available_metrics 必须是纯值列：它是「本次响应里可画的系列」，
+// 而 bucket_ts 由 axis 统一承载、不是可画系列。若把它混进去，前端会多出一条
+// 恒为时间戳的「折线」，且 METRIC_META 里查不到它的中文名（显示为原始列名）。
+// 与 withBucketTS 同样**总是返回新切片**（不得改写入参的底层数组）。
+func withoutBucketTS(cols []string) []string {
+	out := make([]string, 0, len(cols))
 	for _, c := range cols {
 		if c == "bucket_ts" {
 			continue

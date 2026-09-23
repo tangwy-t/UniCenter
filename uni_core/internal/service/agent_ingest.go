@@ -75,7 +75,7 @@ func NewAgentIngestService(repo AgentDeviceRepository, raw AgentRawStore, latest
 //   - 不存在 → 新建设备，签发 device_id 与 agent_token
 //
 // 返回的 agent_token 是**明文**（只此一次），DB 里只存 sha256。
-func (s *AgentIngestService) Enroll(ctx context.Context, h *agentproto.Hello) (uint64, string, error) {
+func (s *AgentIngestService) Enroll(ctx context.Context, h *agentproto.Hello, remoteIP string) (uint64, string, error) {
 	if h == nil {
 		return 0, "", apperror.BadRequest("缺少 hello 载荷")
 	}
@@ -109,6 +109,14 @@ func (s *AgentIngestService) Enroll(ctx context.Context, h *agentproto.Hello) (u
 		existing.MemTotalMB = h.MemTotalMB
 		existing.BootTime = h.BootTime
 		existing.TokenHash = hash
+		// 每次 enroll 都刷新观测 IP（设备换网络/换机房后重新注册即更新）。
+		// 空串**不覆盖**已有值：remoteIP 取不到时（测试态未接管 socket、
+		// 或某些 net.Addr 实现拿不到 host）宁可保留上次观测到的值，
+		// 也不要因为一次取不到就把设备 IP 擦成空 —— 那会让 UI 突然显示「—」，
+		// 而真实原因只是本次观测失败。
+		if remoteIP != "" {
+			existing.PrimaryIP = remoteIP
+		}
 		if err := s.repo.UpdateEnroll(ctx, existing); err != nil {
 			return 0, "", apperror.Internal("更新设备注册信息失败", err)
 		}
@@ -124,6 +132,8 @@ func (s *AgentIngestService) Enroll(ctx context.Context, h *agentproto.Hello) (u
 		MemTotalMB: h.MemTotalMB, BootTime: h.BootTime,
 		Status:    entity.DeviceStatusEnabled,
 		TokenHash: hash,
+		// 来源 IP 来自服务端观测（socket/代理头），不是 hello 载荷里的自述。
+		PrimaryIP: remoteIP,
 	}
 	if err := s.repo.Create(ctx, d); err != nil {
 		// 并发 enroll：唯一约束冲突说明另一请求已建好同一台设备，回读它（幂等）。

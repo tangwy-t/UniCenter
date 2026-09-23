@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -40,12 +41,15 @@ type fakeEnroller struct {
 	mu     sync.Mutex
 	calls  int
 	device uint64
+	// lastRemoteIP 记录 handler 侧传下来的观测 IP（断言 ClientIP 真的被透传）。
+	lastRemoteIP string
 }
 
-func (f *fakeEnroller) Enroll(_ context.Context, _ *agentproto.Hello) (uint64, string, error) {
+func (f *fakeEnroller) Enroll(_ context.Context, _ *agentproto.Hello, remoteIP string) (uint64, string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
+	f.lastRemoteIP = remoteIP
 	return f.device, "tok-1001", nil
 }
 
@@ -256,6 +260,42 @@ func TestAgentWSHandshakeSucceeds(t *testing.T) {
 	}
 	if f.enroll.callCount() != 1 {
 		t.Fatalf("enroller 应被调用 1 次，实际 %d", f.enroll.callCount())
+	}
+}
+
+// TestAgentWSPassesObservedIPToEnroller 钉住 I-1 的**取值口径**：
+// 交给 enroll 的必须是 Gin 的 c.ClientIP()（代理感知），而不是 socket 对端。
+//
+// 为什么这条断言不可省：生产部署下 agent 前面有 nginx，socket 对端是代理。
+// 若误用 RemoteAddr，落库会变成「所有设备 IP 都是 nginx 的 IP」—— 它看起来
+// 像个真实答案，会把排障引向错误方向，而整条链路不会报任何错。
+//
+// 这里用 X-Real-IP 模拟反代（nginx.conf 正是设这个头）。注意本仓库缺省
+// trustedProxies 为空，故 Gin 会**忽略**该头并取对端地址 —— 断言因此写成
+// 「等于 ClientIP()」而不是写死某个值，才真正钉住「与 ClientIP 同源」这一意图，
+// 且不依赖 trustedProxies 配置。
+func TestAgentWSPassesObservedIPToEnroller(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	f := newAgentWSFixture(t, nil)
+
+	conn := f.dialOK()
+	if err := conn.WriteMessage(websocket.TextMessage, validHelloFrame(t)); err != nil {
+		t.Fatalf("写出 hello 失败: %v", err)
+	}
+	_ = readHelloAck(t, conn)
+
+	if f.enroll.callCount() != 1 {
+		t.Fatalf("enroller 应被调用 1 次，实际 %d", f.enroll.callCount())
+	}
+	got := f.enroll.lastRemoteIP
+	if got == "" {
+		t.Fatal("观测 IP 不得为空：handler 必须把 ClientIP 传下来（哪怕测试环境是 127.0.0.1）")
+	}
+	// 反向断言：绝不允许把「带端口的 socket 地址」原样透传 ——
+	// 那是 ws.RemoteAddr() 的形态（如 127.0.0.1:53422），
+	// 一旦出现说明有人把取值换回了 RemoteAddr。
+	if strings.Contains(got, ":") && net.ParseIP(got) == nil {
+		t.Fatalf("观测 IP 疑似 socket 地址（含端口）: %q —— 应取 ClientIP 而非 RemoteAddr", got)
 	}
 }
 

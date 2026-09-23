@@ -240,6 +240,9 @@ type stubDeps struct {
 	enrollToken string
 	enrollErr   error
 	enrollCalls int
+	// enrollIPs 记录每次 Enroll 收到的 remoteIP（按调用顺序）：
+	// 用于断言「服务端观测到的来源 IP 真的被带到了 enroll 调用点」。
+	enrollIPs []string
 
 	authID    uint64
 	authErr   error
@@ -267,10 +270,11 @@ func newStubDeps() *stubDeps {
 	}
 }
 
-func (s *stubDeps) Enroll(_ context.Context, _ *agentproto.Hello) (uint64, string, error) {
+func (s *stubDeps) Enroll(_ context.Context, _ *agentproto.Hello, remoteIP string) (uint64, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.enrollCalls++
+	s.enrollIPs = append(s.enrollIPs, remoteIP)
 	if s.enrollErr != nil {
 		return 0, "", s.enrollErr
 	}
@@ -467,7 +471,9 @@ func newFixtureWithDeps(t *testing.T, opts Options, deps Deps, stub *stubDeps) *
 	t.Helper()
 	hub := NewHub(opts, logger.NewNop())
 	sock := newFakeSocket()
-	conn := newConn(hub, sock, deps, logger.NewNop())
+	// 测试态显式给一个来源 IP：生产路径由 handler 的 ClientIP 提供，
+	// 这里钉住「它会被原样带到 enroll」。
+	conn := newConn(hub, sock, deps, logger.NewNop(), testObservedIP)
 	f := &fixture{t: t, hub: hub, sock: sock, conn: conn, stub: stub}
 	t.Cleanup(func() {
 		// 收尾：把可能还卡在读上的 Serve 协程解开（关闭帧 + 读期限压到当下）。
@@ -544,6 +550,10 @@ func (f *fixture) expectState(t *testing.T, want ConnState) {
 }
 
 const waitTimeout = 2 * time.Second
+
+// testObservedIP 是测试态注入的来源 IP。生产路径由 handler 的 c.ClientIP()
+// 提供（代理感知），测试态用固定值即可 —— 目的是断言它被原样透传到 enroll。
+const testObservedIP = "203.0.113.7"
 
 // waitFor 轮询等待条件成立 —— 断言异步行为一律用它，不用固定 sleep 断言瞬时值。
 func waitFor(t *testing.T, what string, cond func() bool) {

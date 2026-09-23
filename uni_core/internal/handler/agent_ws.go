@@ -107,7 +107,20 @@ func (h *AgentWSHandler) Serve(c *gin.Context) {
 		return
 	}
 
-	conn := agenthub.NewConn(h.hub, ws, h.deps, h.log)
+	// 来源 IP 必须用 c.ClientIP() 而**不是** ws.RemoteAddr()：
+	//   - ws.RemoteAddr() 是 TCP 对端。生产部署下 agent 前面有 nginx
+	//     （见 uni_console/nginx.conf 的 location /api/），对端是**代理**，
+	//     落库会变成「所有设备的 IP 都是 nginx 的 IP」——比没有更糟，因为
+	//     它看起来像个真实答案，排障时会把人引向错误方向。
+	//   - c.ClientIP() 是 Gin 的代理感知解析：trustedProxies 非空时按
+	//     X-Forwarded-For/X-Real-IP 取真实客户端；**为空时取对端地址**
+	//     （router.go 在 trustedProxies 为空时 SetTrustedProxies(nil)，
+	//     正是为了不让 X-Forwarded-For 被伪造成限流/审计身份）。
+	// 于是这里的取值口径与全站其余审计入口（操作日志等）保持一致。
+	//
+	// 取值的**时点**：升级握手之后、交给连接之前。此刻请求头仍然可用
+	// （Upgrade 成功后 c.Request 仍可读），且早于任何 hello 处理。
+	conn := agenthub.NewConn(h.hub, ws, h.deps, h.log, c.ClientIP())
 	defer func() {
 		// 先关 socket 再销注册表：Unregister 之后若有并发 DrainAll，
 		// 注册表里已经没有这条连接（它已经不收任何通知也没关系）；

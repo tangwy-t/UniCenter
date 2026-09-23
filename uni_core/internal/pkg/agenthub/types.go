@@ -65,6 +65,19 @@ type Conn struct {
 	// 每帧从 socket 重算一次地址串是白付的开销。未接管 socket（测试态）时为空串。
 	remoteIP string
 
+	// observedIP 是**服务端观测到**的设备来源 IP，供 enroll 落库为
+	// device.primary_ip 使用（UI 的「设备 IP」）。
+	//
+	// 为什么不复用上面的 remoteIP：两者的**取值口径不同且都不能改**。
+	//   - remoteIP 是 socket 对端的 host 部分，用作**未鉴权限流键** ——
+	//     它必须尽量贴近「一条物理连接一个身份」，换成代理感知的 ClientIP
+	//     会让攻击者用伪造的 X-Forwarded-For 把限流键拆散（放宽限流）；
+	//   - observedIP 是**展示属性**，必须尽量贴近「这台设备真实在哪」——
+	//     部署在 nginx 后面时 socket 对端是代理，只有 ClientIP 才有意义。
+	// 两者在反代场景下**必然不同**，故并存而不是二选一。
+	// 同值时（直连）也无害：它俩本就该一致。
+	observedIP string
+
 	// sendFn/writeCloseFn 是**唯一**的出站通路；nil 表示未接管真实 socket（测试态）。
 	sendFn       func(b []byte) error
 	writeCloseFn func(code int, reason string) error

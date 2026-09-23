@@ -72,12 +72,86 @@ func helloEnroll(inst string) *agentproto.Hello {
 	return h
 }
 
+// TestEnrollPersistsObservedIP 钉住 I-1 的落库语义：primary_ip 来自**服务端观测**
+// 的 remoteIP 参数，而不是 hello 载荷里的任何字段。
+//
+// 为什么值得一条独立断言：IP 是排障定位设备的关键字段，一旦退回「客户端自述」
+// 或「忘了落库」，UI 上要么显示一个不可信的假 IP、要么永远显示「—」，
+// 而两条链路都不会报错（静默缺陷）。
+func TestEnrollPersistsObservedIP(t *testing.T) {
+	env := newIngestTestEnv(t)
+	svc, db := env.svc, env.db
+	ctx := context.Background()
+
+	h := helloEnroll("inst-ip")
+	// 载荷里塞一个伪造的 IP 字段也无所谓：Hello 根本没有 IP 字段可放，
+	// 这里显式把 hostname 装作可疑值，确认 primary_ip 不受载荷影响。
+	h.Hostname = "10.0.0.99"
+
+	if _, _, err := svc.Enroll(ctx, h, "203.0.113.7"); err != nil {
+		t.Fatalf("Enroll: %v", err)
+	}
+	var d entity.Device
+	if err := db.Where("instance_id = ?", "inst-ip").First(&d).Error; err != nil {
+		t.Fatalf("设备未落库: %v", err)
+	}
+	if d.PrimaryIP != "203.0.113.7" {
+		t.Fatalf("primary_ip = %q, want 203.0.113.7（必须取服务端观测值）", d.PrimaryIP)
+	}
+}
+
+// TestReEnrollRefreshesObservedIP 钉住「设备换网络后 IP 会更新」。
+func TestReEnrollRefreshesObservedIP(t *testing.T) {
+	env := newIngestTestEnv(t)
+	svc, db := env.svc, env.db
+	ctx := context.Background()
+
+	if _, _, err := svc.Enroll(ctx, helloEnroll("inst-move"), "203.0.113.7"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.Enroll(ctx, helloEnroll("inst-move"), "198.51.100.9"); err != nil {
+		t.Fatal(err)
+	}
+	var d entity.Device
+	if err := db.Where("instance_id = ?", "inst-move").First(&d).Error; err != nil {
+		t.Fatal(err)
+	}
+	if d.PrimaryIP != "198.51.100.9" {
+		t.Fatalf("重新 enroll 必须刷新 primary_ip, got %q", d.PrimaryIP)
+	}
+}
+
+// TestReEnrollKeepsIPWhenObservationFails 钉住「取不到 IP 时不清空已有值」。
+//
+// 语义：remoteIP 为空是**本次观测失败**（测试态未接管 socket、或某些 net.Addr
+// 实现拿不到 host），不是「设备没有 IP」。若用空串覆盖，UI 会从显示 IP 突然
+// 变成「—」，而真实原因只是这一次没取到 —— 用户会去查设备网络。
+func TestReEnrollKeepsIPWhenObservationFails(t *testing.T) {
+	env := newIngestTestEnv(t)
+	svc, db := env.svc, env.db
+	ctx := context.Background()
+
+	if _, _, err := svc.Enroll(ctx, helloEnroll("inst-keep"), "203.0.113.7"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.Enroll(ctx, helloEnroll("inst-keep"), ""); err != nil {
+		t.Fatal(err)
+	}
+	var d entity.Device
+	if err := db.Where("instance_id = ?", "inst-keep").First(&d).Error; err != nil {
+		t.Fatal(err)
+	}
+	if d.PrimaryIP != "203.0.113.7" {
+		t.Fatalf("观测失败不得清空已有 IP, got %q（want 保留 203.0.113.7）", d.PrimaryIP)
+	}
+}
+
 func TestEnrollCreatesDeviceAndIssuesToken(t *testing.T) {
 	env := newIngestTestEnv(t)
 	svc, db := env.svc, env.db
 	ctx := context.Background()
 
-	id, token, err := svc.Enroll(ctx, helloEnroll("inst-1"))
+	id, token, err := svc.Enroll(ctx, helloEnroll("inst-1"), "203.0.113.7")
 	if err != nil {
 		t.Fatalf("Enroll: %v", err)
 	}
@@ -103,12 +177,12 @@ func TestEnrollIsIdempotentByInstanceID(t *testing.T) {
 	svc, db := env.svc, env.db
 	ctx := context.Background()
 
-	id1, _, err := svc.Enroll(ctx, helloEnroll("inst-1"))
+	id1, _, err := svc.Enroll(ctx, helloEnroll("inst-1"), "203.0.113.7")
 	if err != nil {
 		t.Fatal(err)
 	}
 	// 同 instance_id 再次 enroll：不得新建设备，且应轮换 token
-	id2, token2, err := svc.Enroll(ctx, helloEnroll("inst-1"))
+	id2, token2, err := svc.Enroll(ctx, helloEnroll("inst-1"), "203.0.113.7")
 	if err != nil {
 		t.Fatalf("重复 enroll 必须幂等成功: %v", err)
 	}
@@ -130,7 +204,7 @@ func TestEnrollRejectsWrongEnrollToken(t *testing.T) {
 	svc, db := env.svc, env.db
 	h := helloEnroll("inst-1")
 	h.EnrollToken = "wrong"
-	_, _, err := svc.Enroll(context.Background(), h)
+	_, _, err := svc.Enroll(context.Background(), h, "203.0.113.7")
 	if err == nil {
 		t.Fatal("错误的 enroll token 必须被拒")
 	}
@@ -150,7 +224,7 @@ func TestAuthenticateAndIsAccepting(t *testing.T) {
 	svc, db := env.svc, env.db
 	ctx := context.Background()
 
-	id, token, _ := svc.Enroll(ctx, helloEnroll("inst-1"))
+	id, token, _ := svc.Enroll(ctx, helloEnroll("inst-1"), "203.0.113.7")
 	h := helloEnroll("inst-1")
 	h.EnrollToken = ""
 	h.AgentToken = token
@@ -305,7 +379,7 @@ func TestAuthenticatePropagatesRepositoryFailure(t *testing.T) {
 func TestIngestWritesRawAndLatest(t *testing.T) {
 	env := newIngestTestEnv(t)
 	ctx := context.Background()
-	id, _, _ := env.svc.Enroll(ctx, helloEnroll("inst-1"))
+	id, _, _ := env.svc.Enroll(ctx, helloEnroll("inst-1"), "203.0.113.7")
 
 	nowMs := time.Now().UnixMilli()
 	s := &agentproto.MetricsSample{T: nowMs, CPUUsedPercent: 33}
@@ -407,7 +481,7 @@ func TestEnrollConcurrentConflictRereadsAndIssuesUsableToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	id, token, err := svc.Enroll(ctx, helloEnroll("inst-1"))
+	id, token, err := svc.Enroll(ctx, helloEnroll("inst-1"), "203.0.113.7")
 	if err != nil {
 		t.Fatalf("并发冲突必须回读既存设备并成功返回，不得报错: %v", err)
 	}

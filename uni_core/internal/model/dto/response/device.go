@@ -34,6 +34,26 @@ type DeviceResp struct {
 	MemTotalMB  float64 `json:"memTotalMb,omitempty"`
 	BootTime    int64   `json:"bootTime,omitempty"`
 	CreatedAt   int64   `json:"createdAt,omitempty"` // unix 秒
+
+	// PrimaryIP 是**服务端观测到**的 agent 来源 IP（详见 entity.Device.PrimaryIP）。
+	//
+	// 放在 DeviceResp 而**不**放 DeviceListItem：列表页已有主机名/OS/架构/在线/
+	// 启停/水位等列，再加 IP 会挤压操作列；而 IP 的价值场景（定位设备、SSH）
+	// 都在详情页发生。列表若需要，后续按需再提列即可。
+	//
+	// omitempty：未观测到时整个字段不出现（老设备在升级本版本前 enroll 的行、
+	// 或测试态未接管 socket）—— 与水位三字段同一约定，前端显示「—」，
+	// **不臆造空串**。
+	PrimaryIP string `json:"primaryIp,omitempty"`
+
+	// OfflineThresholdSec 是**后端实际生效**的离线判定阈值（秒），来自
+	// sys.agent.offlineThreshold（可热更）。
+	//
+	// 为什么必须由后端给出、而不是前端写死 30：阈值可热更，前端硬编码会在
+	// 后端热更后与之**静默矛盾** —— UI 说「30 秒内未上报即离线」，而判定
+	// 其实已按 60 秒算。这比不显示阈值更糟：它看起来是个可信的数字。
+	// 与 onlineSince 同源下发，保证「响应里的 online」与「UI 文案」永远同口径。
+	OfflineThresholdSec int `json:"offlineThresholdSec,omitempty"`
 }
 
 // DeviceMetricPoint 是趋势/下钻的一个桶。

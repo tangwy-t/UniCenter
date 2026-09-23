@@ -27,6 +27,13 @@ type Device struct {
 	TokenHash  string     `gorm:"column:token_hash;size:64;uniqueIndex:uk_device_token"       json:"-"`
 	BootTime   int64      `gorm:"column:boot_time"                                           json:"bootTime"`
 	LastSeenAt *time.Time `gorm:"column:last_seen_at;index:idx_device_last_seen"             json:"lastSeenAt"`
+
+	// PrimaryIP 是**服务端观测到**的 agent 来源 IP（不含端口/掩码）。
+	// 取自 WS 升级握手时的 ClientIP（代理感知：trustedProxies 非空时读
+	// X-Forwarded-For/X-Real-IP，否则取对端地址），**不来自 hello 载荷**——
+	// 载荷里的 IP 是客户端自述，不可作为定位依据。
+	// 空串表示「尚未观测到」（老设备在升级前 enroll 的行）。
+	PrimaryIP string `gorm:"column:primary_ip;size:64" json:"primaryIp,omitempty"`
 }
 
 // TableName 见 entity 包约定：表名不带 sys_ 前缀（业务域实体）。

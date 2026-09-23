@@ -315,6 +315,12 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 	agentQuerySvc := service.NewAgentMetricsQueryService(
 		rawStore, deviceMetricRepo, deviceResourceRepo, agentPolicy, log)
 	deviceSvc := service.NewDeviceService(deviceRepo, deviceResourceRepo, rawStore, latestStore, configSvc, log)
+	// 总览服务复用**同一批**依赖实例（deviceRepo/latestStore/rawStore/agentPolicy/
+	// configSvc），故总览与详情页对同一 range/同一列/同一在线阈值的解释必然一致。
+	// 注入 agentPolicy（而不是另建一个 policy）是关键：它内部每次调用都读配置，
+	// 与 agentQuerySvc 共享后，改 reportInterval 会**同时**影响两页的栅格。
+	deviceOverviewSvc := service.NewDeviceOverviewService(
+		deviceRepo, latestStore, deviceMetricRepo, rawStore, agentPolicy, configSvc, log)
 
 	// ── Agent 后台服务（5m 落库 / 1h 回滚 / 6 张表分区对账）─────────────
 	// flush 与 rollup **显式**注入同一个 Redis 客户端：两者消费同一族水位
@@ -447,7 +453,7 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 	fileHdl := handler.NewFileHandler(fileSvc)
 	// 设备 handler 注入两个依赖：管理域 deviceSvc + 查询域 agentQuerySvc。
 	// 两者不能混用（管理域不查指标表，查询域不查设备表），故不合并成一个大接口。
-	deviceHdl := handler.NewDeviceHandler(deviceSvc, agentQuerySvc)
+	deviceHdl := handler.NewDeviceHandler(deviceSvc, agentQuerySvc, deviceOverviewSvc)
 	serverMonitorHdl := handler.NewServerMonitorHandler(log, serverstats.NewHistoryStore(redis))
 
 	// 服务器监控的采样协程随进程退出:drain 阶段优雅停止(幂等 Close)。
