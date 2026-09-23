@@ -16,12 +16,14 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
 	"github.com/tangwy-t/UniCenter/uni_agent/internal/collect"
 	"github.com/tangwy-t/UniCenter/uni_agent/internal/config"
 	"github.com/tangwy-t/UniCenter/uni_agent/internal/transport"
+	"github.com/tangwy-t/UniCenter/uni_agent/internal/upgrade"
 )
 
 func main() {
@@ -32,9 +34,38 @@ func main() {
 }
 
 func run() error {
+	// -self-check：打印版本后退出。**必须在解析配置之前**处理 —— 它是给
+	// 「冒烟自检」与人工查询用的（`uni_agent -self-check` 回答「这份二进制是哪一版」），
+	// 不该因为缺配置而失败。
+	if len(os.Args) > 1 && os.Args[1] == "-self-check" {
+		fmt.Println(upgrade.SelfCheck(config.DefaultVersion))
+		return nil
+	}
+
 	cfg, err := config.Load(os.Args[1:])
 	if err != nil {
 		return err
+	}
+	log := newLogger()
+
+	// ── 升级事务检查：**读配置之后、连网之前** ────────────────────────
+	//
+	// 放在这里而不是更早，是因为它要用 state-dir（配置的一部分）。但它必须在
+	// 建立连接之前跑完：一个「起来就崩」的新版本要在连网之前就判定自己该退回，
+	// 而不是先连一次再退。
+	restart, err := upgrade.CheckOnStartup(upgrade.Deps{
+		StateDir: cfg.StateDir,
+		Log:      log,
+		Exec:     syscall.Exec,
+	})
+	if err != nil {
+		log.Warn("upgrade startup check failed", "err", err.Error())
+	}
+	if restart {
+		// 回滚已经完成（备份已还原）。此处**退出**而不是继续跑：退出后由服务管理器
+		// （systemd Restart=always）拉起的就是还原后的旧版本；直接继续跑的话，
+		// 内存里仍是那份有问题的新版本代码。
+		return errors.New("已回滚到上一版本，退出以便重新启动")
 	}
 
 	store, err := config.NewStore(cfg.StateDir)
@@ -45,8 +76,6 @@ func run() error {
 	if err != nil {
 		return err
 	}
-
-	log := newLogger()
 
 	// 采集器与传输层互相需要一点点状态（积压数、连接数），用回调解开循环依赖。
 	col := collect.New(collect.Options{Interval: cfg.ReportInterval})
@@ -63,6 +92,29 @@ func run() error {
 		Logger:            log,
 	})
 	client.SetHello(hello)
+
+	// ── 升级运行时 ────────────────────────────────────────────────────
+	// 它由连接层驱动（指令来自 hello_ack 内嵌或 core.agent.upgrade 推送），
+	// 自身不持有连接：连接的状态机、退避、读循环都归 transport，运行时只管
+	// 「拿到目标之后做什么」。三个连接侧事件（指令/连上/连失败）由 hook 注入。
+	downloadBase, err := cfg.DownloadBaseURL()
+	if err != nil {
+		// 推导失败不阻断启动：存量设备仍要能上报指标，升级只是可选能力。
+		log.Warn("cannot derive download base, auto-upgrade disabled", "err", err.Error())
+	}
+	upgradeRuntime := upgrade.New(upgrade.Deps{
+		Version:      cfg.AgentVersion,
+		StateDir:     cfg.StateDir,
+		DownloadBase: downloadBase,
+		Token:        client.AgentToken,
+		SendStatus:   client.SendUpgradeStatus,
+		SaveToken:    store.SaveAgentToken,
+		Log:          log,
+		GOOS:         runtime.GOOS,
+		JitterMax:    30 * time.Second,
+	})
+	client.SetHook(upgradeRuntime)
+
 	col.SetBacklogSource(
 		func() int64 { return int64(client.Pending()) },
 		func() int64 { return int64(client.DropCount()) },
@@ -75,6 +127,7 @@ func run() error {
 		"hostname", hello.Hostname,
 		"interval", cfg.ReportInterval.String(),
 		"hasToken", store.AgentToken() != "",
+		"downloadBase", downloadBase,
 	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

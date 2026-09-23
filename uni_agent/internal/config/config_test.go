@@ -168,3 +168,62 @@ func TestEnvDur(t *testing.T) {
 		t.Errorf("非法值应回落默认值，实际 %v", got)
 	}
 }
+
+// TestVersionComesOnlyFromBuild 钉住「版本只有一个来源」这条纪律。
+//
+// 背景（现场的真实故障）：unit 文件里写死 `-version 0.1.0` 时，升级后的新进程
+// 仍自称 0.1.0 → 服务端据此认为「没升上去」→ 无限重下重装。
+// 删掉标志之后，那种 unit 会**启动即报错**（未知标志），比悄悄死循环好得多。
+func TestVersionComesOnlyFromBuild(t *testing.T) {
+	// -version 必须被拒（未知标志）。
+	if _, err := Load([]string{"-url", "ws://x/api/v1/agent/ws", "-version", "9.9.9"}); err == nil {
+		t.Fatal("-version 必须被拒绝：它会让升级后的进程自称旧版本，造成无限重装")
+	}
+	// 环境变量同样不再被读取。
+	t.Setenv("UNI_AGENT_VERSION", "9.9.9")
+	cfg, err := Load([]string{"-url", "ws://x/api/v1/agent/ws"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AgentVersion != DefaultVersion {
+		t.Fatalf("版本只能来自编译期注入，实得 %q", cfg.AgentVersion)
+	}
+	if DefaultVersion != "dev" {
+		t.Fatalf("未注入时的默认版本应是 dev（不谎称某个正式版本），实得 %q", DefaultVersion)
+	}
+}
+
+// TestDownloadBaseDerivation 钉住下载基址的推导规则：ws→http、wss→https，
+// 且**只取主机**（上报路径与下载路径不同，不能把路径一起搬过去）。
+func TestDownloadBaseDerivation(t *testing.T) {
+	cases := []struct {
+		url, explicit, want string
+		wantErr             bool
+	}{
+		{url: "ws://127.0.0.1:8088/api/v1/agent/ws", want: "http://127.0.0.1:8088"},
+		{url: "wss://core.example.com/api/v1/agent/ws", want: "https://core.example.com"},
+		{url: "http://core:8088/api/v1/agent/ws", want: "http://core:8088"},
+		// 反代形态（无端口、无路径前缀）：主机即对外地址。
+		{url: "ws://core/api/v1/agent/ws", want: "http://core"},
+		// 显式配置优先（core 的下载入口与上报入口不同源时用）。
+		{url: "ws://10.0.0.1:8088/api/v1/agent/ws", explicit: "http://dl.example.com:9000/",
+			want: "http://dl.example.com:9000"},
+		{url: "tcp://weird", wantErr: true},
+	}
+	for _, c := range cases {
+		cfg := &Config{URL: c.url, DownloadBase: c.explicit}
+		got, err := cfg.DownloadBaseURL()
+		if c.wantErr {
+			if err == nil {
+				t.Fatalf("%q 应推导失败", c.url)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("%q 推导失败: %v", c.url, err)
+		}
+		if got != c.want {
+			t.Fatalf("%q 推导为 %q，期望 %q", c.url, got, c.want)
+		}
+	}
+}

@@ -45,6 +45,24 @@ type Config struct {
 	HeartbeatInterval time.Duration
 	// Logger 可为空。
 	Logger Logger
+	// Hook 是升级运行时与连接生命周期的接点（可为 nil —— agent 不装配升级能力时
+	// 一切照旧，新协议消息只是被忽略）。
+	Hook UpgradeHook
+}
+
+// UpgradeHook 是升级运行时需要的三个连接侧事件。
+//
+// 为什么用「事件」而不是让运行时自己去看连接：连接状态的所有权在本包（状态机、
+// 退避、读循环都在这儿），让运行时另开一条路去探测会变成两份实现。
+type UpgradeHook interface {
+	// OnDirective 收到一次升级指令（hello_ack 内嵌或 core.agent.upgrade 推送）。
+	// 实现必须是**非阻塞**的：它在读循环里被调用，阻塞会拖住整条连接的读。
+	OnDirective(d *agentproto.UpgradeDirective)
+	// OnConnected 握手完成（hello_ack 被接受）。升级事务靠它确认「新版本确实连上了」。
+	OnConnected()
+	// OnConnectFailed 一次连接尝试失败（拨号失败、握手失败或握手期间断开）。
+	// 用于试用期满后的探测计数（D3：先探测几次再回滚，避免 core 停机被误判）。
+	OnConnectFailed()
 }
 
 // Logger 是本包依赖的最小日志接口（避免把 zap 拖进 agent）。
@@ -70,6 +88,12 @@ type Client struct {
 	reportInterval time.Duration
 
 	sendCh chan *agentproto.MetricsSample
+	// controlCh 投递**非指标**消息（升级状态上报）。
+	//
+	// 与样本队列分开：样本队列的目的是「断线补发最近 5 分钟」，而状态上报只关心
+	// 「现在」—— 排在 30 个陈旧样本后面毫无意义（那时阶段早已跃迁）。分开之后
+	// 它还能被写循环的 select 立即取走，不必等下一次上报 tick。
+	controlCh chan *agentproto.Message
 	// dropCount 统计因积压被丢弃的样本数（spec §4.3：drop-oldest 保最新）。
 	dropCount uint64
 
@@ -81,6 +105,37 @@ type Client struct {
 // 环形缓冲容量：spec §4.3 默认「最近 5min」。上报周期 10s → 30 个样本。
 const outboxCap = 30
 
+// controlCap 是控制消息队列深度。小容量是刻意的：状态上报是「最新状态覆盖旧状态」
+// 的语义，积压一串历史状态没有意义；满了丢最旧的一条（下一次阶段跃迁还会再报）。
+const controlCap = 8
+
+// SendUpgradeStatus 上报一次升级状态（**永不阻塞**：队列满则丢最旧的一条）。
+//
+// 返回错误只在消息本身构造失败（无法序列化）时出现 —— 那种情况是代码缺陷，
+// 不是运行时状况。
+func (c *Client) SendUpgradeStatus(st *agentproto.UpgradeStatus) error {
+	msg, err := agentproto.NewMessage(newID(), agentproto.TypeAgentUpgradeStatus, st)
+	if err != nil {
+		return err
+	}
+	select {
+	case c.controlCh <- msg:
+		return nil
+	default:
+	}
+	// 满了：丢最旧的再放（与样本队列同款取向，但这里丢的是**旧状态**）。
+	select {
+	case <-c.controlCh:
+	default:
+	}
+	select {
+	case c.controlCh <- msg:
+	default:
+		c.log.Warn("upgrade status dropped (control queue full)", "state", st.State)
+	}
+	return nil
+}
+
 // New 构造客户端。
 func New(cfg Config) *Client {
 	if cfg.Logger == nil {
@@ -90,10 +145,11 @@ func New(cfg Config) *Client {
 		cfg.HeartbeatInterval = 30 * time.Second
 	}
 	return &Client{
-		cfg:    cfg,
-		log:    cfg.Logger,
-		state:  stateConnecting,
-		sendCh: make(chan *agentproto.MetricsSample, outboxCap),
+		cfg:       cfg,
+		log:       cfg.Logger,
+		state:     stateConnecting,
+		sendCh:    make(chan *agentproto.MetricsSample, outboxCap),
+		controlCh: make(chan *agentproto.Message, controlCap),
 	}
 }
 
@@ -374,6 +430,31 @@ func (c *Client) handleFrame(raw []byte) {
 		}
 		c.state = stateActive
 		c.mu.Unlock()
+		// 顺序要紧：先确认「连上了」（升级事务据此确认新版本可用），再处理指令。
+		// 反过来的话，一台刚确认就崩的设备仍会把自己标记成「升级成功」。
+		if c.cfg.Hook != nil {
+			c.cfg.Hook.OnConnected()
+		}
+		if ack.Upgrade != nil && c.cfg.Hook != nil {
+			c.cfg.Hook.OnDirective(ack.Upgrade)
+		}
+	case agentproto.TypeCoreAgentUpgrade:
+		// 升级指令的**即时催办**（hello_ack 是声明式对账，这条只是让在线设备
+		// 不必等下一次重连）。方向校验走 DecodeTypedFor：core.* 出现在 agent 侧
+		// 是正常的（这条就是），但载荷必须真的是 core→agent 方向登记的类型。
+		decoded, err := agentproto.DecodeTypedFor(m, agentproto.DirCoreToAgent)
+		if err != nil {
+			c.log.Warn("bad upgrade directive", "err", err.Error())
+			return
+		}
+		d, ok := decoded.(*agentproto.UpgradeDirective)
+		if !ok {
+			c.log.Warn("upgrade directive type mismatch")
+			return
+		}
+		if c.cfg.Hook != nil {
+			c.cfg.Hook.OnDirective(d)
+		}
 	default:
 		// 未知/未处理的类型：忽略（不关连接）。
 		c.log.Debug("ignoring frame", "type", m.Type)
@@ -394,6 +475,15 @@ func (c *Client) sendHello(ws *websocket.Conn) error {
 		return fmt.Errorf("build hello: %w", err)
 	}
 	return c.writeJSON(ws, msg)
+}
+
+// SetHook 注入升级运行时（必须在 Run 之前调用）。
+//
+// 与 SetHello 同一契约：Hook 在连接生命周期里被读，运行中替换它没有意义。
+func (c *Client) SetHook(h UpgradeHook) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cfg.Hook = h
 }
 
 // SetHello 注入 hello 载荷（InstanceID/Hostname/OS/... 与凭据）。
@@ -453,6 +543,12 @@ func (c *Client) writeLoop(ctx context.Context, ws *websocket.Conn, interval tim
 			return nil
 		case <-ctx.Done():
 			return ctx.Err()
+		case msg := <-c.controlCh:
+			// 控制消息即时发（不排队等上报 tick）：升级阶段的跃迁要尽快让服务端
+			// 看见，而 10 秒的上报周期对状态面板来说太慢。
+			if err := c.writeJSON(ws, msg); err != nil {
+				return err
+			}
 		case <-ticker.C:
 			// 一次 tick 把积压的样本**全部**发出去（重连后补发），
 			// 而不是只发一个：否则断线 5 分钟攒下的 30 个样本要 5 分钟才追平。

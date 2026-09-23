@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -28,8 +29,35 @@ type Config struct {
 	// 必须**跨重启保留**：instance id 变了，core 会把它当成一台新设备，
 	// 于是每次重启都多出一台「幽灵设备」。
 	StateDir string
-	// AgentVersion 是上报给 core 的版本号。
+	// AgentVersion 是上报给 core 的版本号（**编译期注入**，不可配置，见 DefaultVersion）。
 	AgentVersion string
+	// DownloadBase 是程序包下载基址（形如 http://host:8088）；空表示由 URL 推导。
+	DownloadBase string
+}
+
+// DownloadBaseURL 返回下载基址（不含路径）：显式配置优先，否则由 -url 推导。
+//
+// ws→http、wss→https，并**只取主机部分** —— 上报地址的路径（/api/v1/agent/ws）
+// 与下载地址的路径（/api/v1/agent/releases/...）不同，推导时不能把路径一起搬过去。
+func (c *Config) DownloadBaseURL() (string, error) {
+	if c.DownloadBase != "" {
+		return strings.TrimRight(c.DownloadBase, "/"), nil
+	}
+	u, err := url.Parse(c.URL)
+	if err != nil {
+		return "", fmt.Errorf("解析 -url 以推导下载基址: %w", err)
+	}
+	switch u.Scheme {
+	case "ws":
+		u.Scheme = "http"
+	case "wss":
+		u.Scheme = "https"
+	case "http", "https":
+		// 已经是 http(s)：原样用（有人会把 URL 写成 http 形式）。
+	default:
+		return "", fmt.Errorf("无法从 %q 推导下载基址（协议 %q 不认识）", c.URL, u.Scheme)
+	}
+	return u.Scheme + "://" + u.Host, nil
 }
 
 // 默认值。上报周期与 core 侧 sys.agent.reportInterval 保持一致（10s）：
@@ -38,8 +66,19 @@ const (
 	DefaultReportInterval    = 10 * time.Second
 	DefaultHeartbeatInterval = 30 * time.Second
 	DefaultStateDir          = "/var/lib/uni_agent"
-	DefaultVersion           = "0.1.0"
 )
+
+// DefaultVersion 是**编译期注入**的版本号（`-X .../internal/config.DefaultVersion=vX.Y.Z`）。
+//
+// 必须是 var 而不是 const：ldflags 只能注入变量。默认值刻意是 `dev` 而不是某个
+// 具体版本号 —— 一个没注入版本号的构建若自称 0.2.0，控制台会认为它已经是最新的，
+// 而真相是「这份二进制不知道自己是哪来的」。
+//
+// **版本只有一个来源**：曾经有 `-version` 标志与环境变量可以覆盖它，那条路被删掉了。
+// 理由是现场的真实故障：unit 文件里写死 `-version 0.1.0` 时，升级后的新进程仍自称
+// 0.1.0，服务端据此认为「没升上去」→ 无限重下重装。删掉标志之后，那种 unit 会
+// **启动即报错**（未知标志），比悄悄死循环好得多。
+var DefaultVersion = "dev"
 
 // Load 解析命令行与环境变量。
 func Load(args []string) (*Config, error) {
@@ -50,7 +89,11 @@ func Load(args []string) (*Config, error) {
 		interval = fs.Duration("interval", envDur("UNI_AGENT_REPORT_INTERVAL", DefaultReportInterval), "上报周期")
 		hb       = fs.Duration("heartbeat", envDur("UNI_AGENT_HEARTBEAT_INTERVAL", DefaultHeartbeatInterval), "心跳周期")
 		stateDir = fs.String("state-dir", envStr("UNI_AGENT_STATE_DIR", DefaultStateDir), "状态目录（存 instance id 与 agent token）")
-		version  = fs.String("version", DefaultVersion, "agent 版本号")
+		// downloadBase 只在「core 的下载入口与上报入口不同源」时才需要（例如上报走
+		// 内网直连、下载走对外域名）。缺省由 -url 推导同源地址，服务端因此不必知道
+		// 自己的对外地址（设计 §4）。
+		downloadBase = fs.String("download-base", envStr("UNI_AGENT_DOWNLOAD_BASE", ""),
+			"程序包下载基址（缺省由 -url 推导，如 http://host:8088）")
 	)
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -62,7 +105,8 @@ func Load(args []string) (*Config, error) {
 		ReportInterval:    *interval,
 		HeartbeatInterval: *hb,
 		StateDir:          *stateDir,
-		AgentVersion:      *version,
+		AgentVersion:      DefaultVersion,
+		DownloadBase:      strings.TrimSpace(*downloadBase),
 	}
 	if cfg.URL == "" {
 		return nil, errors.New("缺少 -url（或环境变量 UNI_AGENT_URL）")
