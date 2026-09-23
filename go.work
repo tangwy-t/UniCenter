@@ -1,6 +1,7 @@
 go 1.26
 
 use (
+	./uni_agent
 	./uni_core
 	./uni_protocol
 )
