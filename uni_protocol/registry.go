@@ -17,6 +17,8 @@ var typeRegistry = []TypeSpec{
 	{Type: TypeCoreHelloAck, Direction: DirCoreToAgent, Kind: KindPayload, New: func() any { return &HelloAck{} }},
 	{Type: TypeAgentHeartbeat, Direction: DirAgentToCore, Kind: KindEmpty, New: func() any { return &Heartbeat{} }},
 	{Type: TypeAgentReportMetrics, Direction: DirAgentToCore, Kind: KindPayload, New: func() any { return &MetricsSample{} }},
+	{Type: TypeCoreAgentUpgrade, Direction: DirCoreToAgent, Kind: KindPayload, New: func() any { return &UpgradeDirective{} }},
+	{Type: TypeAgentUpgradeStatus, Direction: DirAgentToCore, Kind: KindPayload, New: func() any { return &UpgradeStatus{} }},
 }
 
 // AllTypes 返回按注册顺序排列的全部消息类型。

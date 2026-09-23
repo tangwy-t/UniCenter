@@ -16,6 +16,13 @@ type Hello struct {
 	CPUCores     int     `json:"cpu_cores,omitempty"`
 	MemTotalMB   float64 `json:"mem_total_mb,omitempty"`
 	BootTime     int64   `json:"boot_time,omitempty"`
+	// UpgradeSupported 表示「我这一版带升级运行时，可以被远程升级」。
+	//
+	// 为什么必须由设备自报而不是服务端按版本号猜：现场存量的 0.1.0 没有任何升级
+	// 能力，对着它下发目标版本会**毫无反应**（它不认识新字段与新消息）。有了这个
+	// 自报位，控制台可以据此禁用按钮并给出结论式提示，而不是让运维对着一个
+	// 「点了没动静」的界面猜原因。老 agent 不发该字段 → 零值 false，语义正确。
+	UpgradeSupported bool `json:"upgrade_supported,omitempty"`
 }
 
 // CredentialKind 描述 Hello 携带的凭据种类。
@@ -88,6 +95,12 @@ type HelloAck struct {
 	RejectReason   string `json:"reject_reason,omitempty"`
 	ServerTime     int64  `json:"server_time,omitempty"`
 	V              int    `json:"v,omitempty"`
+	// Upgrade 是本次握手携带的升级指令（无目标版本或该平台无产物时为 nil）。
+	//
+	// 放在 hello_ack 里而不是只靠 core.agent.upgrade 推送，是声明式模型的关键：
+	// hello_ack 是**每次重连都会到达**的那一帧，于是离线设备一上线就自动对账，
+	// 不需要服务端记得「哪些设备还没收到」。催办消息只是让在线设备不必等下一次重连。
+	Upgrade *UpgradeDirective `json:"upgrade,omitempty"`
 }
 
 // Validate 校验 HelloAck：accepted=true 必须有 device_id 且 report_interval 满足下限；
@@ -101,7 +114,16 @@ func (a *HelloAck) Validate() error {
 		if a.DeviceID == "" {
 			return decodeErr(StagePayload, "device_id", ErrMissingField)
 		}
+		// 指令只在「被接受」时有意义，故只在接受分支校验。
+		if a.Upgrade != nil {
+			return a.Upgrade.Validate()
+		}
 		return nil
+	}
+	// 被拒的连接里带升级指令是构造错误：agent 拿它没用（连都没连上），
+	// 而放任它会让人误以为「拒绝了但升级照样开始了」。
+	if a.Upgrade != nil {
+		return decodeErr(StagePayload, "upgrade", ErrInvalidPayload)
 	}
 	if a.RejectReason == "" {
 		return decodeErr(StagePayload, "reject_reason", ErrMissingField)

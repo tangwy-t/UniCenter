@@ -33,6 +33,8 @@ func snapshottedDTOs() []struct {
 		{"NICMetric", NICMetric{}},
 		{"SensorMetric", SensorMetric{}},
 		{"AgentMetric", AgentMetric{}},
+		{"UpgradeDirective", UpgradeDirective{}},
+		{"UpgradeStatus", UpgradeStatus{}},
 	}
 }
 

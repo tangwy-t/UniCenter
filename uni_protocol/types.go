@@ -6,6 +6,10 @@ const (
 	TypeCoreHelloAck       = "core.hello_ack"
 	TypeAgentHeartbeat     = "agent.heartbeat"
 	TypeAgentReportMetrics = "agent.report.metrics"
+	// TypeCoreAgentUpgrade 是升级指令（也用于「立即对账」的催办）。
+	TypeCoreAgentUpgrade = "core.agent.upgrade"
+	// TypeAgentUpgradeStatus 是设备对一次升级尝试的状态汇报。
+	TypeAgentUpgradeStatus = "agent.upgrade.status"
 )
 
 // Direction 表示一条消息的允许方向。

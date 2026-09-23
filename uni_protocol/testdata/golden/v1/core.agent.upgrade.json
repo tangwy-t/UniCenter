@@ -1,0 +1,1 @@
+{"v":1,"id":"1700000000004","type":"core.agent.upgrade","ts":1700000000004,"data":{"request_id":"1234567890123456789","target_version":"0.2.0","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","size_bytes":24117248}}

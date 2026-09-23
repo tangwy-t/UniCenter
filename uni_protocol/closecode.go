@@ -20,6 +20,7 @@ const (
 	CloseRateLimited       = 4006 // 限流
 	CloseServerShutdown    = 4007 // 服务端停机，agent 应退避重连
 	CloseProtocolViolation = 4008 // hello 之前发其它消息 / 重复 hello
+	CloseUpgradeRetry      = 4009 // 服务端有新的升级目标，请立即重连对账
 )
 
 // MaxCloseReasonBytes 是 WebSocket 关闭原因串的字节上限。
@@ -35,6 +36,9 @@ var closeReasons = map[int]string{
 	CloseRateLimited:       "rate limited",
 	CloseServerShutdown:    "server shutting down",
 	CloseProtocolViolation: "protocol violation",
+	// 语义是「重连即可拿到新目标」，不是「服务端要停机」—— 两者混用会让
+	// agent 侧日志把一次正常的升级催办读成服务端故障。
+	CloseUpgradeRetry: "upgrade target changed, please reconnect",
 }
 
 // AllCloseCodes 返回升序排列的全部业务关闭码（不含 1000/1001）。

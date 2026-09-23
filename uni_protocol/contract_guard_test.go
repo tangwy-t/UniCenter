@@ -77,6 +77,10 @@ func typeNameOf(v any) string {
 		return "HelloAck"
 	case *MetricsSample:
 		return "MetricsSample"
+	case *UpgradeDirective:
+		return "UpgradeDirective"
+	case *UpgradeStatus:
+		return "UpgradeStatus"
 	default:
 		return ""
 	}

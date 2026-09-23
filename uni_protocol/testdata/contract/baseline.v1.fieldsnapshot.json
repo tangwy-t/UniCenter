@@ -257,6 +257,13 @@
       "type": "int64",
       "pointer": false,
       "omit_empty": true
+    },
+    {
+      "name": "UpgradeSupported",
+      "json": "upgrade_supported",
+      "type": "bool",
+      "pointer": false,
+      "omit_empty": true
     }
   ],
   "HelloAck": [
@@ -307,6 +314,13 @@
       "json": "v",
       "type": "int",
       "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Upgrade",
+      "json": "upgrade",
+      "type": "*agentproto.UpgradeDirective",
+      "pointer": true,
       "omit_empty": true
     }
   ],
@@ -558,6 +572,87 @@
       "json": "temperature_c",
       "type": "*float64",
       "pointer": true,
+      "omit_empty": true
+    }
+  ],
+  "UpgradeDirective": [
+    {
+      "name": "RequestID",
+      "json": "request_id",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "TargetVersion",
+      "json": "target_version",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "SHA256",
+      "json": "sha256",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "SizeBytes",
+      "json": "size_bytes",
+      "type": "int64",
+      "pointer": false,
+      "omit_empty": false
+    }
+  ],
+  "UpgradeStatus": [
+    {
+      "name": "RequestID",
+      "json": "request_id",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "State",
+      "json": "state",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "TargetVersion",
+      "json": "target_version",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "FromVersion",
+      "json": "from_version",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Progress",
+      "json": "progress",
+      "type": "*int",
+      "pointer": true,
+      "omit_empty": true
+    },
+    {
+      "name": "ReasonCode",
+      "json": "reason_code",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "ReasonDetail",
+      "json": "reason_detail",
+      "type": "string",
+      "pointer": false,
       "omit_empty": true
     }
   ]

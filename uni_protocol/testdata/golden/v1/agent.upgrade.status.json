@@ -1,0 +1,1 @@
+{"v":1,"id":"1700000000005","type":"agent.upgrade.status","ts":1700000000005,"data":{"request_id":"1234567890123456789","state":"downloading","target_version":"0.2.0","from_version":"0.1.0","progress":62}}

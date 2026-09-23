@@ -9,7 +9,7 @@ import (
 func TestCloseCodesAreStableAndInRange(t *testing.T) {
 	want := map[int]bool{
 		4000: true, 4001: true, 4002: true, 4003: true,
-		4004: true, 4005: true, 4006: true, 4007: true, 4008: true,
+		4004: true, 4005: true, 4006: true, 4007: true, 4008: true, 4009: true,
 	}
 	got := AllCloseCodes()
 	if len(got) != len(want) {
