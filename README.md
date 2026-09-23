@@ -206,7 +206,7 @@ Configuration follows a **file + environment override** dual approach (Viper; do
 | `DATABASE_PORT` | `3306` | MySQL 端口 / port |
 | `DATABASE_USER` | `root` | MySQL 用户 / user |
 | `DATABASE_PASSWORD` | `password` | MySQL 密码 / password |
-| `DATABASE_DBNAME` | `web_manager_framework` | 数据库名 / database name |
+| `DATABASE_DBNAME` | `uni_center` | 数据库名 / database name |
 | `REDIS_ADDR` | `host.docker.internal:6379` | Redis 地址 / address |
 | `SERVER_PORT` | `8088` | 后端映射端口 / backend mapped port |
 | `WEB_PORT` | `80` | 前端映射端口 / frontend mapped port |

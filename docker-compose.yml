@@ -37,8 +37,11 @@ services:
         VERSION: ${VERSION:-}
         BUILD_TIME: ${BUILD_TIME:-}
         COMMIT_HASH: ${COMMIT_HASH:-}
-    image: ${SERVER_IMAGE:-tangwy-t/uni_core}:${SERVER_IMAGE_TAG:-latest}
-    container_name: wmf-uni_core
+    image: ${SERVER_IMAGE:-uni-center-core}:${SERVER_IMAGE_TAG:-latest}
+    # 容器名带 uni-center- 前缀：此前用的 wmf-* 与仍在磁盘上的旧仓库
+    # (/home/workspace/WebManagerFramework) 的 compose 完全同名，
+    # 两个项目同时 up 会直接报 "container name is already in use" 而启动失败。
+    container_name: uni-center-core
     restart: unless-stopped
 
     # 环境变量覆盖配置键（viper 点号→下划线，优先级高于 config.docker.yaml）。
@@ -47,8 +50,19 @@ services:
       # 时区：与宿主机/MySQL/Redis 对齐（日志时间戳、time.Now()、DSN loc=Local）
       TZ: ${TZ:-Asia/Shanghai}
 
+      # admin 初始密码：v004 迁移建 admin 账号时读取（seed 侧键名为
+      # ADMIN_INITIAL_PASSWORD，见 migrations/v004_seed_admin_user.go）。
+      # ⚠️ 留空时 seed 会回退到内置默认值 admin123 —— 生产必须注入本项，
+      # 否则首个超级管理员是公开的弱口令。仅在**首次**迁移（空库）时生效，
+      # 之后改这里不会改已有账号的密码。
+      ADMIN_INITIAL_PASSWORD: ${ADMIN_INITIAL_PASSWORD:-}
+
       # ── 服务 ──
-      SERVER_PORT: ${SERVER_PORT:-8088}
+      # ⚠️ 端口固定 8088，不能用 ${SERVER_PORT} 覆盖：uni_console 的
+      # nginx.conf 里 proxy_pass http://uni_core:8088 是写死的，且下方
+      # expose 与 healthcheck 也都按 8088 编写；只改这里会让前端 502。
+      # 确需换端口请同步改 nginx.conf、expose、healthcheck 三处。
+      SERVER_PORT: 8088
       SERVER_MODE: release                          # 生产强制 release（禁用 swagger/pprof 文档面）
       SERVER_READTIMEOUT: ${SERVER_READTIMEOUT:-30}
       SERVER_WRITETIMEOUT: ${SERVER_WRITETIMEOUT:-60}
@@ -67,7 +81,9 @@ services:
       DATABASE_PORT: ${DATABASE_PORT:-3306}
       DATABASE_USER: ${DATABASE_USER:?生产环境必须设置 DATABASE_USER}
       DATABASE_PASSWORD: ${DATABASE_PASSWORD:?生产环境必须设置 DATABASE_PASSWORD}
-      DATABASE_DBNAME: ${DATABASE_DBNAME:-web_manager_framework}
+      # 默认值与 uni_core/configs/config.docker.yaml 的 dbname 保持一致
+      # （此前是旧库名 web_manager_framework，.env 未设该键时后端会连到不存在的库）。
+      DATABASE_DBNAME: ${DATABASE_DBNAME:-uni_center}
       DATABASE_CHARSET: ${DATABASE_CHARSET:-utf8mb4}
       DATABASE_SSLMODE: ${DATABASE_SSLMODE:-disable}   # 仅 postgres 使用
       DATABASE_SCHEMA: ${DATABASE_SCHEMA:-}            # 仅 postgres 使用（默认 public）
@@ -102,8 +118,9 @@ services:
       # 生产配置：以 config.docker.yaml 为基线（DB/Redis 走外部实例、日志 stdout），
       # 上面 environment 的键逐项覆盖。改配置请编辑该文件后 `docker compose up -d` 重建。
       - ./uni_core/configs/config.docker.yaml:/app/configs/config.yaml:ro
-      # 上传文件持久化：挂宿主机目录，容器重建/滚动升级不丢数据。
-      # 生产建议改用命名卷或对象存储（sys.file.backend=s3/minio/oss/cos）见 config.yaml。
+      # 上传文件持久化：命名卷 uploads-data（见文件末尾 volumes 段），
+      # 容器重建/滚动升级不丢数据，且不受宿主机目录权限差异影响。
+      # 需要多机共享或海量存储时改用对象存储（sys.file.backend=s3/minio/oss/cos，见 config.yaml）。
       - uploads-data:/app/uploads
 
     extra_hosts:
@@ -168,8 +185,8 @@ services:
         VITE_WITH_CREDENTIALS: ${VITE_WITH_CREDENTIALS:-false}
         VITE_OPEN_ROUTE_INFO: ${VITE_OPEN_ROUTE_INFO:-false}
         VITE_DROP_CONSOLE: ${VITE_DROP_CONSOLE:-true}
-    image: ${WEB_IMAGE:-tangwy-t/uni_console}:${WEB_IMAGE_TAG:-latest}
-    container_name: wmf-uni_console
+    image: ${WEB_IMAGE:-uni-center-console}:${WEB_IMAGE_TAG:-latest}
+    container_name: uni-center-console
     restart: unless-stopped
 
     environment:
@@ -230,7 +247,7 @@ services:
   # ── Jaeger v2 all-in-one（OTLP 采集 + 内存存储 + 查询 UI） ─────────────
   jaeger:
     image: jaegertracing/jaeger:2.20.0
-    container_name: wmf-jaeger
+    container_name: uni-center-jaeger
     profiles: ["tracing"]
     restart: unless-stopped
     environment:
@@ -256,14 +273,17 @@ services:
       - tracing
 
 # ── 命名卷：上传文件持久化（升级/重建不丢数据） ────────────────────────────
+# 名字取 uni-center-uploads：卷内容（2026/09 附件、avatars 头像）由本项目的
+# uni_core 写入，此前沿用了旧仓库名 wmf-uploads，与 /home/workspace/
+# WebManagerFramework 的 compose 指向同一卷，会造成两个项目共写一份上传数据。
 volumes:
   uploads-data:
-    name: wmf-uploads
+    name: uni-center-uploads
 
 # ── 网络：追踪堆栈内部隔离（uni_core 经 tracing 网络访问 Jaeger） ────────────
 # 默认桥接网络仍承载 uni_console↔uni_core 主链路。tracing 网络只服务追踪侧服务，
 # 使 Jaeger 与业务网络隔离，并让 uni_core 能以服务名 "jaeger" 解析。
 networks:
   tracing:
-    name: wmf-tracing
+    name: uni-center-tracing
     driver: bridge
