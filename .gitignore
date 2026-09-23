@@ -34,6 +34,7 @@ data/uploads/*
 .nest-test.mjs
 .css-dump.css
 .buildlog-*
+.zcode
 
 # ── Go 构建与缓存 ──
 .gocache/
