@@ -491,7 +491,7 @@
                   :title="
                     q.table
                       ? `涉及表：${q.table}${isSysTable(q.table) ? '（MySQL 系统库）' : ''}`
-                      : '无表名(事务/函数等)'
+                      : '该语句不涉及表（事务控制、函数调用等）'
                   "
                 >
                   {{ q.table || '—' }}

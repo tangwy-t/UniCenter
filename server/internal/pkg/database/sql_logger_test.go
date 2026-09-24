@@ -35,6 +35,22 @@ func TestExtractTable(t *testing.T) {
 		// 库名限定 / 反引号限定
 		{"SELECT * FROM web_manager_framework.sys_user LIMIT 1", "web_manager_framework.sys_user"},
 		{"SELECT * FROM `web_manager_framework`.`sys_user` LIMIT 1", "web_manager_framework.sys_user"},
+		// ── DDL：表名在 TABLE 之后（不在 FROM/JOIN/INTO/UPDATE 后面）──
+		// 这一组是慢查询实录「表名空白」那个缺陷的回归：此前 ALTER/CREATE/TRUNCATE
+		// 一条都提取不到，而部署时迁移与后台 job 的 DDL 会集中出现在慢查询里。
+		{"ALTER TABLE `device` ADD `target_agent_version` varchar(32)", "device"},
+		{"CREATE TABLE `agent_release` (`id` bigint unsigned, `version` varchar(32))", "agent_release"},
+		// 线上真实样本（分区维护 job）：表名与后面的 PARTITION 段都要能对上
+		{"ALTER TABLE device_metric_disk TRUNCATE PARTITION p2026_w34", "device_metric_disk"},
+		{"DROP TABLE IF EXISTS tmp_import", "tmp_import"},
+		// MySQL 的 TRUNCATE 可省 TABLE 关键字
+		{"TRUNCATE TABLE sys_login_log", "sys_login_log"},
+		{"TRUNCATE sys_login_log", "sys_login_log"},
+		// 索引的 DDL：表名在 ON 之后（不是 JOIN 的那个 ON）
+		{"CREATE INDEX idx_user_name ON sys_user (username)", "sys_user"},
+		{"CREATE UNIQUE INDEX `uk_device_token` ON `device` (`token_hash`)", "device"},
+		// DDL 与 DML 同时出现时以「被操作的表」为准（创建 x、读 y → x）
+		{"CREATE TABLE t_backup AS SELECT * FROM sys_user", "t_backup"},
 		// 无表语句
 		{"BEGIN", ""},
 		{"COMMIT", ""},
