@@ -130,6 +130,22 @@ const (
 	PermDeviceReleaseDelete  = "device:release:delete"
 )
 
+// ── Docker 管理 / docker:* ──────────────────────────────────────────────
+const (
+	PermDockerList    = "docker:list"
+	PermDockerInspect = "docker:inspect"
+	PermDockerManage  = "docker:manage"
+	PermDockerDelete  = "docker:delete"
+	// PermDockerConfig 是配置编辑（表单/YML）与回滚。
+	//
+	// ⚠ 威胁模型同 PermDockerExec：写 yml（image: evil + volumes: ["/:/host"]）+ up
+	// = 宿主机 root，且**比 exec 更持久**（每次 up 都重放）。两码同级独立授予、
+	// 只给管理员 —— 「写配置」不是低危能力。
+	PermDockerConfig = "docker:config"
+	// PermDockerExec 是终端（最高危，独立授予）。
+	PermDockerExec = "docker:exec"
+)
+
 // ── 缓存管理 / system:cache:* ────────────────────────────────────────────
 const (
 	PermCacheDelete = "system:cache:delete"
