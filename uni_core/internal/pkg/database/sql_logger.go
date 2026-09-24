@@ -157,6 +157,27 @@ func extractOp(sql string) string {
 	return strings.ToUpper(parts[0])
 }
 
+// reDDLTable 匹配 DDL 里 TABLE 之后的表名。
+//
+// 为什么单列一条：DDL 的表名不在 FROM/JOIN/INTO/UPDATE 后面（`ALTER TABLE x ADD …`、
+// `CREATE TABLE x (…)`、`TRUNCATE TABLE x`、`RENAME TABLE a TO b`），reTable 一条都匹配不到
+// —— 慢查询实录里那批「没有表名」的 ALTER/CREATE 就是它造成的（issue 现象：
+// 部署时迁移的加列建表 DDL 集中在慢查询里刷出来，表名整列空白）。
+//
+// 覆盖三条形态：
+//
+//	· `ALTER|CREATE|DROP|RENAME TABLE x`（含可选 `IF [NOT] EXISTS`）；
+//	· `TRUNCATE [TABLE] x`（MySQL 的 TABLE 关键字可省）；
+//	· `CREATE INDEX i ON x`（表名在 ON 之后 —— 与 JOIN 的 ON 不同，这里的 ON 后必是表）。
+var reDDLTable = regexp.MustCompile(
+	`(?i)\b(?:(?:ALTER|CREATE|DROP|RENAME)\s+TABLE|TRUNCATE(?:\s+TABLE)?)` +
+		`\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?[\x60"]?(\w+(?:[\x60"]*\.\s*[\x60"]?\w+)*)`)
+
+// reIndexOn 匹配 `CREATE [UNIQUE] INDEX i ON tbl` 里的表名（在 ON 之后）。
+var reIndexOn = regexp.MustCompile(
+	`(?i)\b(?:CREATE|DROP|ALTER)\s+(?:UNIQUE\s+|FULLTEXT\s+|SPATIAL\s+)?INDEX\s+` +
+		`[\x60"]?\w+[\x60"]?\s+ON\s+[\x60"]?(\w+(?:[\x60"]*\.\s*[\x60"]?\w+)*)`)
+
 // reTable 匹配 FROM/JOIN/INTO/UPDATE 后面的第一个表名。
 // GORM 生成的 SQL 表名会被反引号(或双引号)包裹,故词前允许一个可选的
 // 引号字符;词前还允许子查询左括号(如 FROM (SELECT ...) t);表名支持
@@ -169,9 +190,17 @@ var reTable = regexp.MustCompile(`(?i)(?:FROM|JOIN|INTO|UPDATE)\s+[\(\s]*[\x60"]
 var reSubqueryKeyword = regexp.MustCompile(`(?i)^(SELECT|INSERT|UPDATE|DELETE|UNION|WITH|EXISTS|VALUES|SET)$`)
 
 // extractTable 从 SQL 语句中提取表名。
+//
+// 顺序：**先 DDL，再 DML**。理由：`CREATE TABLE x AS SELECT … FROM y` 同时含两边的形态，
+// 而这条语句「动的是 x」（慢查询要回答的是「谁被操作」），故 DDL 命中即返回。
 // 依次检查所有 FROM/JOIN/INTO/UPDATE 候选,跳过子查询等关键字误匹配,
 // 兼容反引号/双引号包裹的表名(MySQL 常见写法),返回值剥离全部引号。
 func extractTable(sql string) string {
+	for _, re := range []*regexp.Regexp{reDDLTable, reIndexOn} {
+		if m := re.FindStringSubmatch(sql); len(m) >= 2 && m[1] != "" {
+			return strings.ReplaceAll(strings.ReplaceAll(m[1], "`", ""), `"`, "")
+		}
+	}
 	for _, m := range reTable.FindAllStringSubmatchIndex(sql, -1) {
 		if len(m) < 4 {
 			continue
