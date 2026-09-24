@@ -294,3 +294,61 @@ func TestDockerReadPayloadRoundTrip(t *testing.T) {
 		t.Fatalf("镜像 inspect 载荷解码不符: %+v", insp)
 	}
 }
+
+// 登记五处是机械的，但漏一处的后果各不相同：漏 registry → 解码报未知类型（**静默忽略**，
+// 现象是「docker 数据永远不出现」而不是报错）；漏 snapshot/typeNameOf → 契约守卫红；
+// 漏 baseline → 形状漂移不可见。故这里把「五条消息都已登记」钉成一条测试。
+func TestDockerMessageTypesAreRegistered(t *testing.T) {
+	want := map[string]Direction{
+		TypeAgentDockerState:  DirAgentToCore,
+		TypeCoreDockerCmd:     DirCoreToAgent,
+		TypeAgentDockerResult: DirAgentToCore,
+		TypeAgentDockerFrame:  DirAgentToCore,
+		TypeCoreDockerFrame:   DirCoreToAgent,
+	}
+	for ty, dir := range want {
+		spec, ok := LookupType(ty)
+		if !ok {
+			t.Fatalf("类型 %q 未登记进注册表", ty)
+		}
+		if spec.Direction != dir {
+			t.Fatalf("%q 方向应为 %v，实际 %v", ty, dir, spec.Direction)
+		}
+		if spec.Kind != KindPayload {
+			t.Fatalf("%q 应携带载荷", ty)
+		}
+		if typeNameOf(spec.New()) == "" {
+			t.Fatalf("%q 的载荷未在 typeNameOf 登记", ty)
+		}
+	}
+}
+
+// hello_ack 的 docker 块是**可选**字段：老 core 不带它时 agent 用内置默认值，
+// 故它必须是指针 + omitempty（additive-only 守卫也据此放行）。
+func TestHelloAckDockerBlockIsOptional(t *testing.T) {
+	shapes := map[string]FieldShape{}
+	for _, f := range Snapshot()["HelloAck"] {
+		shapes[f.Name] = f
+	}
+	f, ok := shapes["Docker"]
+	if !ok {
+		t.Fatal("HelloAck 缺少 Docker 字段")
+	}
+	if !f.Pointer || !f.OmitEmpty {
+		t.Fatalf("Docker 必须是指针 + omitempty（可选下发块），实际 %+v", f)
+	}
+	// 被拒的握手不得携带配置（与升级指令同一条纪律）
+	rejected := &HelloAck{Accepted: false, RejectReason: "x", Docker: &DockerConfig{ConfigVersion: 1}}
+	if err := rejected.Validate(); !errors.Is(err, ErrInvalidPayload) {
+		t.Fatalf("被拒的连接带 docker 配置必须被拒，实际 %v", err)
+	}
+	accepted := &HelloAck{Accepted: true, DeviceID: "1", ReportInterval: 10,
+		Docker: &DockerConfig{ConfigVersion: 3, Protected: "mysql", SnapshotInterval: 30, TransferDir: "/var/lib/uni_agent/transfer"}}
+	if err := accepted.Validate(); err != nil {
+		t.Fatalf("合法握手应通过: %v", err)
+	}
+	bad := &HelloAck{Accepted: true, DeviceID: "1", ReportInterval: 10, Docker: &DockerConfig{SnapshotInterval: 3}}
+	if err := bad.Validate(); !errors.Is(err, ErrInvalidPayload) {
+		t.Fatal("快照周期小于 10 秒的握手必须被拒")
+	}
+}

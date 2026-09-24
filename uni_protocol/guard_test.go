@@ -47,7 +47,8 @@ func TestRegistryIsCompleteAndConsistent(t *testing.T) {
 
 	// 反向：每个常量都必须在 AllTypes 里
 	for _, c := range []string{TypeAgentHello, TypeCoreHelloAck, TypeAgentHeartbeat, TypeAgentReportMetrics,
-		TypeCoreAgentUpgrade, TypeAgentUpgradeStatus} {
+		TypeCoreAgentUpgrade, TypeAgentUpgradeStatus,
+		TypeAgentDockerState, TypeCoreDockerCmd, TypeAgentDockerResult, TypeAgentDockerFrame, TypeCoreDockerFrame} {
 		if !seen[c] {
 			t.Fatalf("常量 %q 未登记进 AllTypes()（新增类型必须显式登记）", c)
 		}

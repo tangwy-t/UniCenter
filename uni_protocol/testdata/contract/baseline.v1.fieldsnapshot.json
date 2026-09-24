@@ -71,6 +71,43 @@
       "omit_empty": true
     }
   ],
+  "CoreDockerFrame": [
+    {
+      "name": "SessionID",
+      "json": "session_id",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Op",
+      "json": "op",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Data",
+      "json": "data",
+      "type": "[]uint8",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Cols",
+      "json": "cols",
+      "type": "int",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Rows",
+      "json": "rows",
+      "type": "int",
+      "pointer": false,
+      "omit_empty": true
+    }
+  ],
   "DiskIOMetric": [
     {
       "name": "Name",
@@ -155,6 +192,968 @@
       "name": "InodesUsedPercent",
       "json": "inodes_used_percent",
       "type": "float64",
+      "pointer": false,
+      "omit_empty": true
+    }
+  ],
+  "DockerCmd": [
+    {
+      "name": "Ref",
+      "json": "ref",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Action",
+      "json": "action",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Options",
+      "json": "options",
+      "type": "agentproto.DockerCmdOptions",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Confirm",
+      "json": "confirm",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    }
+  ],
+  "DockerCmdOptions": [
+    {
+      "name": "Target",
+      "json": "target",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Tail",
+      "json": "tail",
+      "type": "int",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Since",
+      "json": "since",
+      "type": "int64",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "N",
+      "json": "n",
+      "type": "*int",
+      "pointer": true,
+      "omit_empty": true
+    },
+    {
+      "name": "Force",
+      "json": "force",
+      "type": "bool",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Filename",
+      "json": "filename",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Overwrite",
+      "json": "overwrite",
+      "type": "bool",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "All",
+      "json": "all",
+      "type": "bool",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "RemoveOrphans",
+      "json": "remove_orphans",
+      "type": "bool",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Volumes",
+      "json": "volumes",
+      "type": "bool",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Content",
+      "json": "content",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "BaseHash",
+      "json": "base_hash",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Src",
+      "json": "src",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Dst",
+      "json": "dst",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Patch",
+      "json": "patch",
+      "type": "map[string]interface {}",
+      "pointer": false,
+      "omit_empty": true
+    }
+  ],
+  "DockerCmdResult": [
+    {
+      "name": "Ref",
+      "json": "ref",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "OK",
+      "json": "ok",
+      "type": "bool",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Error",
+      "json": "error",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Detail",
+      "json": "detail",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "SessionID",
+      "json": "session_id",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "AlreadyExists",
+      "json": "already_exists",
+      "type": "bool",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Payload",
+      "json": "payload",
+      "type": "[]uint8",
+      "pointer": false,
+      "omit_empty": true
+    }
+  ],
+  "DockerComposeFilePayload": [
+    {
+      "name": "Content",
+      "json": "content",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Hash",
+      "json": "hash",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Path",
+      "json": "path",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    }
+  ],
+  "DockerComposeInfo": [
+    {
+      "name": "Flavor",
+      "json": "flavor",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Version",
+      "json": "version",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    }
+  ],
+  "DockerConfig": [
+    {
+      "name": "ConfigVersion",
+      "json": "config_version",
+      "type": "uint64",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Protected",
+      "json": "protected",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "TransferDir",
+      "json": "transfer_dir",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "SnapshotInterval",
+      "json": "snapshot_interval",
+      "type": "int",
+      "pointer": false,
+      "omit_empty": true
+    }
+  ],
+  "DockerContainer": [
+    {
+      "name": "ID",
+      "json": "id",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Name",
+      "json": "name",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Image",
+      "json": "image",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "State",
+      "json": "state",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "StatusText",
+      "json": "status_text",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Created",
+      "json": "created",
+      "type": "int64",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "StartedAt",
+      "json": "started_at",
+      "type": "int64",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "CPUPercent",
+      "json": "cpu_percent",
+      "type": "float64",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "MemUsageMB",
+      "json": "mem_usage_mb",
+      "type": "float64",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "MemLimitMB",
+      "json": "mem_limit_mb",
+      "type": "float64",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "NetRXBytesSec",
+      "json": "net_rx_bytes_sec",
+      "type": "float64",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "NetTXBytesSec",
+      "json": "net_tx_bytes_sec",
+      "type": "float64",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "ComposeProject",
+      "json": "compose_project",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "ComposeService",
+      "json": "compose_service",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Ports",
+      "json": "ports",
+      "type": "[]agentproto.DockerPort",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Protected",
+      "json": "protected",
+      "type": "bool",
+      "pointer": false,
+      "omit_empty": false
+    }
+  ],
+  "DockerContainerInspectPayload": [
+    {
+      "name": "ID",
+      "json": "id",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Name",
+      "json": "name",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Image",
+      "json": "image",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "ImageID",
+      "json": "image_id",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Created",
+      "json": "created",
+      "type": "int64",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "State",
+      "json": "state",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "StartedAt",
+      "json": "started_at",
+      "type": "int64",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "FinishedAt",
+      "json": "finished_at",
+      "type": "int64",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "ExitCode",
+      "json": "exit_code",
+      "type": "*int",
+      "pointer": true,
+      "omit_empty": true
+    },
+    {
+      "name": "RestartPolicy",
+      "json": "restart_policy",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Env",
+      "json": "env",
+      "type": "[]string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Labels",
+      "json": "labels",
+      "type": "map[string]string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Ports",
+      "json": "ports",
+      "type": "[]agentproto.DockerPort",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Mounts",
+      "json": "mounts",
+      "type": "[]agentproto.DockerMount",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Entrypoint",
+      "json": "entrypoint",
+      "type": "[]string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Cmd",
+      "json": "cmd",
+      "type": "[]string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Health",
+      "json": "health",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Networks",
+      "json": "networks",
+      "type": "[]string",
+      "pointer": false,
+      "omit_empty": true
+    }
+  ],
+  "DockerFrame": [
+    {
+      "name": "SessionID",
+      "json": "session_id",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Seq",
+      "json": "seq",
+      "type": "uint64",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Data",
+      "json": "data",
+      "type": "[]uint8",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "EOF",
+      "json": "eof",
+      "type": "bool",
+      "pointer": false,
+      "omit_empty": true
+    }
+  ],
+  "DockerImage": [
+    {
+      "name": "ID",
+      "json": "id",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "RepoTags",
+      "json": "repo_tags",
+      "type": "[]string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "SizeMB",
+      "json": "size_mb",
+      "type": "float64",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Created",
+      "json": "created",
+      "type": "int64",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "InUse",
+      "json": "in_use",
+      "type": "bool",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Dangling",
+      "json": "dangling",
+      "type": "bool",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "InUseBy",
+      "json": "in_use_by",
+      "type": "[]string",
+      "pointer": false,
+      "omit_empty": true
+    }
+  ],
+  "DockerImageInspectPayload": [
+    {
+      "name": "ID",
+      "json": "id",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "RepoTags",
+      "json": "repo_tags",
+      "type": "[]string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "SizeBytes",
+      "json": "size_bytes",
+      "type": "int64",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Created",
+      "json": "created",
+      "type": "int64",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Architecture",
+      "json": "architecture",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "OS",
+      "json": "os",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Labels",
+      "json": "labels",
+      "type": "map[string]string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Env",
+      "json": "env",
+      "type": "[]string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "ExposedPorts",
+      "json": "exposed_ports",
+      "type": "[]string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Entrypoint",
+      "json": "entrypoint",
+      "type": "[]string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Cmd",
+      "json": "cmd",
+      "type": "[]string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "History",
+      "json": "history",
+      "type": "[]agentproto.DockerImageLayer",
+      "pointer": false,
+      "omit_empty": true
+    }
+  ],
+  "DockerImageLayer": [
+    {
+      "name": "SizeBytes",
+      "json": "size_bytes",
+      "type": "int64",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Created",
+      "json": "created",
+      "type": "int64",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "CreatedBy",
+      "json": "created_by",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "EmptyLayer",
+      "json": "empty_layer",
+      "type": "bool",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Comment",
+      "json": "comment",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    }
+  ],
+  "DockerLogsPayload": [
+    {
+      "name": "Lines",
+      "json": "lines",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Truncated",
+      "json": "truncated",
+      "type": "bool",
+      "pointer": false,
+      "omit_empty": true
+    }
+  ],
+  "DockerMount": [
+    {
+      "name": "Type",
+      "json": "type",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Source",
+      "json": "source",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Destination",
+      "json": "destination",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Mode",
+      "json": "mode",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "RW",
+      "json": "rw",
+      "type": "bool",
+      "pointer": false,
+      "omit_empty": false
+    }
+  ],
+  "DockerNetwork": [
+    {
+      "name": "Name",
+      "json": "name",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Driver",
+      "json": "driver",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Scope",
+      "json": "scope",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Internal",
+      "json": "internal",
+      "type": "bool",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "ContainersCount",
+      "json": "containers_count",
+      "type": "int",
+      "pointer": false,
+      "omit_empty": false
+    }
+  ],
+  "DockerPort": [
+    {
+      "name": "IP",
+      "json": "ip",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "PrivatePort",
+      "json": "private_port",
+      "type": "int",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "PublicPort",
+      "json": "public_port",
+      "type": "int",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Type",
+      "json": "type",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    }
+  ],
+  "DockerProject": [
+    {
+      "name": "Name",
+      "json": "name",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "ConfigFiles",
+      "json": "config_files",
+      "type": "[]string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "State",
+      "json": "state",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Services",
+      "json": "services",
+      "type": "int",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "ContainersCount",
+      "json": "containers_count",
+      "type": "int",
+      "pointer": false,
+      "omit_empty": false
+    }
+  ],
+  "DockerState": [
+    {
+      "name": "T",
+      "json": "t",
+      "type": "int64",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "DockerOK",
+      "json": "docker_ok",
+      "type": "bool",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Error",
+      "json": "error",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Compose",
+      "json": "compose",
+      "type": "*agentproto.DockerComposeInfo",
+      "pointer": true,
+      "omit_empty": true
+    },
+    {
+      "name": "Containers",
+      "json": "containers",
+      "type": "[]agentproto.DockerContainer",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Images",
+      "json": "images",
+      "type": "[]agentproto.DockerImage",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Volumes",
+      "json": "volumes",
+      "type": "[]agentproto.DockerVolume",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Networks",
+      "json": "networks",
+      "type": "[]agentproto.DockerNetwork",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Projects",
+      "json": "projects",
+      "type": "[]agentproto.DockerProject",
+      "pointer": false,
+      "omit_empty": false
+    }
+  ],
+  "DockerVolume": [
+    {
+      "name": "Name",
+      "json": "name",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Driver",
+      "json": "driver",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "SizeMB",
+      "json": "size_mb",
+      "type": "*float64",
+      "pointer": true,
+      "omit_empty": true
+    },
+    {
+      "name": "InUse",
+      "json": "in_use",
+      "type": "bool",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "MountedBy",
+      "json": "mounted_by",
+      "type": "[]string",
       "pointer": false,
       "omit_empty": true
     }
@@ -320,6 +1319,13 @@
       "name": "Upgrade",
       "json": "upgrade",
       "type": "*agentproto.UpgradeDirective",
+      "pointer": true,
+      "omit_empty": true
+    },
+    {
+      "name": "Docker",
+      "json": "docker",
+      "type": "*agentproto.DockerConfig",
       "pointer": true,
       "omit_empty": true
     }

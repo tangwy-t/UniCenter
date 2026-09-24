@@ -10,6 +10,17 @@ const (
 	TypeCoreAgentUpgrade = "core.agent.upgrade"
 	// TypeAgentUpgradeStatus 是设备对一次升级尝试的状态汇报。
 	TypeAgentUpgradeStatus = "agent.upgrade.status"
+	// ── Docker 管理（v1.2.0 新增）────────────────────────────────────────
+	// TypeAgentDockerState 是资源快照（周期上报；Docker 不可达时也发，带 docker_ok=false）。
+	TypeAgentDockerState = "agent.docker.state"
+	// TypeCoreDockerCmd 是一条 Docker 操作指令（ref 关联）。
+	TypeCoreDockerCmd = "core.docker.cmd"
+	// TypeAgentDockerResult 是指令结果（ref 回关联）。
+	TypeAgentDockerResult = "agent.docker.result"
+	// TypeAgentDockerFrame 是流会话的数据帧（日志 chunk / PTY 输出共用）。
+	TypeAgentDockerFrame = "agent.docker.frame"
+	// TypeCoreDockerFrame 是流会话的控制帧（input / resize / cancel）。
+	TypeCoreDockerFrame = "core.docker.frame"
 )
 
 // Direction 表示一条消息的允许方向。

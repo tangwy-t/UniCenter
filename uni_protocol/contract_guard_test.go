@@ -81,6 +81,16 @@ func typeNameOf(v any) string {
 		return "UpgradeDirective"
 	case *UpgradeStatus:
 		return "UpgradeStatus"
+	case *DockerState:
+		return "DockerState"
+	case *DockerCmd:
+		return "DockerCmd"
+	case *DockerCmdResult:
+		return "DockerCmdResult"
+	case *DockerFrame:
+		return "DockerFrame"
+	case *CoreDockerFrame:
+		return "CoreDockerFrame"
 	default:
 		return ""
 	}
@@ -278,4 +288,23 @@ func FuzzEncode(f *testing.F) {
 			t.Fatalf("二次编码不稳定:\n%s\n%s", out, out2)
 		}
 	})
+}
+
+// TestRegenerateFieldSnapshot 在设置 UNI_UPDATE_CONTRACT=1 时重写形状基线。
+//
+// 为什么用显式开关而不是「测试失败就自动重写」：自动化会把「破坏性变更」这类本该
+// 拦住的红灯变成静默通过 —— 基线的价值正是「必须有人确认这一变更是有意的」。
+func TestRegenerateFieldSnapshot(t *testing.T) {
+	if os.Getenv("UNI_UPDATE_CONTRACT") != "1" {
+		t.Skip("设置 UNI_UPDATE_CONTRACT=1 以重写形状基线")
+	}
+	b, err := SnapshotJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 与生成方式一致地补一个尾换行（生成物是给人 diff 的文本）。
+	if err := os.WriteFile(fieldSnapshotPath, append(b, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("已重写 %s", fieldSnapshotPath)
 }

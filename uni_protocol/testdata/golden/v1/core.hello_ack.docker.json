@@ -1,0 +1,1 @@
+{"v":1,"id":"6","type":"core.hello_ack","ts":1790000000000,"data":{"accepted":true,"device_id":"7","report_interval":10,"server_time":1790000000000,"v":1,"docker":{"config_version":42,"protected":"uni-center-core,uni-center-console,mysql,redis,project:uni-center,volume:uni-center-uploads","transfer_dir":"/var/lib/uni_agent/transfer","snapshot_interval":30}}}

@@ -101,6 +101,9 @@ type HelloAck struct {
 	// hello_ack 是**每次重连都会到达**的那一帧，于是离线设备一上线就自动对账，
 	// 不需要服务端记得「哪些设备还没收到」。催办消息只是让在线设备不必等下一次重连。
 	Upgrade *UpgradeDirective `json:"upgrade,omitempty"`
+	// Docker 是本模块三键（config_version / protected / transfer_dir / snapshot_interval）
+	// 的快照。**重连时生效**，与 ReportInterval 同一模型（§3.1.1）。
+	Docker *DockerConfig `json:"docker,omitempty"`
 }
 
 // Validate 校验 HelloAck：accepted=true 必须有 device_id 且 report_interval 满足下限；
@@ -118,12 +121,18 @@ func (a *HelloAck) Validate() error {
 		if a.Upgrade != nil {
 			return a.Upgrade.Validate()
 		}
+		if a.Docker != nil {
+			return a.Docker.Validate()
+		}
 		return nil
 	}
 	// 被拒的连接里带升级指令是构造错误：agent 拿它没用（连都没连上），
 	// 而放任它会让人误以为「拒绝了但升级照样开始了」。
 	if a.Upgrade != nil {
 		return decodeErr(StagePayload, "upgrade", ErrInvalidPayload)
+	}
+	if a.Docker != nil {
+		return decodeErr(StagePayload, "docker", ErrInvalidPayload)
 	}
 	if a.RejectReason == "" {
 		return decodeErr(StagePayload, "reject_reason", ErrMissingField)
