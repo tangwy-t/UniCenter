@@ -1,1 +1,1 @@
-{"v":1,"id":"3","type":"agent.docker.result","ts":1790000000000,"data":{"ref":"1790000000001","ok":true,"payload":{"lines":"2026-09-24T15:30:32 server starting\n","truncated":false}}}
+{"v":1,"id":"3","type":"agent.docker.result","ts":1790000000000,"data":{"ref":"1790000000001","ok":true,"payload":"eyJsaW5lcyI6IjIwMjYtMDktMjRUMTU6MzA6MzIgc2VydmVyIHN0YXJ0aW5nXG4iLCJ0cnVuY2F0ZWQiOmZhbHNlfQ=="}}

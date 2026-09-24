@@ -3,9 +3,49 @@ package agentproto
 import (
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// golden 文件必须在**载荷层**也能解码并过校验。
+//
+// 为什么需要这条（而不是只靠 snapshot_test.go 的 TestGoldenFilesRoundTrip）：
+// 那条只做「信封解码 + 信封字段回环」，看不见载荷形状错误。实测抓到过一例：
+// agent.docker.result 的 payload 被写成 JSON 对象，而线上是 []byte（base64 串）——
+// 信封门禁全绿，真解码时才炸。golden 是「规范线上形态」的样本，形状错了就是在
+// 教后来者写错的代码，故在这一层再钉一次。
+//
+// DecodeTyped 连载荷的 Validate 一起跑，故它同时守住「样本是语义合法的」。
+func TestDockerGoldenPayloadsDecode(t *testing.T) {
+	dir := filepath.Join("testdata", "golden", "v1")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("golden 目录不可读: %v", err)
+	}
+	checked := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.Contains(e.Name(), "docker") {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		m, err := Decode(raw)
+		if err != nil {
+			t.Fatalf("%s: 信封解码失败: %v", e.Name(), err)
+		}
+		if _, err := DecodeTyped(m); err != nil {
+			t.Fatalf("%s 的载荷无法解码或语义非法（golden 必须是真的线上形态）: %v", e.Name(), err)
+		}
+		checked++
+	}
+	if checked != 6 {
+		t.Fatalf("应检查 6 个 docker golden（5 条消息 + hello_ack 的配置块），实际 %d 个", checked)
+	}
+}
 
 // 白名单与总表必须双向一致：漏一条 → 该 action 永远收不到（agent 判未知）；
 // 多一条 → 协议承诺了一个没有策略的动作。
