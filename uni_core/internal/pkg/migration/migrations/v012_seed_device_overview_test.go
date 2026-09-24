@@ -154,7 +154,12 @@ func repoRoot(t *testing.T) string {
 	}
 	// 用 go.work 作为「这里就是仓库根」的判据：它是 monorepo 的标志文件。
 	if _, err := os.Stat(filepath.Join(root, "go.work")); err != nil {
-		t.Fatalf("上溯 5 层得到的 %s 不是仓库根（没有 go.work）: %v", root, err)
+		// **隔离副本里没有仓库根**（`scripts/release-precheck.sh` 只拷 uni_core 到
+		// .tmp-iso/ 验证「发布态」）——那种形态下**前端树根本不存在**，
+		// 没有可比对的对象，跳过才是正确语义：跳过不是在掩盖漂移，因为
+		// 被校验的另一半（前端 index.ts）此刻不在这台机器上。
+		// 全仓（含前端）里跑时本函数正常返回，守卫照常生效。
+		t.Skipf("不在仓库根（%s 无 go.work）：本次为隔离副本构建，跳过前端逐字比对", root)
 	}
 	return root
 }

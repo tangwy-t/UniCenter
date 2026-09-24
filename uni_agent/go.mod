@@ -5,7 +5,7 @@ go 1.26
 require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/shirou/gopsutil/v3 v3.24.5
-	github.com/tangwy-t/UniCenter/uni_protocol v1.0.0
+	github.com/tangwy-t/UniCenter/uni_protocol v1.1.0
 )
 
 require (

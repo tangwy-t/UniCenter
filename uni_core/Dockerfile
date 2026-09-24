@@ -27,8 +27,16 @@ ENV CGO_ENABLED=0 GOOS=linux
 # 为什么需要 .goproxy：uni_core 现在处于「发布态」——go.mod 自带
 # `require github.com/tangwy-t/UniCenter/uni_protocol`（不再依赖仓库根 go.work，
 # 容器里也没有 go.work）。该模块尚未推送到远端，无法从任何公共 proxy 取，
-# 故仓库内烘焙了一份**仅含该模块**的离线载荷（4 文件/72K），此处作为
+# 故仓库内烘焙了一份**仅含该模块**的离线载荷（4 文件/106K），此处作为
 # GOPROXY 的第一顺位；若把它换成真实 proxy，构建阶段无需其它改动。
+#
+# **改了 uni_protocol 就必须重出载荷**（否则镜像构建会以「undefined: 新符号」
+# 失败 —— 那不是代码问题，是载荷还是旧版本）。做法（v1.1.0 即如此产出，
+# 历史版本保持不可变、只追加）：把 uni_protocol 打成一个
+# `<module>@<新版本>/` 前缀的 zip 放进 @v/，同时补 `<版本>.mod`、`<版本>.info`、
+# 在 list 里追加版本，然后 bump uni_core/go.mod 的 require 并用
+# `GOWORK=off GOPROXY=file://$PWD/uni_core/.goproxy,off go mod download` 补 go.sum；
+# 最后 `make release-precheck` 断言发布态可构建（它就是这条流程的门禁）。
 COPY go.mod go.sum ./
 COPY .goproxy ./.goproxy
 RUN GOPROXY="file:///src/.goproxy,${GOPROXY}" GOSUMDB=off GOFLAGS=-mod=mod go mod download
