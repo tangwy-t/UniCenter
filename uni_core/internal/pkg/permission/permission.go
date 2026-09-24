@@ -27,6 +27,14 @@ func All() []string {
 		PermDeviceUpgrade,
 		PermDeviceUpgradeGlobal,
 
+		// ── Docker 管理 / docker:* ──
+		PermDockerConfig,
+		PermDockerDelete,
+		PermDockerExec,
+		PermDockerInspect,
+		PermDockerList,
+		PermDockerManage,
+
 		PermCacheDelete,
 		PermCacheList,
 		PermCacheQuery,
