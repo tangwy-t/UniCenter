@@ -53,7 +53,7 @@ var agentUpgradeMenuDefinitions = []menuDef{
 
 	{Key: "device:upgrade-task", Parent: "device", Name: "升级任务", Type: "menu",
 		Perms: permission.PermDeviceQuery, Path: "/device/upgrade-task",
-		Component: "device/upgrade-task", Sort: 3, Icon: "material-symbols:work-update-outline"},
+		Component: "device/upgrade-task", Sort: 3, Icon: "fluent:agents-16-regular"},
 
 	// 升级是**设备行上的操作**（列表操作列与详情页），故挂在设备列表页下。
 	{Key: "device:index:upgrade", Parent: "device:index", Name: "升级 Agent", Type: "btn",
