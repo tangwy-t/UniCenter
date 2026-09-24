@@ -44,7 +44,11 @@
         </div>
 
         <!-- 手动输入：可直接粘贴官网复制的 icon title（如 home-line、mdi:home）
-             无需受限在预设图标清单内。 -->
+             无需受限在预设图标清单内。
+             但「能敲」不等于「断网能显示」：只有随前端包一起发布的图标才离线可用
+             （判定见 utils/ui/iconify-loader 的 isOfflineIcon）。故对手输的名字实时
+             判定并当场说清 —— 否则运维会把菜单图标改成断网就空白的名字，而那时
+             故障现象（侧边栏空白）离原因（少内置一个图标）已经很远了。 -->
         <div class="picker-manual">
           <div class="picker-manual-label">或手动输入 / 粘贴图标名</div>
           <div class="picker-manual-row">
@@ -60,7 +64,13 @@
                 <ArtSvgIcon :icon="normalizedManual" class="manual-preview" />
               </template>
             </ElInput>
-            <div class="manual-value">存为：{{ normalizedManual || '空' }}</div>
+            <div
+              class="manual-value"
+              :class="{ 'is-offline-warn': offlineWarn }"
+              :title="offlineWarn ? OFFLINE_HINT : ''"
+            >
+              {{ offlineWarn ? '未随前端发布，断网不显示' : `存为：${normalizedManual || '空'}` }}
+            </div>
           </div>
         </div>
 
@@ -91,6 +101,7 @@
   import { computed, ref } from 'vue'
   import ArtSvgIcon from '@/components/core/base/art-svg-icon/index.vue'
   import { MENU_ICON_GROUPS } from './icons'
+  import { isOfflineIcon } from '@/utils/ui/iconify-loader'
 
   defineOptions({ name: 'ArtIconPicker', inheritAttrs: false })
 
@@ -133,6 +144,21 @@
    * - 不含 ':' 视为 Remix 官网复制的裸标题（如 home-line、user-line），自动补 ri: 前缀。
    */
   const normalizedManual = computed(() => normalizeIcon(manualIcon.value))
+
+  /**
+   * 手输的名字是否"未随前端离线包发布"（联网能显示、断网空白）。
+   *
+   * 预设网格里的名字恒为 ri（整套内置，必离线可用），所以只有手输这一条路
+   * 能敲出离线不可用的名字 —— 提示就加在这里。这只是提醒，不拦保存：
+   * 有外网的环境确实能正常显示，拦下来反而误伤。
+   */
+  const offlineWarn = computed(
+    () => Boolean(normalizedManual.value) && !isOfflineIcon(normalizedManual.value)
+  )
+
+  const OFFLINE_HINT =
+    '该图标名不在前端离线包内：联网时能显示，内网/断网环境会渲染成空白。' +
+    '如需离线可用，请改用内置的名字（预设网格里的都内置），或让开发同学执行 pnpm icons:sync 并重新构建前端。'
 
   function normalizeIcon(value: string): string {
     const v = (value || '').trim()
@@ -315,6 +341,12 @@
           max-width: 160px;
           overflow: hidden;
           text-overflow: ellipsis;
+        }
+
+        // 警告文案比「存为：xxx」长，放宽上限，免得被截成「未随前端发…」
+        .manual-value.is-offline-warn {
+          max-width: 220px;
+          color: var(--el-color-warning);
         }
       }
     }

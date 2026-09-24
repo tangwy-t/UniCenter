@@ -17,3 +17,9 @@
 # 但仍显式排除:它与 auto-imports.d.ts 同机制,一旦生成器输出格式变化或 prettier
 # 升级就会开始被改写 —— 这里排除的是**未来同类漂移**,不是当前缺陷。
 /src/types/import/components.d.ts
+# 生成物:由 scripts/offline-icons.mjs 生成(见 pnpm icons:sync)。
+# `pnpm check:icons` 会拿"重新生成一遍"的结果与磁盘文件做**逐字节**比对,
+# 用来抓"手改生成物"与"依赖里的图标数据升级后内容过期"这两类名字对得上、
+# 内容却不同的漂移。prettier 一改就会让这个比对永远失败 —— 与
+# api.generated.d.ts 同款处理:提前排除,而不是每次生成后再格式化。
+/src/utils/ui/offline-icons.generated.ts

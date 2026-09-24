@@ -3,6 +3,12 @@
  *
  * 仅收录「菜单/导航」场景常用的线型图标（与全局 ri: 图标同源），
  * 按语义分组，供图标选择器离线渲染与搜索，不依赖 Iconify API。
+ *
+ * 清单里的名字必须**真实存在于 ri 集合**：写错一个字母，选项在界面上就是
+ * 一个空白格，点中后更是把不存在的名字存进菜单（侧边栏/页签从此空白）。
+ * 这条由 `pnpm check:icons`（scripts/offline-icons.mjs）钉住 —— 它拿本机
+ * `@iconify-json/ri` 逐个核对（离线可跑），并顺带校验名单里没有漏进
+ * 未随前端发布的非 ri 图标（见 src/utils/ui/offline-icons.generated.ts）。
  */
 export interface IconGroup {
   label: string
@@ -208,7 +214,7 @@ export const MENU_ICON_GROUPS: IconGroup[] = [
       'ri:store-3-line',
       'ri:box-1-line',
       'ri:box-3-line',
-      'ri:package-line',
+      'ri:archive-line',
       'ri:truck-line',
       'ri:bank-card-line',
       'ri:calendar-line',
@@ -237,7 +243,7 @@ export const MENU_ICON_GROUPS: IconGroup[] = [
       'ri:close-line',
       'ri:close-circle-line',
       'ri:check-line',
-      'ri:check-circle-line',
+      'ri:checkbox-circle-line',
       'ri:edit-line',
       'ri:pencil-line',
       'ri:delete-bin-line',
@@ -250,7 +256,7 @@ export const MENU_ICON_GROUPS: IconGroup[] = [
       'ri:upload-2-line',
       'ri:play-circle-line',
       'ri:pause-circle-line',
-      'ri:link-line',
+      'ri:link',
       'ri:link-unlink',
       'ri:more-2-line'
     ]

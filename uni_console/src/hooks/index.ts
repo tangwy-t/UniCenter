@@ -24,3 +24,6 @@ export { useLayoutHeight, useAutoLayoutHeight } from './core/useLayoutHeight'
 
 // 树形表格受控展开（记忆折叠状态）
 export { useTreeExpand } from './core/useTreeExpand'
+
+// 页头图标（取菜单图标，缺省回退页面常量）
+export { usePageIcon } from './core/usePageIcon'

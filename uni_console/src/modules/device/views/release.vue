@@ -4,7 +4,7 @@
       <!-- ============ 页头 ============ -->
       <div class="do-hero mb-4 flex flex-wrap items-center gap-3">
         <div class="do-hero__icon flex-cc">
-          <ArtSvgIcon icon="ri:upload-cloud-2-line" />
+          <ArtSvgIcon :icon="pageIcon" />
         </div>
         <div class="min-w-0">
           <h2 class="text-lg font-semibold text-[var(--el-text-color-primary)]">Agent 版本</h2>
@@ -239,6 +239,7 @@
     PermDeviceUpgradeGlobal
   } from '@/enums/permission'
   import { useAuth } from '@/hooks/core/useAuth'
+  import { usePageIcon } from '@/hooks/core/usePageIcon'
   import {
     fetchAgentReleases,
     fetchAgentUpgradeSummary,
@@ -256,6 +257,9 @@
   } from '../utils/upgrade'
 
   defineOptions({ name: 'DeviceRelease' })
+
+  // 页头图标与侧边栏/页签同源（取菜单图标，改「菜单管理」即同步；见 usePageIcon）
+  const pageIcon = usePageIcon('ri:upload-cloud-2-line')
 
   const { hasAuth } = useAuth()
   const canUpload = computed(() => hasAuth(PermDeviceReleaseUpload))

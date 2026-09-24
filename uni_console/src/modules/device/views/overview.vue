@@ -4,7 +4,7 @@
       <!-- ============ 页头：标题 + 实时状态 + 自动刷新（对齐服务监控 .sv-hero）============ -->
       <div class="do-hero mb-4 flex flex-wrap items-center gap-3">
         <div class="do-hero__icon flex-cc">
-          <ArtSvgIcon icon="ri:dashboard-3-line" />
+          <ArtSvgIcon :icon="pageIcon" />
         </div>
         <div class="min-w-0">
           <h2 class="text-lg font-semibold text-[var(--el-text-color-primary)]">设备监控总览</h2>
@@ -338,6 +338,7 @@
 <script setup lang="ts">
   import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
   import { useRouter } from 'vue-router'
+  import { usePageIcon } from '@/hooks/core/usePageIcon'
 
   import { fetchDeviceOverview, type DeviceOverviewQuery } from '../api'
   import OverviewChartCard from '../components/overview-chart-card.vue'
@@ -366,6 +367,9 @@
   } from '../utils/overview'
 
   defineOptions({ name: 'DeviceOverview' })
+
+  // 页头图标与侧边栏/页签同源（取菜单图标，改「菜单管理」即同步；见 usePageIcon）
+  const pageIcon = usePageIcon('ri:dashboard-3-line')
 
   const router = useRouter()
 

@@ -4,7 +4,7 @@
       <!-- ============ 页头：标题 + 主机身份 + 实时状态 + 自动刷新 ============ -->
       <div class="sv-hero mb-4 flex flex-wrap items-center gap-3">
         <div class="sv-hero__icon flex-cc">
-          <ArtSvgIcon icon="ri:server-line" />
+          <ArtSvgIcon :icon="pageIcon" />
         </div>
         <div class="sv-hero__text min-w-0">
           <h2 class="text-lg font-semibold text-[var(--el-text-color-primary)]">服务器监控</h2>
@@ -454,6 +454,7 @@
   import { ElMessage } from 'element-plus'
   import ArtButtonTable from '@/components/core/forms/art-button-table/index.vue'
   import type { LineDataItem } from '@/types/component/chart'
+  import { usePageIcon } from '@/hooks/core/usePageIcon'
   import { fetchServerHistory, fetchServerStats } from '../api'
   import type { ServerHistory, ServerHistoryPoint } from '../api'
   import { buildSparkSeries, sparkPath } from '../composables/use-spark-series'
@@ -470,6 +471,9 @@
   } from '../composables/use-server-format'
 
   defineOptions({ name: 'MonitorServer' })
+
+  // 页头图标与侧边栏/页签同源（取菜单图标，改「菜单管理」即同步；见 usePageIcon）
+  const pageIcon = usePageIcon('ri:server-line')
 
   const AUTO_REFRESH_MS = 10_000
 

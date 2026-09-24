@@ -4,7 +4,7 @@
       <!-- ============ 页头：标题 + 实时状态 + 自动刷新 ============ -->
       <div class="cache-hero mb-4 flex flex-wrap items-center gap-3">
         <div class="cache-hero__icon flex-cc">
-          <ArtSvgIcon icon="ri:database-2-line" />
+          <ArtSvgIcon :icon="pageIcon" />
         </div>
         <div class="cache-hero__text min-w-0">
           <h2 class="text-lg font-semibold text-[var(--el-text-color-primary)]">缓存管理</h2>
@@ -578,6 +578,7 @@
   import { useResizeObserver } from '@vueuse/core'
   import { ElMessage, ElMessageBox } from 'element-plus'
   import ArtButtonTable from '@/components/core/forms/art-button-table/index.vue'
+  import { usePageIcon } from '@/hooks/core/usePageIcon'
   import {
     useCacheValuePaging,
     truncateText,
@@ -598,6 +599,9 @@
   } from '../composables/use-cache-format'
 
   defineOptions({ name: 'MonitorCache' })
+
+  // 页头图标与侧边栏/页签同源（取菜单图标，改「菜单管理」即同步；见 usePageIcon）
+  const pageIcon = usePageIcon('ri:database-2-line')
 
   /** Redis 值类型 → 视觉身份（图标 / 颜色 / 文案），UI 层独立维护 */
   interface TypeMeta {

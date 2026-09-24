@@ -4,7 +4,7 @@
       <!-- ============ 页头：标题 + 实时状态 + 时间范围 + 自动刷新 ============ -->
       <div class="sql-hero mb-4 flex flex-wrap items-center gap-3">
         <div class="sql-hero__icon flex-cc">
-          <ArtSvgIcon icon="ri:terminal-box-line" />
+          <ArtSvgIcon :icon="pageIcon" />
         </div>
         <div class="sql-hero__text min-w-0">
           <h2 class="text-lg font-semibold text-[var(--el-text-color-primary)]">SQL 监控</h2>
@@ -622,6 +622,7 @@
   import { ElDrawer, ElMessage } from 'element-plus'
   import ArtButtonTable from '@/components/core/forms/art-button-table/index.vue'
   import type { LineDataItem } from '@/types/component/chart'
+  import { usePageIcon } from '@/hooks/core/usePageIcon'
   import { fetchSQLHistory, fetchSQLStats } from '../api'
   import type { SqlHistory, SqlHistoryPoint, SqlQueryEntry, SqlStats } from '../api'
   // sparkPath/SparkResult 与 server.vue 原有实现合并至此(两者在 pad=3 时恒等)
@@ -641,6 +642,9 @@
   } from '../composables/use-sql-format'
 
   defineOptions({ name: 'MonitorSql' })
+
+  // 页头图标与侧边栏/页签同源（取菜单图标，改「菜单管理」即同步；见 usePageIcon）
+  const pageIcon = usePageIcon('ri:terminal-box-line')
 
   const REFRESH_MS = 5_000
 

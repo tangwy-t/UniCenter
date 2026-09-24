@@ -4,7 +4,7 @@
       <!-- ============ 页头：标题 + 实时状态 + 启停开关 ============ -->
       <div class="pf-hero mb-4 flex flex-wrap items-center gap-3">
         <div class="pf-hero__icon flex-cc">
-          <ArtSvgIcon icon="ri:fire-line" />
+          <ArtSvgIcon :icon="pageIcon" />
         </div>
         <div class="pf-hero__text min-w-0">
           <h2 class="text-lg font-semibold text-[var(--el-text-color-primary)]">pprof 性能分析</h2>
@@ -592,6 +592,7 @@ go tool pprof -http=:8080 &lt;server 二进制&gt; {{ fileNameExample }}</pre>
   import { ElMessage } from 'element-plus'
   import FileSaver from 'file-saver'
   import ArtButtonTable from '@/components/core/forms/art-button-table/index.vue'
+  import { usePageIcon } from '@/hooks/core/usePageIcon'
   import {
     disablePprof,
     downloadPprofRaw,
@@ -616,6 +617,9 @@ go tool pprof -http=:8080 &lt;server 二进制&gt; {{ fileNameExample }}</pre>
   } from '../composables/use-pprof-format'
 
   defineOptions({ name: 'MonitorPprof' })
+
+  // 页头图标与侧边栏/页签同源（取菜单图标，改「菜单管理」即同步；见 usePageIcon）
+  const pageIcon = usePageIcon('ri:fire-line')
 
   const PREFIX = import.meta.env.VITE_API_PREFIX
 

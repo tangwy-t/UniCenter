@@ -4,7 +4,7 @@
       <!-- ============ 页头 ============ -->
       <div class="do-hero mb-4 flex flex-wrap items-center gap-3">
         <div class="do-hero__icon flex-cc">
-          <ArtSvgIcon icon="ri:list-check-2" />
+          <ArtSvgIcon :icon="pageIcon" />
         </div>
         <div class="min-w-0">
           <h2 class="text-lg font-semibold text-[var(--el-text-color-primary)]">升级任务</h2>
@@ -183,6 +183,7 @@
 
   import { PermDeviceUpgrade } from '@/enums/permission'
   import { useAuth } from '@/hooks/core/useAuth'
+  import { usePageIcon } from '@/hooks/core/usePageIcon'
   import {
     fetchAgentUpgradeTaskDetail,
     fetchAgentUpgradeTasks,
@@ -198,6 +199,9 @@
   } from '../utils/upgrade'
 
   defineOptions({ name: 'DeviceUpgradeTask' })
+
+  // 页头图标与侧边栏/页签同源（取菜单图标，改「菜单管理」即同步；见 usePageIcon）
+  const pageIcon = usePageIcon('ri:list-check-2')
 
   const route = useRoute()
   const router = useRouter()

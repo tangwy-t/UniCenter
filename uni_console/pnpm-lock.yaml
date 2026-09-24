@@ -81,9 +81,54 @@ importers:
       '@eslint/js':
         specifier: ^9.9.1
         version: 9.39.5
+      '@iconify-json/boxicons':
+        specifier: ^1.2.0
+        version: 1.2.0
+      '@iconify-json/devicon-plain':
+        specifier: ^1.2.61
+        version: 1.2.61
+      '@iconify-json/fluent':
+        specifier: ^1.2.58
+        version: 1.2.58
+      '@iconify-json/hugeicons':
+        specifier: ^1.2.35
+        version: 1.2.35
+      '@iconify-json/icon-park-outline':
+        specifier: ^1.2.4
+        version: 1.2.4
+      '@iconify-json/iconamoon':
+        specifier: ^1.2.2
+        version: 1.2.2
+      '@iconify-json/iconoir':
+        specifier: ^1.2.11
+        version: 1.2.11
+      '@iconify-json/ix':
+        specifier: ^1.2.12
+        version: 1.2.12
+      '@iconify-json/material-symbols':
+        specifier: ^1.2.93
+        version: 1.2.93
       '@iconify-json/ri':
         specifier: ^1.2.10
         version: 1.2.10
+      '@iconify-json/streamline-flex':
+        specifier: ^1.2.3
+        version: 1.2.3
+      '@iconify-json/streamline-plump':
+        specifier: ^1.2.0
+        version: 1.2.0
+      '@iconify-json/streamline-ultimate':
+        specifier: ^1.2.2
+        version: 1.2.2
+      '@iconify-json/system-uicons':
+        specifier: ^1.2.4
+        version: 1.2.4
+      '@iconify-json/tabler':
+        specifier: ^1.2.39
+        version: 1.2.39
+      '@iconify-json/tdesign':
+        specifier: ^1.2.19
+        version: 1.2.19
       '@types/node':
         specifier: ^24.0.5
         version: 24.13.3
@@ -535,8 +580,53 @@ packages:
     resolution: {integrity: sha512-bV0Tgo9K4hfPCek+aMAn81RppFKv2ySDQeMoSZuvTASywNTnVJCArCZE2FWqpvIatKu7VMRLWlR1EazvVhDyhQ==}
     engines: {node: '>=18.18'}
 
+  '@iconify-json/boxicons@1.2.0':
+    resolution: {integrity: sha512-yAfCVaiZ5t2bC1xNVEdkWUI94e3u15IrytO2XFh8/7Y45M1i51adQpi42OhH2pUdsYM0/KY4Gklrb+XB+oZS/w==, tarball: https://registry.npmjs.org/@iconify-json/boxicons/-/boxicons-1.2.0.tgz}
+
+  '@iconify-json/devicon-plain@1.2.61':
+    resolution: {integrity: sha512-ukLV1LLDj9obouQ0I47LZc++XfNw2BYPY+2oPmCjxzBEwjA8QGORa5ujYRHcY6aXdbF1MQ16A3hr1f+1vydQbA==}
+
+  '@iconify-json/fluent@1.2.58':
+    resolution: {integrity: sha512-KiWNF3LXZ4rvicH2MR8FKVN49MB++400rSiDpjVSP4V0GjsGViSPw5PJQ3pKDNPohL5wBW/ZDpo+rCYYFbmFkA==}
+
+  '@iconify-json/hugeicons@1.2.35':
+    resolution: {integrity: sha512-c06tY90JZnKhOLBAKoQ1z2pqXMRdATuYXslTKwaaIAjLzKsTIsE+GGknY6+qo/SP0U/NG9xQjr4N+zfDqOeQiQ==}
+
+  '@iconify-json/icon-park-outline@1.2.4':
+    resolution: {integrity: sha512-NyZxXe2gD2TbTOyoRRMdtEJhr6i2KQCdDlYYoOn5oZLndQjwpIhw79hzeFhXvP38/o40D3gQ+l+IaSJgbB+0TQ==}
+
+  '@iconify-json/iconamoon@1.2.2':
+    resolution: {integrity: sha512-Xn7YeSDniPgutPr0qil/iQwQelq975OYQ/i2twGjcK4DjGOXBrBC+6q45WtVuQbFfXzM7bgijv4yVnxy0OqUdQ==}
+
+  '@iconify-json/iconoir@1.2.11':
+    resolution: {integrity: sha512-clBrCsZPkmdksYOkufVp7aoAU1j1hFQPrLUooWWmoYIMvKskUHQ+IDnwV7agTR+tGYHbud7OP2SRfYEpnqFDNw==}
+
+  '@iconify-json/ix@1.2.12':
+    resolution: {integrity: sha512-TteQ8jYbR/R86lS9U9gHCV8cRSa7YhTa8YoBkYPXeUOnmFGyRvhOPYGF68csUzHUKEfxdR55fSG8RgmhmgSqYA==}
+
+  '@iconify-json/material-symbols@1.2.93':
+    resolution: {integrity: sha512-IfbpRixmEdeBrl2Bc+RtNZGb3NcTnMiPP4WausCParQYpIdezEYYbgMggJC1cYzm1q0f77p53t5tppy9PWsrvQ==}
+
   '@iconify-json/ri@1.2.10':
     resolution: {integrity: sha512-WWMhoncVVM+Xmu9T5fgu2lhYRrKTEWhKk3Com0KiM111EeEsRLiASjpsFKnC/SrB6covhUp95r2mH8tGxhgd5Q==}
+
+  '@iconify-json/streamline-flex@1.2.3':
+    resolution: {integrity: sha512-w9gftPCk1i/rvMoKJDYKvxpmeIPfy1inP+hiIyHi5yGRpmCrn1tCIh0c17XnceogSdhs6ZVUwspLEpzRhZzwhQ==}
+
+  '@iconify-json/streamline-plump@1.2.0':
+    resolution: {integrity: sha512-cem8ppCqUuVfargMadkWq22gaFWLnCV98nQYv8ZaFCxzLINGHLjgioQyDAclxLwowREn2yjgymTXlUE6WW/VNg==}
+
+  '@iconify-json/streamline-ultimate@1.2.2':
+    resolution: {integrity: sha512-0Vz9UHgMrmRUYt3JFqm0E6PDdroItVqK4fKf3T72jVwS2MAmc8dcqvCy+f0hzOVzJfo3G34ejFA9Y8l/K44hTQ==}
+
+  '@iconify-json/system-uicons@1.2.4':
+    resolution: {integrity: sha512-9WB9dmEm+TRCXI5Ml2IY8zQAPZES8euKxY0VOaf8D6E6ZaEr7ztO6DChMlGg7qWECs3m3FjFUqNgBx8ZpB+djw==}
+
+  '@iconify-json/tabler@1.2.39':
+    resolution: {integrity: sha512-lMj4kPXAS9G7fkkHxxR/LqBeaFXywTtnK5kRFDNEYxsYzGZBcBpQDaxRE4SZQS6XHBHoeOpRbE+Bg8kv0is+wg==}
+
+  '@iconify-json/tdesign@1.2.19':
+    resolution: {integrity: sha512-YAEUidy7vJBAlGDMro1JWw5CZNO0EbeSb8SxNCsBuBq7hFtftlL2VhZac3EgHeTMMDf3OBfP/YwII7SIdb1d+w==}
 
   '@iconify/types@2.0.0':
     resolution: {integrity: sha512-+wluvCrRhXrhyOmRDJ3q8mux9JkKy5SJ/v8ol2tu4FVjyYvtEzkc/3pK15ET6RKg4b4w4BmTk1+gsCUhf21Ykg==}
@@ -3129,7 +3219,67 @@ snapshots:
 
   '@humanwhocodes/retry@0.4.3': {}
 
+  '@iconify-json/boxicons@1.2.0':
+    dependencies:
+      '@iconify/types': 2.0.0
+
+  '@iconify-json/devicon-plain@1.2.61':
+    dependencies:
+      '@iconify/types': 2.0.0
+
+  '@iconify-json/fluent@1.2.58':
+    dependencies:
+      '@iconify/types': 2.0.0
+
+  '@iconify-json/hugeicons@1.2.35':
+    dependencies:
+      '@iconify/types': 2.0.0
+
+  '@iconify-json/icon-park-outline@1.2.4':
+    dependencies:
+      '@iconify/types': 2.0.0
+
+  '@iconify-json/iconamoon@1.2.2':
+    dependencies:
+      '@iconify/types': 2.0.0
+
+  '@iconify-json/iconoir@1.2.11':
+    dependencies:
+      '@iconify/types': 2.0.0
+
+  '@iconify-json/ix@1.2.12':
+    dependencies:
+      '@iconify/types': 2.0.0
+
+  '@iconify-json/material-symbols@1.2.93':
+    dependencies:
+      '@iconify/types': 2.0.0
+
   '@iconify-json/ri@1.2.10':
+    dependencies:
+      '@iconify/types': 2.0.0
+
+  '@iconify-json/streamline-flex@1.2.3':
+    dependencies:
+      '@iconify/types': 2.0.0
+
+  '@iconify-json/streamline-plump@1.2.0':
+    dependencies:
+      '@iconify/types': 2.0.0
+
+  '@iconify-json/streamline-ultimate@1.2.2':
+    dependencies:
+      '@iconify/types': 2.0.0
+
+  '@iconify-json/system-uicons@1.2.4':
+    dependencies:
+      '@iconify/types': 2.0.0
+
+  '@iconify-json/tabler@1.2.39':
+    dependencies:
+      '@iconify/types': 2.0.0
+
+  '@iconify-json/tdesign@1.2.19':
     dependencies:
       '@iconify/types': 2.0.0
 
