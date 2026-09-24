@@ -33,7 +33,32 @@
                 <ArtSvgIcon icon="ri:file-copy-line" />
               </button>
             </ElTooltip>
-            <template v-if="device?.agentVersion"> · Agent {{ device.agentVersion }}</template>
+            <template v-if="device?.agentVersion">
+              · Agent {{ device.agentVersion }}
+              <!-- 升级对话框：只列「已发布且本设备平台有程序包」的版本 -->
+              <ElDialog v-model="upgradeVisible" title="升级 Agent" width="440px">
+                <div class="dd-upgrade__dialog">
+                  <div class="dd-upgrade__dialog-row">设备：{{ device?.hostname }}</div>
+                  <ElSelect v-model="chosenVersion" class="w-full" placeholder="选择一个版本">
+                    <ElOption v-for="v in versionOptions" :key="v" :label="v" :value="v" />
+                  </ElSelect>
+                  <div v-if="versionOptions.length === 0" class="dd-upgrade__dialog-empty">
+                    没有可用于该设备的版本 —— 请先在「Agent 版本」页上传并发布程序包
+                  </div>
+                </div>
+                <template #footer>
+                  <ElButton @click="upgradeVisible = false">取消</ElButton>
+                  <ElButton
+                    type="primary"
+                    :disabled="!chosenVersion"
+                    :loading="submitting"
+                    @click="submitUpgrade"
+                  >
+                    升级到 {{ chosenVersion || '…' }}
+                  </ElButton>
+                </template>
+              </ElDialog>
+            </template>
             <template v-if="lastSeenText"> · 最后上报 {{ lastSeenText }}</template>
             <!-- I-1：设备 IP。未观测到时不显示「—」，直接不占位 —— 
                  一个「—」会让人以为设备没有 IP，而真相是服务端还没观测到。 -->
@@ -198,6 +223,87 @@
             </div>
           </div>
 
+          <!-- ══════════ L1.5 Agent 升级（W2）══════════
+               这一块回答三个问题：现在是什么版本、期望它到哪、上次动它发生了什么
+               （失败与回滚的原因必须就地可见 —— 那是运维最需要的一眼）。 -->
+          <div class="dd-surface dd-upgrade">
+            <div class="dd-upgrade__head">
+              <span class="dd-upgrade__title">Agent 升级</span>
+              <span class="dd-upgrade__ver">
+                {{ device.agentVersion || '—' }}
+                <template v-if="upgradeTarget && upgradeTarget !== device.agentVersion">
+                  → {{ upgradeTarget }}
+                </template>
+              </span>
+              <ElTag
+                v-if="upgradeBadgeInfo"
+                size="small"
+                effect="light"
+                :type="tagTypeOf(upgradeBadgeInfo.tone)"
+              >
+                {{ upgradeBadgeInfo.text }}
+              </ElTag>
+              <span v-if="device.upgradeReason" class="dd-upgrade__reason">
+                {{ reasonText(device.upgradeReason) }}
+              </span>
+              <span v-if="device.upgradeAt" class="dd-upgrade__time">
+                {{ formatUnixTime(device.upgradeAt) }}
+              </span>
+              <div class="dd-upgrade__actions">
+                <ElButton
+                  v-if="canUpgrade && device.agentUpgradeSupported"
+                  size="small"
+                  type="primary"
+                  @click="openUpgrade"
+                >
+                  升级到…
+                </ElButton>
+                <ElButton
+                  v-if="canUpgrade && device.agentUpgradeSupported && rollbackVersion"
+                  size="small"
+                  @click="rollback"
+                >
+                  回滚到 {{ rollbackVersion }}
+                </ElButton>
+                <ElButton
+                  v-if="canUpgrade && device.agentUpgradeSupported"
+                  size="small"
+                  plain
+                  @click="pinCurrent"
+                >
+                  固定在当前版本
+                </ElButton>
+                <ElButton
+                  v-if="canUpgrade && device.targetVersion && !device.targetFromGlobal"
+                  size="small"
+                  link
+                  @click="resumeFollow"
+                >
+                  恢复跟随全站
+                </ElButton>
+                <span v-if="!device.agentUpgradeSupported" class="dd-upgrade__hint">
+                  该 Agent 版本不支持远程升级，需先手工安装新版本
+                </span>
+              </div>
+            </div>
+            <div v-if="upgradeRecords.length > 0" class="dd-upgrade__records">
+              <div class="dd-upgrade__records-title">升级记录</div>
+              <div v-for="r in upgradeRecords" :key="r.id" class="dd-upgrade__record">
+                <span class="dd-upgrade__record-time">{{ formatUnixTime(r.createdAt) }}</span>
+                <span class="dd-upgrade__record-ver"
+                  >{{ r.fromVersion || '—' }} → {{ r.toVersion }}</span
+                >
+                <span class="dd-upgrade__record-state" :class="{ 'is-bad': isBadState(r.state) }">
+                  {{ resultLabelOf(r.state) }}
+                </span>
+                <span v-if="r.reasonCode" class="dd-upgrade__record-reason">{{
+                  reasonText(r.reasonCode)
+                }}</span>
+              </div>
+            </div>
+            <div v-else class="dd-upgrade__empty">还没有升级记录</div>
+          </div>
+
           <!-- ══════════ L2 趋势分析（F-9：Tab 合并）══════════ -->
           <div class="dd-surface dd-panel">
             <ElTabs v-model="activeTab" class="dd-tabs" @tab-change="onTabChange">
@@ -326,15 +432,33 @@
   import { computed, onUnmounted, ref, watch } from 'vue'
   import { useRoute, useRouter } from 'vue-router'
   import { ElMessage, ElMessageBox } from 'element-plus'
-  import { PermDeviceDelete, PermDeviceDisable, PermDeviceEnable } from '@/enums/permission'
+  import {
+    PermDeviceDelete,
+    PermDeviceDisable,
+    PermDeviceEnable,
+    PermDeviceUpgrade
+  } from '@/enums/permission'
   import { useAuth } from '@/hooks/core/useAuth'
   import {
+    clearDeviceUpgradeTarget,
     disableDevice,
+    dispatchDeviceUpgrade,
     enableDevice,
+    fetchAgentReleases,
     fetchDevice,
     fetchDeviceResources,
-    removeDevice
+    fetchDeviceUpgradeRecords,
+    removeDevice,
+    upgradeDevice
   } from '../api'
+  import {
+    availableVersions,
+    formatUnixTime,
+    reasonText,
+    resultText,
+    tagTypeOf,
+    upgradeBadge
+  } from '../utils/upgrade'
   import DeviceMetricsPanel from '../components/metrics-panel.vue'
   import DeviceResourceDrill from '../components/resource-drill.vue'
   import { classifyDeviceError } from '../utils/error'
@@ -537,6 +661,9 @@
     detailError.value = null
     try {
       device.value = await fetchDevice(deviceId.value)
+      // 升级记录与详情**并行**拉：它是独立的一段数据，失败不影响主体
+      //（记录为空时卡片显示「还没有升级记录」）。
+      void loadUpgradeRecords()
     } catch (e) {
       device.value = null
       detailError.value = classifyDeviceError(e)
@@ -563,6 +690,153 @@
   }
 
   /** F-6：三个请求各自独立，互不牵连。 */
+  // ── Agent 升级（W2）───────────────────────────────────────────────────
+  const canUpgrade = computed(() => hasAuth(PermDeviceUpgrade))
+  const upgradeRecords = ref<Api.Device.DeviceUpgradeRecord[]>([])
+  const upgradeVisible = ref(false)
+  const submitting = ref(false)
+  const chosenVersion = ref('')
+  const releases = ref<Api.Device.AgentReleaseItem[]>([])
+  const publishedVersions = ref<string[]>([])
+
+  /** 生效目标（后端已按「设备级 ?? 全站」算好，前端不再拼第二份口径）。 */
+  const upgradeTarget = computed(() => device.value?.targetVersion || '')
+  /** 一键回滚目标（服务端从升级记录推导；空 = 没有成功历史）。 */
+  const rollbackVersion = computed(() => device.value?.rollbackVersion || '')
+  const upgradeBadgeInfo = computed(() => (device.value ? upgradeBadge(device.value) : null))
+  /** 版本下拉：已发布 ∩ 本设备平台有程序包。 */
+  const versionOptions = computed(() =>
+    availableVersions(publishedVersions.value, releases.value, device.value ? [device.value] : [])
+  )
+
+  function isBadState(state?: string): boolean {
+    return state === 'failed' || state === 'rolled_back' || state === 'timeout'
+  }
+
+  /** 升级记录的一行状态文案（与任务明细同源，但这里只有状态没有进度）。 */
+  function resultLabelOf(state?: string): string {
+    switch (state) {
+      case 'succeeded':
+        return '已达成'
+      case 'failed':
+        return '失败'
+      case 'rolled_back':
+        return '已回滚'
+      case 'timeout':
+        return '超时'
+      case 'superseded':
+        return '已取代'
+      case 'pending':
+      case 'downloading':
+      case 'verifying':
+      case 'installing':
+      case 'restarting':
+        return '进行中'
+      default:
+        return resultText(undefined) || '—'
+    }
+  }
+
+  async function loadUpgradeRecords() {
+    if (!deviceId.value) return
+    try {
+      upgradeRecords.value = await fetchDeviceUpgradeRecords(deviceId.value)
+    } catch {
+      // 记录加载失败不影响详情主体：置空即可（下方显示「还没有升级记录」）。
+      upgradeRecords.value = []
+    }
+  }
+
+  async function openUpgrade() {
+    chosenVersion.value = ''
+    upgradeVisible.value = true
+    if (releases.value.length === 0) {
+      try {
+        const res = await fetchAgentReleases()
+        releases.value = res.list || []
+        publishedVersions.value = res.publishedVersions || []
+      } catch (e) {
+        ElMessage.error(errMsg(e, '版本列表加载失败'))
+      }
+    }
+  }
+
+  async function submitUpgrade() {
+    if (!deviceId.value || !chosenVersion.value) return
+    submitting.value = true
+    try {
+      const res = await upgradeDevice(deviceId.value, { version: chosenVersion.value })
+      ElMessage.success(
+        res.dispatched > 0 ? `已下发升级到 ${chosenVersion.value}` : '该设备无需升级'
+      )
+      upgradeVisible.value = false
+      await refreshAll()
+    } catch (e) {
+      ElMessage.error(errMsg(e, '下发失败'))
+    } finally {
+      submitting.value = false
+    }
+  }
+
+  /** 一键回滚：目标版本由服务端推导，前端只负责确认。 */
+  async function rollback() {
+    if (!deviceId.value || !rollbackVersion.value) return
+    try {
+      await ElMessageBox.confirm(
+        `确认把「${device.value?.hostname}」回滚到 ${rollbackVersion.value} 吗？`,
+        '提示',
+        { type: 'warning' }
+      )
+    } catch {
+      return
+    }
+    try {
+      await dispatchDeviceUpgrade({ version: rollbackVersion.value, ids: [deviceId.value] })
+      ElMessage.success(`已下回滚到 ${rollbackVersion.value}`)
+      await refreshAll()
+    } catch (e) {
+      ElMessage.error(errMsg(e, '回滚失败'))
+    }
+  }
+
+  /**
+   * 固定在当前版本 = 把设备级目标设成它当前的版本。
+   *
+   * 这就是「不跟随全站」的全部语义（设计 §2）：版本与目标一致 → 对账视为无需动作。
+   * 用 pin 标志显式表达意图 —— 普通升级不能顺手写目标，否则一次全站下发会把每台
+   * 设备都钉死。
+   */
+  async function pinCurrent() {
+    if (!deviceId.value || !device.value?.agentVersion) return
+    try {
+      await upgradeDevice(deviceId.value, {
+        version: device.value.agentVersion,
+        pin: true
+      })
+      ElMessage.success(`已固定在 ${device.value.agentVersion}（不再跟随全站）`)
+      await refreshAll()
+    } catch (e) {
+      ElMessage.error(errMsg(e, '操作失败'))
+    }
+  }
+
+  /** 恢复跟随全站 = 清空设备级目标。 */
+  async function resumeFollow() {
+    if (!deviceId.value) return
+    try {
+      await clearDeviceUpgradeTarget(deviceId.value)
+      ElMessage.success('已恢复跟随全站目标')
+      await refreshAll()
+    } catch (e) {
+      ElMessage.error(errMsg(e, '操作失败'))
+    }
+  }
+
+  function errMsg(e: unknown, fallback: string): string {
+    const msg = (e as { message?: string })?.message
+    return msg && msg.trim() !== '' ? msg : fallback
+  }
+
   async function refreshAll() {
     await Promise.all([loadDevice(), loadDiskCount()])
   }
@@ -1061,6 +1335,120 @@
       margin-top: 12px;
       font-size: 12px;
       color: var(--el-text-color-placeholder);
+    }
+  }
+
+  /* ══════════ Agent 升级卡片（W2）══════════
+     信息密度优先：版本、目标、状态、原因、时间与四个动作在一行内可扫读，
+     失败/回滚的原因是运维最需要的一眼（故就地显示，不藏进 hover）。 */
+  .dd-upgrade {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+
+    &__head {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+
+    &__title {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--el-text-color-primary);
+    }
+
+    &__ver {
+      font-size: 13px;
+      color: var(--el-text-color-regular);
+      font-variant-numeric: tabular-nums;
+    }
+
+    &__reason {
+      font-size: 12px;
+      color: var(--el-color-danger);
+    }
+
+    &__time {
+      font-size: 12px;
+      color: var(--el-text-color-secondary);
+    }
+
+    &__actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin-left: auto;
+    }
+
+    &__hint {
+      font-size: 12px;
+      color: var(--el-text-color-secondary);
+    }
+
+    &__records {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding-top: 8px;
+      border-top: 1px solid var(--art-card-border);
+    }
+
+    &__records-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--el-text-color-secondary);
+    }
+
+    &__record {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: baseline;
+      font-size: 12px;
+      color: var(--el-text-color-regular);
+    }
+
+    &__record-time {
+      color: var(--el-text-color-secondary);
+      font-variant-numeric: tabular-nums;
+    }
+
+    &__record-ver {
+      font-variant-numeric: tabular-nums;
+    }
+
+    &__record-state {
+      &.is-bad {
+        color: var(--el-color-danger);
+      }
+    }
+
+    &__record-reason {
+      color: var(--el-color-danger);
+    }
+
+    &__empty {
+      font-size: 12px;
+      color: var(--el-text-color-secondary);
+    }
+
+    &__dialog {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    &__dialog-row {
+      font-size: 13px;
+      color: var(--el-text-color-primary);
+    }
+
+    &__dialog-empty {
+      font-size: 12px;
+      color: var(--el-text-color-secondary);
     }
   }
 </style>

@@ -50,7 +50,11 @@ const VIEW_FILES = [
   '../components/watermark-bar.vue',
   '../views/detail.vue',
   '../views/overview.vue',
-  '../views/index.vue'
+  '../views/index.vue',
+  // 升级域的两个新页面（发布物 / 升级任务）：
+  // 它们最容易长出的内部术语是原因码原文与「sha256 / HTTP 码」这类协议细节。
+  '../views/release.vue',
+  '../views/upgrade-task.vue'
 ]
 
 /**
@@ -68,7 +72,22 @@ const FORBIDDEN_PROSE = [
   '5min 档', // 表分档
   '采样点', // 会被误读成 Agent 上报条数；页面上统一称「数据点」
   '会被后端拒绝', // 拿 400 边界解释禁用原因
-  'range>' // 同上（旧文案原文）
+  'range>', // 同上（旧文案原文）
+  // ── 升级域（新增）──────────────────────────────────────────────
+  'sha256', // 摘要算法名：页面只给「文件校验不通过」这样的结论
+  'SHA256',
+  'HTTP', // 状态码是排障线索，不进页面（下载端点是设备侧的，页面看不到）
+  'ETXTBSY', // 替换二进制时的系统错误名
+  'exit code', // 退出码
+  'request_id', // 协议字段名
+  'reason_code', // 同上（页面只显示翻译后的结论）
+  'from_version',
+  'to_version',
+  'agent_upgrade', // 表/字段前缀
+  'pending', // 状态机原始值（页面有中文相位文案）
+  'rolled_back',
+  'superseded',
+  'timeout' // 注意：它同时是一个原因码，页面文案是「超时未完成」
 ]
 
 /**

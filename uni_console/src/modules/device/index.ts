@@ -1,5 +1,5 @@
 import type { PluginManifest } from '@/types/plugin'
-import { PermDeviceList, PermDeviceQuery } from '@/enums/permission'
+import { PermDeviceList, PermDeviceQuery, PermDeviceReleaseList } from '@/enums/permission'
 
 /**
  * 设备管理模块（路由挂载靠目录约定：src/modules/<name>/index.ts 默认导出
@@ -61,6 +61,33 @@ const plugin: PluginManifest = {
         isHide: true,
         // 隐藏路由按 authMark 过滤（MenuProcessor 与菜单节点同口径），
         // 无权限时连路由都不注册；权限码与后端 /devices/:id 的 PermDeviceQuery 一致。
+        authMark: PermDeviceQuery
+      }
+    },
+    {
+      // Agent 版本页：path/Component 与后端 v013 种子菜单 **逐字一致**
+      // （Path: "/device/release"）。差异的症状是「侧边栏没有这一项，控制台无报错」
+      // —— 由 `v013_seed_agent_upgrade_frontend_test.go` 做字面量比对钉住。
+      path: '/device/release',
+      name: 'DeviceRelease',
+      component: () => import('./views/release.vue'),
+      meta: {
+        // 权限用 release:list（与菜单 Perms 一致）：这一页的主内容是程序包清单，
+        // 与设备查询面是两回事（只有查询权限的人不该看到上传入口）。
+        title: 'Agent 版本',
+        icon: 'ri:upload-cloud-2-line',
+        authMark: PermDeviceReleaseList
+      }
+    },
+    {
+      // 升级任务页：同样与 v013 菜单逐字一致（Path: "/device/upgrade-task"）。
+      // 权限沿用 device:query —— 它展示的是「这次操作的结果」，与设备查询同一批数据。
+      path: '/device/upgrade-task',
+      name: 'DeviceUpgradeTask',
+      component: () => import('./views/upgrade-task.vue'),
+      meta: {
+        title: '升级任务',
+        icon: 'ri:list-check-2',
         authMark: PermDeviceQuery
       }
     }

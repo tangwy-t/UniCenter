@@ -156,3 +156,170 @@ export function fetchDeviceOverview(params: DeviceOverviewQuery = {}) {
     params
   })
 }
+
+// ── Agent 升级（命令 / 发布物 / 任务）──────────────────────────────────
+//
+// 契约要点（与后端 handler 一一对应）：
+// - 所有下发入口都返回 `DeviceUpgradeDispatchResp`（含 task_id，页面据此跳任务页）；
+//   按筛选下发必须带 `expectedCount`（先调 preview 拿到的命中台数），不一致后端 409；
+// - `pin: true` 是「固定在当前版本」的**独立意图**（版本与当前相同时也写目标），
+//   普通升级不要传它 —— 否则一次批量下发会把每台设备都钉死，不再跟随全站；
+// - 发布物与任务都走设备域前缀 `/devices/...`（与 agent 下载端点 `/agent/...` 分开：
+//   后者是设备侧凭 agent token 访问的，前端不碰）。
+
+/** 升级/回滚的请求体（单台与批量共用形状）。 */
+export interface DeviceUpgradeTargetPayload {
+  version: string
+  /** 仅单台「固定在当前版本」时传 true（见文件头说明）。 */
+  pin?: boolean
+}
+
+/** 批量下发请求体：`ids` 与 `filter` 二选一（后端会拒绝同时给）。 */
+export interface DeviceBatchUpgradePayload {
+  version: string
+  /** 多选：设备 ID 列表（雪花 ID 以字符串传输，避免 JS 精度丢失）。 */
+  ids?: string[]
+  /** 按筛选全量：与列表页同一套筛选字段。 */
+  filter?: DeviceQuery
+  /** 按筛选下发时的**影响面确认**（preview 返回的 matched）。 */
+  expectedCount?: number
+}
+
+/** 单台下发（升级到指定版本；`pin` 表示固定在当前版本）。 */
+export function upgradeDevice(id: string, payload: DeviceUpgradeTargetPayload) {
+  return request.post<Api.Device.DeviceUpgradeDispatchResp>({
+    url: `${PREFIX}/devices/${id}/upgrade`,
+    data: payload
+  })
+}
+
+/** 清空设备级目标（恢复跟随全站）。 */
+export function clearDeviceUpgradeTarget(id: string) {
+  return request.del<void>({ url: `${PREFIX}/devices/${id}/upgrade` })
+}
+
+/** 影响面预演（下发前给人看的数字：命中多少、跳过多少、分别为什么）。 */
+export function previewDeviceUpgrade(payload: DeviceBatchUpgradePayload) {
+  return request.post<Api.Device.DeviceUpgradePreviewResp>({
+    url: `${PREFIX}/devices/upgrade/preview`,
+    data: payload
+  })
+}
+
+/** 批量下发（多选或按筛选）。 */
+export function dispatchDeviceUpgrade(payload: DeviceBatchUpgradePayload) {
+  return request.post<Api.Device.DeviceUpgradeDispatchResp>({
+    url: `${PREFIX}/devices/upgrade`,
+    data: payload
+  })
+}
+
+/** 设置/清除全站目标版本（`version` 为空 = 关闭全站升级）。 */
+export function setAgentGlobalTarget(version: string) {
+  return request.post<Api.Device.DeviceUpgradeGlobalResp>({
+    url: `${PREFIX}/devices/upgrade/global`,
+    data: { version }
+  })
+}
+
+/** 升级状态汇总（当前状态视角：按生效目标分桶 + 版本分布）。 */
+export function fetchAgentUpgradeSummary() {
+  return request.get<Api.Device.DeviceUpgradeSummaryResp>({
+    url: `${PREFIX}/devices/upgrade/summary`
+  })
+}
+
+/** 任务列表查询参数。 */
+export interface UpgradeTaskQuery {
+  page?: number
+  pageSize?: number
+  /** 目标版本精确匹配。 */
+  targetVersion?: string
+  /** 来源：manual/batch/filter/global。 */
+  source?: string
+  /** 只看未收口的任务。 */
+  running?: boolean
+}
+
+/** 升级任务列表（每行带明细状态分布）。 */
+export function fetchAgentUpgradeTasks(params: UpgradeTaskQuery = {}) {
+  return request.get<PageResponse<Api.Device.AgentUpgradeTaskItem>>({
+    url: `${PREFIX}/devices/upgrade/tasks`,
+    params
+  })
+}
+
+/**
+ * 任务明细查询参数。
+ *
+ * `filter` 是受限枚举：`active` 只看进行中、`failed` 只看失败/回滚/超时；
+ * **空串表示不过滤**（后端约定，与「不传」等价）——故这里允许空串，
+ * 否则页面在「全部」这一档上只能不传字段，多一份分支。
+ */
+export interface UpgradeAttemptQuery {
+  page?: number
+  pageSize?: number
+  filter?: '' | 'active' | 'failed'
+}
+
+/** 任务详情（任务 + 逐台明细）。 */
+export function fetchAgentUpgradeTaskDetail(id: string, params: UpgradeAttemptQuery = {}) {
+  return request.get<Api.Device.AgentUpgradeTaskDetailResp>({
+    url: `${PREFIX}/devices/upgrade/tasks/${id}`,
+    params
+  })
+}
+
+/** 某设备的升级记录（详情页用；与任务明细同源）。 */
+export function fetchDeviceUpgradeRecords(id: string) {
+  return request.get<Api.Device.DeviceUpgradeRecord[]>({
+    url: `${PREFIX}/devices/${id}/upgrade/records`
+  })
+}
+
+/** 发布物列表（含「能否删除」的结论与已发布版本号）。 */
+export function fetchAgentReleases() {
+  return request.get<Api.Device.AgentReleaseListResp>({
+    url: `${PREFIX}/devices/releases`
+  })
+}
+
+/**
+ * 上传 agent 程序包（草稿态，需再发布）。
+ *
+ * `timeout: 0` = 不限时（程序包 20MB 级，内网也要几十秒；默认超时会在中途掐断）；
+ * `onUploadProgress` 驱动进度条，`signal` 支持取消 —— 与文件模块的 upload 同款。
+ */
+export function uploadAgentRelease(
+  data: FormData,
+  options: {
+    onUploadProgress?: (percent: number) => void
+    signal?: AbortSignal
+  } = {}
+) {
+  return request.post<Api.Device.AgentReleaseItem>({
+    url: `${PREFIX}/devices/releases`,
+    data,
+    timeout: 0,
+    signal: options.signal,
+    onUploadProgress: (e: { loaded: number; total?: number }) => {
+      if (!options.onUploadProgress || !e.total) return
+      options.onUploadProgress(Math.round((e.loaded / e.total) * 100))
+    }
+  })
+}
+
+/** 发布（草稿 → 已发布；此后可被选为目标版本）。 */
+export function publishAgentRelease(id: string) {
+  return request.post<void>({ url: `${PREFIX}/devices/releases/${id}/publish` })
+}
+
+/** 撤回发布（只影响新下发；已指向该版本的设备仍可下载）。 */
+export function unpublishAgentRelease(id: string) {
+  return request.post<void>({ url: `${PREFIX}/devices/releases/${id}/unpublish` })
+}
+
+/** 删除发布物（被升级记录用过的版本会被后端拒绝：回滚余量保护）。 */
+export function removeAgentRelease(id: string) {
+  return request.del<void>({ url: `${PREFIX}/devices/releases/${id}` })
+}
