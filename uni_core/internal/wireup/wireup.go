@@ -451,6 +451,8 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 		AgentFlush:     agentFlushSvc,
 		AgentRollup:    agentRollupSvc,
 		AgentPartition: agentPartitionSvc,
+		// 升级巡检（只读扫描 + 判超时）：不加它，卡住的升级尝试会永远停在「升级中」。
+		AgentUpgrade: deviceUpgradeSvc,
 		// Log 允许 nil（任务侧退化成 Nop），但装配点没有理由交 nil：4 个指标任务的
 		// 全部可观测性就是那几行结构化读数。
 		Log: log,

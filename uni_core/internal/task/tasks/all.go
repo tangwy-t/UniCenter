@@ -24,6 +24,8 @@ type Deps struct {
 	AgentFlush     AgentFlushService
 	AgentRollup    AgentRollupService
 	AgentPartition AgentPartitionService
+	// AgentUpgrade 供升级巡检任务使用（只读扫描 + 判超时，不含任何下发能力）。
+	AgentUpgrade AgentUpgradeSweeper
 	// Log 供 4 个指标任务记录结构化读数（zap 字段）。允许为 nil：任务构造时
 	// 退化成 logger.NewNop()，这样 All(Deps{}) 的零值路径不会 panic。
 	Log logger.LoggerInterface
@@ -38,6 +40,7 @@ func All(d Deps) []task.Task {
 		NewOpLogCleanupTask(d.OpLogRepo, d.ConfigSvc),
 		NewLoginLogCleanupTask(d.LoginLogRepo, d.ConfigSvc),
 		NewJobLogCleanupTask(d.JobLogRepo, d.ConfigSvc),
+		NewAgentUpgradePatrolTask(d.AgentUpgrade, d.Log),
 		NewConfigSyncTask(d.ConfigRepo, d.CacheStore),
 		NewDictSyncTask(d.DictTypeRepo, d.DictDataRepo, d.CacheStore),
 		// 设备指标域（Name 必须与 v009 种子的 invoke_target 逐字一致：

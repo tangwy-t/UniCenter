@@ -191,8 +191,15 @@ func (r *AgentUpgradeAttemptRepo) SupersedeOpen(ctx context.Context, deviceID ui
 // （协议层已保证 verifying 不带 progress，这里负责把库里的旧值抹掉）——
 // 留着 62% 会让页面显示「校验中 62%」这种不存在的状态。
 func (r *AgentUpgradeAttemptRepo) UpdateReport(ctx context.Context, a *entity.AgentUpgradeAttempt) error {
+	// **WHERE 里带「仍未终结」**：这是与 hello 归位的**原子**互斥。
+	//
+	// 服务层的 IsAttemptTerminal 检查是「先读后写」，两条写路径（hello 归位与状态上报）
+	// 会交错：一条刚把行判成功，另一条拿着它读到的旧状态（restarting）再写回去 ——
+	// 现象是**设备已达成、任务却永远显示「升级中」**（端到端验收实测）。
+	// 把条件放进 UPDATE 后，后到的那条自然影响 0 行 → 返回 ErrNotFound →
+	// 服务层按「已被终结」丢弃并记日志。
 	res := r.db.WithContext(ctx).Model(&entity.AgentUpgradeAttempt{}).
-		Where("id = ?", a.ID).
+		Where("id = ? AND state NOT IN ?", a.ID, entity.AttemptTerminalStates()).
 		Updates(map[string]any{
 			"state":          a.State,
 			"progress":       a.Progress,
@@ -319,4 +326,19 @@ func (r *AgentUpgradeAttemptRepo) FindStale(ctx context.Context, before time.Tim
 		return nil, err
 	}
 	return rows, nil
+}
+
+// FinishByID 按行终结一次尝试（**带非终结守卫**，与 UpdateReport 同款：
+// 防止与状态上报/hello 归位交错把已终结的行改回去）。返回被终结的行数。
+func (r *AgentUpgradeAttemptRepo) FinishByID(ctx context.Context, id uint64,
+	state, reasonCode string, at time.Time) (int64, error) {
+	res := r.db.WithContext(ctx).Model(&entity.AgentUpgradeAttempt{}).
+		Where("id = ? AND state NOT IN ?", id, entity.AttemptTerminalStates()).
+		Updates(map[string]any{
+			"state":       state,
+			"reason_code": reasonCode,
+			"progress":    nil,
+			"finished_at": at,
+		})
+	return res.RowsAffected, res.Error
 }

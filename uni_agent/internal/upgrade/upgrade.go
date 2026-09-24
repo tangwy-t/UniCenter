@@ -24,8 +24,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	agentproto "github.com/tangwy-t/UniCenter/uni_protocol"
@@ -70,14 +72,24 @@ type Deps struct {
 	JitterMax time.Duration
 	// SmokeTimeout 是冒烟自检的超时（0 → 5s）。
 	SmokeTimeout time.Duration
+	// TrialWindow / ProbeWindow 覆盖试用期与延长量（0 → 生产默认）。
+	TrialWindow time.Duration
+	ProbeWindow time.Duration
 	// ProcAttr: 冒烟自检执行子进程用的可注入钩子（测试里不必真的跑二进制）。
 	SmokeRun func(ctx context.Context, bin string) (string, error)
 }
 
-// 常量：对话框式的窗口与阈值都在这里，推导见设计 §12。
+// 常量：窗口与阈值都在这里，推导见设计 §12。
+//
+// 两个试用期窗口可由 Deps 覆盖（TrialWindow / ProbeWindow）：默认值面向生产，
+// 而测试与快速验收需要把它们压到秒级 —— 否则「本地自愈」这条路径要么测不了，
+// 要么每条用例等几分钟。
 const (
 	// trialWindow 是试用期：新版本自替换后应在此时限内完成一次握手。
 	trialWindow = 180 * time.Second
+	// probeWindow 是**每一次「试着连但失败」的延长量**：试用期满时若有过失败痕迹，
+	// 说明连接循环在正常工作（只是 core 不可达），再给一个窗口等它连上。
+	probeWindow = 90 * time.Second
 	// maxStartAttempts 是启动计数上限：新版本起来 N 次都没确认即判定崩溃循环。
 	maxStartAttempts = 3
 	// probeBudget 是试用期满后的**探测预算**（D3）：连接失败累计到该值才回滚，
@@ -112,7 +124,31 @@ type attemptRecord struct {
 	Result    string    `json:"result,omitempty"`
 }
 
+// NewForProcess 构造**面向真实进程**的运行时：把三个「只有生产才有意义」的依赖
+// 填成真实实现 —— 自替换与自重启所依赖的 os.Executable / syscall.Exec / runtime.GOOS。
+//
+// 为什么要一个专用构造函数（而不是让 main 逐个字段填）：这三个字段漏设的后果都
+// **不会报错**，只是功能悄悄不工作 ——
+//   - 漏 Exec：文件被替换了但进程不重启（仍然跑旧代码、上报旧版本，
+//     服务端永远显示「升级中」）。这是端到端验收真抓到的缺陷；
+//   - 漏 Executable：定位不到自身路径，替换会失败；
+//   - 漏 GOOS：平台检查失效（默认按 linux 处理）。
+//
+// 把它们收进构造函数后，main 只要调用 NewForProcess 就不可能漏；
+// New（裸构造）留给测试 —— 测试要的就是「注入替身」。
+func NewForProcess(deps Deps) *Runtime {
+	deps.Executable = os.Executable
+	deps.Exec = syscall.Exec
+	if deps.GOOS == "" {
+		deps.GOOS = runtime.GOOS
+	}
+	return New(deps)
+}
+
 // New 构造运行时（并载入上次的尝试记录，使退避跨重启有效）。
+//
+// **生产代码请用 NewForProcess**：裸构造不填 Exec/Executable/GOOS，
+// 那三个字段缺省时升级只会「替换文件但不重启进程」（见 NewForProcess 的说明）。
 func New(deps Deps) *Runtime {
 	if deps.Log == nil {
 		deps.Log = nopLogger{}
@@ -128,6 +164,12 @@ func New(deps Deps) *Runtime {
 	}
 	if deps.SmokeTimeout <= 0 {
 		deps.SmokeTimeout = 5 * time.Second
+	}
+	if deps.TrialWindow <= 0 {
+		deps.TrialWindow = trialWindow
+	}
+	if deps.ProbeWindow <= 0 {
+		deps.ProbeWindow = probeWindow
 	}
 	r := &Runtime{deps: deps, log: deps.Log}
 	r.lastAttempt = readAttemptRecord(deps.StateDir)
@@ -226,6 +268,16 @@ func (r *Runtime) run(d *agentproto.UpgradeDirective) {
 	r.report(d, agentproto.UpgradeStateVerifying, nil)
 
 	// ⑤ 冒烟自检：能跑起来且自述版本正确，才允许替换。
+	//
+	// **必须先给可执行位**：下载时以 0600 落盘（不让人在下载中就去执行半截文件），
+	// 而冒烟要 fork/exec 它 —— 顺序反了会得到 `fork/exec …: permission denied`，
+	// 被归类成「新版本无法启动」（原因码没错，但真正的原因是流程顺序，不是二进制）。
+	// 这一条是端到端验收抓出来的：单元测试里冒烟是注入的，不会真的 exec 文件。
+	if err := os.Chmod(tmp, 0o755); err != nil {
+		_ = os.Remove(tmp)
+		r.fail(d, agentproto.ReasonNoWritePermission, "设置程序文件权限失败", err)
+		return
+	}
 	selfVersion, err := r.smoke(ctx, tmp)
 	if err != nil {
 		_ = os.Remove(tmp)
@@ -238,12 +290,6 @@ func (r *Runtime) run(d *agentproto.UpgradeDirective) {
 			fmt.Sprintf("新版本自述版本为 %q，与目标 %s 不符", strings.TrimSpace(selfVersion), d.TargetVersion), nil)
 		return
 	}
-	if err := os.Chmod(tmp, 0o755); err != nil {
-		_ = os.Remove(tmp)
-		r.fail(d, agentproto.ReasonNoWritePermission, "设置程序文件权限失败", err)
-		return
-	}
-
 	// ⑥ 备份 + 写事务 + 原子替换。
 	r.report(d, agentproto.UpgradeStateInstalling, nil)
 	backup := exe + ".prev"
@@ -381,6 +427,77 @@ func (r *Runtime) smoke(ctx context.Context, bin string) (string, error) {
 	return out, nil
 }
 
+// Start 启动**试用期看门狗**（在建立连接之前调用一次）。
+//
+// 为什么必须有它：回滚的另一条触发路径（OnConnectFailed 的探测预算）依赖
+// 「连接循环在跑」。若新版本启动后卡住、连一次连接尝试都没有发生（不崩也不连），
+// 事件永远不会到来 —— 设备会永远停在那份有问题的二进制上，而 systemd 也不会
+// 重启它（进程还活着）。看门狗把「到点未确认」这件事变成一个**由时间驱动**的
+// 判定，覆盖这条否则无解的路径：
+//
+//   - 到点（At + TrialWindow）仍 pending → 看本次试用期里有没有**失败痕迹**
+//     （ProbeFailures > 0：连接循环确实在跑、只是连不上，例如 core 停机）；
+//   - 没有痕迹 → **立即回滚**：进程自己有问题（连尝试都没有）；
+//   - 有痕迹 → 每有一次痕迹延长一个 ProbeWindow，最多 probeBudget 次，
+//     再用尽即回滚（这就是 D3 的探测预算，由时间兑现而不是靠事件恰好到来）。
+func (r *Runtime) Start(ctx context.Context) {
+	tx := readTransaction(r.deps.StateDir)
+	if tx == nil || tx.Phase != phasePending {
+		return
+	}
+	go r.probationWatch(ctx)
+}
+
+// probationWatch 周期巡检试用期状态（读盘为准：事务是唯一事实源）。
+func (r *Runtime) probationWatch(ctx context.Context) {
+	// 巡检间隔 = 窗口的 1/12（生产：180s/12 = 15s；测试把窗口压到毫秒级时同样按比例，
+	// 否则固定下限会让短窗口「到点了却没人来看」）。硬下限只防空转。
+	interval := r.deps.TrialWindow / 12
+	if interval < 100*time.Millisecond {
+		interval = 100 * time.Millisecond
+	}
+	if interval > 30*time.Second {
+		interval = 30 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		tx := readTransaction(r.deps.StateDir)
+		if tx == nil || tx.Phase != phasePending {
+			// 已确认（OnConnected 清了事务）或被别处终结：看门狗使命结束。
+			return
+		}
+		deadline := tx.At.Add(r.deps.TrialWindow)
+		if tx.ProbeFailures > 0 {
+			deadline = deadline.Add(time.Duration(tx.ProbeFailures) * r.deps.ProbeWindow)
+		}
+		if r.deps.Now().Before(deadline) {
+			continue
+		}
+		if tx.ProbeFailures == 0 {
+			r.log.Warn("upgrade probation expired without any connection attempt",
+				"to", tx.ToVersion)
+			r.rollback(tx, agentproto.ReasonNotConnectedAfterUpgrade,
+				"新版本启动后未能建立连接")
+			return
+		}
+		if tx.ProbeFailures < probeBudget {
+			// 还有探测预算：不在这里回滚，交给 OnConnectFailed 继续计数
+			//（下一次失败会把 deadline 再推一个窗口）。
+			continue
+		}
+		r.log.Warn("upgrade probation expired after probe budget",
+			"to", tx.ToVersion, "probes", tx.ProbeFailures)
+		r.rollback(tx, agentproto.ReasonNotConnectedAfterUpgrade, "试用期内未能连上服务端")
+		return
+	}
+}
+
 // OnConnected 握手完成：升级事务据此确认（新版本确实连上了）。
 func (r *Runtime) OnConnected() {
 	tx := readTransaction(r.deps.StateDir)
@@ -416,7 +533,7 @@ func (r *Runtime) OnConnectFailed() {
 		return
 	}
 	now := r.deps.Now()
-	if now.Before(tx.At.Add(trialWindow)) {
+	if now.Before(tx.At.Add(r.deps.TrialWindow)) {
 		return // 试用期内：连接失败是正常现象
 	}
 	tx.ProbeFailures++

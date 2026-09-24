@@ -65,3 +65,11 @@ type AgentRollupService interface {
 type AgentPartitionService interface {
 	Reconcile(ctx context.Context) (service.PartitionStats, error)
 }
+
+// AgentUpgradeSweeper 是升级巡检需要的窄接口（由 service.DeviceUpgradeService 实现）。
+//
+// 只暴露「扫一遍」这一个方法：巡检任务不该看得见下发的任何能力 ——
+// 一个只会巡检的任务，不可能因为代码写错而把设备升了。
+type AgentUpgradeSweeper interface {
+	SweepStale(ctx context.Context, olderThan time.Duration, limit int) (int, error)
+}

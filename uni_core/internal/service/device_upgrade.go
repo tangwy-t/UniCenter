@@ -37,6 +37,8 @@ type UpgradeAttemptRepository interface {
 	ListByDevice(ctx context.Context, deviceID uint64, limit int) ([]entity.AgentUpgradeAttempt, error)
 	FindPageByTask(ctx context.Context, taskID uint64, q *request.AgentUpgradeAttemptQuery) ([]entity.AgentUpgradeAttempt, int64, error)
 	FindLastSucceededFrom(ctx context.Context, deviceID uint64) (string, error)
+	FindStale(ctx context.Context, before time.Time, limit int) ([]entity.AgentUpgradeAttempt, error)
+	FinishByID(ctx context.Context, id uint64, state, reasonCode string, at time.Time) (int64, error)
 	SupersedeOpen(ctx context.Context, deviceID uint64, at time.Time) (int64, error)
 	UpdateReport(ctx context.Context, a *entity.AgentUpgradeAttempt) error
 	FinishOpen(ctx context.Context, deviceID uint64, state, reasonCode string, at time.Time) (int64, error)
@@ -250,6 +252,11 @@ func (s *DeviceUpgradeService) settleAttemptOnHello(ctx context.Context, dev *en
 // 失败只记日志不上抛：这是握手路径上的辅助动作，升级域的写失败不该让设备连不上。
 func (s *DeviceUpgradeService) finishAttempt(ctx context.Context, dev *entity.Device,
 	state, reasonCode string, now time.Time) {
+	// 先取一次未终结行（为的是它的 TaskID，供下面收口任务用）。
+	var taskID *uint64
+	if open, err := s.attempts.FindOpenByDevice(ctx, dev.ID); err == nil && open != nil {
+		taskID = open.TaskID
+	}
 	n, err := s.attempts.FinishOpen(ctx, dev.ID, state, reasonCode, now)
 	if err != nil {
 		s.log.Warn("agent upgrade attempt finish failed",
@@ -262,6 +269,10 @@ func (s *DeviceUpgradeService) finishAttempt(ctx context.Context, dev *entity.De
 	s.log.Info("agent upgrade attempt settled",
 		zap.Uint64("device_id", dev.ID), zap.String("state", state), zap.String("reason", reasonCode))
 	s.syncDeviceTerminal(ctx, dev.ID, state, reasonCode, now)
+	s.settleTask(ctx, taskID, now)
+	// 任务收口在**两条终结路径**上都要做（状态上报 / hello 归位）：只做一条会让
+	// 「由 hello 裁定的成功」永远收不了口（任务列表一直显示未完成）——
+	// 端到端验收实测到了这个不一致。
 }
 
 // syncDeviceTerminal 把终态写进设备行（只有失败与回滚需要落库；

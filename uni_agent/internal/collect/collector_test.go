@@ -234,3 +234,19 @@ func TestIOTimePercent(t *testing.T) {
 		}
 	}
 }
+
+// TestStaticReportsUpgradeCapability 钉住 hello 里的**升级能力自报位**。
+//
+// 这条守卫的由来是一次真实的漏接线：设计里写明「hello 填 upgrade_supported=true」，
+// 但代码里没实现 —— 端到端验收时下发直接被跳过（「不支持远程升级 1 台」），
+// 整个功能在生产里等于不存在。它与「协议字段有没有被填」是同一类缺陷：
+// 单元测试各自都绿，只有跨层跑一遍才看得见。
+func TestStaticReportsUpgradeCapability(t *testing.T) {
+	h := buildStatic("0.2.0")
+	if !h.UpgradeSupported {
+		t.Fatal("hello 必须自报 upgrade_supported=true（否则控制台永远判「不支持远程升级」）")
+	}
+	if h.AgentVersion != "0.2.0" {
+		t.Fatalf("版本应原样带上: %q", h.AgentVersion)
+	}
+}

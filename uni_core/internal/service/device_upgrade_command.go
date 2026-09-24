@@ -552,3 +552,51 @@ func (s *DeviceUpgradeService) actorName(ctx context.Context, actorID uint64) st
 // ErrDeviceOffline 由 notifier 实现返回，表示设备当前没连（**不是故障** ——
 // 因而调用方只在日志里降一级，不需要断连、重试或向用户报错）。
 var ErrDeviceOffline = errors.New("device offline")
+
+// staleAfter 是巡检判超时的阈值（设计 §12 的时间常数表）。
+//
+// 取 15 分钟的依据：它必须显著大于任何一个正常阶段的时长 —— 下载在内网是秒级、
+// 替换是毫秒级、本地自愈的试用期是 180 秒（含探测预算约 5 分钟）。定成 15 分钟
+// 意味着「只有真的卡住才会被判超时」，不会误伤慢设备。
+const staleAfter = 15 * time.Minute
+
+// SweepStale 把「已开工但长时间没动静」的尝试判超时（由巡检任务每分钟调用）。
+//
+// 三条语义：
+//   - **只看已开工的行**（FindStale 的 SQL 条件）：「等待设备上线」不是卡住，
+//     声明式目标对离线设备仍然生效，判它超时等于把「还没轮到」说成「失败」；
+//   - 终结用**带守卫的按行更新**（FinishByID）：与状态上报/hello 归位并发时，
+//     后到的那条影响 0 行 → 跳过（不重复记终态、不覆盖别人的结论）；
+//   - 终态同步到设备行并尝试收口任务 —— 与另外两条终结路径一致。
+func (s *DeviceUpgradeService) SweepStale(ctx context.Context, olderThan time.Duration,
+	limit int) (int, error) {
+	if olderThan <= 0 {
+		olderThan = staleAfter
+	}
+	now := time.Now()
+	rows, err := s.attempts.FindStale(ctx, now.Add(-olderThan), limit)
+	if err != nil {
+		return 0, err
+	}
+	swept := 0
+	for i := range rows {
+		a := rows[i]
+		n, err := s.attempts.FinishByID(ctx, a.ID, entity.AttemptStateTimeout,
+			entity.AttemptReasonTimeout, now)
+		if err != nil {
+			s.log.Warn("sweep stale attempt failed", zap.Uint64("attempt_id", a.ID), zap.Error(err))
+			continue
+		}
+		if n == 0 {
+			continue // 已被并发路径终结（上报/归位）：不重复记
+		}
+		swept++
+		s.log.Info("agent upgrade attempt timed out",
+			zap.Uint64("device_id", a.DeviceID), zap.String("to", a.ToVersion),
+			zap.String("state", a.State))
+		s.syncDeviceTerminal(ctx, a.DeviceID, entity.AttemptStateTimeout,
+			entity.AttemptReasonTimeout, now)
+		s.settleTask(ctx, a.TaskID, now)
+	}
+	return swept, nil
+}

@@ -1,6 +1,7 @@
 package upgrade
 
 import (
+	"context"
 	"os"
 	"testing"
 	"time"
@@ -41,7 +42,7 @@ func (e *testEnv) checkDeps() Deps {
 		GOOS:         "linux",
 		Executable:   func() (string, error) { return e.exe, nil },
 		Exec:         func(argv0 string, argv, envv []string) error { e.addExec(argv0); return nil },
-		Now:          func() time.Time { return e.now },
+		Now:          e.getNow,
 		HTTPClient:   e.server.Client(),
 		SmokeTimeout: time.Second,
 	}
@@ -51,7 +52,7 @@ func (e *testEnv) checkDeps() Deps {
 // 设备侧只需把事务销掉）。
 func TestStartupConfirmClearsTransaction(t *testing.T) {
 	env := newTestEnv(t, []byte("x"), "0.2.0")
-	env.pendingTx(t, env.now, 0)
+	env.pendingTx(t, env.getNow(), 0)
 
 	restart, err := CheckOnStartup(env.checkDeps())
 	if err != nil || restart {
@@ -79,7 +80,7 @@ func TestStartupConfirmClearsTransaction(t *testing.T) {
 // 不必等满试用期（否则一台崩循环的机器要等 3 分钟才自愈）。
 func TestCrashLoopRollsBackImmediately(t *testing.T) {
 	env := newTestEnv(t, []byte("x"), "0.2.0")
-	env.pendingTx(t, env.now, maxStartAttempts-1) // 已经起来过两次
+	env.pendingTx(t, env.getNow(), maxStartAttempts-1) // 已经起来过两次
 
 	restart, err := CheckOnStartup(env.checkDeps())
 	if err != nil {
@@ -105,7 +106,7 @@ func TestCrashLoopRollsBackImmediately(t *testing.T) {
 // 这条区分了「新版本坏了」与「core 暂时不可达」（后者探测几次就能连上）。
 func TestProbeBudgetRollsBackOnlyAfterTrial(t *testing.T) {
 	env := newTestEnv(t, []byte("x"), "0.2.0")
-	env.pendingTx(t, env.now.Add(-trialWindow-time.Minute), 1) // 试用期已过
+	env.pendingTx(t, env.getNow().Add(-trialWindow-time.Minute), 1) // 试用期已过
 
 	r := New(env.checkDeps())
 	for i := 1; i < probeBudget; i++ {
@@ -129,7 +130,7 @@ func TestProbeBudgetRollsBackOnlyAfterTrial(t *testing.T) {
 // TestProbeWithinTrialDoesNotCount：试用期内的连接失败只是正常重连，不计数。
 func TestProbeWithinTrialDoesNotCount(t *testing.T) {
 	env := newTestEnv(t, []byte("x"), "0.2.0")
-	env.pendingTx(t, env.now, 1) // 试用期刚开始
+	env.pendingTx(t, env.getNow(), 1) // 试用期刚开始
 
 	r := New(env.checkDeps())
 	for i := 0; i < probeBudget*3; i++ {
@@ -147,7 +148,7 @@ func TestProbeWithinTrialDoesNotCount(t *testing.T) {
 // 宁可留在新版本上，也不要让设备彻底离线；但要如实上报「还原失败」。
 func TestBackupMissingKeepsDeviceRunning(t *testing.T) {
 	env := newTestEnv(t, []byte("x"), "0.2.0")
-	env.pendingTx(t, env.now.Add(-trialWindow-time.Minute), 1)
+	env.pendingTx(t, env.getNow().Add(-trialWindow-time.Minute), 1)
 	if err := os.Remove(env.exe + ".prev"); err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +178,7 @@ func TestRolledBackReportedOnceOnConnect(t *testing.T) {
 	env := newTestEnv(t, []byte("x"), "0.2.0")
 	tx := &transaction{
 		FromVersion: "0.1.0", ToVersion: "0.2.0", RequestID: "42",
-		Phase: phaseRolledBack, At: env.now.Add(-time.Hour),
+		Phase: phaseRolledBack, At: env.getNow().Add(-time.Hour),
 		Reason: agentproto.ReasonNotConnectedAfterUpgrade, Detail: "试用期内未能连上服务端",
 	}
 	if err := writeTransaction(env.dir, tx); err != nil {
@@ -206,5 +207,59 @@ func TestRolledBackReportedOnceOnConnect(t *testing.T) {
 	r.OnConnected()
 	if after := len(env.recorder.states()); after != before {
 		t.Fatalf("不该重复上报: %v", env.recorder.states())
+	}
+}
+
+// TestProbationWatchdogRollsBackWhenNothingEverConnects 钉住看门狗要覆盖的那条路径：
+// **新版本启动后卡住**（不崩、也不连）—— 不崩则 systemd 不重启（启动计数不涨），
+// 不连则连接失败事件不来（探测预算不动），只有「到点未确认」这一个事实可依据。
+func TestProbationWatchdogRollsBackWhenNothingEverConnects(t *testing.T) {
+	env := newTestEnv(t, []byte("x"), "0.2.0")
+	deps := env.checkDeps()
+	deps.TrialWindow = 200 * time.Millisecond
+	deps.ProbeWindow = 100 * time.Millisecond
+	env.pendingTx(t, env.getNow(), 1)
+
+	r := New(deps)
+	r.Start(context.Background())
+
+	// 把时钟拨过试用期：看门狗读注入时钟，故不必真的等 200ms。
+	env.setNow(env.getNow().Add(time.Minute))
+	waitFor(t, func() bool { return env.execCount() == 1 })
+
+	if got := env.readExe(t); got != "OLD-BINARY" {
+		t.Fatalf("看门狗应还原备份，实得 %q", got)
+	}
+	tx := readTransaction(env.dir)
+	if tx == nil || tx.Phase != phaseRolledBack {
+		t.Fatalf("应留下回滚标记供旧版本上报: %+v", tx)
+	}
+}
+
+// TestProbationWatchdogSparesFlakyCore：试用期内有过「试着连但失败」的痕迹时，
+// 看门狗**不**抢在探测预算之前回滚 —— 这正是 D3 要区分的两种情形
+// （core 停机 vs 新版本坏了）。
+func TestProbationWatchdogSparesFlakyCore(t *testing.T) {
+	env := newTestEnv(t, []byte("x"), "0.2.0")
+	deps := env.checkDeps()
+	deps.TrialWindow = 200 * time.Millisecond
+	// 一次痕迹就把 deadline 推得很远（用它表达「连接循环在跑、只是 core 不可达」）。
+	deps.ProbeWindow = time.Hour
+	env.pendingTx(t, env.getNow(), 1)
+
+	// 先把时钟拨过试用期，再制造连接失败 —— 探测计数**只在试用期满之后**生效
+	//（试用期内的失败是正常重连，不该被当成证据）。
+	env.setNow(env.getNow().Add(time.Minute))
+	r := New(deps)
+	r.OnConnectFailed()
+
+	// 看门狗起来后应看到痕迹 → 不回滚。
+	r.Start(context.Background())
+	time.Sleep(400 * time.Millisecond)
+	if n := env.execCount(); n != 0 {
+		t.Fatalf("有连接失败痕迹时不该回滚（那会把 core 停机误判成新版本坏了），实得 %d 次 exec", n)
+	}
+	if tx := readTransaction(env.dir); tx == nil || tx.Phase != phasePending {
+		t.Fatalf("事务应保持 pending: %+v", tx)
 	}
 }

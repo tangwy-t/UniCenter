@@ -372,8 +372,10 @@ func TestV010RunsThroughMigrationRunner(t *testing.T) {
 		t.Fatalf("migration.Run: %v", err)
 	}
 	got := readJobs(t, db)
-	if len(got) != len(jobDefinitions)+len(agentJobDefinitions) {
-		t.Fatalf("sys_job 总数 = %d, want %d", len(got), len(jobDefinitions)+len(agentJobDefinitions))
+	// 与 v009 的同类断言一致：全量账本（新增任务种子迁移时必须同步这里）。
+	wantJobs := len(jobDefinitions) + len(agentJobDefinitions) + len(agentUpgradePatrolJobDefinitions)
+	if len(got) != wantJobs {
+		t.Fatalf("sys_job 总数 = %d, want %d", len(got), wantJobs)
 	}
 	if got[backfillInvokeTarget].CronExpression != backfillCronPaced {
 		t.Fatalf("runner 跑完后 %s 的 cron = %q, want %q（v010 必须在 v009 之后执行）",

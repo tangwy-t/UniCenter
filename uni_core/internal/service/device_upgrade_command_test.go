@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	agentproto "github.com/tangwy-t/UniCenter/uni_protocol"
 
@@ -546,4 +547,120 @@ func mustParseUint(t *testing.T, s string) uint64 {
 		v = v*10 + uint64(s[i]-'0')
 	}
 	return v
+}
+
+// TestLateStatusReportCannotReopenSettledAttempt 钉住一个**并发真实存在**的缺口：
+// hello 归位与状态上报是两条写路径，各自「先读后写」时会交错 ——
+// 一条刚把行判成功，另一条拿着旧状态（restarting）把它写回去，于是
+// 「设备已达成、任务却永远显示升级中」（端到端验收实测）。
+//
+// 修法是把「仍未终结」写进 UPDATE 的 WHERE（原子互斥），本用例直接构造
+// 「先终结、后上报」的时序来钉住它。
+func TestLateStatusReportCannotReopenSettledAttempt(t *testing.T) {
+	ctx := context.Background()
+	env := newUpgradeTestEnv(t, stubCfg{})
+	env.seedRelease(t, "0.2.0", "linux", "amd64", true)
+	dev := env.seedDevice(t, "0.1.0")
+	if _, err := env.svc.SetDeviceTarget(ctx, dev.ID, "0.2.0", false, 0); err != nil {
+		t.Fatal(err)
+	}
+	d, err := env.svc.ReconcileOnHello(ctx, dev.ID, helloFrom("0.1.0"))
+	if err != nil || d == nil {
+		t.Fatalf("对账失败: %v", err)
+	}
+	// 设备开工 → 上报 restarting。
+	if err := env.svc.ReportUpgradeStatus(ctx, dev.ID, &agentproto.UpgradeStatus{
+		RequestID: d.RequestID, State: agentproto.UpgradeStateRestarting,
+		TargetVersion: "0.2.0", FromVersion: "0.1.0",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// 新版本连上：hello 归位判成功。
+	if _, err := env.svc.ReconcileOnHello(ctx, dev.ID, helloFrom("0.2.0")); err != nil {
+		t.Fatal(err)
+	}
+	// 迟到的 restarting 上报（旧连接的最后一条，与 hello 并发）不得把它写回去。
+	if err := env.svc.ReportUpgradeStatus(ctx, dev.ID, &agentproto.UpgradeStatus{
+		RequestID: d.RequestID, State: agentproto.UpgradeStateRestarting,
+		TargetVersion: "0.2.0", FromVersion: "0.1.0",
+	}); err != nil {
+		t.Fatalf("迟到上报应被丢弃而不是报错: %v", err)
+	}
+	if got := env.attemptRows(t)[0].State; got != entity.AttemptStateSucceeded {
+		t.Fatalf("已终结的尝试不得被迟到上报改写，实得 %s", got)
+	}
+	// 任务也应随之收口（两条终结路径都要收口，否则任务永远显示未完成）。
+	if disp, err := env.svc.SetDeviceTarget(ctx, dev.ID, "0.3.0", false, 0); err == nil && disp != nil {
+		_ = disp
+	}
+}
+
+// TestSweepStaleTimesOutStuckAttempts 钉住巡检的三条语义：
+//   - 卡住的（已开工、久无动静）判超时 + 同步设备终态 + 收口任务；
+//   - **等待上线的不算卡住**（从未开工 → 不判）；
+//   - 已终结的行不被改写（并发守卫）。
+func TestSweepStaleTimesOutStuckAttempts(t *testing.T) {
+	ctx := context.Background()
+	env := newUpgradeTestEnv(t, stubCfg{})
+	env.seedRelease(t, "0.2.0", "linux", "amd64", true)
+
+	stuck := env.seedDevice(t, "0.1.0")
+	waiting := env.seedDevice(t, "0.1.0")
+	for _, id := range []uint64{stuck.ID, waiting.ID} {
+		if _, err := env.svc.SetDeviceTarget(ctx, id, "0.2.0", false, 0); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := env.svc.ReconcileOnHello(ctx, id, helloFrom("0.1.0")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 让「卡住」那台开工（收到过状态上报 = started_at 非空），然后把它的
+	// last_report_at 拨到很久以前（模拟静默）。
+	if err := env.db.Model(&entity.AgentUpgradeAttempt{}).
+		Where("device_id = ?", stuck.ID).
+		Updates(map[string]any{
+			"state":          entity.AttemptStateDownloading,
+			"started_at":     time.Now().Add(-time.Hour),
+			"last_report_at": time.Now().Add(-time.Hour),
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := env.svc.SweepStale(ctx, 15*time.Minute, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("应恰有 1 条被判超时（等待上线的不算），实得 %d", n)
+	}
+
+	var rows []entity.AgentUpgradeAttempt
+	if err := env.db.Order("device_id").Find(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	for i := range rows {
+		switch rows[i].DeviceID {
+		case stuck.ID:
+			if rows[i].State != entity.AttemptStateTimeout ||
+				rows[i].ReasonCode != entity.AttemptReasonTimeout || rows[i].FinishedAt == nil {
+				t.Fatalf("卡住的行应判超时: %+v", rows[i])
+			}
+		case waiting.ID:
+			if rows[i].State != entity.AttemptStatePending {
+				t.Fatalf("等待上线的行不得被判超时（声明式目标仍在生效）: %+v", rows[i])
+			}
+		}
+	}
+	if got := env.deviceRow(t, stuck.ID).AgentUpgradeState; got != entity.DeviceUpgradeFailed {
+		t.Fatalf("设备行应同步为失败: %d", got)
+	}
+	if got := env.deviceRow(t, stuck.ID).AgentUpgradeReason; got != entity.AttemptReasonTimeout {
+		t.Fatalf("原因码应为 timeout: %q", got)
+	}
+
+	// 再扫一遍：已终结的行不该被重复处理。
+	n, err = env.svc.SweepStale(ctx, 15*time.Minute, 100)
+	if err != nil || n != 0 {
+		t.Fatalf("第二次巡检不该再判（已终结）: n=%d err=%v", n, err)
+	}
 }

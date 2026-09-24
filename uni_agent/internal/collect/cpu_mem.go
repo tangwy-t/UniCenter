@@ -102,6 +102,13 @@ func buildStatic(agentVersion string) *agentproto.Hello {
 		OS:           runtime.GOOS,
 		Arch:         runtime.GOARCH,
 		AgentVersion: agentVersion,
+		// **自报「我这一版能被远程升级」**：这个字段是控制台能不能下发的前提，
+		// 也是「存量 0.1.0 点了没反应」那类困惑的解药。
+		//
+		// 置 true 的依据是「本构建里编译进了 internal/upgrade」—— 即编译期事实，
+		// 而不是某个运行时开关：一个 Agent 能不能被升级，取决于它的代码里有没有
+		// 那套下载/替换/自愈逻辑，与配置无关。
+		UpgradeSupported: true,
 	}
 	if hi, err := host.Info(); err == nil && hi != nil {
 		h.Hostname = hi.Hostname

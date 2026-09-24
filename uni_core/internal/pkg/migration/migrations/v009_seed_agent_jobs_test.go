@@ -302,9 +302,13 @@ func TestV009RunsThroughMigrationRunner(t *testing.T) {
 	if err := db.Model(&entity.SysJob{}).Count(&total).Error; err != nil {
 		t.Fatalf("count jobs: %v", err)
 	}
-	wantTotal := int64(len(jobDefinitions) + len(agentJobDefinitions)) // v007 的 5 个 + v009 的 4 个
+	// 总数 = 各迁移种子的任务之和。**这是个全量账本**：每新增一条任务种子迁移，
+	// 这里就要 +1（v014 的升级巡检就是最近一次）—— 它守的是「没有意外多出来的任务」，
+	// 而不是某一批的数量。
+	wantTotal := int64(len(jobDefinitions) + len(agentJobDefinitions) +
+		len(agentUpgradePatrolJobDefinitions)) // v007 的 5 + v009 的 4 + v014 的 1
 	if total != wantTotal {
-		t.Fatalf("sys_job 总数 = %d, want %d（v007 的 5 个 + v009 的 4 个）", total, wantTotal)
+		t.Fatalf("sys_job 总数 = %d, want %d（v007 的 5 个 + v009 的 4 个 + v014 的 1 个）", total, wantTotal)
 	}
 
 	// 再跑一次 runner：版本账本让 v009 不再执行，数量必须一动不动

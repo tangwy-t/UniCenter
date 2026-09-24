@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -131,12 +132,24 @@ func (e *testEnv) deps(version string, body []byte) Deps {
 			// 于是运行时应当还原备份并上报失败 —— 这条路径同样必须被覆盖。
 			return errors.New("test: exec returned")
 		},
-		Now:          func() time.Time { return e.now },
+		Now:          e.getNow,
 		Sleep:        func(_ context.Context, d time.Duration) { e.addSleep(d) },
 		HTTPClient:   e.server.Client(),
 		SmokeRun:     func(context.Context, string) (string, error) { return "uni_agent " + e.newVersion, nil },
 		SmokeTimeout: time.Second,
 	}
+}
+
+func (e *testEnv) setNow(t time.Time) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.now = t
+}
+
+func (e *testEnv) getNow() time.Time {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.now
 }
 
 func (e *testEnv) addExec(argv0 string) {
@@ -504,4 +517,66 @@ func waitFor(t *testing.T, cond func() bool) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("等待超时")
+}
+
+// TestSmokeSeesExecutableTempFile 钉住冒烟自检之前的**文件模式**。
+//
+// 由来（端到端抓到的真问题）：临时文件以 0600 下载（防止下载中被执行半截文件），
+// 而冒烟自检要 fork/exec 它 —— 顺序反了会得到 `permission denied`，
+// 上报的原因码是「新版本无法启动」（不算撒谎，但真正的原因是流程顺序）。
+// 单元测试此前看不见它，因为冒烟是注入的、从不真的 exec。
+func TestSmokeSeesExecutableTempFile(t *testing.T) {
+	body := []byte("NEW-BINARY-CONTENT")
+	env := newTestEnv(t, body, "0.2.0")
+	deps := env.deps("0.1.0", body)
+	// 冒烟替身：在「被执行的那一刻」检查文件权限位。
+	// 用互斥保护：写入发生在升级 goroutine，读取在测试里（-race 会抓）。
+	var mu sync.Mutex
+	var mode os.FileMode
+	deps.SmokeRun = func(_ context.Context, bin string) (string, error) {
+		fi, err := os.Stat(bin)
+		if err != nil {
+			return "", err
+		}
+		mu.Lock()
+		mode = fi.Mode()
+		mu.Unlock()
+		return "uni_agent " + env.newVersion, nil
+	}
+	r := New(deps)
+	r.OnDirective(&agentproto.UpgradeDirective{
+		RequestID: "1", TargetVersion: "0.2.0", SHA256: env.sha, SizeBytes: int64(len(body)),
+	})
+	waitFor(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return mode != 0
+	})
+	mu.Lock()
+	got := mode
+	mu.Unlock()
+	if got.Perm()&0o111 == 0 {
+		t.Fatalf("冒烟自检时临时文件必须已可执行，实得 %v（顺序反了会 permission denied）", got.Perm())
+	}
+}
+
+// TestNewForProcessFillsProcessDependencies 钉住「生产构造函数必须填满三个进程依赖」。
+//
+// 由来（端到端抓到的缺陷）：main 曾用裸 New 构造，Exec 为空 —— 升级流程把文件
+// 替换成 0.2.0 之后**没有重启进程**：设备仍跑旧代码、上报旧版本，服务端永远显示
+// 「升级中」。这类漏设不会报错，只在真的升级时暴露，故用测试把它变成红灯。
+func TestNewForProcessFillsProcessDependencies(t *testing.T) {
+	r := NewForProcess(Deps{Version: "0.1.0", StateDir: t.TempDir()})
+	if r.deps.Exec == nil {
+		t.Fatal("NewForProcess 必须注入 Exec（否则替换后不会重启进程）")
+	}
+	if r.deps.Executable == nil {
+		t.Fatal("NewForProcess 必须注入 Executable（否则定位不到自身路径）")
+	}
+	if r.deps.GOOS == "" {
+		t.Fatal("NewForProcess 必须注入 GOOS（否则平台检查失效）")
+	}
+	if r.deps.GOOS != runtime.GOOS {
+		t.Fatalf("GOOS 应取运行时值，实得 %q", r.deps.GOOS)
+	}
 }

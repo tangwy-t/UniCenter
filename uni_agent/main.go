@@ -16,7 +16,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"runtime"
 	"syscall"
 	"time"
 
@@ -102,7 +101,9 @@ func run() error {
 		// 推导失败不阻断启动：存量设备仍要能上报指标，升级只是可选能力。
 		log.Warn("cannot derive download base, auto-upgrade disabled", "err", err.Error())
 	}
-	upgradeRuntime := upgrade.New(upgrade.Deps{
+	// **用 NewForProcess**：它填好 os.Executable / syscall.Exec / runtime.GOOS ——
+	// 这三个字段漏设不会报错，只会让升级「替换了文件却不重启进程」（端到端抓到过）。
+	upgradeRuntime := upgrade.NewForProcess(upgrade.Deps{
 		Version:      cfg.AgentVersion,
 		StateDir:     cfg.StateDir,
 		DownloadBase: downloadBase,
@@ -110,10 +111,12 @@ func run() error {
 		SendStatus:   client.SendUpgradeStatus,
 		SaveToken:    store.SaveAgentToken,
 		Log:          log,
-		GOOS:         runtime.GOOS,
 		JitterMax:    30 * time.Second,
 	})
 	client.SetHook(upgradeRuntime)
+	// 试用期看门狗：覆盖「新版本卡住、连连接尝试都没有」这条否则无解的路径
+	//（另一种回滚触发靠连接失败事件，而那条路径假设连接循环在跑）。
+	upgradeRuntime.Start(context.Background())
 
 	col.SetBacklogSource(
 		func() int64 { return int64(client.Pending()) },
