@@ -226,21 +226,29 @@
         axisPointer: { type: 'line', snap: true }
       },
       legend: {
+        // 单行 + 翻页是本页有意为之：图块只有 16rem 高，图例换行会直接压扁绘图区。
+        // 注意 scroll 图例**不会**换行 —— 它把内容裁成一个窗口，放不下的条目
+        // 挂在「1/2」翻页控件后面（见下方 itemHeight 的说明：这个窗口有代价）。
         type: 'scroll',
         bottom: 0,
         // 设备多时图例会很长：小字号 + 固定行高，避免挤压绘图区。
-        // 实测 2 台设备时单行已接近图宽（主机名 + 指标名较长），
-        // 故这里把 legend 的高度也钉住，防止多行图例把 grid 顶上去。
         textStyle: { fontSize: 11 },
         itemWidth: 12,
-        itemHeight: 8,
+        // itemHeight 必须高于文字行高（11px），否则**汉字天头会被裁掉**：
+        //
+        // 滚动图例在内容超宽时会给内容套一个 clipPath，而这个裁剪窗口的上沿
+        // 与条目包围盒上沿严格齐平（实测：窗口上沿 243.0 = 条目框上沿 243.0）。
+        // 折线系列的图例标记尺寸是 itemHeight × 0.8（LineSeries.getLegendIcon），
+        // 故 itemHeight 取 8 时条目框 == 文字框，裁剪线正好压在文字框上沿 ——
+        // 汉字墨迹高出行框的那 1~2px 就被切掉，顶上一道没有反锯齿的硬边。
+        // 16 让条目框变成 14.8px，文字框上沿因此比裁剪线低 1.9px（实测），天头完整。
+        itemHeight: 16,
         itemGap: 10,
-        // 图例超宽时换行（而不是悄悄裁掉）——被裁掉的图例意味着
-        // 「有设备在图上但你不知道是哪台」。
         orient: 'horizontal',
         left: 'center',
         padding: 0,
-        // 显式给图例区域高度：多行时 ECharts 会自己撑开，配合 grid.bottom 留白。
+        // 显式给图例区域高度：翻页窗口的高度取它（而不是按文字行高算），
+        // 与 grid.bottom 的 44px 一起分成「图例带 + X 轴标签」两段留白。
         height: 28
       },
       xAxis: {

@@ -549,3 +549,59 @@ describe('useChart 消费方必须监听 chartVisible（防「空白图块」静
     expect(src).toContain("removeEventListener('chartVisible'")
   })
 })
+
+/**
+ * 源码级守卫：滚动图例的条目高度必须高于文字行高。
+ *
+ * ## 为什么需要这条守卫
+ *
+ * 滚动图例（`type: 'scroll'`）在内容宽于容器时会给内容套一个 clipPath，
+ * 而这个裁剪窗口的上沿与**条目包围盒上沿严格齐平**（零余量）—— 探针实测
+ * 窗口上沿 243.0、条目框上沿 243.0、文字框上沿 243.0，三者同一个数。
+ *
+ * 折线系列的图例标记尺寸是 `itemHeight × 0.8`（`LineSeries.getLegendIcon`），
+ * 文字行高是 `textStyle.fontSize`（zrender 的文字布局框高 = 字号）。于是当
+ * `itemHeight × 0.8 ≤ fontSize` 时条目框就等于文字框，**裁剪线正好压在文字
+ * 框上沿**：汉字墨迹高出行框的那 1~2px 被切掉。失败方式很隐蔽 —— 不报错、
+ * 不缺字，只是图例汉字顶部一道没有反锯齿的硬边（截图放大才看得出），
+ * 而「把 itemHeight 从 8 改成 16」看起来又像是纯粹的整理。
+ *
+ * 之所以用源码扫描而不是渲染断言：本仓库的测试环境是 node（无 jsdom，
+ * 更无字模，测不出墨迹溢出），而这条不变量是「两个数值之间必须保持的关系」，
+ * 正是源码级守卫最擅长的形态（与上面的 chartVisible 守卫同思路）。
+ */
+describe('滚动图例：条目高度必须高于文字行高（防「图例切字头」）', () => {
+  /** 截取源码里 `key: {` 起的对象字面量（按花括号配对）。 */
+  function objectLiteral(src: string, key: string): string {
+    const start = src.indexOf(`${key}: {`)
+    if (start < 0) return ''
+    let depth = 0
+    for (let i = src.indexOf('{', start); i < src.length; i++) {
+      if (src[i] === '{') depth++
+      else if (src[i] === '}' && --depth === 0) return src.slice(start, i + 1)
+    }
+    return ''
+  }
+
+  const readSrc = (rel: string): string => readFileSync(new URL(rel, import.meta.url), 'utf8')
+
+  it('overview-chart-card.vue 的 legend.itemHeight 留出了文字天头的余量', () => {
+    const legend = objectLiteral(readSrc('../components/overview-chart-card.vue'), 'legend')
+    expect(legend, '没找到 legend 配置块（组件结构变了？）').not.toBe('')
+
+    const itemHeight = Number(/itemHeight:\s*(\d+)/.exec(legend)?.[1])
+    const fontSize = Number(/fontSize:\s*(\d+)/.exec(legend)?.[1])
+    expect(Number.isFinite(itemHeight) && Number.isFinite(fontSize)).toBe(true)
+    expect(fontSize).toBe(11)
+
+    if (/type:\s*'scroll'/.test(legend)) {
+      // 差值的下半部分就是文字框上沿到裁剪线的余量。留 4px 才有 2px 余量；
+      // 实测 16 − 11 = 5 → 余量 1.9px，汉字天头完整（原先是 0，天头被切）。
+      expect(itemHeight - fontSize).toBeGreaterThanOrEqual(4)
+    } else {
+      // 改成会换行的图例（无裁剪路径）后这条约束不再成立 —— 那时请连同本守卫
+      // 与组件里的注释一起改，而不是悄悄把它调松。
+      expect(legend, '图例已不是 scroll：请复核这条守卫的前提').toContain('orient')
+    }
+  })
+})

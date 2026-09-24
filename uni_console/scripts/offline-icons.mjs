@@ -32,6 +32,15 @@
  *
  * --check 不需要联网:拼写校验读本机 @iconify-json/ri,清单校验比对生成物,
  * 两者都不碰网络(只有 --write 拉新图标时才读本机的 @iconify-json/<集合>)。
+ *
+ * ## 跨仓库合并时生成物会冲突,这是预期而非故障
+ *
+ * 生成物是按**本仓库自己的**源码/种子/预设算出来的,上游(WebManagerFramework
+ * 的 web/,同一套框架文件)与本地两份必然不同(各自用到的图标集合不一样)。故从
+ * 上游合并进来时 offline-icons.generated.ts 会报 add/add 冲突 —— 处理办法:
+ * **先随便取一边,再跑一次 `pnpm icons:sync`**(它按当前仓库重算),不要去手工
+ * 合并那两份清单。合并后 `pnpm check:icons` 绿了才算合完(守卫也会把"清单与
+ * 源码不同步"直接报出来)。
  */
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join, relative, resolve } from 'node:path'
