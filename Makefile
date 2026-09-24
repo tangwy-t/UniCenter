@@ -229,8 +229,11 @@ uni_console-install: ## 安装前端依赖(pnpm install)
 uni_console-dev: ## 启动前端开发服务器(vite dev)
 	cd $(WEB_DIR) && $(PM) dev
 
-uni_console-build: ## 构建前端(类型检查 + vite build)
-	cd $(WEB_DIR) && $(PM) build
+uni_console-build: ## 构建前端(类型检查 + vite build；自动带上仓库根 .env 的 VITE_*)
+	@# 必须 source 根 .env：VITE_* 是**编译期内联**进 dist 的（compose 的 build args
+	@# 与这里同源）。漏了它们会产出 "undefined/login" 这种「构建成功但页面坏」的产物
+	@# —— 2026-09-24 的教训；vite.config 里另有缺失即失败的守卫。
+	cd $(WEB_DIR) && set -a && . ../.env && set +a && $(PM) build
 
 uni_console-serve: ## 本地预览前端构建产物(vite preview)
 	cd $(WEB_DIR) && $(PM) serve
