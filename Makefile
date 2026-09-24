@@ -18,6 +18,7 @@ SHELL := /bin/bash
 SERVER_DIR     := uni_core
 WEB_DIR        := uni_console
 PROTO_DIR      := uni_protocol
+AGENT_DIR      := uni_agent
 
 # ── Go 模块与版本注入 ───────────────────────────────────────
 GO_MODULE      := github.com/tangwy-t/UniCenter/uni_core
@@ -41,13 +42,32 @@ LDFLAGS = -X '$(GO_MODULE)/internal/pkg/version.Version=$(VERSION)' \
           -X '$(GO_MODULE)/internal/pkg/version.BuildTime=$(BUILD_TIME)' \
           -X '$(GO_MODULE)/internal/pkg/version.CommitHash=$(COMMIT_HASH)'
 
+# agent 的版本注入：它**只有一个来源**（编译期）。
+# 理由见 uni_agent/internal/config/config.go 的 DefaultVersion 注释：曾有
+# -version 标志可覆盖，现场 unit 写死它时升级后的新进程仍自称旧版本 →
+# 服务端认为没升上去 → 无限重下重装。故这里注入的就是唯一事实。
+AGENT_MODULE := github.com/tangwy-t/UniCenter/uni_agent
+# AGENT_VERSION 默认与 VERSION 同源，但**必须去掉 git describe 的前缀与脏标记**：
+# 它要作为 semver 参与比对（`refs/tags/uni_agent/v0.2.0-3-g1234abcd` 这种形态
+# 在 semver 解析里是非法值，会让设备永远对不上目标版本）。
+# 发版时显式传 AGENT_VERSION=0.2.0 最稳妥；缺省时尽力从 tag 提取。
+AGENT_VERSION ?= $(shell git describe --tags --match 'uni_agent/v*' --abbrev=0 2>/dev/null | sed 's|^uni_agent/v||' || echo "dev")
+# 空值兜底：`git describe` 在没有匹配 tag 时**静默返回空串**（sed 的成功退出让
+# `|| echo dev` 不生效），而空版本会被 core 以「载荷校验失败」拒掉 —— 设备连不上，
+# 且现象与「agent 坏了」完全不同。这一条与上方 VERSION 的 strip 兜底同一机制。
+ifeq ($(strip $(AGENT_VERSION)),)
+  AGENT_VERSION := dev
+endif
+
+AGENT_LDFLAGS = -X '$(AGENT_MODULE)/internal/config.DefaultVersion=$(AGENT_VERSION)'
+
 # ── 前端包管理器 ─────────────────────────────────────────────
 PM             ?= pnpm
 
 # ── swag 版本(与 uni_core/go.mod 的 swaggo/swag 保持一致) ──────
 SWAG_VERSION   ?= v1.16.6
 
-.PHONY: help all \
+.PHONY: help all uni_agent-build uni_agent-release uni_agent-test uni_agent-lint uni_agent-fmt \
         uni_core-run uni_core-build uni_core-test uni_core-lint uni_core-vet uni_core-fmt \
         uni_core-swagger uni_core-clean \
         uni_protocol-test uni_protocol-vet uni_protocol-lint uni_protocol-fmt \
@@ -106,6 +126,41 @@ uni_core-swagger: ## 后端重新生成 swagger 文档(docs/)
 
 uni_core-clean: ## 清理后端产物(bin/ 与 docs/)
 	rm -rf $(SERVER_DIR)/bin/ $(SERVER_DIR)/docs/
+
+## ──────────────────────────────────────────────────────────
+## 设备侧采集代理 uni_agent
+## ───────────────────────────────────────────────────────────
+# 版本注入是硬要求：agent 的版本号是「该不该替换自己」的判定依据，
+# 也是控制台显示与成功裁决的唯一来源。
+
+uni_agent-build: ## 构建 agent 二进制到 uni_agent/bin/uni_agent（注入版本）
+	cd $(AGENT_DIR) && CGO_ENABLED=0 go build -trimpath \
+		-ldflags "$(AGENT_LDFLAGS)" -o bin/uni_agent .
+
+# 发布产物：产出可上传到控制台的文件与它的 sha256。
+# 命名带平台后缀：一次发版要同时产出多个平台时，文件名必须能区分，
+# 否则上传到控制台时得靠人记住哪个文件是哪个架构。
+uni_agent-release: ## 构建发布产物(linux/amd64 + sha256)到 dist/
+	@mkdir -p dist
+	cd $(AGENT_DIR) && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+		-ldflags "$(AGENT_LDFLAGS)" -o ../dist/uni_agent_$(AGENT_VERSION)_linux_amd64 .
+	@cd dist && sha256sum uni_agent_$(AGENT_VERSION)_linux_amd64 | tee uni_agent_$(AGENT_VERSION)_linux_amd64.sha256
+	@echo "发布产物: dist/uni_agent_$(AGENT_VERSION)_linux_amd64（上传到控制台「Agent 版本」页）"
+
+uni_agent-test: ## agent 单元测试(go test -race)
+	cd $(AGENT_DIR) && go test ./... -race -count=1
+
+uni_agent-lint: ## agent 静态检查(golangci-lint,缺省降级 go vet)
+	@cd $(AGENT_DIR) && \
+	if command -v golangci-lint >/dev/null 2>&1; then \
+		golangci-lint run ./...; \
+	else \
+		echo "golangci-lint 未安装,降级 go vet"; \
+		go vet ./...; \
+	fi
+
+uni_agent-fmt: ## agent gofmt 格式化(检查模式,列差异)
+	cd $(AGENT_DIR) && gofmt -l internal/ .
 
 ## ──────────────────────────────────────────────────────────
 ## 协议契约 uni_protocol
@@ -201,17 +256,18 @@ build: uni_core-build uni_console-build ## 同 all
 
 run: uni_core-run ## 运行后端(带前端时请配合 uni_console-dev)
 
-test: uni_core-test uni_protocol-test uni_console-test ## 全量测试(uni_core + uni_protocol + uni_console)
+test: uni_core-test uni_protocol-test uni_agent-test uni_console-test ## 全量测试(uni_core + uni_protocol + uni_agent + uni_console)
 
-lint: uni_core-lint uni_protocol-lint uni_console-lint ## 全量静态检查(uni_core + uni_protocol + uni_console)
+lint: uni_core-lint uni_protocol-lint uni_agent-lint uni_console-lint ## 全量静态检查(uni_core + uni_protocol + uni_agent + uni_console)
 
-fmt: uni_core-fmt uni_protocol-fmt uni_console-fmt ## 全量格式化(uni_core + uni_protocol + uni_console)
+fmt: uni_core-fmt uni_protocol-fmt uni_agent-fmt uni_console-fmt ## 全量格式化(uni_core + uni_protocol + uni_agent + uni_console)
 
 contract: uni_protocol-contract ## 契约门禁(当前仅协议模块)
 
 release-precheck: uni_protocol-contract uni_protocol-release-precheck ## 发布前置门禁(契约 + 脱工作区可构建)
 
-clean: uni_core-clean ## 清理(后端产物;前端 dist 请在 uni_console/ 内单独处理或全局 git clean)
+clean: uni_core-clean ## 清理(后端与 agent 产物;前端 dist 请在 uni_console/ 内单独处理或全局 git clean)
+	rm -rf $(AGENT_DIR)/bin/ dist/
 
 ## ───────────────────────────────────────────────────────────
 ## Docker 编排(根目录 docker-compose.yml)

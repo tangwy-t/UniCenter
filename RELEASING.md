@@ -308,7 +308,12 @@ exit=1
 
 ## 4. tag 命名方案（结论）
 
-**方案：目录前缀 tag。`uni_protocol` 与 `uni_core` 两个模块的 tag 都必须带自己的目录前缀。**
+**方案：目录前缀 tag。`uni_protocol` / `uni_core` / `uni_agent` 三个模块的 tag 都必须带自己的目录前缀。**
+
+（`uni_agent` 是后加的：它虽然不进 Go 的模块依赖图（core 不 import 它），
+但它的**产物版本**要参与升级判定（semver 比对），故同样按 `uni_agent/vX.Y.Z` 打 tag，
+并由 `make uni_agent-release` 用 `AGENT_VERSION` 注入 —— 缺省值从该前缀 tag 提取，
+发版时显式传 `AGENT_VERSION=0.2.0` 最稳妥。）
 
 软硬件依据分两层：**本仓库本地实测**（主证据） + **Go 官方文档原文**（旁证）。
 

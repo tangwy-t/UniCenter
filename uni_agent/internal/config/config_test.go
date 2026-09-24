@@ -227,3 +227,19 @@ func TestDownloadBaseDerivation(t *testing.T) {
 		}
 	}
 }
+
+// TestEmptyVersionIsRejectedAtStartup 钉住「版本未注入」这条构建期错误的**运行时表现**。
+//
+// 背景（实测）：`make uni_agent-build` 缺省时，git describe 在没有匹配 tag 的情况下
+// 静默返回空串，ldflags 把 DefaultVersion 注入成空 —— 而空版本会被 core 以
+// 「载荷校验失败」（4002）拒掉：设备完全连不上，日志里却看不到真正的原因。
+// 故空版本必须在**启动时**就说清楚。
+func TestEmptyVersionIsRejectedAtStartup(t *testing.T) {
+	saved := DefaultVersion
+	DefaultVersion = ""
+	defer func() { DefaultVersion = saved }()
+
+	if _, err := Load([]string{"-url", "ws://x/api/v1/agent/ws"}); err == nil {
+		t.Fatal("空版本必须在启动时被拒绝（否则会在握手阶段表现为 4002 连接失败）")
+	}
+}

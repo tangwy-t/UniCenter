@@ -1,0 +1,59 @@
+# uni_agent 的 systemd 单元（仓库接管安装形态的第一步）
+#
+# ── 安装 ─────────────────────────────────────────────────────────────
+#
+#   scripts/install-agent.sh -e <enroll 令牌> [-u ws://host:8088/api/v1/agent/ws]
+#
+# 或用离线 tar 包：`scripts/install-agent.sh -p uni_agent_0.2.0_linux_amd64.tar.gz -e <令牌>`
+#
+# ── 三条容易踩的硬约束（都有后果，不是风格问题）────────────────────
+#
+# 1. **不要在本文件里写 `-version`**：
+#    agent 的版本只有一个来源（编译期注入）。unit 写死 `-version 0.1.0` 时，
+#    自升级后的新进程仍自称 0.1.0 → 控制台认为「没升上去」→ 无限重下重装。
+#    新版二进制不认识这个标志，会**启动即报错**（比悄悄死循环好，但装机时会看到）。
+#
+# 2. **Restart=always 且放宽 StartLimit**：
+#    agent 的本地自愈流程包含「自己 exec 回旧版本」这一步（见 internal/upgrade）。
+#    若 systemd 因崩溃循环把服务判死（默认 5 次/10 秒），自愈就没有机会执行 ——
+#    设备会停在「新版本起不来、systemd 也不再拉起」的死局里。
+#    这里的取值（20 次/5 分钟）远宽于正常启动抖动，又能在真正的坏版本上
+#    触发自愈（自愈靠的是 agent 自己的启动计数，不依赖 systemd 的重启次数）。
+#
+# 3. **对 /usr/local/bin 有写权限**：
+#    升级 = 同目录临时文件 + rename 覆盖自身二进制。若 agent 以非 root 用户运行，
+#    该用户必须能写自己二进制所在目录，否则升级会失败并上报
+#    「设备上没有写权限」（这是**可解释的失败**，但需要人上机处理）。
+#
+# ── 状态目录 ─────────────────────────────────────────────────────────
+#
+# /var/lib/uni_agent 存 instance_id、agent_token 与升级事务（upgrade.state）。
+# **必须跨重启保留**：instance_id 变了，core 会把它当成一台新设备（每次重启多出
+# 一台幽灵设备）；升级事务丢了，本地自愈就失去判据。
+
+[Unit]
+Description=UniCenter Agent（设备指标采集与上报）
+Documentation=https://github.com/tangwy-t/UniCenter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 环境变量形态的配置（与命令行等价，改这里不需要动 ExecStart）。
+# URL 与 enroll 令牌由安装脚本写入 /etc/default/uni-agent，避免把它们散在工作单元里。
+EnvironmentFile=-/etc/default/uni-agent
+ExecStart=/usr/local/bin/uni_agent
+Restart=always
+RestartSec=5
+# 放宽启动限流（见上文第 2 条）：给本地自愈留出执行窗口。
+StartLimitIntervalSec=300
+StartLimitBurst=20
+# 优雅退出：收到 SIGTERM 后 agent 会落盘最新 token 再退出。
+KillSignal=SIGTERM
+TimeoutStopSec=10
+# 文件系统保护保持默认（agent 需要读 /proc、/sys 与写状态目录与自身二进制目录，
+# 加 ProtectSystem 之类会让升级与采集失效）。
+NoNewPrivileges=no
+
+[Install]
+WantedBy=multi-user.target

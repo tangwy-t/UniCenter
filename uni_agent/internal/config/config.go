@@ -99,6 +99,15 @@ func Load(args []string) (*Config, error) {
 		return nil, err
 	}
 
+	// 空版本必须在此**当场拒绝**：协议要求 hello.agent_version 非空，
+	// 空值会被 core 判为「载荷校验失败」（4002）并关闭连接 ——
+	// 现象是设备完全连不上，而日志里看不到「版本没注入」这条真正的原因。
+	// 构建脚本漏注入（例如 git 无匹配 tag 时 command substitution 返回空串）不该
+	// 变成一次排障。
+	if strings.TrimSpace(DefaultVersion) == "" {
+		return nil, errors.New("构建未注入版本号（DefaultVersion 为空）：请用 make uni_agent-build / uni_agent-release 构建")
+	}
+
 	cfg := &Config{
 		URL:               strings.TrimSpace(*url),
 		EnrollToken:       strings.TrimSpace(*enroll),
