@@ -43,7 +43,7 @@ func init() {
 var deviceOverviewMenuDefinitions = []menuDef{
 	{Key: "device:overview", Parent: "device", Name: "监控总览", Type: "menu",
 		Perms: permission.PermDeviceQuery, Path: "/device/overview",
-		Component: "device/overview", Sort: 0, Icon: "ri:dashboard-3-line"},
+		Component: "device/overview", Sort: 0, Icon: "material-symbols:monitoring"},
 }
 
 // seedDeviceOverviewMenu 把总览菜单挂到**已存在**的「设备管理」目录下。

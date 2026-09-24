@@ -39,7 +39,7 @@ func init() {
 var agentUpgradeMenuDefinitions = []menuDef{
 	{Key: "device:release", Parent: "device", Name: "Agent 版本", Type: "menu",
 		Perms: permission.PermDeviceReleaseList, Path: "/device/release",
-		Component: "device/release", Sort: 2, Icon: "ri:upload-cloud-2-line"},
+		Component: "device/release", Sort: 2, Icon: "iconoir:git"},
 	{Key: "device:release:upload", Parent: "device:release", Name: "上传发布物", Type: "btn",
 		Perms: permission.PermDeviceReleaseUpload, Sort: 1},
 	{Key: "device:release:publish", Parent: "device:release", Name: "发布与撤回", Type: "btn",
@@ -53,7 +53,7 @@ var agentUpgradeMenuDefinitions = []menuDef{
 
 	{Key: "device:upgrade-task", Parent: "device", Name: "升级任务", Type: "menu",
 		Perms: permission.PermDeviceQuery, Path: "/device/upgrade-task",
-		Component: "device/upgrade-task", Sort: 3, Icon: "ri:list-check-2"},
+		Component: "device/upgrade-task", Sort: 3, Icon: "material-symbols:work-update-outline"},
 
 	// 升级是**设备行上的操作**（列表操作列与详情页），故挂在设备列表页下。
 	{Key: "device:index:upgrade", Parent: "device:index", Name: "升级 Agent", Type: "btn",

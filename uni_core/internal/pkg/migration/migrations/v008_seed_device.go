@@ -23,9 +23,9 @@ func init() {
 
 // deviceMenuDefinitions 是设备管理域的菜单定义（父必须先于子书写）。
 var deviceMenuDefinitions = []menuDef{
-	{Key: "device", Name: "设备管理", Type: "dir", Sort: 2, Icon: "ri:server-line"},
+	{Key: "device", Name: "设备管理", Type: "dir", Sort: 2, Icon: "tabler:device-desktop-cog"},
 	{Key: "device:index", Parent: "device", Name: "设备列表", Type: "menu",
-		Perms: permission.PermDeviceList, Path: "/device/index", Component: "device/index", Sort: 1, Icon: "ri:hard-drive-2-line"},
+		Perms: permission.PermDeviceList, Path: "/device/index", Component: "device/index", Sort: 1, Icon: "material-symbols:dvr-outline"},
 	{Key: "device:index:query", Parent: "device:index", Name: "设备查询", Type: "btn", Perms: permission.PermDeviceQuery, Sort: 1},
 	{Key: "device:index:enable", Parent: "device:index", Name: "启用设备", Type: "btn", Perms: permission.PermDeviceEnable, Sort: 2},
 	{Key: "device:index:disable", Parent: "device:index", Name: "停用设备", Type: "btn", Perms: permission.PermDeviceDisable, Sort: 3},

@@ -35,6 +35,7 @@ data/uploads/*
 .css-dump.css
 .buildlog-*
 .zcode
+.mimosa
 
 # 本地跑 uni_core 时的运行时上传目录（cwd=uni_core 时 sys.file.upload.path 的默认值）
 # 里面是 E2E/开发期上传的产物与文件，不是源码 —— 与 bin/ 同类。
