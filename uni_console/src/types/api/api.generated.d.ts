@@ -896,6 +896,121 @@ declare namespace Api {
     }
   }
 
+  namespace Docker {
+    interface DockerHostItem {
+      id: string
+      hostname: string
+      primaryIp?: string
+      online: boolean
+      dockerOk: boolean
+      error?: string
+      composeFlavor?: string
+      composeVersion?: string
+      containers: number
+      images: number
+      lastSync?: number
+      stale: boolean
+    }
+
+    interface DockerHostListResp {
+      list: Api.Docker.DockerHostItem[]
+      snapshotInterval: number
+    }
+
+    interface DockerStateResp {
+      lastSync?: number
+      stale: boolean
+      ageSeconds: number
+      neverReported: boolean
+      dockerOk: boolean
+      error?: string
+      compose?: Api.Docker.DockerComposeInfoResp | null
+      containers: Api.Docker.DockerContainerItem[]
+      images: Api.Docker.DockerImageItem[]
+      volumes: Api.Docker.DockerVolumeItem[]
+      networks: Api.Docker.DockerNetworkItem[]
+      projects: Api.Docker.DockerProjectItem[]
+    }
+
+    interface DockerComposeInfoResp {
+      flavor: string
+      version?: string
+    }
+
+    interface DockerContainerItem {
+      id: string
+      name: string
+      image: string
+      state: string
+      statusText?: string
+      created?: number
+      startedAt?: number
+      cpuPercent: number
+      memUsageMb: number
+      memLimitMb: number
+      netRxBytesSec: number
+      netTxBytesSec: number
+      composeProject?: string
+      composeService?: string
+      ports?: Api.Docker.DockerPortItem[]
+      protected: boolean
+    }
+
+    interface DockerPortItem {
+      ip?: string
+      privatePort: number
+      publicPort?: number
+      type?: string
+    }
+
+    interface DockerImageItem {
+      id: string
+      repoTags?: string[]
+      sizeMb: number
+      created?: number
+      inUse: boolean
+      dangling: boolean
+      inUseBy?: string[]
+    }
+
+    interface DockerVolumeItem {
+      name: string
+      driver?: string
+      sizeMb?: number | null
+      inUse: boolean
+      mountedBy?: string[]
+    }
+
+    interface DockerNetworkItem {
+      name: string
+      driver?: string
+      scope?: string
+      internal: boolean
+      containersCount: number
+    }
+
+    interface DockerProjectItem {
+      name: string
+      configFiles?: string[]
+      state?: string
+      services: number
+      containersCount: number
+    }
+
+    interface DockerCmdResp {
+      ref: string
+    }
+
+    interface DockerCmdResultResp {
+      status: string
+      error?: string
+      detail?: string
+      sessionId?: string
+      alreadyExists?: boolean
+      payload?: unknown
+    }
+  }
+
   namespace File {
     interface FileResp {
       id: string

@@ -32,6 +32,10 @@ var fileNamespace = map[string]string{
 	// agent 升级域（发布物 / 任务 / 明细 / 汇总）与设备同属设备管理页族，
 	// 共享 Device 命名空间：命名空间已存在于 namespaceOrder，无需改第二处。
 	"device_upgrade.go": "Device",
+	// Docker 管理域（主机清单 / 快照 / 指令结果）自带命名空间：它与设备域是两套语义
+	//（设备＝宿主机自身，docker＝宿主上的资源），共享 Device 只会让两边的类型名互相干扰。
+	// 与上一行不同，这个命名空间是**新增**的，故 namespaceOrder 也要同步追加。
+	"docker.go":         "Docker",
 	"dict.go":           "Dict",
 	"dict_data.go":      "Dict",
 	"dict_type.go":      "Dict",
@@ -56,7 +60,7 @@ var fileNamespace = map[string]string{
 // 该切片是**穷举**的:genPackage 只遍历它来发射命名空间,fileNamespace 里登记了
 // 却不在本切片里的命名空间会被**静默丢弃**(不报错、不产出),故新增命名空间必须
 // 同时改两处。位置只影响发射顺序(进而影响生成物的字节形状),不影响类型。
-var namespaceOrder = []string{"Auth", "Dict", "System", "Notice", "Config", "Job", "Log", "Monitor", "Device", "File"}
+var namespaceOrder = []string{"Auth", "Dict", "System", "Notice", "Config", "Job", "Log", "Monitor", "Device", "Docker", "File"}
 
 // primitives maps Go predeclared identifiers to TypeScript types.
 var primitives = map[string]string{
