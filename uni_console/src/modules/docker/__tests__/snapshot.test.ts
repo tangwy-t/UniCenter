@@ -1,6 +1,18 @@
 import { describe, expect, it } from 'vitest'
-import { filterContainers, filterImages, imageTotals, volumeTotals } from '../utils/snapshot'
-import type { DockerContainerItem, DockerImageItem, DockerVolumeItem } from '../api'
+import {
+  filterContainers,
+  filterImages,
+  filterNetworks,
+  filterVolumes,
+  imageTotals,
+  volumeTotals
+} from '../utils/snapshot'
+import type {
+  DockerContainerItem,
+  DockerImageItem,
+  DockerNetworkItem,
+  DockerVolumeItem
+} from '../api'
 
 const c = (name: string, over: Partial<DockerContainerItem> = {}): DockerContainerItem =>
   ({
@@ -87,5 +99,43 @@ describe('镜像截图与筛选', () => {
     expect(t.totalMB).toBe(15)
     expect(t.unknownSizeCount).toBe(1)
     expect(t.unusedCount).toBe(2)
+  })
+})
+
+describe('卷与网络的筛选', () => {
+  // 大小未知（null / 缺省）的卷也要能搜能筛 —— 筛选只看名称与使用状态。
+  const vols: DockerVolumeItem[] = [
+    { name: 'uni-center_uploads', driver: 'local', sizeMb: 12, inUse: true, mountedBy: ['core'] },
+    { name: 'uni-center_mysql-data', driver: 'local', sizeMb: null, inUse: true },
+    { name: 'orphan-vol', driver: 'local', inUse: false }
+  ]
+  const nets: DockerNetworkItem[] = [
+    { name: 'bridge', driver: 'bridge', scope: 'local', internal: false, containersCount: 2 },
+    {
+      name: 'uni-center_default',
+      driver: 'bridge',
+      scope: 'local',
+      internal: false,
+      containersCount: 2
+    },
+    { name: 'internal-net', driver: 'bridge', scope: 'local', internal: true, containersCount: 0 }
+  ]
+
+  it('卷按名称搜（大小写不敏感）、按未使用筛', () => {
+    expect(filterVolumes(vols, { keyword: 'MYSQL' }).map((x) => x.name)).toEqual([
+      'uni-center_mysql-data'
+    ])
+    expect(filterVolumes(vols, { unusedOnly: true }).map((x) => x.name)).toEqual(['orphan-vol'])
+    expect(filterVolumes(vols, {})).toHaveLength(3)
+  })
+
+  it('网络按名称搜、按仅内部网络筛', () => {
+    expect(filterNetworks(nets, { keyword: 'uni-center' }).map((x) => x.name)).toEqual([
+      'uni-center_default'
+    ])
+    expect(filterNetworks(nets, { internalOnly: true }).map((x) => x.name)).toEqual([
+      'internal-net'
+    ])
+    expect(filterNetworks(nets, {})).toHaveLength(3)
   })
 })

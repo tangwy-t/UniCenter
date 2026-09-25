@@ -1,5 +1,10 @@
 /** 快照的筛选与合计（纯函数）。 */
-import type { DockerContainerItem, DockerImageItem, DockerVolumeItem } from '../api'
+import type {
+  DockerContainerItem,
+  DockerImageItem,
+  DockerNetworkItem,
+  DockerVolumeItem
+} from '../api'
 
 export interface ContainerQuery {
   keyword?: string
@@ -34,6 +39,41 @@ export function filterImages(list: DockerImageItem[], q: ImageQuery): DockerImag
     if (q.danglingOnly && !i.dangling) return false
     if (q.unusedOnly && i.inUse) return false
     if (kw && !(i.repoTags ?? []).join(' ').toLowerCase().includes(kw)) return false
+    return true
+  })
+}
+
+export interface VolumeQuery {
+  keyword?: string
+  unusedOnly?: boolean
+}
+
+/** 卷筛选：名称模糊 + 未被任何容器使用。 */
+export function filterVolumes(list: DockerVolumeItem[], q: VolumeQuery): DockerVolumeItem[] {
+  const kw = q.keyword?.trim().toLowerCase()
+  return list.filter((v) => {
+    if (q.unusedOnly && v.inUse) return false
+    if (kw && !v.name.toLowerCase().includes(kw)) return false
+    return true
+  })
+}
+
+export interface NetworkQuery {
+  keyword?: string
+  internalOnly?: boolean
+}
+
+/**
+ * 网络筛选：名称模糊 + 仅内部网络。
+ *
+ * 按名称搜而不是按 id：`docker network ls` 里人认的就是名字（默认网络 `bridge`
+ * 等也是名字），id 只用于命令行。
+ */
+export function filterNetworks(list: DockerNetworkItem[], q: NetworkQuery): DockerNetworkItem[] {
+  const kw = q.keyword?.trim().toLowerCase()
+  return list.filter((n) => {
+    if (q.internalOnly && !n.internal) return false
+    if (kw && !n.name.toLowerCase().includes(kw)) return false
     return true
   })
 }
