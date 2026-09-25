@@ -238,8 +238,11 @@ uni_console-build: ## 构建前端(类型检查 + vite build；自动带上仓�
 uni_console-serve: ## 本地预览前端构建产物(vite preview)
 	cd $(WEB_DIR) && $(PM) serve
 
-uni_console-test: ## 前端单元测试(vitest run)
-	cd $(WEB_DIR) && $(PM) test
+uni_console-test: ## 前端单元测试(vitest run；自动带上仓库根 .env 的 VITE_*)
+	@# 与 uni_console-build 同源地 source 根 .env：vite.config 的 VITE_* 守卫在**加载配置阶段**
+	@# 就生效，未 source 时整条 vitest 起不来（报「缺少客户端编译期变量」）—— 那不是测试失败，
+	@# 而是门禁不可用；漏 source 会让 `make test` 长期红着、进而被无视。
+	cd $(WEB_DIR) && set -a && . ../.env && set +a && $(PM) test
 
 uni_console-lint: ## 前端 ESLint 检查
 	cd $(WEB_DIR) && $(PM) lint
