@@ -3,7 +3,6 @@ package dockerops
 import (
 	"context"
 	"errors"
-	"sync/atomic"
 	"time"
 
 	agentproto "github.com/tangwy-t/UniCenter/uni_protocol"
@@ -42,18 +41,10 @@ type Executor interface {
 // 而并行的收益（用户同时点两个按钮）在这个界面里不值一提；串行还让「同一目标上
 // 两条指令」的竞态在架构上不存在 —— 服务端的 409 只是第二道锁。
 type Dispatcher struct {
-	jobs chan queued
+	jobs chan *agentproto.DockerCmd
 	exec Executor
 	send func(*agentproto.DockerCmdResult) error
 	log  Logger
-	// done 让测试的同步入口能等到结果写回。
-	seq atomic.Uint64
-}
-
-type queued struct {
-	cmd *agentproto.DockerCmd
-	// done 非 nil 时，worker 写完结果会关闭它（测试的同步等待用；生产为 nil）。
-	done chan struct{}
 }
 
 // NewDispatcher 构造分派器。
@@ -61,7 +52,7 @@ func NewDispatcher(exec Executor, send func(*agentproto.DockerCmdResult) error, 
 	if log == nil {
 		log = nopLogger{}
 	}
-	return &Dispatcher{jobs: make(chan queued, dispatchQueueCap), exec: exec, send: send, log: log}
+	return &Dispatcher{jobs: make(chan *agentproto.DockerCmd, dispatchQueueCap), exec: exec, send: send, log: log}
 }
 
 // Handle 受理一条指令，报告是否入队。**非阻塞**：它在连接读循环里被调用。
@@ -70,7 +61,7 @@ func NewDispatcher(exec Executor, send func(*agentproto.DockerCmdResult) error, 
 // 而不是阻塞读循环或无限排队 —— 对用户而言「等 30 秒才开始执行」比「现在告诉我忙」更糟。
 func (d *Dispatcher) Handle(ctx context.Context, cmd *agentproto.DockerCmd) bool {
 	select {
-	case d.jobs <- queued{cmd: cmd}:
+	case d.jobs <- cmd:
 		return true
 	default:
 		return false
@@ -83,26 +74,26 @@ func (d *Dispatcher) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case q := <-d.jobs:
-			res := d.execute(ctx, q.cmd)
+		case cmd := <-d.jobs:
+			res := d.execute(ctx, cmd)
 			if err := d.send(res); err != nil {
 				d.log.Warn("docker result send failed", "ref", res.Ref, "err", err.Error())
-			}
-			if q.done != nil {
-				close(q.done)
 			}
 		}
 	}
 }
 
 // ExecuteNow 同步执行队列里的**指定 ref**（仅测试用：让表驱动用例不必起 worker 循环）。
+//
+// 它按受理顺序依次执行到命中 ref 为止 —— 与 Run 的执行顺序一致，故表驱动的断言
+// 与生产路径是同一套串行语义。
 func (d *Dispatcher) ExecuteNow(ctx context.Context, ref string) {
 	for {
 		select {
-		case q := <-d.jobs:
-			res := d.execute(ctx, q.cmd)
+		case cmd := <-d.jobs:
+			res := d.execute(ctx, cmd)
 			_ = d.send(res)
-			if q.cmd.Ref == ref {
+			if cmd.Ref == ref {
 				return
 			}
 		default:
