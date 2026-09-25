@@ -15,6 +15,7 @@ import (
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/entity"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/apperror"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/database"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockerstate"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/repository"
 )
@@ -60,13 +61,19 @@ type AgentIngestService struct {
 	repo   AgentDeviceRepository
 	raw    AgentRawStore
 	latest AgentLatestStore
+	// docker / cmd 是 docker 域的两个存储（快照与指令记录）：agent 通道的
+	// docker 三面（快照落库、结果回写）由本服务承接，读面与下发面见 C6 的两个服务。
+	docker *dockerstate.Store
+	cmd    *dockerstate.CmdStore
 	cfg    AgentConfigGetter
 	log    logger.LoggerInterface
 }
 
 func NewAgentIngestService(repo AgentDeviceRepository, raw AgentRawStore, latest AgentLatestStore,
+	docker *dockerstate.Store, cmd *dockerstate.CmdStore,
 	cfg AgentConfigGetter, log logger.LoggerInterface) *AgentIngestService {
-	return &AgentIngestService{repo: repo, raw: raw, latest: latest, cfg: cfg, log: log}
+	return &AgentIngestService{repo: repo, raw: raw, latest: latest,
+		docker: docker, cmd: cmd, cfg: cfg, log: log}
 }
 
 // Enroll 处理带 enroll_token 的首次注册。
@@ -290,6 +297,42 @@ func (s *AgentIngestService) Ingest(ctx context.Context, deviceID uint64, sample
 		return err
 	}
 	return nil
+}
+
+// SaveDockerState 落一帧 docker 快照（agent 通道的 docker 面）。
+//
+// 不碰 DB：快照只存 Redis（spec §2 存储决策）。
+func (s *AgentIngestService) SaveDockerState(ctx context.Context, deviceID uint64, st *agentproto.DockerState) error {
+	if st == nil {
+		return nil
+	}
+	return s.docker.Save(ctx, deviceID, st, time.Now())
+}
+
+// CompleteDockerCmd 回写一条指令结果。
+//
+// 归属校验（设备的 ref 只由该设备回）在这一层做不了 —— agent 通道只知道
+// 「这一帧来自哪台设备」，而记录里也存了 device_id，两者不一致时**丢弃并告警**：
+// 那是一台设备在回别人的 ref（伪造或串号）。
+func (s *AgentIngestService) CompleteDockerCmd(ctx context.Context, deviceID uint64, res *agentproto.DockerCmdResult) error {
+	if res == nil {
+		return nil
+	}
+	rec, err := s.cmd.Get(ctx, res.Ref)
+	if err != nil {
+		return err
+	}
+	if rec == nil {
+		s.log.Warn("docker result 命中不到指令（已过期或伪造）",
+			zap.Uint64("deviceId", deviceID), zap.String("ref", res.Ref))
+		return nil
+	}
+	if rec.DeviceID != deviceID {
+		s.log.Warn("docker result 归属不符，丢弃",
+			zap.Uint64("fromDevice", deviceID), zap.Uint64("expectDevice", rec.DeviceID), zap.String("ref", res.Ref))
+		return nil
+	}
+	return s.cmd.Complete(ctx, rec, res)
 }
 
 // ── 内部工具 ───────────────────────────────────────────

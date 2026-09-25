@@ -78,7 +78,7 @@ func newUpgradeTestEnv(t *testing.T, cfg stubCfg) *upgradeEnv {
 		svc: NewDeviceUpgradeService(devices, attempts, tasks, releases, cfg,
 			setter, notifier, nil, logger.NewNop()),
 		release:   NewAgentReleaseService(releases, attempts, cfg, logger.NewNop()),
-		ingest:    NewAgentIngestService(devices, stubAgentRaw{}, stubAgentLatest{}, cfg, logger.NewNop()),
+		ingest:    NewAgentIngestService(devices, stubAgentRaw{}, stubAgentLatest{}, nil, nil, cfg, logger.NewNop()),
 		db:        db,
 		devices:   devices,
 		attempts:  attempts,

@@ -99,6 +99,13 @@ type Deps struct {
 	//
 	// nil = 未装配：同样放行 + Warn（限流器缺失不得让整条通道停摆）。
 	Limiter RateLimiter
+	// DockerState / DockerResult 是 docker 域的两条入站落库面（窄接口见 docker_channel.go）。
+	// nil 容忍：未装配时快照与结果被丢弃（与「未实现该模块」表现一致），
+	// 且**不影响**指标主链路 —— 这是三个依赖共同的取向。
+	DockerState  DockerStateIngestor
+	DockerResult DockerCmdCompleter
+	// DockerConfig 是 hello_ack 里 docker 配置块的来源。nil = 不带该块（老 core 行为）。
+	DockerConfig DockerConfigProvider
 }
 
 // socket 是连接的入站/控制通路。生产态就是 `*websocket.Conn`（NewConn 收它），
@@ -627,6 +634,9 @@ var agentHandlers = map[string]func(*Conn, context.Context, *agentproto.Message)
 	agentproto.TypeAgentHeartbeat:     (*Conn).handleHeartbeat,
 	agentproto.TypeAgentReportMetrics: (*Conn).handleMetrics,
 	agentproto.TypeAgentUpgradeStatus: (*Conn).handleUpgradeStatus,
+	agentproto.TypeAgentDockerState:   (*Conn).handleDockerState,
+	agentproto.TypeAgentDockerResult:  (*Conn).handleDockerResult,
+	agentproto.TypeAgentDockerFrame:   (*Conn).handleDockerFrame,
 }
 
 // allowFrame 询问限流器是否放行这一帧。
@@ -784,6 +794,12 @@ func (c *Conn) handleHello(ctx context.Context, m *agentproto.Message) bool {
 				zap.Uint64("device_id", deviceID), zap.Error(err))
 		}
 		ack.Upgrade = directive
+	}
+	// docker 配置块：与升级对账同一个位置（握手成功之后、应答之前）——
+	// 它是**重连时生效**的下发通道（§3.1.1），不需要服务端记得谁还没收到。
+	// 取失败**绝不关连接**：配置读取的故障不该妨碍握手（agent 用上一份或内置默认值）。
+	if c.deps.DockerConfig != nil {
+		ack.Docker = c.deps.DockerConfig.DockerConfig(ctx)
 	}
 	msg, err := agentproto.NewMessage(m.ID, agentproto.TypeCoreHelloAck, ack)
 	if err != nil {

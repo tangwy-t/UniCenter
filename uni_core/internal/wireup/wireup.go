@@ -19,6 +19,7 @@ import (
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/config"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/database"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/datascope"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockerstate"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/lifecycle"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/limiter"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
@@ -302,6 +303,20 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 		)
 	}
 
+	// ── Docker 管理（agent 侧装配）──────────────────────────────────────
+	// 两个 store 与 agent 通道共用同一个 Redis 客户端：快照/指令记录都是同一族键，
+	// 分成两个客户端只会让「谁清了哪个键」这个问题多一处答案。
+	// 顺序要紧：两者必须早于 agentIngestSvc（它是快照与结果两条入站面的实现）。
+	// 这里传 redis（goredis.UniversalClient）而不是上面的 cacheStore：后者是
+	// *cache.RedisStore（面向缓存的窄封装，不满足 UniversalClient），而这两个 store
+	// 与配置提供者要的是原生客户端（与 WithCursorStore(redis) 同源）。
+	dockerStore := dockerstate.NewStore(redis)
+	dockerCmdStore := dockerstate.NewCmdStore(redis)
+	dockerCfgProvider := service.NewDockerConfigProvider(configSvc, redis, log)
+	// config.changed 订阅：只有 sys.docker.* 的变更会自增 docker:config_version
+	//（agent 据此判断「配置变了」，值哈希感知不到「改回原值」这种回摆）。
+	dockerCfgProvider.Watch(broker, log)
+
 	// ── Agent 服务（入湖写路径 + 趋势/下钻查询 + 设备管理）──────────────
 	// 同一个 rawStore 分别以写入面与读取面注入：*agentmetrics.RawStore 同时具备
 	// Append（入湖）/ Query+Bucket（查询）/ Purge（删除连带清理）三面，
@@ -314,7 +329,8 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 	// （装配见下方 agentDeps，接口见 internal/pkg/agenthub/conn.go 与 types.go）。
 	// 这就是 Plan 2B 留下的那条「2C 交接说明」的落点：这个服务至此有了真实
 	// 消费者，不再需要「构造出来只能赋给 `_`」的将就写法。
-	agentIngestSvc := service.NewAgentIngestService(deviceRepo, rawStore, latestStore, configSvc, log)
+	agentIngestSvc := service.NewAgentIngestService(deviceRepo, rawStore, latestStore,
+		dockerStore, dockerCmdStore, configSvc, log)
 	// agentPolicy 是 sys.agent.* 节奏配置（reportInterval / heartbeatInterval）的
 	// 适配器（定义见文末 agentIntervalPolicy），**一个实例喂两处**：
 	//   - 查询服务：Redis 档的原生栅格 = reportInterval（上方的 rawStore Step 也取自
@@ -408,6 +424,12 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 		// 阈值取 sys.agent.maxFramesPerMin（缺省 900），计数走与上方 rateLimiter 同一个
 		// cacheStore（同一个 Redis 客户端）。未注入 = fail-open，所以这里必须接上。
 		Limiter: newAgentFrameLimiter(cacheStore, configSvc),
+		// docker 域的三个依赖：快照落库、结果回写（都由 agentIngestSvc 承接，
+		// 它们的方法集逐字满足 agenthub 的两个窄接口）与 hello_ack 的配置块来源。
+		// nil 容忍在连接侧（未装配 = 丢弃并记日志），这里全部接上。
+		DockerState:  agentIngestSvc,
+		DockerResult: agentIngestSvc,
+		DockerConfig: dockerCfgProvider,
 	}
 
 	// ── 启动期分区 reconcile（**必须**在 scheduler.NewScheduler 之前）─────

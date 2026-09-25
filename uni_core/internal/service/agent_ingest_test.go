@@ -61,7 +61,7 @@ func newIngestTestEnv(t *testing.T) *ingestEnv {
 
 	raw := agentmetrics.NewRawStore(rdb, agentmetrics.RawOptions{Step: 10 * time.Second, MaxPoints: 1000})
 	latest := agentmetrics.NewLatestStore(rdb)
-	svc := NewAgentIngestService(repository.NewDeviceRepository(db), raw, latest,
+	svc := NewAgentIngestService(repository.NewDeviceRepository(db), raw, latest, nil, nil,
 		stubCfg{"sys.agent.enrollToken": "secret-token"}, logger.NewNop())
 	return &ingestEnv{svc: svc, db: db, raw: raw, latest: latest}
 }
@@ -352,7 +352,7 @@ func (stubAgentLatest) Set(context.Context, uint64, *agentproto.MetricsSample) e
 // appErrStatusOf 把错误归一成 HTTP 状态（同 device_test.go 的 appErrStatus，
 // 此处的断言跨文件共享同一个语义）。
 func newIngestSvc(repo AgentDeviceRepository) *AgentIngestService {
-	return NewAgentIngestService(repo, stubAgentRaw{}, stubAgentLatest{}, stubCfg{}, logger.NewNop())
+	return NewAgentIngestService(repo, stubAgentRaw{}, stubAgentLatest{}, nil, nil, stubCfg{}, logger.NewNop())
 }
 
 // TestIsAcceptingPropagatesRepositoryFailure：S5 —— IsAccepting **不得把错误吞成**
@@ -531,7 +531,7 @@ func TestEnrollConcurrentConflictRereadsAndIssuesUsableToken(t *testing.T) {
 		goredis.NewClient(&goredis.Options{Addr: miniredis.RunT(t).Addr()}),
 		agentmetrics.RawOptions{Step: 10 * time.Second, MaxPoints: 100})
 	svc := NewAgentIngestService(&missingOnceRepo{DeviceRepo: repo}, raw, agentmetrics.NewLatestStore(
-		goredis.NewClient(&goredis.Options{Addr: miniredis.RunT(t).Addr()})),
+		goredis.NewClient(&goredis.Options{Addr: miniredis.RunT(t).Addr()})), nil, nil,
 		stubCfg{"sys.agent.enrollToken": "secret-token"}, logger.NewNop())
 
 	// 预置设备，模拟「另一个并发请求已经建好了同一台」
