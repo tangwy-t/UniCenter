@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   isPhase1Action,
+  parseContainerInspectPayload,
   parseImageInspectPayload,
   parseLogsPayload,
   PHASE1_ACTIONS,
@@ -54,14 +55,48 @@ describe('结果载荷解析', () => {
     expect(parseLogsPayload({})).toEqual({ lines: '', truncated: false })
   })
 
-  it('镜像详情载荷：分层列表与元数据', () => {
+  // 载荷的键名是**协议侧的 snake_case**：core 对结果载荷原样透传（不重命名），
+  // 故这里必须用真的线上形态断言 —— 用 camelCase 写测试会让「解析器读错键名」
+  // 这件事永远看不见（字段静默为空，页面显示空白）。
+  it('镜像详情载荷：按线上 snake_case 解析成分层列表与元数据', () => {
     const p = parseImageInspectPayload({
       id: 'sha256:x',
-      sizeBytes: 100,
-      history: [{ sizeBytes: 10, createdBy: 'CMD' }]
+      repo_tags: ['mysql:8.0.22'],
+      size_bytes: 100,
+      exposed_ports: ['3306/tcp'],
+      history: [
+        { size_bytes: 10, created_by: 'CMD ["mysqld"]' },
+        { size_bytes: 0, created_by: 'ENV x=1', empty_layer: true }
+      ]
     })
     expect(p.id).toBe('sha256:x')
-    expect(p.history).toHaveLength(1)
+    expect(p.repoTags).toEqual(['mysql:8.0.22'])
+    expect(p.sizeBytes).toBe(100)
+    expect(p.exposedPorts).toEqual(['3306/tcp'])
+    expect(p.history).toHaveLength(2)
+    expect(p.history[0]!.createdBy).toBe('CMD ["mysqld"]')
+    expect(p.history[1]!.emptyLayer).toBe(true)
     expect(parseImageInspectPayload(undefined).history).toEqual([])
+  })
+
+  it('容器详情载荷：按线上 snake_case 解析时刻/退出码/重启策略', () => {
+    const v = parseContainerInspectPayload({
+      id: 'c1',
+      name: 'mysql',
+      state: 'exited',
+      created: 1789000000,
+      started_at: 1789000100,
+      finished_at: 1789000200,
+      exit_code: 0,
+      restart_policy: 'unless-stopped',
+      env: ['TZ=Asia/Shanghai']
+    })
+    expect(v.name).toBe('mysql')
+    expect(v.createdAt).toBe(1789000000)
+    expect(v.startedAt).toBe(1789000100)
+    expect(v.finishedAt).toBe(1789000200)
+    expect(v.exitCode).toBe(0)
+    expect(v.restartPolicy).toBe('unless-stopped')
+    expect(v.env).toEqual(['TZ=Asia/Shanghai'])
   })
 })
