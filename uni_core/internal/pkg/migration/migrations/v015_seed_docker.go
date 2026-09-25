@@ -90,9 +90,13 @@ func seedDocker(tx *gorm.DB) error {
 
 // seedDockerMenus 写入 Docker 菜单（父先于子书写，父 ID 经 idByKey 传递）。
 //
-// 幂等查重走同包的 menuExists（与 v013 同款）：迁移框架保证同版本只执行一次，
-// 但「从备份恢复 + 重启」会让同一 Up 在语义上重放；重复插入的症状是侧边栏
+// 幂等查重：迁移框架保证同版本只执行一次，但「从备份恢复 + 重启」会让同一 Up
+// 在语义上重放（备份里的 sys_migration 落后于实际数据）；重复插入的症状是侧边栏
 // 出现两条同名菜单或两个同名按钮。
+//
+// **重放路径靠 idByKey 回填兜住**：查重命中时不 `continue` 完事，而是用
+// findMenuID 把既有行的 ID 回读进 idByKey —— 否则父节点被整体跳过，其子节点在
+// 下一轮迭代解析父键失败，整条迁移报错回滚（migration.Run 里 Up 出错即中止）。
 func seedDockerMenus(tx *gorm.DB) error {
 	idByKey := make(map[string]uint64, len(dockerMenuDefinitions))
 	for _, d := range dockerMenuDefinitions {
@@ -104,11 +108,19 @@ func seedDockerMenus(tx *gorm.DB) error {
 			}
 			parentID = pid
 		}
-		dup, err := menuExists(tx, parentID, d)
+		dup, err := dockerMenuExists(tx, parentID, d)
 		if err != nil {
 			return err
 		}
 		if dup {
+			// 回填既有行的 ID：父节点必须仍可解析，否则子节点在下一轮报错。
+			existingID, err := findMenuID(tx, "parent_id = ? AND name = ? AND type = ?", parentID, d.Name, d.Type)
+			if err != nil {
+				// 查重命中却回读不到 = 库里这棵子树与本定义不一致（例如菜单被
+				// 改名过）。静默跳过只会把错误推迟到子节点，且报错指向错的地方。
+				return fmt.Errorf("v015 菜单 %s 查重命中但按 (parent_id,name,type) 回读失败（库中菜单树与本定义不一致）: %w", d.Key, err)
+			}
+			idByKey[d.Key] = existingID
 			continue
 		}
 		menu := entity.SysMenu{
@@ -129,6 +141,34 @@ func seedDockerMenus(tx *gorm.DB) error {
 		idByKey[d.Key] = menu.ID // 雪花回调在 Create 时就地回写
 	}
 	return nil
+}
+
+// dockerMenuExists 是 v015 **专用**的查重口径（不动同包 v013 的 menuExists，
+// 别的迁移在用它）。
+//
+// 为什么 dir 必须单独判：目录节点既无 Path 也无 Perms，若沿用 menuExists 的
+// 「Path 为空 → 比 perms」分支，它会拿一个空串 perms 去比 —— 那会匹配到**别的**
+// 顶级目录（任何 perms 为空串的根目录），症状是「docker 目录永不创建，紧接着
+// 5 个子菜单报父节点缺失」。故：
+//
+//   - dir  ：按 (parent_id, name, type) —— 目录的身份就是「顶层下的这个分类」；
+//   - menu ：按 path（前端路由逐字一致，改 path 即新页面）；
+//   - btn  ：按 perms（按钮无 path，权限码即身份）。
+func dockerMenuExists(tx *gorm.DB, parentID uint64, d menuDef) (bool, error) {
+	q := tx.Model(&entity.SysMenu{}).Where("parent_id = ?", parentID)
+	switch {
+	case d.Type == "dir":
+		q = q.Where("name = ? AND type = ?", d.Name, d.Type)
+	case d.Path != "":
+		q = q.Where("path = ?", d.Path)
+	default:
+		q = q.Where("perms = ?", d.Perms)
+	}
+	var n int64
+	if err := q.Count(&n).Error; err != nil {
+		return false, fmt.Errorf("v015 查询菜单 %s: %w", d.Key, err)
+	}
+	return n > 0, nil
 }
 
 // seedDockerConfig 按 config_key 去重地补齐配置键（与 v013 同款取向）：
