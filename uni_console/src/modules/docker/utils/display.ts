@@ -55,3 +55,30 @@ export function layersTotalMB(
     history.reduce((sum, l) => sum + (l.emptyLayer ? 0 : (l.sizeBytes ?? 0)), 0) / (1024 * 1024)
   )
 }
+
+/**
+ * 「使用」列：悬空 → 「可回收」，未被任何容器使用 → 「未使用」，在用则带上容器名。
+ *
+ * 悬空镜像**必然**无容器引用，故它先于 inUse 判断：把悬空说成「未使用」会丢掉
+ * 唯一可安全回收的那条线索（回收的目标就是它）。
+ */
+export function inUseText(image: DockerImageItem): string {
+  if (image.dangling) return '可回收（无标签）'
+  if (!image.inUse) return '未使用'
+  const names = image.inUseBy ?? []
+  return names.length ? `在用（${names.join('、')}）` : '在用'
+}
+
+/**
+ * 相对时间（「3 月前」）：只在列表里用，精确时刻在详情页给。
+ *
+ * 四档跨度刻意粗（分钟/小时/天/月）：镜像的创建时间是静态的，「3 月前」已够判断
+ * 新旧，逐档细化只会占满一列。未来时刻（时钟偏差）夹到 0，避免出现负数。
+ */
+export function formatRelativeTime(unixSec: number, now = Date.now() / 1000): string {
+  const diff = Math.max(0, now - unixSec)
+  if (diff < 3600) return `${Math.max(1, Math.floor(diff / 60))} 分钟前`
+  if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`
+  if (diff < 86400 * 30) return `${Math.floor(diff / 86400)} 天前`
+  return `${Math.floor(diff / (86400 * 30))} 月前`
+}

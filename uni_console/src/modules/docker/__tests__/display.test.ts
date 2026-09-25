@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { containerStateText, layersTotalMB, memText, portsText } from '../utils/display'
-import type { DockerContainerItem } from '../api'
+import {
+  containerStateText,
+  formatRelativeTime,
+  inUseText,
+  layersTotalMB,
+  memText,
+  portsText
+} from '../utils/display'
+import type { DockerContainerItem, DockerImageItem } from '../api'
 
 const c = (over: Partial<DockerContainerItem> = {}): DockerContainerItem =>
   ({
@@ -56,5 +63,39 @@ describe('镜像分层合计', () => {
   it('无历史时返回 0（不产生 NaN）', () => {
     expect(layersTotalMB([])).toBe(0)
     expect(layersTotalMB(undefined)).toBe(0)
+  })
+})
+
+const img = (over: Partial<DockerImageItem> = {}): DockerImageItem =>
+  ({
+    id: 'sha256:abc',
+    repoTags: [],
+    sizeMb: 10,
+    inUse: false,
+    dangling: false,
+    ...over
+  }) as DockerImageItem
+
+describe('镜像使用状态与相对时间', () => {
+  it('相对时间分四档（分钟/小时/天/月），未来时刻不说负数', () => {
+    const now = 1_700_000_000
+    expect(formatRelativeTime(now - 90, now)).toBe('1 分钟前')
+    expect(formatRelativeTime(now - 3600 * 5, now)).toBe('5 小时前')
+    expect(formatRelativeTime(now - 86400 * 3, now)).toBe('3 天前')
+    expect(formatRelativeTime(now - 86400 * 30 * 4, now)).toBe('4 月前')
+    // 时钟偏差：容器/镜像的时间来自远端主机，比浏览器快时绝不能显示「-N 分钟前」。
+    expect(formatRelativeTime(now + 600, now)).toBe('1 分钟前')
+  })
+
+  it('「使用」列把悬空、未使用、在用说成三句不同的话（悬空就是可回收的那批）', () => {
+    expect(inUseText(img({ dangling: true }))).toBe('可回收（无标签）')
+    expect(inUseText(img({ inUse: false }))).toBe('未使用')
+    expect(inUseText(img({ inUse: true }))).toBe('在用')
+  })
+
+  it('在用镜像带上占用它的容器名（清理前先看是谁在用）', () => {
+    expect(inUseText(img({ inUse: true, inUseBy: ['mysql', 'redis'] }))).toBe(
+      '在用（mysql、redis）'
+    )
   })
 })
