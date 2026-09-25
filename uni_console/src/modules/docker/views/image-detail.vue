@@ -51,11 +51,15 @@
             <template v-else-if="view">
               <ArtTable v-if="layerRows.length" :data="layerRows" :columns="layerColumns" />
               <ElEmpty v-else description="这个镜像没有分层信息" />
-              <!-- 合计只列不与镜像大小混为一谈：共享层会被多个镜像共用，故合计通常小于镜像大小。
-                   这句话必须写出来，否则「12 层加起来 ≠ 545MB」会被当成数据错。 -->
+              <!-- 合计只列、不与镜像大小混为一谈：两者**不是同一口径** —— 各层大小是解压后的
+                   差值，共享层会被多个镜像共用，镜像的存储体积还经过压缩。
+                   实测（本机 mysql:8.0）：分层合计 812MB，镜像 223MB，合计**偏大**。
+                   这句话必须写出来，否则「层加起来 ≠ 镜像大小」会被当成数据错。 -->
               <div v-if="layerRows.length" class="imd-total">
                 <span>分层合计 {{ layersTotalText }}（镜像 {{ sizeText }}）</span>
-                <span class="imd-total__sub">镜像大小包含共享层，分层合计通常小于镜像大小</span>
+                <span class="imd-total__sub"
+                  >各层大小是解压后的差值，合计与镜像大小不是同一口径</span
+                >
               </div>
             </template>
           </ElTabPane>
