@@ -23,6 +23,57 @@ const docTemplate = `{
     "host": "{{.Host}}",
     "basePath": "{{.BasePath}}",
     "paths": {
+        "/agent/releases/{version}/download": {
+            "get": {
+                "description": "agent 用自身令牌下载指定版本的程序包（按设备平台解析）",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/octet-stream"
+                ],
+                "tags": [
+                    "Agent 通道"
+                ],
+                "summary": "Agent 下载程序包",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "版本号",
+                        "name": "version",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "agent 令牌",
+                        "name": "X-Agent-Token",
+                        "in": "header",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "程序包字节",
+                        "schema": {
+                            "type": "file"
+                        }
+                    },
+                    "401": {
+                        "description": "凭据无效",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "404": {
+                        "description": "没有该设备可用的程序文件",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    }
+                }
+            }
+        },
         "/agent/ws": {
             "get": {
                 "description": "未鉴权端点：升级握手阶段不做任何校验，凭据是首帧 agent.hello 里的 enroll/agent token。\n升级后的动作/上报/心跳全部走帧协议(agent.report.metrics、agent.heartbeat、agent.resource.*)，不体现在 HTTP 层。",
@@ -948,6 +999,734 @@ const docTemplate = `{
                 }
             }
         },
+        "/devices/overview": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "一次请求返回 N 台设备的最新快照（水位全字段）与多列趋势（列式，共享时间轴），按指标类别分组绘图即可得到「所有设备 × 各类指标」的总览视图\nrange 选档与 /devices/{id}/metrics **完全同口径**（≤24h Redis / ≤30d 5min / \u003e30d 1h）；metrics 为逗号白名单，* 表示该档全部可用列\nids 可显式指定设备白名单（「只对比勾选的这几台」）；hostname/status/online 为页面级过滤\n设备数超过上限时**截断并置 truncated**（不报错），单台设备的趋势取数失败降级为该设备的 error 字段（不影响其余设备）",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "设备监控"
+                ],
+                "summary": "设备监控总览",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "default": 86400,
+                        "description": "时间窗口(秒)",
+                        "name": "range",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "逗号分隔的指标列白名单，* 表示该档全部可用列",
+                        "name": "metrics",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "设备ID白名单(逗号分隔)，用于只看选定设备",
+                        "name": "ids",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "主机名模糊匹配",
+                        "name": "hostname",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "启停状态(0停用/1启用)",
+                        "name": "status",
+                        "in": "query"
+                    },
+                    {
+                        "type": "boolean",
+                        "description": "是否在线(在线判定依 sys.agent.offlineThreshold)",
+                        "name": "online",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "总览数据",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/app.Response"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/response.DeviceOverviewResp"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "参数错误(range 越界 / 列不在该档可用列集 / ids 含非法设备ID)",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "401": {
+                        "description": "未登录",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "403": {
+                        "description": "无权限",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    }
+                }
+            }
+        },
+        "/devices/releases": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "agent 程序包列表（含可删除性结论）与已发布版本号",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "设备监控"
+                ],
+                "summary": "发布物列表",
+                "responses": {
+                    "200": {
+                        "description": "查询成功",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/app.Response"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/response.AgentReleaseListResp"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            },
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "上传 agent 二进制（草稿态，需发布后才能被选为目标版本）；sha256 由服务端计算",
+                "consumes": [
+                    "multipart/form-data"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "设备监控"
+                ],
+                "summary": "上传 Agent 程序包",
+                "parameters": [
+                    {
+                        "type": "file",
+                        "description": "agent 二进制",
+                        "name": "file",
+                        "in": "formData",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "版本号(如 0.2.0)",
+                        "name": "version",
+                        "in": "formData",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "目标系统(linux)",
+                        "name": "os",
+                        "in": "formData",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "目标架构(amd64/arm64)",
+                        "name": "arch",
+                        "in": "formData",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "备注",
+                        "name": "notes",
+                        "in": "formData"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "上传成功",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/app.Response"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/response.AgentReleaseItem"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "参数错误或超过大小上限",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "409": {
+                        "description": "该版本在该平台上已存在",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    }
+                }
+            }
+        },
+        "/devices/releases/{id}": {
+            "delete": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "删除程序包；被升级记录使用过的版本会被拒绝（回滚余量保护）",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "设备监控"
+                ],
+                "summary": "删除程序包",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "format": "int64",
+                        "description": "程序包ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "已删除",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "404": {
+                        "description": "程序包不存在",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "409": {
+                        "description": "该版本已被使用，需保留以便回滚",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    }
+                }
+            }
+        },
+        "/devices/releases/{id}/publish": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "把草稿置为已发布（此后可被选为目标版本）",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "设备监控"
+                ],
+                "summary": "发布程序包",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "format": "int64",
+                        "description": "程序包ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "已发布",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "404": {
+                        "description": "程序包不存在",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    }
+                }
+            }
+        },
+        "/devices/releases/{id}/unpublish": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "撤回发布（只影响新下发；已指向该版本的设备仍可下载）",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "设备监控"
+                ],
+                "summary": "撤回程序包",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "format": "int64",
+                        "description": "程序包ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "已撤回",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "404": {
+                        "description": "程序包不存在",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    }
+                }
+            }
+        },
+        "/devices/upgrade": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "对选中的设备或筛选结果下发目标版本；按筛选下发必须带 expectedCount（预演给出的命中台数）",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "设备监控"
+                ],
+                "summary": "批量升级 Agent",
+                "parameters": [
+                    {
+                        "description": "版本与目标集合",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/request.DeviceBatchUpgradeRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "已下发",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/app.Response"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/response.DeviceUpgradeDispatchResp"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "参数错误",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "409": {
+                        "description": "筛选结果已变化，请重新确认",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    }
+                }
+            }
+        },
+        "/devices/upgrade/global": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "设置或清除全站目标版本（空 = 关闭全站升级）；只影响跟随全站的设备",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "设备监控"
+                ],
+                "summary": "设置全站目标版本",
+                "parameters": [
+                    {
+                        "description": "目标版本",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/request.DeviceUpgradeGlobalRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "已设置",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/app.Response"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/response.DeviceUpgradeGlobalResp"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "版本号格式不正确",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    }
+                }
+            }
+        },
+        "/devices/upgrade/preview": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "按设备列表或筛选条件预览本次下发会命中多少台、跳过多少台（下发前确认用）",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "设备监控"
+                ],
+                "summary": "升级影响面预演",
+                "parameters": [
+                    {
+                        "description": "版本与目标集合",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/request.DeviceBatchUpgradeRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "预演结果",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/app.Response"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/response.DeviceUpgradePreviewResp"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "参数错误",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    }
+                }
+            }
+        },
+        "/devices/upgrade/summary": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "按生效目标版本分桶统计（已达成/升级中/待升级/失败/已回滚/不支持/无产物）+ 版本分布",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "设备监控"
+                ],
+                "summary": "升级状态汇总",
+                "responses": {
+                    "200": {
+                        "description": "汇总",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/app.Response"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/response.DeviceUpgradeSummaryResp"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        },
+        "/devices/upgrade/tasks": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "分页查询升级任务（每行带明细状态分布）",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "设备监控"
+                ],
+                "summary": "升级任务列表",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "default": 1,
+                        "description": "页码",
+                        "name": "page",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "default": 10,
+                        "description": "每页条数",
+                        "name": "pageSize",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "目标版本",
+                        "name": "targetVersion",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "来源(manual/batch/filter/global)",
+                        "name": "source",
+                        "in": "query"
+                    },
+                    {
+                        "type": "boolean",
+                        "description": "只看未收口",
+                        "name": "running",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "查询成功",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/app.Response"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/app.PageResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        },
+        "/devices/upgrade/tasks/{id}": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "任务信息 + 逐台明细（可只看进行中/失败）",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "设备监控"
+                ],
+                "summary": "升级任务详情",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "format": "int64",
+                        "description": "任务ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "default": 1,
+                        "description": "页码",
+                        "name": "page",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "default": 20,
+                        "description": "每页条数",
+                        "name": "pageSize",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "筛选(active=进行中 failed=失败)",
+                        "name": "filter",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "查询成功",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/app.Response"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/response.AgentUpgradeTaskDetailResp"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "404": {
+                        "description": "任务不存在",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    }
+                }
+            }
+        },
         "/devices/{id}": {
             "get": {
                 "security": [
@@ -1338,6 +2117,178 @@ const docTemplate = `{
                         "description": "无权限",
                         "schema": {
                             "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "404": {
+                        "description": "设备不存在",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    }
+                }
+            }
+        },
+        "/devices/{id}/upgrade": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "为单台设备设置目标版本并催办；pin=true 表示「固定在当前版本」（不再跟随全站）",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "设备监控"
+                ],
+                "summary": "升级 Agent",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "format": "int64",
+                        "description": "设备ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "目标版本",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/request.DeviceUpgradeTargetRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "已下发",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/app.Response"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/response.DeviceUpgradeDispatchResp"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "版本号格式不正确",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "404": {
+                        "description": "设备不存在",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "清空设备级目标版本（恢复跟随全站目标）",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "设备监控"
+                ],
+                "summary": "取消升级目标",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "format": "int64",
+                        "description": "设备ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "已清空",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "404": {
+                        "description": "设备不存在",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    }
+                }
+            }
+        },
+        "/devices/{id}/upgrade/records": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "该设备最近的升级记录（与任务明细同源）",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "设备监控"
+                ],
+                "summary": "设备升级记录",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "format": "int64",
+                        "description": "设备ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "查询成功",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/app.Response"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "type": "array",
+                                            "items": {
+                                                "$ref": "#/definitions/response.DeviceUpgradeRecord"
+                                            }
+                                        }
+                                    }
+                                }
+                            ]
                         }
                     },
                     "404": {
@@ -2155,6 +3106,287 @@ const docTemplate = `{
                     },
                     "404": {
                         "description": "字典数据不存在",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    }
+                }
+            }
+        },
+        "/docker/hosts": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "枚举上报过快照的主机（docker:hosts 集合）及各自的摘要与陈旧结论",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Docker 管理"
+                ],
+                "summary": "可管主机清单",
+                "responses": {
+                    "200": {
+                        "description": "查询成功",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/app.Response"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/response.DockerHostListResp"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "401": {
+                        "description": "未登录",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "403": {
+                        "description": "无权限",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    }
+                }
+            }
+        },
+        "/docker/hosts/{id}/cmds": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "校验 action 对应的权限码与期次闸后下发；立即返回指令号（ref），结果靠轮询",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Docker 管理"
+                ],
+                "summary": "受理 docker 指令",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "format": "int64",
+                        "description": "设备ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "指令请求",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/request.DockerCmdReq"
+                        }
+                    }
+                ],
+                "responses": {
+                    "202": {
+                        "description": "已受理（data.ref 为指令号）",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/app.Response"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/response.DockerCmdResp"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "参数错误 / 未知操作 / 该操作尚未开放",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "401": {
+                        "description": "未登录",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "403": {
+                        "description": "无操作权限",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "409": {
+                        "description": "该目标上已有同一条指令在执行",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "500": {
+                        "description": "设备离线 / docker 不可用 / 内部错误",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    }
+                }
+            }
+        },
+        "/docker/hosts/{id}/cmds/{ref}": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "按指令号查询状态与载荷（pending/running/succeeded/failed/timeout）",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Docker 管理"
+                ],
+                "summary": "轮询 docker 指令结果",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "format": "int64",
+                        "description": "设备ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "指令号",
+                        "name": "ref",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "查询成功",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/app.Response"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/response.DockerCmdResultResp"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "401": {
+                        "description": "未登录",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "403": {
+                        "description": "无操作权限",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "404": {
+                        "description": "指令不存在或已过期",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    }
+                }
+            }
+        },
+        "/docker/hosts/{id}/state": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "返回一台主机的容器/镜像/卷/网络/编排项目清单与陈旧结论（离线可读，只标 stale）",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Docker 管理"
+                ],
+                "summary": "主机资源快照",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "format": "int64",
+                        "description": "设备ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "查询成功",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/app.Response"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/response.DockerStateResp"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "参数错误",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "401": {
+                        "description": "未登录",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "403": {
+                        "description": "无权限",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "404": {
+                        "description": "设备不存在",
                         "schema": {
                             "$ref": "#/definitions/app.Response"
                         }
@@ -7957,6 +9189,84 @@ const docTemplate = `{
                 }
             }
         },
+        "request.DeviceBatchUpgradeRequest": {
+            "type": "object",
+            "required": [
+                "version"
+            ],
+            "properties": {
+                "expectedCount": {
+                    "description": "ExpectedCount 只在 filter 路径生效（ids 路径的影响面由 ids 自身确定）。",
+                    "type": "integer"
+                },
+                "filter": {
+                    "$ref": "#/definitions/request.DeviceQuery"
+                },
+                "ids": {
+                    "type": "array",
+                    "items": {
+                        "type": "integer"
+                    }
+                },
+                "version": {
+                    "type": "string"
+                }
+            }
+        },
+        "request.DeviceQuery": {
+            "type": "object",
+            "properties": {
+                "hostname": {
+                    "description": "Hostname 模糊匹配（LIKE %v%）。",
+                    "type": "string"
+                },
+                "online": {
+                    "description": "Online 在线过滤；nil = 不过滤。在线判定由 service 依\nsys.agent.offlineThreshold 折算成 onlineSince 后交给仓储。",
+                    "type": "boolean"
+                },
+                "page": {
+                    "type": "integer",
+                    "maximum": 10000,
+                    "minimum": 1
+                },
+                "pageSize": {
+                    "type": "integer",
+                    "maximum": 100,
+                    "minimum": 1
+                },
+                "status": {
+                    "description": "Status 精确匹配启停态；nil = 不过滤。",
+                    "type": "integer"
+                }
+            }
+        },
+        "request.DeviceUpgradeGlobalRequest": {
+            "type": "object",
+            "properties": {
+                "version": {
+                    "type": "string"
+                }
+            }
+        },
+        "request.DeviceUpgradeTargetRequest": {
+            "type": "object",
+            "required": [
+                "version"
+            ],
+            "properties": {
+                "pin": {
+                    "description": "Pin 为 true 时表示「固定在当前版本」：即使版本与当前相同也**写下设备级目标**，\n使它不再跟随全站目标。\n\n为什么必须显式传而不是从「版本 == 当前」推出来：一次普通的升级下发里，\n「已经在该版本上」的设备应当**保持跟随全站**（不写设备级目标）—— 否则\n一次全站升级会把每台设备都打上设备级目标，「跟随全站」的比例悄悄变成 0，\n下一次改全站目标时谁都跟不上。固定是一个**独立意图**，必须由调用方明说。",
+                    "type": "boolean"
+                },
+                "version": {
+                    "description": "Version 必须是合法 semver；**允许低于当前版本**（那就是回滚）——\n服务端只校验形态，不校验方向：回滚不是错误操作。",
+                    "type": "string"
+                }
+            }
+        },
+        "request.DockerCmdReq": {
+            "type": "object"
+        },
         "request.KickSessionReq": {
             "type": "object",
             "required": [
@@ -8496,6 +9806,202 @@ const docTemplate = `{
                 }
             }
         },
+        "response.AgentReleaseItem": {
+            "type": "object",
+            "properties": {
+                "arch": {
+                    "type": "string"
+                },
+                "createdAt": {
+                    "type": "integer"
+                },
+                "deletable": {
+                    "description": "Deletable 是**服务端算好的结论**：该版本是否还没被任何升级尝试用过。\n前端据此禁用删除按钮并说明原因，而不是点了才报错 —— 回滚余量是硬约束\n（用过即禁删），把它做成一个「按下才知道」的失败体验没有必要。",
+                    "type": "boolean"
+                },
+                "fileName": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string",
+                    "example": "0"
+                },
+                "notes": {
+                    "type": "string"
+                },
+                "os": {
+                    "type": "string"
+                },
+                "publishedAt": {
+                    "description": "PublishedAt 只在已发布时有值（撤回时置空）。",
+                    "type": "integer"
+                },
+                "sha256": {
+                    "description": "SHA256 是服务端落盘时算的摘要。前端**只展示不解释**（不出现「sha256」等\n内部术语的地方也不该出现它的值 —— 展示层只给大小与时间）。",
+                    "type": "string"
+                },
+                "sizeBytes": {
+                    "type": "integer"
+                },
+                "status": {
+                    "type": "integer"
+                },
+                "version": {
+                    "type": "string"
+                }
+            }
+        },
+        "response.AgentReleaseListResp": {
+            "type": "object",
+            "properties": {
+                "list": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/response.AgentReleaseItem"
+                    }
+                },
+                "publishedVersions": {
+                    "description": "PublishedVersions 是已发布过的版本号（去重、新→旧），供「升级到…」下拉。\n与 List 一并返回：下拉与列表必须同源，否则会出现「列表里有、下拉里没有」。",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "response.AgentUpgradeAttemptItem": {
+            "type": "object",
+            "properties": {
+                "createdAt": {
+                    "type": "integer"
+                },
+                "deviceDeleted": {
+                    "type": "boolean"
+                },
+                "deviceId": {
+                    "type": "string",
+                    "example": "0"
+                },
+                "finishedAt": {
+                    "type": "integer"
+                },
+                "fromVersion": {
+                    "type": "string"
+                },
+                "hostname": {
+                    "description": "Hostname / PrimaryIP 取自设备表；设备已删除时为空串且 DeviceDeleted=true。",
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string",
+                    "example": "0"
+                },
+                "lastReportAt": {
+                    "type": "integer"
+                },
+                "primaryIp": {
+                    "type": "string"
+                },
+                "progress": {
+                    "description": "Progress 只在下载阶段有值（协议层已钉死），nil = 本阶段没有百分比。",
+                    "type": "integer"
+                },
+                "reasonCode": {
+                    "type": "string"
+                },
+                "startedAt": {
+                    "type": "integer"
+                },
+                "state": {
+                    "type": "string"
+                },
+                "taskId": {
+                    "type": "string"
+                },
+                "toVersion": {
+                    "type": "string"
+                }
+            }
+        },
+        "response.AgentUpgradeCounts": {
+            "type": "object",
+            "properties": {
+                "failed": {
+                    "type": "integer"
+                },
+                "pending": {
+                    "type": "integer"
+                },
+                "rolledBack": {
+                    "type": "integer"
+                },
+                "running": {
+                    "type": "integer"
+                },
+                "succeeded": {
+                    "type": "integer"
+                },
+                "superseded": {
+                    "type": "integer"
+                },
+                "timeout": {
+                    "type": "integer"
+                }
+            }
+        },
+        "response.AgentUpgradeTaskDetailResp": {
+            "type": "object",
+            "properties": {
+                "list": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/response.AgentUpgradeAttemptItem"
+                    }
+                },
+                "page": {
+                    "type": "integer"
+                },
+                "pageSize": {
+                    "type": "integer"
+                },
+                "task": {
+                    "$ref": "#/definitions/response.AgentUpgradeTaskItem"
+                },
+                "total": {
+                    "type": "integer"
+                }
+            }
+        },
+        "response.AgentUpgradeTaskItem": {
+            "type": "object",
+            "properties": {
+                "actor": {
+                    "type": "string"
+                },
+                "counts": {
+                    "$ref": "#/definitions/response.AgentUpgradeCounts"
+                },
+                "createdAt": {
+                    "type": "integer"
+                },
+                "finishedAt": {
+                    "type": "integer"
+                },
+                "id": {
+                    "type": "string",
+                    "example": "0"
+                },
+                "source": {
+                    "type": "string"
+                },
+                "targetVersion": {
+                    "type": "string"
+                },
+                "total": {
+                    "type": "integer"
+                }
+            }
+        },
         "response.AvatarUploadResp": {
             "type": "object",
             "properties": {
@@ -8779,6 +10285,184 @@ const docTemplate = `{
                 }
             }
         },
+        "response.DeviceOverviewItem": {
+            "type": "object",
+            "properties": {
+                "error": {
+                    "description": "Error 是**该设备单独**的趋势取数失败原因（已脱敏，面向用户可读）。\n有值时该设备的快照（Watermark）仍然有效——故障被局部化。",
+                    "type": "string"
+                },
+                "hostname": {
+                    "type": "string"
+                },
+                "id": {
+                    "description": "ID 用 ` + "`" + `json:\"id\"` + "`" + `（**不带** ` + "`" + `,string` + "`" + `）：本字段已经是 string，而 Go 的\n` + "`" + `,string` + "`" + ` 选项对 string 类型字段会**再加一层引号**（把 ` + "`" + `2100772…` + "`" + `\n编码成 ` + "`" + `\"\\\"2100772…\\\"\"` + "`" + `）。既有 DeviceListItem 之所以能写 ` + "`" + `,string` + "`" + `，\n是因为它那边是 uint64（需要转成 JSON 字符串以避免 JS 大整数精度丢失）；\n这里已在服务层 strconv.FormatUint 转过一次，再带 ` + "`" + `,string` + "`" + ` 就是双重编码。\n\n实测症状：页面上设备 ID 显示成 ` + "`" + `\"2100772873982447616\"` + "`" + `（带字面引号），\n且勾选设备时下发的 ids 也带引号 → 后端 400。",
+                    "type": "string"
+                },
+                "lastSeenAt": {
+                    "description": "LastSeenAt 是最后上报时刻（unix 秒）；从未上报则不出现。",
+                    "type": "integer"
+                },
+                "online": {
+                    "type": "boolean"
+                },
+                "os": {
+                    "type": "string"
+                },
+                "platform": {
+                    "description": "Platform / OS 用于行内图标（deviceIcon）与次级标识。",
+                    "type": "string"
+                },
+                "series": {
+                    "description": "Series 是 ` + "`" + `AvailableMetrics` + "`" + ` 的按列趋势，顺序与请求的列序一致。\n取数失败时为空，并置 ` + "`" + `Error` + "`" + `。",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/response.DeviceOverviewSeries"
+                    }
+                },
+                "stale": {
+                    "type": "boolean"
+                },
+                "status": {
+                    "type": "integer"
+                },
+                "watermark": {
+                    "description": "Watermark 是**水位全字段**快照（键名即整机宽表列名，如\n` + "`" + `cpu_used_percent` + "`" + `）——直接复用列名是为了让快照图表与趋势图表\n用同一套 METRIC_META 元数据（中文名/单位/分组），不需要第二张映射表。\n\n缺值列**不出现在 map 里**（而不是出现且为 null）：水位本身是\n` + "`" + `omitempty` + "`" + ` 投影，没采集到的列压根不落 Redis。",
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "number",
+                        "format": "float64"
+                    }
+                },
+                "watermarkAt": {
+                    "description": "WatermarkAt 是水位（最新样本）的采样时刻（unix 秒）。",
+                    "type": "integer"
+                }
+            }
+        },
+        "response.DeviceOverviewResp": {
+            "type": "object",
+            "properties": {
+                "available_metrics": {
+                    "description": "AvailableMetrics 是本次实际可用的**整机宽表列名**（snake_case），\n剔除 bucket_ts。消费方据此决定「哪些图表有数据」，而**不得**硬编码列名\n（与设备详情页同口径：有没有这一列由后端决定）。",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "axis": {
+                    "description": "Axis 是所有设备共享的时间轴（桶起始 unix 秒，升序）。\n每条 series 的 Values 与 Axis 等长且一一对应。",
+                    "type": "array",
+                    "items": {
+                        "type": "integer"
+                    }
+                },
+                "axis_step_seconds": {
+                    "description": "AxisStepSeconds 是抽样步长（秒）：1 表示未抽样，\u003e1 表示每隔 N 个原始桶取 1 个。",
+                    "type": "integer"
+                },
+                "device_total": {
+                    "description": "DeviceTotal 是过滤后命中的设备总数（未截断前）。",
+                    "type": "integer"
+                },
+                "devices": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/response.DeviceOverviewItem"
+                    }
+                },
+                "downsampled": {
+                    "description": "Downsampled 为真时必须让用户看见（UI 应标注「已抽样」）——\n抽样会**丢失尖峰**，静默抽样会让用户以为看到的是全部细节。",
+                    "type": "boolean"
+                },
+                "max_devices": {
+                    "description": "MaxDevices 是本次生效的设备数上限（随响应下发，供 UI 说明）。",
+                    "type": "integer"
+                },
+                "range_seconds": {
+                    "description": "RangeSeconds 是本次趋势窗口（秒）。",
+                    "type": "integer"
+                },
+                "resolution_seconds": {
+                    "description": "ResolutionSeconds 是**原始**桶宽（秒，来自选档），非抽样后的步长。",
+                    "type": "integer"
+                },
+                "source": {
+                    "description": "Source 是数据来源档位：redis（≤24h，热层）| db（\u003e24h，冷层）。",
+                    "type": "string"
+                },
+                "summary": {
+                    "$ref": "#/definitions/response.DeviceOverviewSummary"
+                },
+                "truncated": {
+                    "description": "Truncated 为真表示设备数超过 MaxDevices，只返回了前 MaxDevices 台。",
+                    "type": "boolean"
+                }
+            }
+        },
+        "response.DeviceOverviewSeries": {
+            "type": "object",
+            "properties": {
+                "avg": {
+                    "type": "number"
+                },
+                "last": {
+                    "description": "以下统计量均由**非空值**算出；无任何非空值时全部不出现（omitempty），\n消费方据此显示「无数据」而不是 0。\n\n为什么在后端算：这些是「一列数字的聚合」，设备数 × 列数在上限内\n（见 MaxDevices），后端算一次比让 N 个客户端各算一次更省，且口径唯一。",
+                    "type": "number"
+                },
+                "max": {
+                    "type": "number"
+                },
+                "metric": {
+                    "description": "Metric 是整机宽表列名（snake_case），与 ` + "`" + `AvailableMetrics` + "`" + ` 同集合。",
+                    "type": "string"
+                },
+                "min": {
+                    "type": "number"
+                },
+                "missing": {
+                    "type": "integer"
+                },
+                "present": {
+                    "description": "Present / Missing 是桶计数：两者之和 = len(Axis)。\n它们让「覆盖率」可被直接展示（例如「344 桶中 12 桶无数据」），\n而不需要前端再遍历一遍。",
+                    "type": "integer"
+                },
+                "values": {
+                    "description": "Values 与 ` + "`" + `DeviceOverviewResp.Axis` + "`" + ` 等长；` + "`" + `null` + "`" + ` = 该桶无数据（≠ 0）。",
+                    "type": "array",
+                    "items": {
+                        "type": "number"
+                    }
+                }
+            }
+        },
+        "response.DeviceOverviewSummary": {
+            "type": "object",
+            "properties": {
+                "disabled": {
+                    "description": "Disabled 是管理侧停用态（与在线状态正交）：停用的设备仍可能在线。",
+                    "type": "integer"
+                },
+                "offline": {
+                    "type": "integer"
+                },
+                "offline_threshold_sec": {
+                    "description": "OfflineThresholdSec 是本次判定实际使用的离线阈值（秒），随响应下发，\n保证 UI 文案与 ` + "`" + `Online` + "`" + ` 的判定永远同口径（同 DeviceResp 的理由）。",
+                    "type": "integer"
+                },
+                "online": {
+                    "description": "Online / Offline 由 last_seen_at 与 sys.agent.offlineThreshold 判定，\n与列表页 ` + "`" + `online` + "`" + ` 字段**同源同口径**（同一次配置读取）。",
+                    "type": "integer"
+                },
+                "stale": {
+                    "description": "Stale 是有水位、但水位采样时刻已超过离线阈值（数据陈旧）的设备数。\n它与 Offline 不等价：Offline 看的是「最后上报时间」，Stale 看的是\n「最新水位那条样本的时间」——设备可能在上报心跳却停止上报指标。",
+                    "type": "integer"
+                },
+                "total": {
+                    "type": "integer"
+                }
+            }
+        },
         "response.DeviceResourceItem": {
             "type": "object",
             "properties": {
@@ -8865,6 +10549,10 @@ const docTemplate = `{
         "response.DeviceResp": {
             "type": "object",
             "properties": {
+                "agentUpgradeSupported": {
+                    "description": "AgentUpgradeSupported 是设备自报的「我这一版能被远程升级」。\nfalse 时页面禁用升级按钮并给结论式提示（现场存量 0.1.0 属于这一档）。",
+                    "type": "boolean"
+                },
                 "agentVersion": {
                     "type": "string"
                 },
@@ -8911,6 +10599,10 @@ const docTemplate = `{
                 "memUsedPercent": {
                     "type": "number"
                 },
+                "offlineThresholdSec": {
+                    "description": "OfflineThresholdSec 是**后端实际生效**的离线判定阈值（秒），来自\nsys.agent.offlineThreshold（可热更）。\n\n为什么必须由后端给出、而不是前端写死 30：阈值可热更，前端硬编码会在\n后端热更后与之**静默矛盾** —— UI 说「30 秒内未上报即离线」，而判定\n其实已按 60 秒算。这比不显示阈值更糟：它看起来是个可信的数字。\n与 onlineSince 同源下发，保证「响应里的 online」与「UI 文案」永远同口径。",
+                    "type": "integer"
+                },
                 "online": {
                     "description": "Online 由 last_seen_at 与 sys.agent.offlineThreshold 推导（不落库）。",
                     "type": "boolean"
@@ -8924,12 +10616,225 @@ const docTemplate = `{
                 "platformVer": {
                     "type": "string"
                 },
+                "primaryIp": {
+                    "description": "PrimaryIP 是**服务端观测到**的 agent 来源 IP（详见 entity.Device.PrimaryIP）。\n\n放在 DeviceResp 而**不**放 DeviceListItem：列表页已有主机名/OS/架构/在线/\n启停/水位等列，再加 IP 会挤压操作列；而 IP 的价值场景（定位设备、SSH）\n都在详情页发生。列表若需要，后续按需再提列即可。\n\nomitempty：未观测到时整个字段不出现（老设备在升级本版本前 enroll 的行、\n或测试态未接管 socket）—— 与水位三字段同一约定，前端显示「—」，\n**不臆造空串**。",
+                    "type": "string"
+                },
+                "rollbackVersion": {
+                    "description": "RollbackVersion 是「一键回滚」的目标版本：该设备最近一次成功升级的**起始版本**，\n由升级域从升级记录推导。空串 = 没有成功历史（页面禁用回滚按钮）。",
+                    "type": "string"
+                },
                 "status": {
+                    "type": "integer"
+                },
+                "targetFromGlobal": {
+                    "description": "TargetFromGlobal 表示该目标来自全站（页面标注「跟随全站」/「设备指定」）。",
+                    "type": "boolean"
+                },
+                "targetVersion": {
+                    "description": "TargetVersion 是**生效目标**（设备级指定优先，否则全站目标）。",
+                    "type": "string"
+                },
+                "upgradeAt": {
+                    "description": "UpgradeAt 是最近一次终态的时刻（unix 秒）。",
+                    "type": "integer"
+                },
+                "upgradePhase": {
+                    "description": "UpgradePhase 是**推导**出来的相位：achieved | running | pending（空 = 无目标）。",
+                    "type": "string"
+                },
+                "upgradeReason": {
+                    "description": "UpgradeReason 是终态的原因码（展示层翻译成结论）。",
+                    "type": "string"
+                },
+                "upgradeResult": {
+                    "description": "UpgradeResult 是最近一次终态（0 无 / 1 已达成 / 2 失败 / 3 已回滚）。",
                     "type": "integer"
                 },
                 "watermarkAt": {
                     "description": "WatermarkAt 是水位采样时刻（unix 秒）。",
                     "type": "integer"
+                }
+            }
+        },
+        "response.DeviceUpgradeBucket": {
+            "type": "object",
+            "properties": {
+                "achieved": {
+                    "description": "Achieved 是已达成的台数（**读时推导**：生效目标 == 当前版本）。",
+                    "type": "integer"
+                },
+                "disabled": {
+                    "type": "integer"
+                },
+                "failed": {
+                    "type": "integer"
+                },
+                "noArtifact": {
+                    "type": "integer"
+                },
+                "pending": {
+                    "type": "integer"
+                },
+                "rolledBack": {
+                    "type": "integer"
+                },
+                "running": {
+                    "description": "Running 是升级中的台数（存在未终结尝试）。",
+                    "type": "integer"
+                },
+                "targetVersion": {
+                    "description": "TargetVersion 为空 = 无目标（既没有设备级也没有全站目标）。",
+                    "type": "string"
+                },
+                "total": {
+                    "type": "integer"
+                },
+                "unsupported": {
+                    "description": "Unsupported / NoArtifact / Disabled 是三类「想升也升不了」的台数\n（见 DeviceUpgradeSkip）。Disabled 在汇总里要单列：停用设备根本连不上，\n把它混进「等待上线」会让运维去等一台永远不会上线的机器。",
+                    "type": "integer"
+                }
+            }
+        },
+        "response.DeviceUpgradeDispatchResp": {
+            "type": "object",
+            "properties": {
+                "dispatched": {
+                    "type": "integer"
+                },
+                "skip": {
+                    "$ref": "#/definitions/response.DeviceUpgradeSkip"
+                },
+                "targetVersion": {
+                    "type": "string"
+                },
+                "taskId": {
+                    "description": "TaskID 是本次下发建出的任务（前端用它跳到任务页看进度）。",
+                    "type": "string"
+                }
+            }
+        },
+        "response.DeviceUpgradeGlobalResp": {
+            "type": "object",
+            "properties": {
+                "affected": {
+                    "description": "Affected 是生效目标随之改变、需要动一动的台数。",
+                    "type": "integer"
+                },
+                "pinnedDevices": {
+                    "description": "PinnedDevices 是设备级已指定版本、**不跟随全站**的台数。\n它是全站变更时最容易被忽略的一类：页面必须把它说出来，否则\n「全站都升了」会与「这几台没动」同时成立而没人知道为什么。",
+                    "type": "integer"
+                },
+                "targetVersion": {
+                    "description": "TargetVersion 是**变更后**的全站目标（空 = 已关闭全站升级）。",
+                    "type": "string"
+                },
+                "taskId": {
+                    "description": "TaskID 是本次变更建出的任务（为空 = 没有设备需要动）。",
+                    "type": "string"
+                }
+            }
+        },
+        "response.DeviceUpgradePreviewResp": {
+            "type": "object",
+            "properties": {
+                "matched": {
+                    "description": "Matched 是筛选命中的台数（不管能否升级）。",
+                    "type": "integer"
+                },
+                "skip": {
+                    "$ref": "#/definitions/response.DeviceUpgradeSkip"
+                },
+                "targetVersion": {
+                    "type": "string"
+                },
+                "willUpgrade": {
+                    "description": "WillUpgrade 是实际会下发的台数 = Matched - Skip.Total()。",
+                    "type": "integer"
+                }
+            }
+        },
+        "response.DeviceUpgradeRecord": {
+            "type": "object",
+            "properties": {
+                "createdAt": {
+                    "type": "integer"
+                },
+                "finishedAt": {
+                    "type": "integer"
+                },
+                "fromVersion": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string",
+                    "example": "0"
+                },
+                "reasonCode": {
+                    "type": "string"
+                },
+                "state": {
+                    "type": "string"
+                },
+                "toVersion": {
+                    "type": "string"
+                }
+            }
+        },
+        "response.DeviceUpgradeSkip": {
+            "type": "object",
+            "properties": {
+                "alreadyOnTarget": {
+                    "type": "integer"
+                },
+                "disabled": {
+                    "type": "integer"
+                },
+                "noArtifact": {
+                    "type": "integer"
+                },
+                "unsupported": {
+                    "type": "integer"
+                }
+            }
+        },
+        "response.DeviceUpgradeSummaryResp": {
+            "type": "object",
+            "properties": {
+                "buckets": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/response.DeviceUpgradeBucket"
+                    }
+                },
+                "globalTargetVersion": {
+                    "description": "GlobalTargetVersion 是当前全站目标（空 = 未开启全站升级）。",
+                    "type": "string"
+                },
+                "pinnedDevices": {
+                    "description": "PinnedDevices 是设备级指定了版本的台数（不跟随全站）。",
+                    "type": "integer"
+                },
+                "total": {
+                    "type": "integer"
+                },
+                "versionDistribution": {
+                    "description": "VersionDistribution 是当前版本分布（新→旧按台数降序）。",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/response.DeviceVersionCount"
+                    }
+                }
+            }
+        },
+        "response.DeviceVersionCount": {
+            "type": "object",
+            "properties": {
+                "count": {
+                    "type": "integer"
+                },
+                "version": {
+                    "type": "string"
                 }
             }
         },
@@ -9039,6 +10944,343 @@ const docTemplate = `{
                     "type": "number"
                 },
                 "usedGB": {
+                    "type": "number"
+                }
+            }
+        },
+        "response.DockerCmdResp": {
+            "type": "object",
+            "properties": {
+                "ref": {
+                    "description": "Ref 是指令号：前端用它轮询结果。",
+                    "type": "string"
+                }
+            }
+        },
+        "response.DockerCmdResultResp": {
+            "type": "object",
+            "properties": {
+                "alreadyExists": {
+                    "type": "boolean"
+                },
+                "detail": {
+                    "description": "Detail 是排障细节（**页面不渲染**；留给「复制诊断信息」这类入口）。",
+                    "type": "string"
+                },
+                "error": {
+                    "description": "Error 是终态结论句（页面直接显示）。",
+                    "type": "string"
+                },
+                "payload": {
+                    "description": "Payload 是结果数据面（按 action 形态不同；前端按 action 解析）。"
+                },
+                "sessionId": {
+                    "type": "string"
+                },
+                "status": {
+                    "description": "Status ∈ pending | succeeded | failed | timeout。",
+                    "type": "string"
+                }
+            }
+        },
+        "response.DockerComposeInfoResp": {
+            "type": "object",
+            "properties": {
+                "flavor": {
+                    "type": "string"
+                },
+                "version": {
+                    "type": "string"
+                }
+            }
+        },
+        "response.DockerContainerItem": {
+            "type": "object",
+            "properties": {
+                "composeProject": {
+                    "type": "string"
+                },
+                "composeService": {
+                    "type": "string"
+                },
+                "cpuPercent": {
+                    "type": "number"
+                },
+                "created": {
+                    "type": "integer"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "image": {
+                    "type": "string"
+                },
+                "memLimitMb": {
+                    "type": "number"
+                },
+                "memUsageMb": {
+                    "type": "number"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "netRxBytesSec": {
+                    "type": "number"
+                },
+                "netTxBytesSec": {
+                    "type": "number"
+                },
+                "ports": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/response.DockerPortItem"
+                    }
+                },
+                "protected": {
+                    "type": "boolean"
+                },
+                "startedAt": {
+                    "type": "integer"
+                },
+                "state": {
+                    "type": "string"
+                },
+                "statusText": {
+                    "type": "string"
+                }
+            }
+        },
+        "response.DockerHostItem": {
+            "type": "object",
+            "properties": {
+                "composeFlavor": {
+                    "type": "string"
+                },
+                "composeVersion": {
+                    "type": "string"
+                },
+                "containers": {
+                    "type": "integer"
+                },
+                "dockerOk": {
+                    "description": "DockerOK 是 agent 自报的能力信号；false 时前端不渲染任何操作按钮。",
+                    "type": "boolean"
+                },
+                "error": {
+                    "description": "Error 是 dockerOK=false 的结论句。",
+                    "type": "string"
+                },
+                "hostname": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string",
+                    "example": "0"
+                },
+                "images": {
+                    "type": "integer"
+                },
+                "lastSync": {
+                    "description": "LastSync 是 core 收到快照的时刻（unix 秒）；0 = 从未上报。",
+                    "type": "integer"
+                },
+                "online": {
+                    "description": "Online 由 last_seen_at 与 sys.agent.offlineThreshold 折算（与设备列表同口径）。",
+                    "type": "boolean"
+                },
+                "primaryIp": {
+                    "type": "string"
+                },
+                "stale": {
+                    "description": "Stale 是服务端算好的结论（\u003emax(3×周期, 90s) 未更新）。",
+                    "type": "boolean"
+                }
+            }
+        },
+        "response.DockerHostListResp": {
+            "type": "object",
+            "properties": {
+                "list": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/response.DockerHostItem"
+                    }
+                },
+                "snapshotInterval": {
+                    "description": "SnapshotInterval 是当前快照周期（秒）：前端据此算「同步于 N 秒前」的文案，\n与后端 stale 判定同源（各自硬编码会让两边对「多久算陈旧」给出不同答案）。",
+                    "type": "integer"
+                }
+            }
+        },
+        "response.DockerImageItem": {
+            "type": "object",
+            "properties": {
+                "created": {
+                    "type": "integer"
+                },
+                "dangling": {
+                    "type": "boolean"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "inUse": {
+                    "type": "boolean"
+                },
+                "inUseBy": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "repoTags": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "sizeMb": {
+                    "type": "number"
+                }
+            }
+        },
+        "response.DockerNetworkItem": {
+            "type": "object",
+            "properties": {
+                "containersCount": {
+                    "type": "integer"
+                },
+                "driver": {
+                    "type": "string"
+                },
+                "internal": {
+                    "type": "boolean"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "scope": {
+                    "type": "string"
+                }
+            }
+        },
+        "response.DockerPortItem": {
+            "type": "object",
+            "properties": {
+                "ip": {
+                    "type": "string"
+                },
+                "privatePort": {
+                    "type": "integer"
+                },
+                "publicPort": {
+                    "type": "integer"
+                },
+                "type": {
+                    "type": "string"
+                }
+            }
+        },
+        "response.DockerProjectItem": {
+            "type": "object",
+            "properties": {
+                "configFiles": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "containersCount": {
+                    "type": "integer"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "services": {
+                    "type": "integer"
+                },
+                "state": {
+                    "type": "string"
+                }
+            }
+        },
+        "response.DockerStateResp": {
+            "type": "object",
+            "properties": {
+                "ageSeconds": {
+                    "description": "AgeSeconds 是距上次上报的秒数（0 = 刚刚）。",
+                    "type": "integer"
+                },
+                "compose": {
+                    "$ref": "#/definitions/response.DockerComposeInfoResp"
+                },
+                "containers": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/response.DockerContainerItem"
+                    }
+                },
+                "dockerOk": {
+                    "type": "boolean"
+                },
+                "error": {
+                    "type": "string"
+                },
+                "images": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/response.DockerImageItem"
+                    }
+                },
+                "lastSync": {
+                    "type": "integer"
+                },
+                "networks": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/response.DockerNetworkItem"
+                    }
+                },
+                "neverReported": {
+                    "description": "NeverReported 表示该主机从未上报过快照（与「陈旧」是两句不同的话）。",
+                    "type": "boolean"
+                },
+                "projects": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/response.DockerProjectItem"
+                    }
+                },
+                "stale": {
+                    "type": "boolean"
+                },
+                "volumes": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/response.DockerVolumeItem"
+                    }
+                }
+            }
+        },
+        "response.DockerVolumeItem": {
+            "type": "object",
+            "properties": {
+                "driver": {
+                    "type": "string"
+                },
+                "inUse": {
+                    "type": "boolean"
+                },
+                "mountedBy": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "name": {
+                    "type": "string"
+                },
+                "sizeMb": {
                     "type": "number"
                 }
             }
