@@ -54,7 +54,14 @@ type DeviceService struct {
 	// 之所以由设备服务去**问**升级域而不是自己算：生效目标与「一次尝试」的口径
 	// 只有升级域那一份（ResolveTargetVersion），这里再算一遍就是第二份实现。
 	upgrade DeviceUpgradeInfoProvider
-	log     logger.LoggerInterface
+	// docker 是删除设备时的 docker 键清理能力（由 service.DockerService 满足）。
+	//
+	// 可空：nil 时跳过这步清理（docker 域未装配的部署形态仍要能删设备）。
+	// 与 raw 并列而不是并进 DeviceRedisPurger：两者虽都是「删设备时清 Redis」，
+	// 但清的是两组不相交的键（agent 水位/指标档 vs docker:state/docker:hosts），
+	// 分别由两个域负责，合并只会让任一域的装配都要看见对方的键名。
+	docker DeviceDockerPurger
+	log    logger.LoggerInterface
 }
 
 // DeviceUpgradeInfoProvider 是设备服务需要的升级域信息（由 DeviceUpgradeService 实现）。
@@ -91,11 +98,25 @@ type DeviceLatestReader interface {
 	GetMany(ctx context.Context, deviceIDs []uint64) (map[uint64]*agentmetrics.LatestSummary, error)
 }
 
+// DeviceDockerPurger 是删除设备时的 docker 键清理能力（由 service.DockerService 满足）。
+//
+// 不清的后果有两处可见：docker:state:<id> 永久泄漏；docker:hosts 里留着一个已删设备的 id，
+// 主机清单每次都要靠「FindByID 失败」来跳过它。
+type DeviceDockerPurger interface {
+	PurgeDevice(ctx context.Context, deviceID uint64) error
+}
+
+// NewDeviceService 构造设备服务。
+//
+// docker 是 docker 域的连带清理面，**可传 nil**（未装配 docker 域的部署形态，
+// 与 upgrade 同款的可空约定）；参数放在 log 之前是为了让两个「外部域」依赖
+// （upgrade / docker）相邻，一眼能看全本服务对外部的依赖面。
 func NewDeviceService(repo DeviceRepository, resources DeviceResourceRepository,
 	raw DeviceRedisPurger, latest DeviceLatestReader, cfg AgentConfigGetter,
-	upgrade DeviceUpgradeInfoProvider, log logger.LoggerInterface) *DeviceService {
+	upgrade DeviceUpgradeInfoProvider, docker DeviceDockerPurger,
+	log logger.LoggerInterface) *DeviceService {
 	return &DeviceService{repo: repo, resources: resources, raw: raw, latest: latest,
-		cfg: cfg, upgrade: upgrade, log: log}
+		cfg: cfg, upgrade: upgrade, docker: docker, log: log}
 }
 
 // offlineThresholdSec 返回**实际生效**的离线判定阈值（秒）。
@@ -269,7 +290,8 @@ func (s *DeviceService) setStatus(ctx context.Context, id uint64, status int8) e
 	return nil
 }
 
-// Delete 软删设备，并**连带清理** Redis 侧与资源维度行。
+// Delete 软删设备，并**连带清理** Redis 侧（agent 水位/原始窗 + docker 快照与主机集合）
+// 与资源维度行。
 //
 // 顺序很重要：先确认设备存在（否则 404），再清 Redis/资源，最后软删 ——
 // 这样即使中途失败，设备仍在（可重试），不会出现「设备没了但 key 还在」的孤儿状态。
@@ -281,6 +303,17 @@ func (s *DeviceService) Delete(ctx context.Context, id uint64) error {
 	}
 	if err := s.raw.Purge(ctx, id); err != nil {
 		s.log.Warn("device redis purge failed")
+	}
+	// docker 侧的连带清理（两个键族：docker:state:<id> 与 docker:hosts 集合成员）。
+	//
+	// 失败**只记日志、不阻断**（与上面 raw.Purge 同一取向）：docker 键是读面缓存，
+	// 泄漏的后果是「已删设备在主机清单里多留一行」（且读面还会自愈——见 DockerService.Hosts
+	// 的 FindByID 失败分支）。为了清一个可自愈的缓存键而让设备删不掉，是本末倒置。
+	// 顺序与 raw 一致：**先清理、最后软删**，中途失败时设备仍在、可重试，不会留下孤儿键。
+	if s.docker != nil {
+		if err := s.docker.PurgeDevice(ctx, id); err != nil {
+			s.log.Warn("device docker purge failed")
+		}
 	}
 	if err := s.resources.DeleteByDevice(ctx, id); err != nil {
 		return apperror.Internal("内部错误", err)

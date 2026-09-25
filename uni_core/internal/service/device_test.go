@@ -43,7 +43,7 @@ func newDeviceTestEnv(t *testing.T) (*DeviceService, *gorm.DB, *agentmetrics.Raw
 	raw := agentmetrics.NewRawStore(rdb, agentmetrics.RawOptions{Step: 10 * time.Second, MaxPoints: 100})
 	latest := agentmetrics.NewLatestStore(rdb)
 	svc := NewDeviceService(repository.NewDeviceRepository(db), repository.NewDeviceResourceRepository(db),
-		raw, latest, stubCfg{}, nil, logger.NewNop())
+		raw, latest, stubCfg{}, nil, nil, logger.NewNop())
 	return svc, db, raw, latest
 }
 
@@ -174,6 +174,66 @@ func TestDeviceDeletePurgesRedisAndResources(t *testing.T) {
 	}
 }
 
+// TestDeviceDeletePurgesDockerKeys：删除设备必须连带清 docker 键（docker:state:<id>
+// 与 docker:hosts 成员），否则已删设备会一直出现在主机切换器里（清单按集合枚举）。
+//
+// 两条断言各对应一个真实后果：
+//   - 清理**被调用**（只断言「Delete 没报错」证明不了它发生过）；
+//   - 清理**失败不阻断**删除（docker 键是可自愈的读面缓存，不该拦住设备删除）。
+func TestDeviceDeletePurgesDockerKeys(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("清理被调用", func(t *testing.T) {
+		_, db, raw, latest := newDeviceTestEnv(t)
+		if err := db.Create(&entity.Device{BaseEntity: entity.BaseEntity{ID: 1001},
+			InstanceID: "i1", Status: entity.DeviceStatusEnabled}).Error; err != nil {
+			t.Fatal(err)
+		}
+		purger := &stubDockerPurger{}
+		svc := NewDeviceService(repository.NewDeviceRepository(db),
+			repository.NewDeviceResourceRepository(db), raw, latest, stubCfg{}, nil, purger, logger.NewNop())
+
+		if err := svc.Delete(ctx, 1001); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+		if len(purger.purged) != 1 || purger.purged[0] != 1001 {
+			t.Fatalf("删除设备必须连带清理 docker 键, purged=%v", purger.purged)
+		}
+	})
+
+	t.Run("清理失败不阻断删除", func(t *testing.T) {
+		_, db, raw, latest := newDeviceTestEnv(t)
+		if err := db.Create(&entity.Device{BaseEntity: entity.BaseEntity{ID: 1001},
+			InstanceID: "i1", Status: entity.DeviceStatusEnabled}).Error; err != nil {
+			t.Fatal(err)
+		}
+		purger := &stubDockerPurger{err: errors.New("redis down")}
+		svc := NewDeviceService(repository.NewDeviceRepository(db),
+			repository.NewDeviceResourceRepository(db), raw, latest, stubCfg{}, nil, purger, logger.NewNop())
+
+		if err := svc.Delete(ctx, 1001); err != nil {
+			t.Fatalf("docker 键清理失败不得阻断设备删除: %v", err)
+		}
+		if _, err := svc.GetByID(ctx, 1001); err == nil {
+			t.Fatal("清理失败后设备仍必须被删掉")
+		}
+	})
+
+	t.Run("未装配 docker 域时照常可删", func(t *testing.T) {
+		_, db, raw, latest := newDeviceTestEnv(t)
+		if err := db.Create(&entity.Device{BaseEntity: entity.BaseEntity{ID: 1001},
+			InstanceID: "i1", Status: entity.DeviceStatusEnabled}).Error; err != nil {
+			t.Fatal(err)
+		}
+		svc := NewDeviceService(repository.NewDeviceRepository(db),
+			repository.NewDeviceResourceRepository(db), raw, latest, stubCfg{}, nil, nil, logger.NewNop())
+
+		if err := svc.Delete(ctx, 1001); err != nil {
+			t.Fatalf("docker purger 为 nil（未装配）时必须照常删除: %v", err)
+		}
+	})
+}
+
 func TestDeviceEnableDisable(t *testing.T) {
 	svc, db, _, _ := newDeviceTestEnv(t)
 	ctx := context.Background()
@@ -269,7 +329,7 @@ func TestDeviceReadPathsMapRepositoryFailureToInternal(t *testing.T) {
 	for _, tc := range calls {
 		t.Run(tc.name+"_故障→500", func(t *testing.T) {
 			repo := &stubDeviceRepo{findErr: dbDown}
-			svc := NewDeviceService(repo, &stubResourceRepo{}, stubPurger{}, stubLatestReader{}, stubCfg{}, nil, logger.NewNop())
+			svc := NewDeviceService(repo, &stubResourceRepo{}, stubPurger{}, stubLatestReader{}, stubCfg{}, nil, nil, logger.NewNop())
 
 			err := tc.call(svc)
 			if err == nil {
@@ -285,7 +345,7 @@ func TestDeviceReadPathsMapRepositoryFailureToInternal(t *testing.T) {
 
 		t.Run(tc.name+"_未命中→404", func(t *testing.T) {
 			repo := &stubDeviceRepo{findErr: repository.ErrNotFound}
-			svc := NewDeviceService(repo, &stubResourceRepo{}, stubPurger{}, stubLatestReader{}, stubCfg{}, nil, logger.NewNop())
+			svc := NewDeviceService(repo, &stubResourceRepo{}, stubPurger{}, stubLatestReader{}, stubCfg{}, nil, nil, logger.NewNop())
 
 			if status := appErrStatus(tc.call(svc)); status != 404 {
 				t.Fatalf("仓储未命中必须映射为 404 NotFound, got status=%d", status)
@@ -361,6 +421,18 @@ type stubPurger struct{ err error }
 
 func (s stubPurger) Purge(context.Context, uint64) error { return s.err }
 
+// stubDockerPurger 是 DeviceDockerPurger 的最小桩：记录被清理过的设备 id，
+// 好让「删除设备确实连带清了 docker 键」这件事可断言（只断言没报错证明不了它被调用）。
+type stubDockerPurger struct {
+	purged []uint64
+	err    error
+}
+
+func (s *stubDockerPurger) PurgeDevice(_ context.Context, deviceID uint64) error {
+	s.purged = append(s.purged, deviceID)
+	return s.err
+}
+
 // stubLatestReader 是 DeviceLatestReader 的最小桩（未命中一律 nil）。
 type stubLatestReader struct{ err error }
 
@@ -388,7 +460,7 @@ func TestDeviceEnableDisableMapsRepositoryMissToNotFound(t *testing.T) {
 
 	// 未命中（设备不存在）：仓储返回 repository.ErrNotFound 哨兵 → 必须是 404
 	miss := &stubDeviceRepo{setStatusErr: repository.ErrNotFound}
-	svcMiss := NewDeviceService(miss, &stubResourceRepo{}, stubPurger{}, stubLatestReader{}, stubCfg{}, nil, logger.NewNop())
+	svcMiss := NewDeviceService(miss, &stubResourceRepo{}, stubPurger{}, stubLatestReader{}, stubCfg{}, nil, nil, logger.NewNop())
 	if err := svcMiss.Enable(ctx, 999999); appErrStatus(err) != 404 {
 		t.Fatalf("未命中必须映射为 404 NotFound, got status=%d err=%v", appErrStatus(err), err)
 	}
@@ -415,7 +487,7 @@ func TestDeviceEnableDisableMapsRepositoryFailureToInternal(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			repo := &stubDeviceRepo{setStatusErr: dbDown}
-			svc := NewDeviceService(repo, &stubResourceRepo{}, stubPurger{}, stubLatestReader{}, stubCfg{}, nil, logger.NewNop())
+			svc := NewDeviceService(repo, &stubResourceRepo{}, stubPurger{}, stubLatestReader{}, stubCfg{}, nil, nil, logger.NewNop())
 
 			err := tc.call(svc)
 			if err == nil {

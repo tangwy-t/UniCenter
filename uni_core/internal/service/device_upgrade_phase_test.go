@@ -50,9 +50,9 @@ func TestDeviceListExposesUpgradeFields(t *testing.T) {
 	env.seedRelease(t, "0.2.0", "linux", "amd64", true)
 	dev := env.seedDevice(t, "0.1.0")
 
-	// 设备服务注入升级域（生产装配同款）。
+	// 设备服务注入升级域（生产装配同款）；docker purger 传 nil（本用例不涉及删除）。
 	deviceSvc := NewDeviceService(env.devices, repository.NewDeviceResourceRepository(env.db),
-		stubPurger{}, stubLatestReader{}, stubCfg{}, env.svc, logger.NewNop())
+		stubPurger{}, stubLatestReader{}, stubCfg{}, env.svc, nil, logger.NewNop())
 
 	// 列表接口能跑通（升级字段在列表与详情走同一条组装路径）。
 	if _, err := deviceSvc.List(ctx, nil); err != nil {

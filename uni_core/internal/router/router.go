@@ -111,6 +111,15 @@ type DeviceDeps struct {
 	ReleaseHdl *handler.AgentReleaseHandler
 }
 
+// DockerDeps holds Docker management handler dependencies.
+//
+// 指令面的权限码按 action 变化，故这两条路由**没有静态 perm**：由 handler 在解析出
+// action/记录后调用 PermissionGuard.Ensure 强制（与路由级同一套缓存与 admin 通配语义）。
+// JWT 鉴权仍由 auth 组提供；守卫见 handler/docker_test.go 的「每个 action 类别无权限即 403」。
+type DockerDeps struct {
+	Hdl *handler.DockerHandler
+}
+
 // AgentDeps holds agent channel handler dependencies.
 // 与 DeviceDeps 分开：设备管理走 JWT + 权限码，agent 通道是**未鉴权**入口，
 // 两者的鉴权模型不同，混在一起只会让「哪些端点需要 token」变得含糊。
@@ -129,6 +138,7 @@ type Dependencies struct {
 	Config  ConfigDeps
 	File    FileDeps
 	Device  DeviceDeps
+	Docker  DockerDeps
 	Agent   AgentDeps
 }
 
@@ -507,6 +517,24 @@ func Setup(deps Dependencies) *gin.Engine {
 			devices.POST("/releases/:id/publish", perm(permission.PermDeviceReleasePublish), deps.Device.ReleaseHdl.Publish)
 			devices.POST("/releases/:id/unpublish", perm(permission.PermDeviceReleasePublish), deps.Device.ReleaseHdl.Unpublish)
 			devices.DELETE("/releases/:id", perm(permission.PermDeviceReleaseDelete), deps.Device.ReleaseHdl.Delete)
+		}
+
+		// Docker 管理
+		//
+		// 挂在 auth 组内（JWT + 操作日志 + scope 解析与设备管理同款），
+		// 但**指令面的两条路由没有静态 perm**：docker 的权限码随 action 变化
+		//（logs→inspect、remove→delete…，spec §4.3.1 总表），写在路由上只能是其中一个，
+		// 由 handler 在拿到 action / 指令记录后调用 PermissionGuard.Ensure 判定
+		//（同一套缓存与 admin 通配语义，见 middleware.PermissionGuard.Ensure）。
+		docker := auth.Group("/docker")
+		docker.Use(middleware.SetModuleName("Docker 管理"))
+		{
+			// 读面：主机清单与快照用 docker:list（与菜单一致）。
+			docker.GET("/hosts", perm(permission.PermDockerList), deps.Docker.Hdl.Hosts)
+			docker.GET("/hosts/:id/state", perm(permission.PermDockerList), deps.Docker.Hdl.State)
+			// 指令面：**无静态 perm**（权限按 action 决定，见 DockerDeps 的说明）。
+			docker.POST("/hosts/:id/cmds", deps.Docker.Hdl.SendCmd)
+			docker.GET("/hosts/:id/cmds/:ref", deps.Docker.Hdl.CmdResult)
 		}
 	}
 

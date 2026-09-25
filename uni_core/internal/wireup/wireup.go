@@ -73,6 +73,10 @@ const (
 	// 又不会变成忙等（drain 期的 CPU 不该被这里吃掉）。
 	agentDrainPollInterval = 20 * time.Millisecond
 
+	// dockerCmdSweepInterval 是 docker 指令 sweep 的周期。
+	// 5s 是「指令超时（最短 30s）的 1/6」——够及时，也不至于空转打 Redis。
+	dockerCmdSweepInterval = 5 * time.Second
+
 	// rawWindowShortfallMarker 是「热层窗口跨度短于回填假设」那条启动期 Warn 的
 	// **稳定前缀**：同包测试按它筛日志（文案可以再改，前缀是契约），
 	// 运维也按它 grep/告警。理由见 Init 里那处启动期校验。
@@ -353,6 +357,14 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 		PongWait:     3 * agentHeartbeat,
 	}, log)
 
+	// ── Docker 管理（读面 + 下发面的服务）─────────────────────────────────
+	// 读面与下发面共用上面那两个 store 实例；拆成两个服务类型的理由见
+	// service/docker.go：读面只碰 Redis 与设备表，下发面才经 agentHub 摸设备 ——
+	// 合成一个类型会让「只想看主机清单」的调用方被迫依赖整条下行链路。
+	// dockerCmdSvc 的 sender 就是上面这个 agentHub：本域不碰 socket，也不缓存连接。
+	dockerSvc := service.NewDockerService(dockerStore, deviceRepo, configSvc, log)
+	dockerCmdSvc := service.NewDockerCmdService(dockerCmdStore, agentHub, dockerStore, log)
+
 	// ── Agent 升级（编排 + 发布物）─────────────────────────────────────
 	// 编排服务是升级域的**唯一写入口**：agent 通道（对账/上报）与控制台 HTTP
 	// （下发/任务/汇总）共用同一个实例 —— 生效目标与「一次尝试」的口径只有一份。
@@ -374,7 +386,7 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 	// 设备服务注入**升级域的信息面**（生效目标 / 未终结尝试 / 一键回滚版本）：
 	// 列表与详情上的升级字段全部由它供给，设备服务自己不算第二份口径。
 	deviceSvc := service.NewDeviceService(deviceRepo, deviceResourceRepo, rawStore, latestStore,
-		configSvc, deviceUpgradeSvc, log)
+		configSvc, deviceUpgradeSvc, dockerSvc, log)
 	// 总览服务复用**同一批**依赖实例（deviceRepo/latestStore/rawStore/agentPolicy/
 	// configSvc），故总览与详情页对同一 range/同一列/同一在线阈值的解释必然一致。
 	// 注入 agentPolicy（而不是另建一个 policy）是关键：它内部每次调用都读配置，
@@ -523,6 +535,8 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 	agentReleaseHdl := handler.NewAgentReleaseHandler(agentReleaseSvc, agentIngestSvc)
 	serverMonitorHdl := handler.NewServerMonitorHandler(log, serverstats.NewHistoryStore(redis))
 
+	// Docker handler 与指令 sweep 见下方「Docker handler」段（要等 permGuard 构造完）。
+
 	// 服务器监控的采样协程随进程退出:drain 阶段优雅停止(幂等 Close)。
 	lc.RegisterTo("drain", "server-monitor", func(context.Context) error {
 		serverMonitorHdl.Close()
@@ -557,6 +571,52 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 
 	// ── Permission Guard ─────────────────────────────────────────────────
 	permGuard := middleware.NewPermissionGuard(authSvc, sessionStore, configSvc, log)
+
+	// ── Docker handler 与指令 sweep ───────────────────────────────────────
+	// handler 必须拿到 permGuard：指令面的权限码按 action 变化，路由上挂不了静态 perm，
+	// 由 handler 在解析出 action / 指令记录后调用 PermissionGuard.Ensure（同一套
+	// 缓存与 admin 通配语义，见 middleware/permission.go 与 router 的 /docker 组）。
+	dockerHdl := handler.NewDockerHandler(dockerSvc, dockerCmdSvc, permGuard, log)
+
+	// 指令 sweep：终结到期未回结果的指令（§4.1 的 timeout 状态）。
+	//
+	// 形状照 db-pool-monitor / sql-monitor 的既有惯例：**worker 自己的 goroutine**
+	// （停止信号走自己的 stop channel），lifecycle 钩子只发信号 + 有界等待后返回。
+	// 刻意**不**把循环体写在钩子里等 `ctx.Done()`：lifecycle 传给钩子的 ctx 就是
+	// runHook 判定「钩子超时」用的那一个（context.WithTimeout(phase.Timeout)），
+	// 在它上面等待等于把整个相位预算耗光，runHook 的 select 会先选中自己的
+	// `<-ctx.Done()` 并记一条 `shutdown timed out after <预算>`，join 进
+	// ShutdownStaged —— e2e/wireup 测试直接断言该错误为空，生产则让每次停机都
+	// 多一条「有组件没停下来」的错误日志，而真相是它**按时**停了。
+	dockerSweepStop := make(chan struct{})
+	dockerSweepDone := make(chan struct{})
+	go func() {
+		defer close(dockerSweepDone)
+		ticker := time.NewTicker(dockerCmdSweepInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-dockerSweepStop:
+				return
+			case <-ticker.C:
+				// 用 Background 而不是钩子的 ctx：sweep 是独立的一轮 IO，
+				// 不该因为「钩子被人等超时了」而在半路被取消。
+				if _, err := dockerCmdSvc.Sweep(context.Background()); err != nil {
+					log.Warn("docker cmd sweep failed", zap.Error(err))
+				}
+			}
+		}
+	}()
+	lc.RegisterTo("cleanup", "docker-cmd-sweep", func(context.Context) error {
+		// 幂等：close 只做一次（重复停机/测试重复调用会 panic）。
+		select {
+		case <-dockerSweepStop:
+		default:
+			close(dockerSweepStop)
+		}
+		<-dockerSweepDone
+		return nil
+	})
 
 	// ── Agent WS Handler（未鉴权入口）─────────────────────────────────────
 	// hub 是上面的 agentHub（与 4 个后台任务共享同一个 rawStore 与同一族水位），
@@ -643,6 +703,11 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 			DeviceHdl:  deviceHdl,
 			UpgradeHdl: deviceUpgradeHdl,
 			ReleaseHdl: agentReleaseHdl,
+		},
+		// Docker 管理：读面两条路由挂 docker:list，指令面两条在处理器内按 action 判定
+		//（见 router.DockerDeps 与 handler/docker.go）。
+		Docker: router.DockerDeps{
+			Hdl: dockerHdl,
 		},
 		// agent WS 入口：hub 与依赖束都是**完整装配**（enroll / 鉴权 / 入湖 /
 		// touch / 策略六个能力面全部接上，且 hub 与 4 个后台任务共享同一批
