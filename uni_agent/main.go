@@ -21,6 +21,7 @@ import (
 
 	"github.com/tangwy-t/UniCenter/uni_agent/internal/collect"
 	"github.com/tangwy-t/UniCenter/uni_agent/internal/config"
+	"github.com/tangwy-t/UniCenter/uni_agent/internal/dockerops"
 	"github.com/tangwy-t/UniCenter/uni_agent/internal/transport"
 	"github.com/tangwy-t/UniCenter/uni_agent/internal/upgrade"
 )
@@ -118,6 +119,25 @@ func run() error {
 	//（另一种回滚触发靠连接失败事件，而那条路径假设连接循环在跑）。
 	upgradeRuntime.Start(context.Background())
 
+	// ── Docker 运行时 ────────────────────────────────────────────────
+	// 与升级运行时同一形状：门面由连接层驱动（hook 注入），自己持有快照循环与
+	// 指令 worker。两个能力**互不依赖**：任一个装配失败都不该让另一个失效 ——
+	// docker 探测/API 构造失败时只记日志（存量设备仍要能上报指标）。
+	var dockerRuntime *dockerops.Runtime
+	if dr, err := dockerops.NewForProcess(dockerops.Deps{
+		StateDir:   cfg.StateDir,
+		SendState:  client.SendDockerState,
+		SendResult: client.SendDockerResult,
+		Log:        log,
+		// 初始周期用协议默认值；真实值由 hello_ack 下发覆盖（重连生效，§3.1.1）。
+		Interval: 30 * time.Second,
+	}); err != nil {
+		log.Warn("docker runtime disabled", "err", err.Error())
+	} else {
+		dockerRuntime = dr
+		client.SetDockerHook(dockerRuntime)
+	}
+
 	col.SetBacklogSource(
 		func() int64 { return int64(client.Pending()) },
 		func() int64 { return int64(client.DropCount()) },
@@ -142,6 +162,13 @@ func run() error {
 	// 采集照常把样本投进有界缓冲，恢复后能补发最近 5 分钟的数据。
 	// 若两者串行（采一帧才能发一帧），断线期间就彻底没有数据了。
 	go collectLoop(ctx, col, client, cfg.ReportInterval, log)
+
+	if dockerRuntime != nil {
+		// 采集与指令执行**分成两个循环**：一条 15 分钟的大指令（二期的 save）
+		// 不该让快照停摆。
+		go dockerRuntime.SnapshotLoop(ctx)
+		go dockerRuntime.Run(ctx)
+	}
 
 	// 连接主循环（内部自带指数退避重连），阻塞到 ctx 取消。
 	if err := client.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {

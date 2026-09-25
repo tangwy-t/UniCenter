@@ -48,6 +48,8 @@ type Config struct {
 	// Hook 是升级运行时与连接生命周期的接点（可为 nil —— agent 不装配升级能力时
 	// 一切照旧，新协议消息只是被忽略）。
 	Hook UpgradeHook
+	// DockerHook 是 docker 运行时的连接侧接点（可为 nil —— 不装配 docker 能力时一切照旧）。
+	DockerHook DockerHook
 }
 
 // UpgradeHook 是升级运行时需要的三个连接侧事件。
@@ -63,6 +65,24 @@ type UpgradeHook interface {
 	// OnConnectFailed 一次连接尝试失败（拨号失败、握手失败或握手期间断开）。
 	// 用于试用期满后的探测计数（D3：先探测几次再回滚，避免 core 停机被误判）。
 	OnConnectFailed()
+}
+
+// DockerHook 是 docker 运行时需要的连接侧事件。
+//
+// 与 UpgradeHook **分开**而不是合并成一个接口：两者是独立的可选能力（一个部署可以只装
+// 升级、只装 docker、或都装），合并会让任一能力缺失时另一个也得实现空方法 ——
+// 而「实现了但什么都不做」正是最难发现的那类接线错误。
+//
+// 三个回调都必须在**读循环里非阻塞**（OnConnected/OnCmd 由 dockerops.Runtime 保证）。
+type DockerHook interface {
+	// OnConnected 握手完成（docker 侧据此立刻上报首帧快照）。
+	OnConnected()
+	// OnConfig 收到 hello_ack 的 docker 配置块（重连时生效）。
+	OnConfig(cfg *agentproto.DockerConfig)
+	// OnCmd 收到一条操作指令。
+	OnCmd(cmd *agentproto.DockerCmd)
+	// OnFrame 收到一条流控制帧（一期不消费）。
+	OnFrame(f *agentproto.CoreDockerFrame)
 }
 
 // Logger 是本包依赖的最小日志接口（避免把 zap 拖进 agent）。
@@ -94,6 +114,11 @@ type Client struct {
 	// 「现在」—— 排在 30 个陈旧样本后面毫无意义（那时阶段早已跃迁）。分开之后
 	// 它还能被写循环的 select 立即取走，不必等下一次上报 tick。
 	controlCh chan *agentproto.Message
+	// dockerCh 投递 docker 的上行消息（快照与指令结果）。
+	//
+	// 与 controlCh 分开：两者的丢弃语义相反 —— 控制消息（升级状态）「新盖旧」，
+	// 而 docker 的结果**丢了就要等 sweep 超时**（用户会看到「超时」而操作其实成功了）。
+	dockerCh chan *agentproto.Message
 	// dropCount 统计因积压被丢弃的样本数（spec §4.3：drop-oldest 保最新）。
 	dropCount uint64
 
@@ -108,6 +133,12 @@ const outboxCap = 30
 // controlCap 是控制消息队列深度。小容量是刻意的：状态上报是「最新状态覆盖旧状态」
 // 的语义，积压一串历史状态没有意义；满了丢最旧的一条（下一次阶段跃迁还会再报）。
 const controlCap = 8
+
+// dockerCap 是 docker 上行队列深度。
+//
+// 取值 16 是「够一次突发、又不会让结果排太久」：单 worker 串行执行指令，
+// 队列里同时有两条以上结果说明指令已经积压，此时再排队只会让用户等更久。
+const dockerCap = 16
 
 // SendUpgradeStatus 上报一次升级状态（**永不阻塞**：队列满则丢最旧的一条）。
 //
@@ -136,6 +167,64 @@ func (c *Client) SendUpgradeStatus(st *agentproto.UpgradeStatus) error {
 	return nil
 }
 
+// SendDockerState 上报一帧快照。**非阻塞**：断线或队列满则立即返回错误。
+//
+// 为什么不排队：快照是**幂等的覆盖式数据**（下一轮 30 秒后就到），为它排队只会
+// 让一份陈旧快照在重连后立刻发出去，反而把新鲜的那份挤掉。
+func (c *Client) SendDockerState(st *agentproto.DockerState) error {
+	msg, err := agentproto.NewMessage(newID(), agentproto.TypeAgentDockerState, st)
+	if err != nil {
+		return err
+	}
+	if !c.active() {
+		return errors.New("not connected")
+	}
+	select {
+	case c.dockerCh <- msg:
+		return nil
+	default:
+		return errors.New("docker send queue full")
+	}
+}
+
+// SendDockerResult 上报一条指令结果。**可短暂等待**（最多 5 秒）。
+//
+// 为什么结果与快照的取舍相反：结果的丢失会让服务端把一条**已经执行成功**的指令终结为
+// timeout（用户看到「超时」而实际生效了），这种不一致比多等 5 秒糟得多。
+func (c *Client) SendDockerResult(res *agentproto.DockerCmdResult) error {
+	msg, err := agentproto.NewMessage(newID(), agentproto.TypeAgentDockerResult, res)
+	if err != nil {
+		return err
+	}
+	if !c.active() {
+		// 断线时不排队：服务端会把它终结为超时（诚实的结果），而排队只会让
+		// 「指令成功但结果 3 分钟后才到」这种更糟的时序发生。
+		return errors.New("not connected")
+	}
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	select {
+	case c.dockerCh <- msg:
+		return nil
+	case <-timer.C:
+		return errors.New("docker send queue full after 5s")
+	}
+}
+
+// active 报告连接是否处于 ACTIVE（已收到 hello_ack）。
+func (c *Client) active() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.state == stateActive
+}
+
+// SetDockerHook 注入 docker 运行时（必须在 Run 之前调用，与 SetHook 同一契约）。
+func (c *Client) SetDockerHook(h DockerHook) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cfg.DockerHook = h
+}
+
 // New 构造客户端。
 func New(cfg Config) *Client {
 	if cfg.Logger == nil {
@@ -150,6 +239,7 @@ func New(cfg Config) *Client {
 		state:     stateConnecting,
 		sendCh:    make(chan *agentproto.MetricsSample, outboxCap),
 		controlCh: make(chan *agentproto.Message, controlCap),
+		dockerCh:  make(chan *agentproto.Message, dockerCap),
 	}
 }
 
@@ -438,6 +528,14 @@ func (c *Client) handleFrame(raw []byte) {
 		if ack.Upgrade != nil && c.cfg.Hook != nil {
 			c.cfg.Hook.OnDirective(ack.Upgrade)
 		}
+		// 顺序要紧：**先应用配置、再触发首帧快照** —— 反过来的话首帧会用上一份
+		// 保护清单/周期采集，而那一帧正是页面看到的第一印象。
+		if c.cfg.DockerHook != nil {
+			if ack.Docker != nil {
+				c.cfg.DockerHook.OnConfig(ack.Docker)
+			}
+			c.cfg.DockerHook.OnConnected()
+		}
 	case agentproto.TypeCoreAgentUpgrade:
 		// 升级指令的**即时催办**（hello_ack 是声明式对账，这条只是让在线设备
 		// 不必等下一次重连）。方向校验走 DecodeTypedFor：core.* 出现在 agent 侧
@@ -454,6 +552,30 @@ func (c *Client) handleFrame(raw []byte) {
 		}
 		if c.cfg.Hook != nil {
 			c.cfg.Hook.OnDirective(d)
+		}
+	case agentproto.TypeCoreDockerCmd:
+		// 与升级指令同一取向：类型登记了就不该「未知」，解不出来只记日志。
+		decoded, err := agentproto.DecodeTypedFor(m, agentproto.DirCoreToAgent)
+		if err != nil {
+			c.log.Warn("bad docker cmd", "err", err.Error())
+			return
+		}
+		cmd, ok := decoded.(*agentproto.DockerCmd)
+		if !ok {
+			c.log.Warn("docker cmd type mismatch")
+			return
+		}
+		if c.cfg.DockerHook != nil {
+			c.cfg.DockerHook.OnCmd(cmd)
+		}
+	case agentproto.TypeCoreDockerFrame:
+		decoded, err := agentproto.DecodeTypedFor(m, agentproto.DirCoreToAgent)
+		if err != nil {
+			c.log.Warn("bad docker frame", "err", err.Error())
+			return
+		}
+		if f, ok := decoded.(*agentproto.CoreDockerFrame); ok && c.cfg.DockerHook != nil {
+			c.cfg.DockerHook.OnFrame(f)
 		}
 	default:
 		// 未知/未处理的类型：忽略（不关连接）。
@@ -546,6 +668,10 @@ func (c *Client) writeLoop(ctx context.Context, ws *websocket.Conn, interval tim
 		case msg := <-c.controlCh:
 			// 控制消息即时发（不排队等上报 tick）：升级阶段的跃迁要尽快让服务端
 			// 看见，而 10 秒的上报周期对状态面板来说太慢。
+			if err := c.writeJSON(ws, msg); err != nil {
+				return err
+			}
+		case msg := <-c.dockerCh:
 			if err := c.writeJSON(ws, msg); err != nil {
 				return err
 			}
