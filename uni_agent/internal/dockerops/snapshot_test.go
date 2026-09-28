@@ -183,6 +183,11 @@ func TestSnapshotCollectsEverything(t *testing.T) {
 		images: []ImageInfo{
 			{ID: "sha256:aaa", RepoTags: []string{"uni-center-core:latest"}, SizeBytes: 96 << 20, Created: 1789000000},
 			{ID: "sha256:ddd", RepoTags: nil, SizeBytes: 1 << 30, Created: 1788000000},
+			// 无标签但**有 digest**：按 digest 拉下来的镜像，Docker 不认为它悬空
+			//（`docker images -f dangling=false` 会列出它），故不该进「可回收」计数。
+			{ID: "sha256:eee", RepoTags: nil,
+				RepoDigests: []string{"tomcat@sha256:604362a626b01d2db83b6b509ae4aedc4fbc3622b3c163fb3678c2c84a8f2904"},
+				SizeBytes:   367 << 20, Created: 1788000000},
 		},
 		volumes:  []VolumeInfo{{Name: "uni-center-uploads", Driver: "local", SizeBytes: ptrInt64(13 << 20)}, {Name: "other", Driver: "local"}},
 		networks: []NetworkInfo{{Name: "bridge", Driver: "bridge", Scope: "local", ContainersCount: 8}},
@@ -191,7 +196,7 @@ func TestSnapshotCollectsEverything(t *testing.T) {
 	if err := st.Validate(); err != nil {
 		t.Fatalf("采集结果必须能过协议校验: %v", err)
 	}
-	if !st.DockerOK || len(st.Containers) != 3 || len(st.Projects) != 1 || len(st.Images) != 2 {
+	if !st.DockerOK || len(st.Containers) != 3 || len(st.Projects) != 1 || len(st.Images) != 3 {
 		t.Fatalf("采集不完整: ok=%v containers=%d projects=%d images=%d", st.DockerOK, len(st.Containers), len(st.Projects), len(st.Images))
 	}
 	// 顺序即契约：daemon 的返回顺序无保证，而前端翻页、快照 diff 与「这台机器有没有变化」
@@ -199,8 +204,12 @@ func TestSnapshotCollectsEverything(t *testing.T) {
 	if want := []string{"mysql", "uni-center-core", "zentao"}; !slices.Equal(containerNames(st.Containers), want) {
 		t.Fatalf("容器必须按名字升序，实际 %v", containerNames(st.Containers))
 	}
-	if want := []string{"sha256:ddd", "uni-center-core:latest"}; !slices.Equal(imageSortKeys(st.Images), want) {
+	if want := []string{"sha256:ddd", "sha256:eee", "uni-center-core:latest"}; !slices.Equal(imageSortKeys(st.Images), want) {
 		t.Fatalf("镜像必须按第一个 repo tag（无标签按 id）升序，实际 %v", imageSortKeys(st.Images))
+	}
+	// digest-only 的镜像没有标签，排序键也是 id（它是「无标签」但「不悬空」，两件事分开）
+	if got := imageSortKeys(st.Images)[1]; got != "sha256:eee" {
+		t.Fatalf("digest-only 镜像的排序键应为 id，实际 %q", got)
 	}
 	if st.Volumes[0].Name != "other" || st.Volumes[1].Name != "uni-center-uploads" {
 		t.Fatalf("卷必须按名字升序，实际 %s,%s", st.Volumes[0].Name, st.Volumes[1].Name)
@@ -220,6 +229,16 @@ func TestSnapshotCollectsEverything(t *testing.T) {
 	dangling := findImage(t, st.Images, "sha256:ddd")
 	if !dangling.Dangling || dangling.InUse {
 		t.Fatalf("无标签镜像应判悬空且未被使用: %+v", dangling)
+	}
+	// 无标签但有 digest：**不是**悬空（Docker 的悬空是「既无标签也无 digest」）。
+	// 这条守的是镜像页的「可回收」数字：多报一个 367MB 的 digest 镜像就是多报一份空间，
+	// 且与 `docker image prune` 的实际动作对不上（2026-09-25 在生产实测到这个差异）。
+	digestOnly := findImage(t, st.Images, "sha256:eee")
+	if digestOnly.Dangling {
+		t.Fatalf("按 digest 引用的镜像不该判悬空: %+v", digestOnly)
+	}
+	if digestOnly.InUse {
+		t.Fatal("它没有被任何容器使用，in_use 应为 false（悬空与在用是两个维度）")
 	}
 	inUse := findImage(t, st.Images, "sha256:aaa")
 	if !inUse.InUse || len(inUse.InUseBy) != 1 || inUse.InUseBy[0] != "uni-center-core" {

@@ -147,7 +147,7 @@ func (s *Snapshotter) Collect(ctx context.Context) *agentproto.DockerState {
 		inUseBy := imageUsers[im.ID]
 		st.Images = append(st.Images, agentproto.DockerImage{
 			ID: im.ID, RepoTags: im.RepoTags, SizeMB: round2(float64(im.SizeBytes) / (1024 * 1024)),
-			Created: im.Created, InUse: len(inUseBy) > 0, Dangling: len(im.RepoTags) == 0, InUseBy: inUseBy,
+			Created: im.Created, InUse: len(inUseBy) > 0, Dangling: isDanglingImage(im), InUseBy: inUseBy,
 		})
 	}
 	st.Volumes = make([]agentproto.DockerVolume, 0, len(volumes))
@@ -449,4 +449,15 @@ func imageSortKey(im agentproto.DockerImage) string {
 		return im.RepoTags[0]
 	}
 	return im.ID
+}
+
+// isDanglingImage 判定镜像是否悬空：**既无标签、也无 digest 引用**。
+//
+// 为什么不能只判标签：Docker 的悬空定义两个条件都要（按 digest 拉下来的镜像没有
+// 标签但可按 `repo@sha256:…` 取用，`docker images -f dangling=false` 会把它算作非悬空）。
+// 实测差异（2026-09-25，.105）：只判标签得 31+14=45，而 CLI 的非悬空是 32 —— 那 1 个
+// 正是 367MB 的 `tomcat@sha256:…`。镜像页的「可回收」是清理入口，多报一个就是多报一份空间，
+// 且与 `docker image prune` 的实际动作对不上。
+func isDanglingImage(im ImageInfo) bool {
+	return len(im.RepoTags) == 0 && len(im.RepoDigests) == 0
 }

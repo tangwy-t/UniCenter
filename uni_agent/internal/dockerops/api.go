@@ -59,10 +59,16 @@ type StatsInfo struct {
 
 // ImageInfo 是镜像列表项。
 type ImageInfo struct {
-	ID        string
-	RepoTags  []string
-	SizeBytes int64
-	Created   int64
+	ID       string
+	RepoTags []string
+	// RepoDigests 是「按 digest 引用」的名字（如 `tomcat@sha256:…`）。
+	//
+	// 它决定悬空判定：Docker 的悬空是「既无标签**也无 digest」—— 只判标签会把
+	// 按 digest 拉下来的镜像误报成可回收（实测 .105 上有一个 367MB 的 tomcat 属于这类），
+	// 而镜像页的「可回收」正是清理入口，多报一个就是多报一份空间。
+	RepoDigests []string
+	SizeBytes   int64
+	Created     int64
 }
 
 // VolumeInfo 是卷列表项。
