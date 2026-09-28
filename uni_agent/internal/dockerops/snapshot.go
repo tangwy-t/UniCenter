@@ -451,13 +451,18 @@ func imageSortKey(im agentproto.DockerImage) string {
 	return im.ID
 }
 
-// isDanglingImage 判定镜像是否悬空：**既无标签、也无 digest 引用**。
+// isDanglingImage 判定镜像是否悬空：**没有任何标签**（`RepoTags` 为空）。
 //
-// 为什么不能只判标签：Docker 的悬空定义两个条件都要（按 digest 拉下来的镜像没有
-// 标签但可按 `repo@sha256:…` 取用，`docker images -f dangling=false` 会把它算作非悬空）。
-// 实测差异（2026-09-25，.105）：只判标签得 31+14=45，而 CLI 的非悬空是 32 —— 那 1 个
-// 正是 367MB 的 `tomcat@sha256:…`。镜像页的「可回收」是清理入口，多报一个就是多报一份空间，
-// 且与 `docker image prune` 的实际动作对不上。
+// 为什么就是「无标签」而不是「既无标签也无 digest」—— 2026-09-25 在生产(.105)实测过三种口径，
+// 结论以 daemon 为准：
+//   - daemon 的 `GET /images/json?filters={"dangling":["true"]}` 返回 14 条，**包含**那个按
+//     digest 拉下来的 `tomcat@sha256:…`（它的 RepoTags 是空的）→ daemon 的悬空判据就是 RepoTags 空；
+//   - `docker images -f dangling=true -q` 同为 14（CLI 与 daemon 一致）；
+//   - 但 `docker images -f dangling=false -q` 是 32，而总数是 45 —— **32+14 ≠ 45**：CLI 的展示层
+//     把 digest 镜像画成 `tomcat:<none>` 并算进「非悬空」，两个过滤器因此不是互补关系。
+//     拿 `dangling=false` 当对照就会得出「我们的判定多了一个」的错误结论。
+//   - `docker image prune` 删的正是 daemon 的悬空集合，故「无标签」这一口径**与清理动作一致** ——
+//     镜像页的「可回收」数字必须与它对齐，多报一个 367MB 就是多报一份空间。
 func isDanglingImage(im ImageInfo) bool {
-	return len(im.RepoTags) == 0 && len(im.RepoDigests) == 0
+	return len(im.RepoTags) == 0
 }

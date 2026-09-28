@@ -154,8 +154,7 @@ func (a *sdkAdapter) Images(ctx context.Context) ([]ImageInfo, error) {
 	}
 	out := make([]ImageInfo, 0, len(list))
 	for _, im := range list {
-		out = append(out, ImageInfo{ID: im.ID, RepoTags: im.RepoTags, RepoDigests: im.RepoDigests,
-			SizeBytes: im.Size, Created: im.Created})
+		out = append(out, ImageInfo{ID: im.ID, RepoTags: im.RepoTags, SizeBytes: im.Size, Created: im.Created})
 	}
 	return out, nil
 }
