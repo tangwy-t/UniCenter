@@ -197,22 +197,25 @@
     })
 
     return [
-      { type: 'index', width: 60, label: '序号' },
+      // 列优先级：手机保留"谁 / 操作 / 结果 / 时间"，平板补序号与 IP，请求细节桌面才展示
+      { type: 'index', width: 60, label: '序号', hideBelow: 'tablet' },
+      { prop: 'username', label: '操作人员', minWidth: 110 },
       {
         prop: 'module',
         label: '系统模块',
         minWidth: 120,
+        hideBelow: 'desktop',
         // 模块是分类信息:统一中性标签,不与状态列的语义色抢注意力
         formatter: (row) =>
           row.module ? h(ElTag, { type: 'info', effect: 'light' }, () => row.module) : '—'
       },
       { prop: 'operationType', label: '操作类型', minWidth: 120, showOverflowTooltip: true },
-      { prop: 'username', label: '操作人员', width: 120 },
-      { prop: 'ip', label: 'IP', width: 140 },
+      { prop: 'ip', label: 'IP', minWidth: 140, hideBelow: 'tablet' },
       {
         prop: 'requestMethod',
         label: '请求方式',
-        width: 100,
+        minWidth: 100,
+        hideBelow: 'desktop',
         formatter: (row) => {
           const method = (row.requestMethod ?? '').toUpperCase()
           if (!method) return '—'
@@ -223,20 +226,27 @@
           )
         }
       },
-      { prop: 'requestUrl', label: '请求地址', minWidth: 180, showOverflowTooltip: true },
+      {
+        prop: 'requestUrl',
+        label: '请求地址',
+        minWidth: 180,
+        showOverflowTooltip: true,
+        hideBelow: 'desktop'
+      },
       {
         prop: 'code',
         label: '状态',
-        width: 130,
+        minWidth: 100,
         formatter: (row) => resultCodeDict.render(row.code)
       },
       {
         prop: 'costTime',
         label: '耗时',
-        width: 100,
+        minWidth: 100,
+        hideBelow: 'tablet',
         formatter: (row) => `${row.costTime}ms`
       },
-      { prop: 'operTime', label: '操作时间', width: 180 },
+      { prop: 'operTime', label: '操作时间', minWidth: 150 },
       ...(operationColumnConfig ? [operationColumnConfig] : [])
     ]
   })

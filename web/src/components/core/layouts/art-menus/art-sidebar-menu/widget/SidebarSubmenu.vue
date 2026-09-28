@@ -38,7 +38,7 @@
         />
       </div>
       <div
-        v-show="item.meta.showBadge && level === 0 && !menuOpen"
+        v-show="item.meta.showBadge && level === 0 && !isMenuVisible"
         class="art-badge"
         style="right: 5px"
       />
@@ -48,7 +48,7 @@
           {{ formatMenuTitle(item.meta.title) }}
         </span>
         <div v-if="item.meta.showBadge" class="art-badge" />
-        <div v-if="item.meta.showTextBadge && (level > 0 || menuOpen)" class="art-text-badge">
+        <div v-if="item.meta.showTextBadge && (level > 0 || isMenuVisible)" class="art-text-badge">
           {{ item.meta.showTextBadge }}
         </div>
       </template>
@@ -61,7 +61,7 @@
   import type { AppRouteRecord } from '@/types/router'
   import { formatMenuTitle } from '@/utils/router'
   import { handleMenuJump } from '@/utils/navigation'
-  import { useSettingStore } from '@/store/modules/setting'
+  import { useResponsiveMenu } from '@/hooks/core/useResponsiveMenu'
 
   interface MenuTheme {
     iconColor?: string
@@ -95,9 +95,8 @@
 
   const emit = defineEmits<Emits>()
 
-  const settingStore = useSettingStore()
-
-  const { menuOpen } = storeToRefs(settingStore)
+  // 菜单是否展开：手机端为抽屉状态，桌面端为用户持久化偏好
+  const { isMenuVisible } = useResponsiveMenu()
 
   /**
    * 过滤后的菜单项列表

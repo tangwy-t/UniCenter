@@ -1,3 +1,5 @@
+@use '@styles/core/breakpoints.scss' as *;
+
 .art-table {
   position: relative;
   height: 100%;
@@ -88,7 +90,7 @@
 }
 
 // 移动端分页
-@media (width <= 640px) {
+@include respond-at-most('phone') {
   :deep(.el-pagination) {
     display: flex;
     flex-wrap: wrap;

@@ -465,7 +465,9 @@
   )
 </script>
 
-<style scoped>
+<style lang="scss" scoped>
+  @use '@styles/core/breakpoints.scss' as *;
+
   .google-tab.activ-tab {
     color: var(--theme-color) !important;
     background-color: var(--el-color-primary-light-9) !important;
@@ -554,14 +556,14 @@
     background: var(--art-gray-300);
   }
 
-  @media only screen and (width <= 768px) {
+  @include respond-at-most('tablet') {
     .box-border.flex.justify-between {
       padding-right: 0.625rem;
       padding-left: 0.625rem;
     }
   }
 
-  @media only screen and (width <= 640px) {
+  @include respond-at-most('phone') {
     .box-border.flex.justify-between {
       padding-right: 0.9375rem;
       padding-left: 0.9375rem;

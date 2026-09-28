@@ -244,18 +244,18 @@
       {
         prop: 'sort',
         label: '排序',
-        width: 150,
+        minWidth: 150,
         align: 'center',
         useSlot: true,
         slotName: 'sort'
       },
-      { prop: 'leader', label: '负责人', width: 110 },
-      { prop: 'phone', label: '联系电话', width: 140 },
+      { prop: 'leader', label: '负责人', minWidth: 110 },
+      { prop: 'phone', label: '联系电话', minWidth: 140 },
       { prop: 'email', label: '邮箱', minWidth: 160 },
       {
         prop: 'status',
         label: '状态',
-        width: 80,
+        minWidth: 80,
         align: 'center',
         formatter: (row) => statusDict.render(row.status)
       },

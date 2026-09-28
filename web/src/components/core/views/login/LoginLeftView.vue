@@ -82,6 +82,8 @@
 </script>
 
 <style lang="scss" scoped>
+  @use '@styles/core/breakpoints.scss' as *;
+
   // 颜色变量定义
   $primary-light-7: var(--el-color-primary-light-7);
   $primary-light-8: var(--el-color-primary-light-8);
@@ -484,7 +486,7 @@
       }
     }
 
-    @media only screen and (width <= 1600px) {
+    @include respond-at-most('xwide') {
       width: 60vw;
 
       .text-wrap {
@@ -492,7 +494,7 @@
       }
     }
 
-    @media only screen and (width <= 1180px) {
+    @include respond-at-most('compact') {
       width: auto;
       height: auto;
       padding: 0;
@@ -515,7 +517,7 @@
   .dark .login-left-view {
     background-color: color-mix(in srgb, $primary-light-9 60%, #070707);
 
-    @media only screen and (width <= 1180px) {
+    @include respond-at-most('compact') {
       background: transparent;
     }
 

@@ -1,0 +1,52 @@
+// 全局响应式断点（与 src/config/breakpoints.ts 保持一致，由 breakpoints.test.ts 断言）
+//
+// 命名与 Tailwind 语义对齐：phone=sm(640) / tablet=md(768) / desktop=lg(1024)，
+// 因此 Tailwind 的 `max-sm:` / `max-md:` 前缀类与这里的 respond-* 混用时不会错位。
+//
+// 使用方式：
+//   @use '@styles/core/breakpoints.scss' as *;
+//   @include respond-at-most('tablet') { ... }
+
+@use 'sass:map';
+
+$breakpoints: (
+  'phoneNarrow': 500,
+  'phone': 640,
+  'tablet': 768,
+  'desktop': 1024,
+  'compact': 1180,
+  'xl': 1280,
+  'wide': 1440,
+  'xwide': 1600
+);
+
+@function breakpoint($name) {
+  $value: map.get($breakpoints, $name);
+
+  @if $value == null {
+    @error '未知断点 `#{$name}`，可用断点：#{map.keys($breakpoints)}';
+  }
+
+  @return $value;
+}
+
+/// 视口宽度 < 断点（对应历史写法 `max-width: 1023.98px`）
+@mixin respond-below($name) {
+  @media only screen and (max-width: #{breakpoint($name) - 0.02}px) {
+    @content;
+  }
+}
+
+/// 视口宽度 <= 断点（对应历史写法 `max-width: 1024px` / `(width <= 1024px)`）
+@mixin respond-at-most($name) {
+  @media only screen and (max-width: #{breakpoint($name)}px) {
+    @content;
+  }
+}
+
+/// 视口宽度 >= 断点
+@mixin respond-at-least($name) {
+  @media only screen and (min-width: #{breakpoint($name)}px) {
+    @content;
+  }
+}

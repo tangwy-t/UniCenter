@@ -1,4 +1,6 @@
 // 全局样式
+@use './breakpoints' as *;
+
 // 顶部进度条颜色
 #nprogress .bar {
   z-index: 2400;
@@ -17,7 +19,7 @@
 }
 
 // 处理移动端组件兼容性
-@media screen and (max-width: 640px) {
+@include respond-at-most('phone') {
   * {
     cursor: default !important;
   }
@@ -162,7 +164,7 @@
   display: flex;
   flex-direction: column;
 
-  @media (max-width: 640px) {
+  @include respond-at-most('phone') {
     height: auto;
   }
 }
@@ -252,7 +254,7 @@
 }
 
 // 去除移动端点击背景色
-@media screen and (max-width: 1180px) {
+@include respond-at-most('compact') {
   * {
     -webkit-tap-highlight-color: transparent;
   }

@@ -92,7 +92,9 @@
 </script>
 
 <style lang="scss" scoped>
-  @media screen and (width <= 768px) {
+  @use '@styles/core/breakpoints.scss' as *;
+
+  @include respond-at-most('tablet') {
     .mobile-hide {
       display: none !important;
     }

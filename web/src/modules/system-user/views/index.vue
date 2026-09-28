@@ -114,8 +114,8 @@
   import { PermUserAdd, PermUserDelete } from '@/enums/permission'
   import { computed, h, reactive, ref } from 'vue'
   import { ElSwitch, ElTag, ElTooltip, ElMessage, ElMessageBox } from 'element-plus'
-  import { useWindowSize } from '@vueuse/core'
   import { useTableColumns } from '@/hooks/core/useTableColumns'
+  import { useAppBreakpoints } from '@/hooks/core/useAppBreakpoints'
   import { useAuth } from '@/hooks/core/useAuth'
   import { useDict } from '@/hooks/core/useDict'
   import { resolveAvatar } from '@/utils/avatar'
@@ -139,8 +139,8 @@
 
   defineOptions({ name: 'SystemUser' })
 
-  const { width } = useWindowSize()
-  const isMobile = computed(() => width.value < 1024)
+  const { smaller } = useAppBreakpoints()
+  const isMobile = smaller('desktop')
   const { hasAuth } = useAuth()
 
   /* ── 部门树 ─────────────────────────────────────── */
@@ -509,12 +509,15 @@
     })
 
     return [
+      // 列优先级：手机（<768）保留"账号 / 姓名 / 状态 / 操作"，头像与部门/角色在平板起显示，
+      // 昵称、手机、性别、登录与创建时间等档案细节桌面起显示
       { type: 'selection', width: 46 },
       {
         prop: 'avatar',
         label: '头像',
-        width: 72,
+        minWidth: 72,
         align: 'center',
+        hideBelow: 'tablet',
         formatter: (row) => renderAvatar(row)
       },
       {
@@ -528,31 +531,64 @@
             row.username
           )
       },
-      { prop: 'realName', label: '姓名', width: 100, formatter: (row) => row.realName || '—' },
-      { prop: 'nickname', label: '昵称', width: 120, formatter: (row) => row.nickname || '—' },
-      { prop: 'deptName', label: '部门', width: 130, formatter: (row) => row.deptName || '—' },
-      { prop: 'phone', label: '手机', width: 120, formatter: (row) => row.phone || '—' },
+      { prop: 'realName', label: '姓名', minWidth: 100, formatter: (row) => row.realName || '—' },
+      {
+        prop: 'nickname',
+        label: '昵称',
+        minWidth: 120,
+        hideBelow: 'desktop',
+        formatter: (row) => row.nickname || '—'
+      },
+      {
+        prop: 'deptName',
+        label: '部门',
+        minWidth: 120,
+        hideBelow: 'tablet',
+        formatter: (row) => row.deptName || '—'
+      },
+      {
+        prop: 'phone',
+        label: '手机',
+        minWidth: 120,
+        hideBelow: 'desktop',
+        formatter: (row) => row.phone || '—'
+      },
       {
         prop: 'email',
         label: '邮箱',
         minWidth: 150,
         showOverflowTooltip: true,
         visible: false,
+        hideBelow: 'desktop',
         formatter: (row) => row.email || '—'
       },
-      { prop: 'roleNames', label: '角色', minWidth: 150, formatter: (row) => renderRoleTags(row) },
-      { prop: 'gender', label: '性别', width: 80, formatter: (row) => genderDict.labelOf(row.gender) },
-      { prop: 'status', label: '状态', width: 96, formatter: (row) => renderStatus(row) },
+      {
+        prop: 'roleNames',
+        label: '角色',
+        minWidth: 150,
+        hideBelow: 'tablet',
+        formatter: (row) => renderRoleTags(row)
+      },
+      {
+        prop: 'gender',
+        label: '性别',
+        minWidth: 80,
+        hideBelow: 'desktop',
+        formatter: (row) => genderDict.labelOf(row.gender)
+      },
+      { prop: 'status', label: '状态', minWidth: 88, formatter: (row) => renderStatus(row) },
       {
         prop: 'lastLoginTime',
         label: '最后登录',
-        width: 140,
+        minWidth: 130,
+        hideBelow: 'desktop',
         formatter: (row) => fmtTime(row.lastLoginTime)
       },
       {
         prop: 'createdAt',
         label: '创建时间',
-        width: 140,
+        minWidth: 140,
+        hideBelow: 'desktop',
         formatter: (row) => fmtTime(row.createdAt)
       },
       ...(operationColumnConfig ? [operationColumnConfig] : [])
@@ -564,6 +600,8 @@
 </script>
 
 <style lang="scss" scoped>
+  @use '@styles/core/breakpoints.scss' as *;
+
   .user-layout {
     display: flex;
     align-items: stretch;
@@ -669,7 +707,7 @@
   }
 
   /* ── 响应式 ─────────────────────────────────────── */
-  @media screen and (max-width: 1023.98px) {
+  @include respond-below('desktop') {
     .user-layout {
       gap: 0;
     }

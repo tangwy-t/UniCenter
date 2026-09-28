@@ -81,19 +81,20 @@
     })
     return [
       { type: 'index', width: 60, label: '序号' },
-      { prop: 'username', label: '用户名称', width: 140 },
-      { prop: 'realName', label: '姓名', width: 120 },
+      { prop: 'username', label: '用户名称', minWidth: 140 },
+      { prop: 'realName', label: '姓名', minWidth: 120 },
       { prop: 'deptName', label: '所属部门', minWidth: 140 },
       { prop: 'ip', label: '登录地址', minWidth: 140 },
       {
         prop: 'browser',
         label: '设备',
         minWidth: 180,
-        formatter: (row) => (row.os && row.os !== 'Unknown' ? `${row.browser} · ${row.os}` : row.browser)
+        formatter: (row) =>
+          row.os && row.os !== 'Unknown' ? `${row.browser} · ${row.os}` : row.browser
       },
-      { prop: 'loginAt', label: '最后登录时间', width: 180 },
-      { prop: 'expireAt', label: '过期时间', width: 180 },
-      { prop: 'tokenCount', label: '会话数', width: 90 },
+      { prop: 'loginAt', label: '最后登录时间', minWidth: 180 },
+      { prop: 'expireAt', label: '过期时间', minWidth: 180 },
+      { prop: 'tokenCount', label: '会话数', minWidth: 90 },
       ...(operationColumnConfig ? [operationColumnConfig] : [])
     ]
   })

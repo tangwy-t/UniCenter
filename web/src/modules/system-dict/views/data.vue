@@ -131,11 +131,11 @@
           h(ElTag, { type: tagType(row.listClass), effect: 'light' }, () => row.label)
       },
       { prop: 'value', label: '值', minWidth: 120 },
-      { prop: 'sort', label: '排序', width: 80 },
+      { prop: 'sort', label: '排序', minWidth: 80 },
       {
         prop: 'status',
         label: '状态',
-        width: 90,
+        minWidth: 90,
         formatter: (row) => dictStatus.render(row.status)
       },
       { prop: 'remark', label: '备注', minWidth: 160, showOverflowTooltip: true },

@@ -1018,6 +1018,7 @@
 <style scoped lang="scss">
   /* 四视图共享的设计令牌(卡片 / KPI / 呼吸圆点 / 入场动画) */
   @use './monitor-tokens' as t;
+  @use '@styles/core/breakpoints.scss' as *;
 
   @include t.rise-keyframes;
   @include t.pulse-keyframes;
@@ -1178,7 +1179,7 @@
 
   /* ---------- 键空间浏览 ---------- */
   /* 桌面端：左列高度 = 右列实测高度（两列底部持平，列表内部滚动） */
-  @media (min-width: 1024px) {
+  @include respond-at-least('desktop') {
     .cache-explorer-card {
       max-height: var(--explorer-max, none);
     }

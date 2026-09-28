@@ -21,6 +21,8 @@
  * @author Art Design Pro Team
  */
 
+import type { BreakpointName } from '@/config/breakpoints'
+
 // 搜索组件类型
 export type SearchComponentType =
   | 'input'
@@ -73,6 +75,9 @@ export interface ColumnOption<T = any> {
   visible?: boolean
   // 是否选中显示
   checked?: boolean
+  // 低于此断点时隐藏该列（断点名取自 src/config/breakpoints.ts，如 'tablet' / 'desktop'）
+  // 仅影响渲染，不改变列设置里的用户显隐偏好，见 components/core/tables/responsive-columns.ts
+  hideBelow?: BreakpointName
   // 自定义渲染函数
   formatter?: (row: T) => any
   // 插槽相关配置

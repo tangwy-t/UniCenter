@@ -89,7 +89,8 @@
                   @update:model-value="(val) => updateColumnVisibility(item, val)"
                   :disabled="item.disabled"
                   class="flex-1 min-w-0 [&_.el-checkbox__label]:overflow-hidden [&_.el-checkbox__label]:text-ellipsis [&_.el-checkbox__label]:whitespace-nowrap"
-                  >{{ item.label || (item.type === 'selection' ? '选择' : '') }}</ElCheckbox
+                  >{{ item.label || (item.type === 'selection' ? '选择' : '')
+                  }}{{ isViewportHidden(item) ? '（窄屏隐藏）' : '' }}</ElCheckbox
                 >
               </div>
             </VueDraggable>
@@ -121,6 +122,8 @@
   import { storeToRefs } from 'pinia'
   import { TableSizeEnum } from '@/enums/formEnum'
   import { useTableStore } from '@/store/modules/table'
+  import { useAppBreakpoints } from '@/hooks/core/useAppBreakpoints'
+  import { isValidHideBelow } from '../responsive-columns'
   import { VueDraggable } from 'vue-draggable-plus'
   import type { ColumnOption } from '@/types/component'
   import { ElScrollbar } from 'element-plus'
@@ -184,6 +187,14 @@
     col.checked = boolValue
     col.visible = boolValue
   }
+
+  /**
+   * 列是否因当前视口低于 hideBelow 断点而暂不渲染
+   * （用于在列设置里提示"勾选了但当前屏幕看不到"的原因）
+   */
+  const { smaller } = useAppBreakpoints()
+  const isViewportHidden = (col: ColumnOption): boolean =>
+    isValidHideBelow(col.hideBelow) && smaller(col.hideBelow).value
 
   /** 表格大小选项配置 */
   const tableSizeOptions = [

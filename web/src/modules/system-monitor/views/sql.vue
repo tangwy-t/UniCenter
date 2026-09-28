@@ -1043,6 +1043,7 @@
 <style scoped lang="scss">
   /* 四视图共享的设计令牌(卡片 / KPI / 呼吸圆点 / 入场动画) */
   @use './monitor-tokens' as t;
+  @use '@styles/core/breakpoints.scss' as *;
 
   @include t.rise-keyframes;
   @include t.pulse-keyframes;
@@ -1178,7 +1179,7 @@
     background: var(--el-fill-color-light);
   }
 
-  @media (max-width: 639px) {
+  @include respond-below('phone') {
     .kpi-tile__spark {
       display: none;
     }

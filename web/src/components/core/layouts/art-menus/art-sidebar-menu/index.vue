@@ -63,7 +63,7 @@
     <div
       v-show="menuList.length > 0"
       class="menu-left"
-      :class="`menu-left-${getMenuTheme.theme} menu-left-${!menuOpen ? 'close' : 'open'}`"
+      :class="`menu-left-${getMenuTheme.theme} menu-left-${!isMenuVisible ? 'close' : 'open'}`"
       :style="{
         background: getMenuTheme.background,
         width: isDualMenuCollapsed ? MENU_CLOSE_WIDTH : undefined
@@ -83,7 +83,7 @@
           :class="{ 'is-dual-menu-name': isDualMenu }"
           :style="{
             color: getMenuTheme.systemNameColor,
-            opacity: !menuOpen ? 0 : 1
+            opacity: !isMenuVisible ? 0 : 1
           }"
         >
           {{ AppConfig.systemInfo.name }}
@@ -92,7 +92,7 @@
       <ElScrollbar :style="scrollbarStyle">
         <ElMenu
           :class="'el-menu-' + getMenuTheme.theme"
-          :collapse="!menuOpen"
+          :collapse="!isMenuVisible"
           :default-active="routerPath"
           :text-color="getMenuTheme.textColor"
           :unique-opened="uniqueOpened"
@@ -104,7 +104,7 @@
         >
           <SidebarSubmenu
             :list="menuList"
-            :isMobile="isMobileMode"
+            :isMobile="isPhone"
             :theme="getMenuTheme"
             @close="handleMenuClose"
           />
@@ -115,7 +115,7 @@
       <div class="dual-menu-collapse-btn" v-if="isDualMenu" @click="toggleMenuVisibility">
         <ArtSvgIcon
           class="text-g-500/70"
-          :icon="menuOpen ? 'ri:arrow-left-wide-fill' : 'ri:arrow-right-wide-fill'"
+          :icon="isMenuVisible ? 'ri:arrow-left-wide-fill' : 'ri:arrow-right-wide-fill'"
         />
       </div>
 
@@ -123,7 +123,7 @@
         class="menu-model"
         @click="toggleMenuVisibility"
         :style="{
-          opacity: !menuOpen ? 0 : 1,
+          opacity: !isMenuVisible ? 0 : 1,
           transform: showMobileModal ? 'scale(1)' : 'scale(0)'
         }"
       />
@@ -140,11 +140,11 @@
   import { handleMenuJump } from '@/utils/navigation'
   import SidebarSubmenu from './widget/SidebarSubmenu.vue'
   import { useCommon } from '@/hooks/core/useCommon'
-  import { useWindowSize, useTimeoutFn } from '@vueuse/core'
+  import { useResponsiveMenu } from '@/hooks/core/useResponsiveMenu'
+  import { useTimeoutFn } from '@vueuse/core'
 
   defineOptions({ name: 'ArtSidebarMenu' })
 
-  const MOBILE_BREAKPOINT = 800
   const ANIMATION_DELAY = 350
   const MENU_CLOSE_WIDTH = MenuWidth.CLOSE
 
@@ -152,16 +152,15 @@
   const router = useRouter()
   const settingStore = useSettingStore()
 
-  const { getMenuOpenWidth, menuType, uniqueOpened, dualMenuShowText, menuOpen, getMenuTheme } =
+  const { getMenuOpenWidth, menuType, uniqueOpened, dualMenuShowText, getMenuTheme } =
     storeToRefs(settingStore)
+
+  // 菜单可见状态：手机端为瞬态抽屉，桌面端为用户持久化偏好（详见 composable 注释）
+  const { isPhone, isMenuVisible, toggleMenu, closeMobileDrawer } = useResponsiveMenu()
 
   // 组件内部状态
   const defaultOpenedMenus = ref<string[]>([])
-  const isMobileMode = ref(false)
   const showMobileModal = ref(false)
-
-  // 使用 VueUse 的窗口尺寸监听
-  const { width } = useWindowSize()
 
   // 菜单宽度相关
   const menuopenwidth = computed(() => getMenuOpenWidth.value)
@@ -173,10 +172,7 @@
     () => menuType.value === MenuTypeEnum.LEFT || menuType.value === MenuTypeEnum.TOP_LEFT
   )
   const isDualMenu = computed(() => menuType.value === MenuTypeEnum.DUAL_MENU)
-  const isDualMenuCollapsed = computed(() => isDualMenu.value && !menuOpen.value)
-
-  // 移动端屏幕判断（使用 computed 避免重复计算）
-  const isMobileScreen = computed(() => width.value < MOBILE_BREAKPOINT)
+  const isDualMenuCollapsed = computed(() => isDualMenu.value && !isMenuVisible.value)
 
   // 路由相关
   const firstLevelMenuPath = computed(() => route.matched[0]?.path)
@@ -280,14 +276,14 @@
   }
 
   /**
-   * 切换菜单显示/隐藏
+   * 切换菜单显示/隐藏（手机端切抽屉，桌面端写用户偏好）
    */
   const toggleMenuVisibility = (): void => {
-    settingStore.setMenuOpen(!menuOpen.value)
+    toggleMenu()
 
     // 移动端模态框控制逻辑
-    if (isMobileScreen.value) {
-      if (!menuOpen.value) {
+    if (isPhone.value) {
+      if (isMenuVisible.value) {
         // 菜单即将打开，立即显示模态框
         showMobileModal.value = true
       } else {
@@ -298,11 +294,11 @@
   }
 
   /**
-   * 处理菜单关闭（来自子组件）
+   * 处理菜单关闭（来自子组件；仅手机端需要自动收起抽屉）
    */
   const handleMenuClose = (): void => {
-    if (isMobileScreen.value) {
-      settingStore.setMenuOpen(false)
+    if (isPhone.value) {
+      closeMobileDrawer()
       delayHideMobileModal()
     }
   }
@@ -315,35 +311,27 @@
   }
 
   /**
-   * 监听窗口尺寸变化，自动处理移动端菜单
+   * 监听菜单可见状态，控制移动端遮罩层
    */
-  watch(width, (newWidth) => {
-    if (newWidth < MOBILE_BREAKPOINT) {
-      settingStore.setMenuOpen(false)
-      if (!menuOpen.value) {
-        showMobileModal.value = false
-      }
-    } else {
+  watch(isMenuVisible, (visible: boolean) => {
+    if (!isPhone.value) {
+      // 大屏幕设备上，模态框始终隐藏
       showMobileModal.value = false
+    } else if (visible) {
+      // 抽屉打开时立即显示模态框
+      showMobileModal.value = true
+    } else {
+      // 抽屉关闭时延迟隐藏模态框，确保动画完成
+      delayHideMobileModal()
     }
   })
 
   /**
-   * 监听菜单开关状态变化
+   * 监听断点变化：离开手机端时隐藏遮罩（抽屉状态由 composable 复位）
    */
-  watch(menuOpen, (isMenuOpen: boolean) => {
-    if (!isMobileScreen.value) {
-      // 大屏幕设备上，模态框始终隐藏
+  watch(isPhone, (phone: boolean) => {
+    if (!phone) {
       showMobileModal.value = false
-    } else {
-      // 小屏幕设备上，根据菜单状态控制模态框
-      if (isMenuOpen) {
-        // 菜单打开时立即显示模态框
-        showMobileModal.value = true
-      } else {
-        // 菜单关闭时延迟隐藏模态框，确保动画完成
-        delayHideMobileModal()
-      }
     }
   })
 </script>

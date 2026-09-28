@@ -85,6 +85,11 @@
 
 /* ==================== Tailwind Theme Configuration ==================== */
 @theme {
+  /* Font Family (统一正文字体栈；Element Plus 组件通过 el-ui.scss 复用同一变量) */
+  --font-sans:
+    system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei',
+    'Noto Sans CJK SC', 'Helvetica Neue', Arial, sans-serif;
+
   /* Box Color (Light: white / Dark: black) */
   --color-box: var(--default-box-color);
 

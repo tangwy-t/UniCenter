@@ -1,5 +1,11 @@
 import type { PluginManifest } from '@/types/plugin'
-import { PermCacheList, PermOnlineList, PermPprofList, PermServerList, PermSqlList } from '@/enums/permission'
+import {
+  PermCacheList,
+  PermOnlineList,
+  PermPprofList,
+  PermServerList,
+  PermSqlList
+} from '@/enums/permission'
 
 const plugin: PluginManifest = {
   name: 'system-monitor',

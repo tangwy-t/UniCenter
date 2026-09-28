@@ -1,5 +1,7 @@
 /* 文章标题设置（h1-h6）*/
 /* ------------------------------------------------ */
+@use './breakpoints' as *;
+
 $font-color: #24292e;
 
 .markdown-body h1,
@@ -17,7 +19,7 @@ $font-color: #24292e;
   font-size: 30px;
 }
 
-@media only screen and (max-width: 550px) {
+@include respond-at-most('phone') {
   .markdown-body h1 {
     font-size: 26px;
   }

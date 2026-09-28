@@ -168,11 +168,11 @@
       {
         prop: 'status',
         label: '状态',
-        width: 90,
+        minWidth: 90,
         formatter: (row) => dictStatus.render(row.status)
       },
       { prop: 'remark', label: '备注', minWidth: 160, showOverflowTooltip: true },
-      { prop: 'createdAt', label: '创建时间', width: 180 },
+      { prop: 'createdAt', label: '创建时间', minWidth: 180 },
       ...(operationColumnConfig ? [operationColumnConfig] : [])
     ]
   })
