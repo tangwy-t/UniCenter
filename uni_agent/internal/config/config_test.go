@@ -243,3 +243,39 @@ func TestEmptyVersionIsRejectedAtStartup(t *testing.T) {
 		t.Fatal("空版本必须在启动时被拒绝（否则会在握手阶段表现为 4002 连接失败）")
 	}
 }
+
+// TestCAFileFromFlagAndEnv 验证 -ca-file 与 UNI_AGENT_CA_FILE 都要能生效，
+// 且两者都没给时默认空（= 只用系统信任库）。
+//
+// 默认空必须显式钉住：若默认落到某个非空值，「没配置却像是在用 CA」会让
+// wss 排障时分不清到底信的是谁。
+func TestCAFileFromFlagAndEnv(t *testing.T) {
+	// 默认：未配置 → 空。
+	t.Setenv("UNI_AGENT_CA_FILE", "")
+	cfg0, err := Load([]string{"-url", "wss://h/api/v1/agent/ws", "-enroll-token", "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg0.CAFile != "" {
+		t.Fatalf("未配置时 CAFile 应为空，实际 %q", cfg0.CAFile)
+	}
+
+	// 命令行标志生效。
+	cfg, err := Load([]string{"-url", "wss://h/api/v1/agent/ws", "-enroll-token", "t", "-ca-file", "/tmp/a.crt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CAFile != "/tmp/a.crt" {
+		t.Fatalf("flag 未生效: %q", cfg.CAFile)
+	}
+
+	// 环境变量生效。
+	t.Setenv("UNI_AGENT_CA_FILE", "/tmp/b.crt")
+	cfg2, err := Load([]string{"-url", "wss://h/api/v1/agent/ws", "-enroll-token", "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg2.CAFile != "/tmp/b.crt" {
+		t.Fatalf("env 未生效: %q", cfg2.CAFile)
+	}
+}

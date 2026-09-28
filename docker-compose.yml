@@ -200,6 +200,14 @@ services:
     ports:
       # 前端对外唯一入口：仅发布 WEB_PORT。生产通常在更外层接负载均衡 / TLS 网关。
       - "${WEB_PORT:-80}:80"
+      # agent 专用 TLS 终端（控制台自身仍是 WEB_PORT/HTTP）。agent 一律连这里，
+      # 明文入口（80 上的 /api/v1/agent/ws）由 nginx 直接 403 —— 二期硬前置。
+      - "20443:20443"
+
+    volumes:
+      # agent 通道 TLS 的自签证书（scripts/make-agent-tls-cert.sh 生成，不入库）。
+      # **只读**：nginx 只消费不写；私钥留在宿主机，不进镜像。
+      - ./uni_console/certs:/etc/nginx/certs:ro
 
     mem_limit: ${WEB_MEM_LIMIT:-256m}
     cpus: ${WEB_CPUS:-0.5}

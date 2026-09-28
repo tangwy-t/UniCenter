@@ -12,9 +12,12 @@ package transport
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"math/rand"
+	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -41,6 +44,11 @@ type Config struct {
 	AgentToken string
 	// InstanceID 是设备指纹，必须跨重启稳定 —— core 用它做幂等与顶号判定。
 	InstanceID string
+	// CAFile 是额外的根证书（PEM）路径；为空 = 只用系统信任库。
+	//
+	// wss 连自签服务端时的唯一信任来源（-ca-file / UNI_AGENT_CA_FILE）。
+	// 本包刻意**不提供**「跳过校验」的开关：那会让加密退化成谁都能中间人。
+	CAFile string
 	// HeartbeatInterval 是应用层心跳周期（WS ping/pong 之外兜底）。
 	HeartbeatInterval time.Duration
 	// Logger 可为空。
@@ -357,6 +365,23 @@ func jitter(d time.Duration) time.Duration {
 func (c *Client) runOnce(ctx context.Context) error {
 	dialer := *websocket.DefaultDialer
 	dialer.HandshakeTimeout = 15 * time.Second
+	// wss + 自签证书：显式信任给定的 CA 文件（不设 = 用系统信任库）。
+	// **不提供 InsecureSkipVerify 选项**：那会让「加密」退化成「谁都能中间人」，
+	// 而这条通道二期起能换来宿主机 root 执行。
+	//
+	// 这段必须在 DialContext **之前**：CA 文件坏掉时静默退化到系统信任库，
+	// 会让人以为「配了 CA」而实际走的是另一套信任链（排障时最难发现的一类）。
+	if c.cfg.CAFile != "" {
+		pem, err := os.ReadFile(c.cfg.CAFile)
+		if err != nil {
+			return fmt.Errorf("读取 CA 文件失败: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return fmt.Errorf("CA 文件不含可用的证书: %s", c.cfg.CAFile)
+		}
+		dialer.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+	}
 
 	ws, resp, err := dialer.DialContext(ctx, c.cfg.URL, nil)
 	if err != nil {

@@ -15,3 +15,5 @@ docs
 .npmrc
 # 本地 pnpm store(离线安装/CI 缓存产物),不是源码,避免拖进构建上下文
 .pnpm-store
+# 自签证书目录(含私钥):运行时由 compose 只读挂载,绝不能进构建上下文/镜像层
+certs

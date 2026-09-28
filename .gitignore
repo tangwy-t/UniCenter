@@ -83,3 +83,7 @@ go.work.sum
 
 # 部署私钥(沙箱内生成的 GitHub push 用)。绝不入库、绝不推送。
 .deploy-keys/
+
+# ── agent 通道 wss/TLS 自签证书(生成物,**含私钥**,绝不入库) ──
+# 生成:scripts/make-agent-tls-cert.sh;部署时由 compose 只读挂载进 console 容器。
+uni_console/certs/

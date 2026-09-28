@@ -33,6 +33,12 @@ type Config struct {
 	AgentVersion string
 	// DownloadBase 是程序包下载基址（形如 http://host:8088）；空表示由 URL 推导。
 	DownloadBase string
+	// CAFile 是额外的根证书（PEM）。为空 = 只用系统信任库。
+	//
+	// 为什么需要它：内网没有 CA 签发，core 侧用自签证书做 TLS 终端，而自签证书
+	// 不在系统信任库里 —— 没有这个开关，agent 只能选「不校验」（等于把 MITM 换回来）
+	// 或「连不上」。显式给 CA 文件是唯一既加密又验身份的选项。
+	CAFile string
 }
 
 // DownloadBaseURL 返回下载基址（不含路径）：显式配置优先，否则由 -url 推导。
@@ -94,6 +100,7 @@ func Load(args []string) (*Config, error) {
 		// 自己的对外地址（设计 §4）。
 		downloadBase = fs.String("download-base", envStr("UNI_AGENT_DOWNLOAD_BASE", ""),
 			"程序包下载基址（缺省由 -url 推导，如 http://host:8088）")
+		caFile = fs.String("ca-file", envStr("UNI_AGENT_CA_FILE", ""), "额外的根证书（PEM）路径，用于校验自签的 wss 服务端")
 	)
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -116,6 +123,7 @@ func Load(args []string) (*Config, error) {
 		StateDir:          *stateDir,
 		AgentVersion:      DefaultVersion,
 		DownloadBase:      strings.TrimSpace(*downloadBase),
+		CAFile:            strings.TrimSpace(*caFile),
 	}
 	if cfg.URL == "" {
 		return nil, errors.New("缺少 -url（或环境变量 UNI_AGENT_URL）")

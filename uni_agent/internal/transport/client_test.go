@@ -1,6 +1,10 @@
 package transport
 
 import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -330,5 +334,37 @@ func TestJitterWithinRange(t *testing.T) {
 	}
 	if got := jitter(0); got != 0 {
 		t.Errorf("jitter(0) = %v, 期望 0", got)
+	}
+}
+
+// TestBadCAFileFailsBeforeDial 钉住「坏 CA 必须在拨号之前失败」。
+//
+// 静默退化到系统信任库会让人以为「配了 CA」而实际走的是另一套信任链 ——
+// 这是 wss 排障里最难发现的一类。故 CA 文件读不到/不含证书时必须当场返回错误，
+// 而不是当作没配置继续拨号。
+//
+// 为什么直接调 runOnce 而不是 Run：Run 是带指数退避的重连循环，配置类错误
+// 也会被它无限重试（对存量设备这是正确行为：CA 文件可能恰好被运维在重连间隙
+// 换掉）。runOnce 才是「一次连接尝试」的边界；这里用 127.0.0.1:1（无监听）
+// 保证——若它没有早失败而是真去拨号，报出来的会是 connection refused 而非
+// CA 错误，断言足以区分。
+func TestBadCAFileFailsBeforeDial(t *testing.T) {
+	dir := t.TempDir()
+	bad := filepath.Join(dir, "empty.crt")
+	if err := os.WriteFile(bad, []byte("not a pem"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := New(Config{URL: "wss://127.0.0.1:1/api/v1/agent/ws", CAFile: bad, Logger: nopLogger{}})
+	c.SetHello(&agentproto.Hello{InstanceID: "i", Hostname: "h", OS: "linux", Arch: "amd64", AgentVersion: "0.4.0", EnrollToken: "e"})
+	err := c.runOnce(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "CA 文件不含可用的证书") {
+		t.Fatalf("应在拨号前报 CA 文件无效，实际 %v", err)
+	}
+
+	// 文件不存在的路径同样必须早失败（而不是悄悄回落系统信任库）。
+	c2 := New(Config{URL: "wss://127.0.0.1:1/api/v1/agent/ws", CAFile: filepath.Join(dir, "missing.crt"), Logger: nopLogger{}})
+	c2.SetHello(&agentproto.Hello{InstanceID: "i", Hostname: "h", OS: "linux", Arch: "amd64", AgentVersion: "0.4.0", EnrollToken: "e"})
+	if err := c2.runOnce(context.Background()); err == nil || !strings.Contains(err.Error(), "读取 CA 文件失败") {
+		t.Fatalf("应在拨号前报 CA 文件读取失败，实际 %v", err)
 	}
 }

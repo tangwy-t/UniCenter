@@ -89,7 +89,9 @@ func run() error {
 		AgentToken:        store.AgentToken(),
 		InstanceID:        instanceID,
 		HeartbeatInterval: cfg.HeartbeatInterval,
-		Logger:            log,
+		// wss 自签服务端的信任来源；空 = 系统信任库（明文 ws 用不到）。
+		CAFile: cfg.CAFile,
+		Logger: log,
 	})
 	client.SetHello(hello)
 
@@ -151,6 +153,9 @@ func run() error {
 		"interval", cfg.ReportInterval.String(),
 		"hasToken", store.AgentToken() != "",
 		"downloadBase", downloadBase,
+		// 是否注入了自签 CA：wss 场景下这一项为 false 而 url 是 wss 时，
+		// 连接失败几乎注定是信任链问题 —— 让它出现在启动日志里省一轮排障。
+		"caFile", cfg.CAFile,
 	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
