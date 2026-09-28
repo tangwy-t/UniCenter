@@ -1,6 +1,10 @@
 <!-- 登录页面 -->
 <template>
-  <div class="flex w-full h-screen">
+  <!-- h-dvh：移动端地址栏收起/展开时高度跟随，避免 100vh 溢出；
+       左右/底部安全区避让刘海屏横屏与底部手势条（非刘海设备 env() 为 0） -->
+  <div
+    class="flex w-full h-dvh pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)] pb-[env(safe-area-inset-bottom)]"
+  >
     <LoginLeftView />
 
     <div class="relative flex-1">

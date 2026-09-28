@@ -4,6 +4,8 @@
     class="layout-sidebar"
     v-if="showLeftMenu || isDualMenu"
     :class="{ 'no-border': menuList.length === 0 }"
+    @touchstart.passive="handleDrawerTouchStart"
+    @touchend.passive="handleDrawerTouchEnd"
   >
     <!-- 双列菜单（左侧） -->
     <div
@@ -141,6 +143,7 @@
   import SidebarSubmenu from './widget/SidebarSubmenu.vue'
   import { useCommon } from '@/hooks/core/useCommon'
   import { useResponsiveMenu } from '@/hooks/core/useResponsiveMenu'
+  import { isLeftSwipe } from '@/utils/ui/gesture'
   import { useTimeoutFn } from '@vueuse/core'
 
   defineOptions({ name: 'ArtSidebarMenu' })
@@ -300,6 +303,40 @@
     if (isPhone.value) {
       closeMobileDrawer()
       delayHideMobileModal()
+    }
+  }
+
+  /**
+   * 手机端抽屉左滑关闭：记录触摸起点
+   * 仅手机端抽屉打开时记录，避免干扰菜单内正常的纵向滚动
+   */
+  const drawerTouchStart = { x: 0, y: 0 }
+
+  const handleDrawerTouchStart = (event: TouchEvent): void => {
+    if (!isPhone.value || !isMenuVisible.value) return
+
+    const touch = event.touches[0]
+    if (!touch) return
+
+    drawerTouchStart.x = touch.clientX
+    drawerTouchStart.y = touch.clientY
+  }
+
+  /**
+   * 手机端抽屉左滑关闭：抬指时判定手势并关闭抽屉
+   */
+  const handleDrawerTouchEnd = (event: TouchEvent): void => {
+    if (!isPhone.value || !isMenuVisible.value) return
+
+    const touch = event.changedTouches[0]
+    if (!touch) return
+
+    const deltaX = touch.clientX - drawerTouchStart.x
+    const deltaY = touch.clientY - drawerTouchStart.y
+
+    // 左滑且水平位移明显大于垂直位移（避免与纵向滚动冲突）时关闭抽屉
+    if (isLeftSwipe(deltaX, deltaY)) {
+      handleMenuClose()
     }
   }
 

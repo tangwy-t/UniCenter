@@ -77,6 +77,29 @@ html.dark .el-card {
   // border: 1px solid red !important;
 }
 
+// 触屏设备（pointer: coarse）：放大交互热区，保证可点性。
+// 仅触屏生效，桌面端（pointer: fine）保持紧凑尺寸；
+// 组件高度 36 → 40px，分页按钮 28/32 → 36px
+// （WCAG 2.5.8 最低 24px，向移动端 44px 实践靠拢）
+@media (pointer: coarse) {
+  :root {
+    --el-component-custom-height: 40px !important;
+  }
+
+  .el-pagination--default {
+    --el-pagination-button-width: 36px !important;
+  }
+
+  // 消除双击缩放等待，提升点击响应（双指缩放不受影响）
+  .el-button,
+  .el-menu-item,
+  .el-sub-menu__title,
+  .el-dropdown-menu__item,
+  .el-pager li {
+    touch-action: manipulation;
+  }
+}
+
 // 优化菜单折叠展开动画（提升动画流畅度）
 .el-menu.el-menu--inline {
   transition: max-height 0.26s cubic-bezier(0.4, 0, 0.2, 1) !important;
@@ -123,6 +146,11 @@ html.dark .el-card {
 .el-popover {
   min-width: 80px;
   border-radius: var(--el-border-radius-small) !important;
+
+  // 宽度自适应：显式 width 的弹层（如图标选择器 440px）在窄视口下不超出屏幕。
+  // 与 .el-dialog / .el-drawer 的钳制规则保持一致；popper 只能位移不能收缩，
+  // 必须由 max-width 强制收窄，否则 <470px 视口上 440px 弹层无法完整容纳。
+  max-width: calc(100vw - 32px);
 }
 
 .el-dialog {

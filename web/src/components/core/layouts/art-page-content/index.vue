@@ -91,21 +91,22 @@
     })
   })
 
-  const containerStyle = computed((): CSSProperties =>
-    isFullPage.value
-      ? {
-          position: 'fixed',
-          top: 0,
-          left: 0,
-          width: '100%',
-          height: '100vh',
-          zIndex: 2500,
-          background: 'var(--default-bg-color)'
-        }
-      : {
-          maxWidth: containerWidth.value
-        }
-  )
+  const containerStyle = computed((): CSSProperties => {
+    if (isFullPage.value) {
+      return {
+        position: 'fixed',
+        top: 0,
+        left: 0,
+        width: '100%',
+        height: '100vh',
+        zIndex: 2500,
+        background: 'var(--default-bg-color)'
+      }
+    }
+
+    // 容器宽度完全由用户偏好决定（铺满=100% / 定宽=1200px），不做超宽屏自动收束
+    return { maxWidth: containerWidth.value }
+  })
 
   const contentStyle = computed((): CSSProperties => ({
     minHeight: containerMinHeight.value

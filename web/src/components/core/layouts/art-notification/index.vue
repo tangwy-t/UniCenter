@@ -335,7 +335,7 @@
 
   .art-notification-panel {
     @apply absolute top-14.5 right-5 w-95 h-130 overflow-hidden transition-all duration-300 origin-top will-change-[top,left]
-      max-[640px]:top-[65px] max-[640px]:right-0 max-[640px]:w-full max-[640px]:h-[80vh];
+      max-sm:top-[65px] max-sm:right-0 max-sm:w-full max-sm:h-[80vh];
     display: flex;
     flex-direction: column;
   }

@@ -198,7 +198,9 @@
     }
 
     .el-menu {
-      height: calc(100vh - 60px);
+      // 100dvh：与 #app-sidebar / #app-main 的 dvh 规则保持一致，
+      // 避免手机地址栏收起/展开时菜单底部与内容区错位
+      height: calc(100dvh - 60px);
     }
 
     .el-menu--collapse {
@@ -225,7 +227,9 @@
       z-index: -1;
       display: block;
       width: 100%;
-      height: 100vh;
+      // 100dvh：与同断点下 #app-sidebar / .el-menu 的 dvh 规则保持一致，
+      // 避免手机地址栏变化时遮罩与侧栏高度错位露出缝隙
+      height: 100dvh;
       background: rgba($color: #000, $alpha: 50%);
       transition: opacity 0.2s ease-in-out;
     }

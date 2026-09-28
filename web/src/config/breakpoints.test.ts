@@ -11,6 +11,7 @@ import { BREAKPOINTS } from './breakpoints'
 // 这正是改造前的问题（500/800/1000/1024 等阈值散落在 JS 与 SCSS 中）。
 
 const scssPath = fileURLToPath(new URL('../assets/styles/core/_breakpoints.scss', import.meta.url))
+const tailwindPath = fileURLToPath(new URL('../assets/styles/core/tailwind.css', import.meta.url))
 
 /** 解析 SCSS 中的 $breakpoints map（只取 '名称': 数值 形式的行） */
 function parseScssBreakpoints(source: string): Record<string, number> {
@@ -24,6 +25,17 @@ function parseScssBreakpoints(source: string): Record<string, number> {
   const result: Record<string, number> = {}
 
   for (const match of block.matchAll(/'([A-Za-z0-9_-]+)'\s*:\s*(\d+)/g)) {
+    result[match[1]] = Number(match[2])
+  }
+
+  return result
+}
+
+/** 解析 tailwind.css @theme 中显式声明的 --breakpoint-*（kebab-case → px 数值） */
+function parseTailwindBreakpoints(source: string): Record<string, number> {
+  const result: Record<string, number> = {}
+
+  for (const match of source.matchAll(/--breakpoint-([a-z0-9-]+)\s*:\s*(\d+)px/g)) {
     result[match[1]] = Number(match[2])
   }
 
@@ -55,5 +67,64 @@ describe('断点单一事实源（TS ↔ SCSS）', () => {
     expect(tsBreakpoints.phone).toBe(640)
     expect(tsBreakpoints.tablet).toBe(768)
     expect(tsBreakpoints.desktop).toBe(1024)
+  })
+})
+
+// Tailwind @theme 的 --breakpoint-* 是断点表的第三个载体：模板里的
+// `max-compact:` 等命名前缀由它生成，若与 TS/SCSS 漂移，会出现
+// "JS 判定与 CSS 前缀不同步"。默认前缀（sm/md/lg/xl）与项目断点的
+// 对应关系见下方映射，显式覆盖时也会被本套断言捕获。
+describe('断点单一事实源（Tailwind @theme ↔ TS）', () => {
+  const tailwindBreakpoints = parseTailwindBreakpoints(readFileSync(tailwindPath, 'utf8'))
+  const tsBreakpoints: Record<string, number> = { ...BREAKPOINTS }
+
+  // 项目特有断点：必须在 @theme 显式注册，供 max-* 命名前缀使用
+  const projectSpecific: Record<string, keyof typeof BREAKPOINTS> = {
+    'phone-narrow': 'phoneNarrow',
+    compact: 'compact',
+    wide: 'wide',
+    xwide: 'xwide'
+  }
+
+  // 与 Tailwind 默认断点对齐的项目断点（默认值：sm=40rem / md=48rem / lg=64rem / xl=80rem）
+  const defaultAligned: Record<string, keyof typeof BREAKPOINTS> = {
+    sm: 'phone',
+    md: 'tablet',
+    lg: 'desktop',
+    xl: 'xl'
+  }
+
+  it('项目特有断点已在 @theme 注册且数值与 TS 一致', () => {
+    for (const [tailwindName, tsName] of Object.entries(projectSpecific)) {
+      expect(
+        tailwindBreakpoints[tailwindName],
+        `@theme 缺少 --breakpoint-${tailwindName}（或未使用 px 数值）`
+      ).toBe(tsBreakpoints[tsName])
+    }
+  })
+
+  it('默认对齐断点若被 @theme 覆盖，数值必须与 TS 一致', () => {
+    for (const [tailwindName, tsName] of Object.entries(defaultAligned)) {
+      const declared = tailwindBreakpoints[tailwindName]
+
+      // 未声明时使用 Tailwind 默认（640/768/1024/1280），与项目断点相符；
+      // 一旦声明覆盖就必须与 TS 表一致
+      if (declared !== undefined) {
+        expect(declared, `@theme 覆盖的 --breakpoint-${tailwindName} 与 TS 断点 ${tsName} 不同`).toBe(
+          tsBreakpoints[tsName]
+        )
+      } else {
+        expect(
+          tsBreakpoints[tsName],
+          `Tailwind 默认 --breakpoint-${tailwindName} 与项目断点 ${tsName} 不再对齐，需在 @theme 显式注册`
+        ).toBe({ sm: 640, md: 768, lg: 1024, xl: 1280 }[tailwindName])
+      }
+    }
+  })
+
+  it('@theme 不注册与项目断点表无关的自定义断点（避免两套语义并存）', () => {
+    const known = new Set([...Object.keys(projectSpecific), ...Object.keys(defaultAligned)])
+    const unknown = Object.keys(tailwindBreakpoints).filter((name) => !known.has(name))
+    expect(unknown, `发现未在断点表登记的 @theme 断点：${unknown.join(', ')}`).toEqual([])
   })
 })

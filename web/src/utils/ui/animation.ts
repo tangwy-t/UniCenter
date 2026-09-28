@@ -48,7 +48,11 @@ export const themeAnimation = (e: any) => {
   document.documentElement.style.setProperty('--y', y + 'px')
   document.documentElement.style.setProperty('--r', endRadius + 'px')
 
-  if (document.startViewTransition) {
+  // 用户偏好减少动态效果时跳过 View Transition 扩散动画，直接切换
+  // （CSS 侧 app.scss 亦有兜底，这里避免无意义的过渡启动开销）
+  const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+
+  if (document.startViewTransition && !prefersReducedMotion) {
     document.startViewTransition(() => toggleTheme())
   } else {
     toggleTheme()

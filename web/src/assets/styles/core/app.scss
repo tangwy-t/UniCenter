@@ -259,3 +259,33 @@
     -webkit-tap-highlight-color: transparent;
   }
 }
+
+// 用户偏好：减少动态效果（prefers-reduced-motion: reduce）
+// 全局兜底：核心层的路由切换、主题扩散与 Element Plus 过渡未逐一处适配，
+// 这里统一降级；业务组件内的 14 处精细适配保持不变。
+// 时长压缩到 0.01ms 而非 none——保留 transitionend/animationend 事件，
+// 避免依赖动画结束回调的组件（如 EP 弹层）卡在中间态。
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  // View Transition API 的伪元素不在 * 命中范围内，单独关闭主题圆形扩散动画
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation: none !important;
+  }
+
+  // 加载指示器属"必要动效"（状态指示），保留旋转，否则用户无法感知加载中
+  .el-loading-spinner .circular,
+  .el-icon.is-loading {
+    animation-duration: 2s !important;
+    animation-iteration-count: infinite !important;
+  }
+}
