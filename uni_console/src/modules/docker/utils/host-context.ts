@@ -16,7 +16,7 @@ export interface DockerHostContext {
   hostId: string
   host: DockerHostItem | undefined
   loading: boolean
-  /** 拉一次主机清单：路由 query 里有主机就用它，否则落到第一台并写回 query。 */
+  /** 拉一次主机清单（**只读**：不写路由，见 reload 的注释）。 */
   reload: () => Promise<void>
   /** 切换主机：写 route query（替换历史，避免后退键在主机间跳来跳去）。 */
   selectHost: (id: string) => void
@@ -36,11 +36,16 @@ export function provideDockerHost(): DockerHostContext {
     try {
       const res = await fetchDockerHosts()
       hosts.value = res.list ?? []
-      // 首次进入（query 里没有 host）时落到第一台，并写回 query —— 之后所有请求
-      // 都从 query 取主机，刷新也能还原。
-      if (!route.query.host && hosts.value[0]) {
-        void router.replace({ query: { ...route.query, host: hosts.value[0].id } })
-      }
+      // ⚠ 这里**绝不能**顺手把 host 写回 query（曾经这么写过，是个真 bug）：
+      // 每个页面挂载时都会调本函数，而「从侧边栏进入」时 query 里本来就没有 host ——
+      // 于是页面刚挂载就立刻发起一次「同路径、仅改 query」的第二次导航。它与控制台的
+      // 工作标签 + 页面出口区的 out-in 过渡相撞：从第 3 次切页起，出口区再也不挂载
+      // 组件（表现为「切到别的页面一片空白，必须刷新」，而 route 已变、`?host=` 始终
+      // 补不上、控制台无报错）。其它模块的页面挂载时只拉数据、不碰路由，所以只有本模块
+      // 出这个现象。
+      //
+      // 现在的纪律：**路由 query 只在用户显式切换主机时写**（selectHost），
+      // 读取时装不上就退到第一台（hostId 的兜底），页面功能不受影响。
     } catch {
       // 静默失败：清单拉不到时页面显示「没有可管理的主机」，不弹错（与轮询同一取向）。
       hosts.value = []
@@ -52,6 +57,8 @@ export function provideDockerHost(): DockerHostContext {
   function selectHost(id: string) {
     // 切换主机 = 换一台机器看：列表要重新拉，筛选与分页由调用方按需重置
     //（筛选保留、分页重置 —— 见各列表页的 watch）。
+    // 这是**用户动作**（点击切换器），发起导航是安全的；挂载时不行（见 reload 的注释）。
+    if (!id || id === hostId.value) return
     void router.replace({ query: { ...route.query, host: id } })
   }
 
