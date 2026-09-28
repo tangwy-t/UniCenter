@@ -1,46 +1,63 @@
 <template>
-  <DockerPage
-    :loading="loading"
-    :stale="state?.stale ?? false"
-    :age-seconds="state?.ageSeconds ?? 0"
-    :never-reported="state?.neverReported ?? false"
-    @refresh="loadState"
-  >
-    <template #table>
-      <!-- 提示行：只陈述当前能力边界，不写「敬请期待」这类空话。
-           这句话也解释了项目页与容器页的口径差：非 compose 管理的裸容器不在本页。 -->
-      <div class="docker-hint">本页可查看项目配置；编辑与新增网元在后续版本提供</div>
+  <!-- ⚠ 单根包装：页面**必须只有一个根节点**。
+       布局把页面放进 `<Transition mode="out-in">`（components/core/layouts/art-page-content），
+       而 Vue 的 Transition 只支持单根元素。此前本页是 `<DockerPage>` 与 `<ElDialog>` 两个兄弟
+       根节点（fragment），它作为「离场方」参与一次 out-in 切换后，过渡内部的元素记账就坏了 ——
+       症状是**从本页切到任何其它页面都白屏，必须刷新**（本页渲染时出口区给的 .art-page-view
+       类也落不下）。只有本模块踩到，因为其余页面都是单根。
+       守卫：__tests__/single-root.test.ts 扫描模块内所有 .vue，双根即红灯。 -->
+  <div class="docker-projects-page">
+    <DockerPage
+      :loading="loading"
+      :stale="state?.stale ?? false"
+      :age-seconds="state?.ageSeconds ?? 0"
+      :never-reported="state?.neverReported ?? false"
+      @refresh="loadState"
+    >
+      <template #table>
+        <!-- 提示行：只陈述当前能力边界，不写「敬请期待」这类空话。
+             这句话也解释了项目页与容器页的口径差：非 compose 管理的裸容器不在本页。 -->
+        <div class="docker-hint">本页可查看项目配置；编辑与新增网元在后续版本提供</div>
 
-      <ArtTableHeader :loading="loading" @refresh="loadState" />
+        <ArtTableHeader :loading="loading" @refresh="loadState" />
 
-      <!-- 两种空态分开：主机上没有项目 vs 清单还没到（后者尚不知有没有主机，
-           不能先喊「没有项目」），故 v-if 把主机清单的加载态一并算进来。
-           空态渲染在本页、不写进 ArtTable 的 `#empty` 插槽：ArtTable 不转发该插槽
-           （内部把 ElTable 的空态写死成「暂无数据」），写进去会被静默丢弃。 -->
-      <ArtTable v-if="showTable" :loading="listLoading" :data="projects" :columns="columns" />
-      <!-- host-context.ts 的 reload 注释承诺：清单拉不到时页面显示「没有可管理的主机」 -->
-      <ElEmpty v-else-if="!ctx.hosts.length" class="docker-empty" description="没有可管理的主机" />
-      <ElEmpty v-else class="docker-empty" description="该主机上还没有项目" />
-    </template>
-  </DockerPage>
+        <!-- 两种空态分开：主机上没有项目 vs 清单还没到（后者尚不知有没有主机，
+             不能先喊「没有项目」），故 v-if 把主机清单的加载态一并算进来。
+             空态渲染在本页、不写进 ArtTable 的 `#empty` 插槽：ArtTable 不转发该插槽
+             （内部把 ElTable 的空态写死成「暂无数据」），写进去会被静默丢弃。 -->
+        <ArtTable v-if="showTable" :loading="listLoading" :data="projects" :columns="columns" />
+        <!-- host-context.ts 的 reload 注释承诺：清单拉不到时页面显示「没有可管理的主机」 -->
+        <ElEmpty
+          v-else-if="!ctx.hosts.length"
+          class="docker-empty"
+          description="没有可管理的主机"
+        />
+        <ElEmpty v-else class="docker-empty" description="该主机上还没有项目" />
+      </template>
+    </DockerPage>
 
-  <!-- 配置查看器：一期**只读**（无编辑入口 —— 编辑是四期能力，spec §11.0）。
-       失败原因直接显示服务端/agent 给的结论句：这里再包一层「操作失败」只会把
-       「设备离线」「路径没记录」「文件被删」说成同一句话。 -->
-  <ElDialog v-model="configDialog.visible" :title="`配置 · ${configDialog.project}`" width="760px">
-    <div v-loading="configDialog.loading" class="docker-yml">
-      <ElAlert
-        v-if="configDialog.error"
-        type="warning"
-        :title="configDialog.error"
-        :closable="false"
-      />
-      <pre v-else class="docker-yml__body">{{ configDialog.content }}</pre>
-    </div>
-    <template #footer>
-      <ElButton @click="configDialog.visible = false">关闭</ElButton>
-    </template>
-  </ElDialog>
+    <!-- 配置查看器：一期**只读**（无编辑入口 —— 编辑是四期能力，spec §11.0）。
+         失败原因直接显示服务端/agent 给的结论句：这里再包一层「操作失败」只会把
+         「设备离线」「路径没记录」「文件被删」说成同一句话。 -->
+    <ElDialog
+      v-model="configDialog.visible"
+      :title="`配置 · ${configDialog.project}`"
+      width="760px"
+    >
+      <div v-loading="configDialog.loading" class="docker-yml">
+        <ElAlert
+          v-if="configDialog.error"
+          type="warning"
+          :title="configDialog.error"
+          :closable="false"
+        />
+        <pre v-else class="docker-yml__body">{{ configDialog.content }}</pre>
+      </div>
+      <template #footer>
+        <ElButton @click="configDialog.visible = false">关闭</ElButton>
+      </template>
+    </ElDialog>
+  </div>
 </template>
 
 <script setup lang="ts">
