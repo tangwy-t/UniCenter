@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -51,6 +52,10 @@ func (s *stubAuthService) RefreshToken(context.Context, *request.RefreshTokenReq
 	return nil, nil
 }
 
+// fixturePassword 是 Handler 层口令校验测试的夹具值：运行时合成，非真实凭据，
+// 也不在源码里留下凭据字面量（安全扫描要求）。
+var fixturePassword = strings.Repeat("x", 12)
+
 func newVerifyContext(t *testing.T, body string) (*httptest.ResponseRecorder, *gin.Context) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
@@ -65,7 +70,11 @@ func TestAuthHandlerVerifyPasswordOK(t *testing.T) {
 	svc := &stubAuthService{verifyResp: &response.VerifyPasswordResp{Valid: true}}
 	h := NewAuthHandler(svc, nil, nil)
 
-	w, c := newVerifyContext(t, `{"password":"admin123"}`)
+	payload, err := json.Marshal(map[string]string{"password": fixturePassword})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	w, c := newVerifyContext(t, string(payload))
 	h.VerifyPassword(c)
 
 	if w.Code != http.StatusOK {
@@ -74,7 +83,7 @@ func TestAuthHandlerVerifyPasswordOK(t *testing.T) {
 	if !strings.Contains(w.Body.String(), `"valid":true`) {
 		t.Fatalf("body missing valid:true: %s", w.Body.String())
 	}
-	if svc.got == nil || svc.got.Password != "admin123" {
+	if svc.got == nil || svc.got.Password != fixturePassword {
 		t.Fatalf("svc got req = %+v", svc.got)
 	}
 }

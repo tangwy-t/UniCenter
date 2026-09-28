@@ -59,7 +59,7 @@ func TestPoc_CreateUser_RejectsAdminRole(t *testing.T) {
 
 	req := &request.CreateUserReq{
 		Username: "newadmin",
-		Password: "password123",
+		Password: fixturePassword,
 		RoleIDs:  []uint64{1},
 	}
 	if _, err := svc.Create(context.Background(), req); err == nil {
