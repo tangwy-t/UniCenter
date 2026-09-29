@@ -534,18 +534,37 @@
     })
 
     return [
+      // 列的多设备优先级按**运维排查顺序**排定（不是按重要性一刀切全隐藏）：
+      //   「是哪台、活没活、能怎么处置」三件事任何宽度都必须看得见；
+      //   版本 / 启停 / 最后上报是第二层（平板起，`hideBelow: 'tablet'`）；
+      //   静态档案与资源细节是第三层（桌面起，`hideBelow: 'desktop'`）——
+      //   水位在总览页有专门的图与快照表，列表页不占窄屏宽度。
+      // 列宽口径：数据列一律 minWidth（随容器伸缩），仅 selection / index /
+      // 操作列这类结构性列用固定 width。断点定义见 src/config/breakpoints.ts。
       // 选择列只在有升级权限时出现：没这个权限的人看到一个用不上的勾选框只会困惑。
       ...(canUpgrade.value
         ? [{ type: 'selection' as const, width: 46, selectable: () => true }]
         : []),
-      { type: 'index', width: 60, label: '序号' },
+      // 序号是纯位置信息，手机上让位给数据列。
+      { type: 'index', width: 60, label: '序号', hideBelow: 'tablet' },
+      // 主机名 = 设备标识，任何宽度都不隐藏。
       { prop: 'hostname', label: '主机名', minWidth: 180, showOverflowTooltip: true },
-      { prop: 'os', label: '操作系统', width: 140, showOverflowTooltip: true },
-      { prop: 'arch', label: '架构', width: 100 },
+      // 系统类型影响升级包与兼容判断，平板起显示。
+      {
+        prop: 'os',
+        label: '操作系统',
+        minWidth: 140,
+        hideBelow: 'tablet',
+        showOverflowTooltip: true
+      },
+      // 架构只在排查兼容性问题时才需要，优先级最低，桌面起显示。
+      { prop: 'arch', label: '架构', minWidth: 100, hideBelow: 'desktop' },
       {
         prop: 'agentVersion',
         label: 'Agent 版本',
-        width: 190,
+        minWidth: 190,
+        // 版本决定「该不该升级 / 能不能回滚」，平板起显示。
+        hideBelow: 'tablet',
         // 版本列要一眼回答「这台机器该不该动」：当前版本 + （有目标时）目标与标记。
         // 标记的语义规则在 utils/upgrade.upgradeBadge 里（含「不支持远程升级」
         // 这类必须说清楚的结论），这里只负责渲染。
@@ -575,9 +594,10 @@
       {
         prop: 'online',
         label: '在线状态',
-        width: 100,
+        minWidth: 100,
         // 直接消费后端算好的 online（后端按 sys.agent.offlineThreshold
         // 折算），前端不得拿 lastSeenAt 自行算阈值 —— 阈值可热更。
+        // 不声明 hideBelow：任何宽度都要能一眼看到「活没活」。
         formatter: (row) =>
           h(ElTag, { size: 'small', type: row.online ? 'success' : 'info', effect: 'light' }, () =>
             row.online ? '在线' : '离线'
@@ -586,43 +606,55 @@
       {
         prop: 'status',
         label: '启停状态',
-        width: 100,
+        minWidth: 100,
+        // 被停用的设备同样不会上报，排查时必须与在线状态一起看；平板起显示。
+        hideBelow: 'tablet',
         formatter: (row) => statusDict.render(row.status)
       },
       {
         prop: 'lastSeenAt',
         label: '最后上报',
-        width: 170,
+        minWidth: 170,
+        // 「失联多久」是离线的第一追问，平板起显示；更细的采样时刻见水位列。
+        hideBelow: 'tablet',
         formatter: (row) => fmtUnixSeconds(row.lastSeenAt)
       },
       // 水位三列来自列表接口拼的 Redis latest：缺值时**整个字段不出现**
       // （omitempty），一律显示「—」，不得把缺值当成 0。
       // 渲染成「条 + 数值」：多列并排时**条**负责一眼比高低，**数值**负责精确值，
       // 缺值则由组件渲染「—」且不画空条（空条会被误读成 0%）。见 watermark-bar.vue。
+      // 三列合计 360px：窄屏（含平板竖屏）完整看水位去总览页的快照表，桌面起在列表内联显示。
       {
         prop: 'cpuUsedPercent',
         label: 'CPU 使用率',
-        width: 120,
+        minWidth: 120,
+        hideBelow: 'desktop',
         formatter: (row) => h(WatermarkBar, { value: row.cpuUsedPercent })
       },
       {
         prop: 'memUsedPercent',
         label: '内存使用率',
-        width: 120,
+        minWidth: 120,
+        hideBelow: 'desktop',
         formatter: (row) => h(WatermarkBar, { value: row.memUsedPercent })
       },
       {
         prop: 'diskUsedPercent',
         label: '磁盘使用率',
-        width: 120,
+        minWidth: 120,
+        hideBelow: 'desktop',
         formatter: (row) => h(WatermarkBar, { value: row.diskUsedPercent })
       },
       {
         prop: 'watermarkAt',
         label: '水位采样时间',
-        width: 170,
+        minWidth: 170,
+        // 最细粒度的时间元数据（与水位列配套核对数据新鲜度），桌面起显示。
+        hideBelow: 'desktop',
         formatter: (row) => fmtUnixSeconds(row.watermarkAt)
       },
+      // 操作列固定右侧、宽随按钮数计算（结构性列），任何宽度都不隐藏：
+      // 窄屏放不下的次要动作本来就已收进「更多」下拉。
       ...(operationColumnConfig ? [operationColumnConfig] : [])
     ]
   })
