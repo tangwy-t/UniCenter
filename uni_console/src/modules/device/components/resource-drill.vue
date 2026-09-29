@@ -230,13 +230,18 @@
 </script>
 
 <style lang="scss" scoped>
+  @use '@styles/core/breakpoints.scss' as *;
+
   .rd {
     display: grid;
     grid-template-columns: 220px minmax(0, 1fr);
     gap: 16px;
 
-    /* 窄屏：左栏折到上方，避免把图表挤成一条缝 */
-    @media (max-width: 900px) {
+    /* 窄屏：左栏折到上方，避免把图表挤成一条缝。
+       阈值由 900 上移到 desktop（<1024）——**有意的行为变更**：手机横屏
+       约 844px 必须折成单栏；若按字面映射到 tablet（768），768–900 区间
+       仍是「220px 侧栏 + 图表」两栏，趋势图会被压扁，违背本段注释的意图。 */
+    @include respond-below('desktop') {
       grid-template-columns: minmax(0, 1fr);
     }
   }
@@ -245,7 +250,8 @@
     padding-right: 12px;
     border-right: 1px solid var(--art-card-border);
 
-    @media (max-width: 900px) {
+    /* 与 .rd 同一折点：折成单栏后，侧栏的竖分隔线转为横向分隔线。 */
+    @include respond-below('desktop') {
       padding-right: 0;
       padding-bottom: 12px;
       border-right: 0;

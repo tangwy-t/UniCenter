@@ -677,6 +677,8 @@
 <style lang="scss" scoped>
   /* 设备模块共享设计令牌（数值与服务监控 monitor-tokens 一致，见该文件注释） */
   @use './device-tokens' as t;
+  /* 断点单一事实源：JS 侧见 src/config/breakpoints.ts */
+  @use '@styles/core/breakpoints.scss' as *;
 
   @include t.rise-keyframes;
   @include t.pulse-keyframes;
@@ -984,8 +986,10 @@
     }
   }
 
-  /* 窄屏：一律单列。图表在窄屏并排会窄到无法读数。 */
-  @media (max-width: 1200px) {
+  /* 窄屏：一律单列。图表在窄屏并排会窄到无法读数。
+     原阈值 1200 映射到断点表中最接近的 compact（1180）：仅 1180–1200
+     这 20px 区间由两列变单列，是有意的口径收敛（不再保留 1200 这个魔数）。 */
+  @include respond-below('compact') {
     .do-charts {
       grid-template-columns: minmax(0, 1fr);
 
@@ -995,7 +999,9 @@
     }
   }
 
-  @media (max-width: 768px) {
+  /* 手机上筛选控件撑满整行（原 max-width: 768 与表内 tablet 同值，语义等价；
+     mixin 输出 767.98px 收口，仅 768 整点这一像素的边界差异）。 */
+  @include respond-below('tablet') {
     .do-filter__host,
     .do-filter__status {
       width: 100%;

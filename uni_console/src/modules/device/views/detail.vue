@@ -439,6 +439,7 @@
     PermDeviceUpgrade
   } from '@/enums/permission'
   import { useAuth } from '@/hooks/core/useAuth'
+  import { useAppBreakpoints } from '@/hooks/core/useAppBreakpoints'
   import {
     clearDeviceUpgradeTarget,
     disableDevice,
@@ -468,6 +469,7 @@
   const route = useRoute()
   const router = useRouter()
   const { hasAuth } = useAuth()
+  const { smaller } = useAppBreakpoints()
 
   const deviceId = computed(() => String(route.params.id ?? ''))
 
@@ -629,12 +631,15 @@
     hideEmptyFields.value ? filterFilledGroups(infoGroups.value) : infoGroups.value
   )
 
-  const infoColumns = ref(3)
-  function updateColumns() {
-    if (typeof window === 'undefined') return
-    const w = window.innerWidth
-    infoColumns.value = w >= 1280 ? 4 : w >= 992 ? 3 : w >= 768 ? 2 : 1
-  }
+  // 信息栅格的列数只跟视口宽度有关，故走断点钩子（matchMedia 驱动、随视口自动重算），
+  // 不再手写 resize 监听。阈值取断点表的 xl/desktop/tablet：原先的 992 是历史魔数，
+  // 按上游统一口径的做法收敛到 desktop（1024）—— 仅 992–1023 这 32px 区间由 3 列变 2 列。
+  const infoColumns = computed(() => {
+    if (!smaller('xl').value) return 4
+    if (!smaller('desktop').value) return 3
+    if (!smaller('tablet').value) return 2
+    return 1
+  })
 
   const activeTab = ref<'machine' | 'drill'>('machine')
 
@@ -959,10 +964,7 @@
     () => syncFromQuery()
   )
 
-  updateColumns()
-  if (typeof window !== 'undefined') window.addEventListener('resize', updateColumns)
   onUnmounted(() => {
-    if (typeof window !== 'undefined') window.removeEventListener('resize', updateColumns)
     stopAutoRefresh()
   })
 

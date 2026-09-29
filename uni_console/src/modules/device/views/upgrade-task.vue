@@ -372,6 +372,7 @@
 
 <style lang="scss" scoped>
   @use '../views/device-tokens' as t;
+  @use '@styles/core/breakpoints.scss' as *;
 
   @include t.rise-keyframes;
   @include t.pulse-keyframes;
@@ -400,7 +401,9 @@
     grid-template-columns: minmax(0, 1fr);
     gap: 16px;
 
-    @media (min-width: 1280px) {
+    /* 宽屏起「固定宽列表 + 自适应详情」两栏并排
+       （1280 与断点表 xl 同值，纯口径统一，行为等价） */
+    @include respond-at-least('xl') {
       grid-template-columns: 26rem minmax(0, 1fr);
     }
   }
