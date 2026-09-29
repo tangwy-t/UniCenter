@@ -264,7 +264,7 @@ run: uni_core-run ## 运行后端(带前端时请配合 uni_console-dev)
 
 test: uni_core-test uni_protocol-test uni_agent-test uni_console-test ## 全量测试(uni_core + uni_protocol + uni_agent + uni_console)
 
-lint: uni_core-lint uni_protocol-lint uni_agent-lint uni_console-lint ## 全量静态检查(uni_core + uni_protocol + uni_agent + uni_console)
+lint: uni_core-lint uni_protocol-lint uni_agent-lint uni_console-lint compose-check ## 全量静态检查(uni_core + uni_protocol + uni_agent + uni_console + compose)
 
 fmt: uni_core-fmt uni_protocol-fmt uni_agent-fmt uni_console-fmt ## 全量格式化(uni_core + uni_protocol + uni_agent + uni_console)
 
@@ -278,6 +278,18 @@ clean: uni_core-clean ## 清理(后端与 agent 产物;前端 dist 请在 uni_co
 ## ───────────────────────────────────────────────────────────
 ## Docker 编排(根目录 docker-compose.yml)
 ## ───────────────────────────────────────────────────────────
+# compose-check: 解析校验 docker-compose.yml。YAML 映射里同一个键写两遍(典型来源:
+# 上游同步时两边各加一个同名环境变量)会让 `docker compose up` 直接报
+# "mapping key ... already defined" 而失败,但肉眼看文件看不出来。
+# 未装 docker CLI 时跳过并出提示,避免门禁在无 docker 的机器上变成噪音;
+# .env 缺失时注入探针值(DATABASE_USER/PASSWORD 是 compose 里的必填项)。
+compose-check: ## 校验 docker-compose.yml 可解析(重复键/语法)
+	@if command -v docker >/dev/null 2>&1; then \
+		DATABASE_USER=probe DATABASE_PASSWORD=probe docker compose -f docker-compose.yml config -q \
+			&& echo "compose-check: OK"; \
+	else \
+		echo "compose-check: 跳过(未安装 docker CLI)"; \
+	fi
 # docker-build: 计算版本三件套并注入 uni_core 镜像(监控页「构建时间/提交 Hash」
 # 数据源)。直接 docker compose build 不传参时,Dockerfile 兜底为
 # BUILD_TIME=构建时刻、VERSION=docker、COMMIT_HASH=unknown。
