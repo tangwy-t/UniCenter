@@ -106,6 +106,9 @@ type Deps struct {
 	DockerResult DockerCmdCompleter
 	// DockerConfig 是 hello_ack 里 docker 配置块的来源。nil = 不带该块（老 core 行为）。
 	DockerConfig DockerConfigProvider
+	// DockerFrames 是流数据帧（日志/PTY）的投递面（由 dockerstream.Registry 实现）。
+	// nil = 未装配：帧被丢弃（与「流通道未接线」表现一致），不影响连接存活。
+	DockerFrames DockerFrameDeliverer
 }
 
 // socket 是连接的入站/控制通路。生产态就是 `*websocket.Conn`（NewConn 收它），

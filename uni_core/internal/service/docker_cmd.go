@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"time"
 
 	"go.uber.org/zap"
@@ -14,6 +15,7 @@ import (
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/apperror"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockerpolicy"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockerstate"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockerstream"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
 	agentproto "github.com/tangwy-t/UniCenter/uni_protocol"
 )
@@ -33,6 +35,15 @@ type DockerCmdSender interface {
 	SendToDevice(deviceID uint64, msg *agentproto.Message) error
 }
 
+// DockerSessionCounter 是「该设备当前有几条流会话」的能力面（由 dockerstream.Registry 满足）。
+//
+// 上限与 agent 侧同值（3）；core 在受理处先拒是为了给出**更好的结论句** ——
+// agent 的 errStreamLimit 要等一条 result 回来才可见，而用户在点下「终端」时
+// 就该知道「先关掉其它日志或终端」。
+type DockerSessionCounter interface {
+	CountByDevice(deviceID uint64) int
+}
+
 // DockerCmdService 是 docker 域的下发面。
 type DockerCmdService struct {
 	cmds   *dockerstate.CmdStore
@@ -46,6 +57,15 @@ type DockerCmdService struct {
 	// idGen 生成指令号（ref）。字段而非常量：装配与测试可以替换成
 	// 进程级雪花节点生成的十进制串（见 newDockerRef 的说明）。
 	idGen func() string
+	// sessions 是流会话计数面（三期）。nil = 未装配：跳过上限预检
+	//（agent 侧仍有 3 条上限兜底），不影响其余受理路径。
+	sessions DockerSessionCounter
+}
+
+// WithStreamSessions 注入流会话计数面（三期日志 Follow / 终端的上限预检）。
+func (s *DockerCmdService) WithStreamSessions(c DockerSessionCounter) *DockerCmdService {
+	s.sessions = c
+	return s
 }
 
 // NewDockerCmdService 构造下发面。
@@ -53,6 +73,15 @@ func NewDockerCmdService(cmds *dockerstate.CmdStore, sender DockerCmdSender,
 	store *dockerstate.Store, log logger.LoggerInterface) *DockerCmdService {
 	return &DockerCmdService{cmds: cmds, sender: sender, store: store, log: log,
 		now: time.Now, idGen: newDockerRef}
+}
+
+// createsStreamSession 报告一条指令是否会建立流会话（上限预检的依据）：
+// 会话制 action（exec），或带 follow=true 的 container:logs。
+func createsStreamSession(pol dockerpolicy.Policy, action string, opts *agentproto.DockerCmdOptions) bool {
+	if pol.Session {
+		return true
+	}
+	return action == agentproto.DockerActionContainerLogs && opts != nil && opts.Follow
 }
 
 // newDockerRef 是 idGen 的缺省实现。
@@ -87,11 +116,8 @@ func (s *DockerCmdService) Send(ctx context.Context, userID, deviceID uint64, re
 	}
 	if pol.Phase > dockerpolicy.CurrentPhase {
 		// 期次闸：页面不该渲染这些按钮，服务端这道闸是它的兜底（curl 也过不去）。
-		return "", apperror.BadRequest("该操作尚未开放")
-	}
-	if pol.Session {
-		// 会话制指令（exec）需要流通道（三期）：它的「结果」是会话句柄，
-		// 而一期没有任何机制把句柄变成可用的终端 —— 受理它只会留下一个悬空会话。
+		// 会话制指令（exec）三期已交付：它的期次由同一张表的 Phase 列表达，
+		// 不再需要一条单独的分支（曾经的「三期未接线 → 一律拒绝」已随流通道落地）。
 		return "", apperror.BadRequest("该操作尚未开放")
 	}
 	opts := toProtocolOptions(req)
@@ -115,6 +141,14 @@ func (s *DockerCmdService) Send(ctx context.Context, userID, deviceID uint64, re
 		}
 	}
 
+	// 流会话上限**先拒**（三期）：与 agent 的会话槽位同上限（3）。放在在飞去重
+	// 之前：这是「这台机器上已经开了几条流」的资源结论，与「同目标是否已有指令」
+	// 无关 —— 用户先看到哪句更可行动，就该先说哪句。
+	if s.sessions != nil && createsStreamSession(pol, req.Action, opts) &&
+		s.sessions.CountByDevice(deviceID) >= dockerstream.MaxSessionsPerDevice {
+		return "", apperror.Conflict("该主机同时在跑的流会话已达上限（最多 3 个），请先关闭其它日志或终端")
+	}
+
 	if ref, err := s.cmds.Inflight(ctx, deviceID, req.Action, opts.Target); err != nil {
 		return "", apperror.Internal("内部错误", err)
 	} else if ref != "" {
@@ -125,7 +159,9 @@ func (s *DockerCmdService) Send(ctx context.Context, userID, deviceID uint64, re
 		Ref: s.idGen(), DeviceID: deviceID, Action: req.Action, Target: opts.Target,
 		UserID: userID, Perm: pol.Perm, Confirm: req.Confirm, CreatedAt: s.now().UnixMilli(),
 	}
-	if err := s.cmds.Create(ctx, rec, pol.Timeout); err != nil {
+	// 会话制的 sweep 时限是**建立窗口**（见 dockerpolicy.SessionSetupTimeout）：
+	// 会话建立后记录已终结，生命周期交给流通道。
+	if err := s.cmds.Create(ctx, rec, pol.AcceptTimeout()); err != nil {
 		return "", apperror.Internal("内部错误", err)
 	}
 
@@ -247,6 +283,11 @@ func toProtocolOptions(req *request.DockerCmdReq) *agentproto.DockerCmdOptions {
 	if o.Volumes != nil {
 		opts.Volumes = *o.Volumes
 	}
+	if o.Follow != nil {
+		opts.Follow = *o.Follow
+	}
+	// argv 复制一份：协议载荷会被编码进消息，不该继续持有请求体里的切片。
+	opts.Command = slices.Clone(o.Command)
 	opts.Filename = o.Filename
 	opts.Content = o.Content
 	opts.BaseHash = o.BaseHash
@@ -261,5 +302,8 @@ func toProtocolOptions(req *request.DockerCmdReq) *agentproto.DockerCmdOptions {
 			opts.Patch = patch
 		}
 	}
+	// 回滚令牌（四期）：形态校验在协议层（严格 `YYYYMMDD-HHMMSS`），core 只负责透传 ——
+	// 这里不解析、不拼路径（路径由 agent 从自己的解析结果重建）。
+	opts.Backup = o.Backup
 	return opts
 }

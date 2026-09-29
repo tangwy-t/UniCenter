@@ -109,6 +109,9 @@ type DockerVolumeItem struct {
 	SizeMB    *float64 `json:"sizeMb,omitempty"`
 	InUse     bool     `json:"inUse"`
 	MountedBy []string `json:"mountedBy,omitempty"`
+	// Protected 来自 agent 的结论（volume:<名>），前端不重复实现判断。
+	// 不带 omitempty：与 DockerContainerItem.Protected 同一形态（0 是真实值）。
+	Protected bool `json:"protected"`
 }
 
 // DockerNetworkItem 是网络列表的一行。
@@ -127,6 +130,8 @@ type DockerProjectItem struct {
 	State           string   `json:"state,omitempty"`
 	Services        int      `json:"services"`
 	ContainersCount int      `json:"containersCount"`
+	// Protected 来自 agent 的结论（project:<名>）；服务粒度由容器条目承载。
+	Protected bool `json:"protected"`
 }
 
 // DockerCmdResp 是受理响应的载荷（202）。
@@ -145,6 +150,10 @@ type DockerCmdResultResp struct {
 	Detail        string `json:"detail,omitempty"`
 	SessionID     string `json:"sessionId,omitempty"`
 	AlreadyExists bool   `json:"alreadyExists,omitempty"`
+	// StreamTicket 是一次性流票据（三期）：指令建立了流会话时，**每次**轮询响应
+	// 都新签一张（TTL 30s、单次使用，绑定 userId+sessionId+deviceId）。前端接流
+	// 时用**最新**的那张；票据不进日志、不上报，只在该响应里出现。
+	StreamTicket string `json:"streamTicket,omitempty"`
 	// Payload 是结果数据面（按 action 形态不同；前端按 action 解析）。
 	Payload any `json:"payload,omitempty"`
 }

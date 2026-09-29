@@ -107,10 +107,15 @@ func TestPolicyPermissionsAreRegistered(t *testing.T) {
 	}
 }
 
-// 一期只交付只读四个：CurrentPhase 与这批 action 一致（多一个 = 页面会出现点不通的按钮）。
+// CurrentPhase 与**已交付期的 action 集合**一致：少放行一条 = 页面缺一个该有的按钮；
+// 多放行一条（尚未交付的期）= 页面会出现点不通的按钮（服务端期次闸会 400）。
+//
+// 四期把期次放到 4：断言随之升级为「全表 29 条都在 live 里」—— 配置编辑
+// （compose.file:write/validate/patch）已随 agent 0.5.4 落地，交付边界推到全表尽头，
+// 此后新增 action 才需要重新审视这条断言。
 func TestCurrentPhaseActions(t *testing.T) {
-	if CurrentPhase != 1 {
-		t.Fatalf("一期应把 CurrentPhase 定为 1，实际 %d", CurrentPhase)
+	if CurrentPhase != 4 {
+		t.Fatalf("四期应把 CurrentPhase 定为 4，实际 %d", CurrentPhase)
 	}
 	live := map[string]bool{}
 	for _, p := range All() {
@@ -118,20 +123,56 @@ func TestCurrentPhaseActions(t *testing.T) {
 			live[p.Action] = true
 		}
 	}
+	// 一期只读四条 + 二期操作面全量（启停/删除/prune/pull/tag/save/load/compose 操作）
+	// + 三期会话制（exec；日志 Follow 复用一期 action，由 options.follow 表达）
+	// + 四期配置编辑（validate/write/patch —— 回滚也走 write，由 options.backup 表达）。
 	for _, a := range []string{
 		agentproto.DockerActionContainerInspect, agentproto.DockerActionContainerLogs,
 		agentproto.DockerActionImageInspect, agentproto.DockerActionComposeFileRead,
+		agentproto.DockerActionContainerStart, agentproto.DockerActionContainerStop,
+		agentproto.DockerActionContainerRestart, agentproto.DockerActionContainerRemove,
+		agentproto.DockerActionImageRemove, agentproto.DockerActionImagePrune,
+		agentproto.DockerActionImagePull, agentproto.DockerActionImageTag,
+		agentproto.DockerActionImageSave, agentproto.DockerActionImageLoad,
+		agentproto.DockerActionVolumeRemove, agentproto.DockerActionVolumePrune,
+		agentproto.DockerActionNetworkRemove,
+		agentproto.DockerActionComposeUp, agentproto.DockerActionComposeStop,
+		agentproto.DockerActionComposeStart, agentproto.DockerActionComposeRestart,
+		agentproto.DockerActionComposePull, agentproto.DockerActionComposeDown,
+		agentproto.DockerActionComposeServiceScale,
+		agentproto.DockerActionComposeServiceRemoveContainers,
+		agentproto.DockerActionContainerExec,
+		agentproto.DockerActionComposeFileValidate,
+		agentproto.DockerActionComposeFileWrite,
+		agentproto.DockerActionComposeFilePatch,
 	} {
 		if !live[a] {
-			t.Fatalf("一期应放行 %s", a)
+			t.Fatalf("已交付期的 action 应放行 %s", a)
 		}
 	}
-	for _, a := range []string{
-		agentproto.DockerActionContainerStart, agentproto.DockerActionImagePrune,
-		agentproto.DockerActionComposeDown, agentproto.DockerActionComposeFilePatch,
-	} {
-		if live[a] {
-			t.Fatalf("%s 不属于一期，不该放行（页面会因此出现点不通的按钮）", a)
-		}
+	// 全表放行：协议白名单与本表双向一致（TestPolicyCoversProtocolWhiteList）之外的
+	// 额外断言 —— live 必须覆盖 All()，没有「登记了却期次未到」的幽灵行。
+	if len(live) != len(All()) {
+		t.Fatalf("期次 4 之后 live 应覆盖全表 %d 条，实际 %d 条", len(All()), len(live))
+	}
+}
+
+// AcceptTimeout 是受理记录的 sweep 时限：会话制用建立窗口（SessionSetupTimeout），
+// 其余沿用 Policy.Timeout。exec 的 Timeout=0 直接进 Create 会在下一轮 sweep 被
+// 判成 timeout —— 这条断言盯住的正是那个「正在建立的会话被服务端提前判死」的坑。
+func TestPolicyAcceptTimeout(t *testing.T) {
+	if got := SessionSetupTimeout; got <= 0 || got > time.Minute {
+		t.Fatalf("会话建立窗口应在 (0, 1m]，实际 %v", got)
+	}
+	exec, ok := Lookup(agentproto.DockerActionContainerExec)
+	if !ok || !exec.Session {
+		t.Fatal("exec 必须是会话制")
+	}
+	if got := exec.AcceptTimeout(); got != SessionSetupTimeout {
+		t.Fatalf("会话制的受理时限应为建立窗口 %v，实际 %v", SessionSetupTimeout, got)
+	}
+	logs, _ := Lookup(agentproto.DockerActionContainerLogs)
+	if got := logs.AcceptTimeout(); got != logs.Timeout {
+		t.Fatalf("非会话制必须沿用策略超时 %v，实际 %v", logs.Timeout, got)
 	}
 }

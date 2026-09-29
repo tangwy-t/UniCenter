@@ -155,14 +155,14 @@ func TestDockerServiceStateMapsFullSnapshot(t *testing.T) {
 		}},
 		Volumes: []agentproto.DockerVolume{{
 			Name: "uni-center-uploads", Driver: "local", SizeMB: &sizeMB,
-			InUse: true, MountedBy: []string{"uni-center-core"},
+			InUse: true, MountedBy: []string{"uni-center-core"}, Protected: true,
 		}},
 		Networks: []agentproto.DockerNetwork{{
 			Name: "bridge", Driver: "bridge", Scope: "local", Internal: true, ContainersCount: 8,
 		}},
 		Projects: []agentproto.DockerProject{{
 			Name: "uni-center", ConfigFiles: []string{"/data/UniCenter/docker-compose.yml"},
-			State: "running", Services: 2, ContainersCount: 2,
+			State: "running", Services: 2, ContainersCount: 2, Protected: true,
 		}},
 	}
 	if err := store.Save(ctx, 7, st, now.Add(-5*time.Second)); err != nil {
@@ -204,7 +204,7 @@ func TestDockerServiceStateMapsFullSnapshot(t *testing.T) {
 	}
 	wantVolume := response.DockerVolumeItem{
 		Name: "uni-center-uploads", Driver: "local", SizeMB: &sizeMB,
-		InUse: true, MountedBy: []string{"uni-center-core"},
+		InUse: true, MountedBy: []string{"uni-center-core"}, Protected: true,
 	}
 	if len(resp.Volumes) != 1 || !reflect.DeepEqual(resp.Volumes[0], wantVolume) {
 		t.Fatalf("卷字段未逐项映射: got %+v want %+v", resp.Volumes, wantVolume)
@@ -215,7 +215,7 @@ func TestDockerServiceStateMapsFullSnapshot(t *testing.T) {
 	}
 	wantProject := response.DockerProjectItem{
 		Name: "uni-center", ConfigFiles: []string{"/data/UniCenter/docker-compose.yml"},
-		State: "running", Services: 2, ContainersCount: 2,
+		State: "running", Services: 2, ContainersCount: 2, Protected: true,
 	}
 	if len(resp.Projects) != 1 || !reflect.DeepEqual(resp.Projects[0], wantProject) {
 		t.Fatalf("项目字段未逐项映射: got %+v want %+v", resp.Projects, wantProject)

@@ -281,6 +281,7 @@ func toVolumeItem(v agentproto.DockerVolume) response.DockerVolumeItem {
 		Driver:    v.Driver,
 		InUse:     v.InUse,
 		MountedBy: slices.Clone(v.MountedBy),
+		Protected: v.Protected,
 	}
 	if v.SizeMB != nil {
 		// 复制值而不是共享指针：响应与 Redis 里那份快照不该引用同一块存储 ——
@@ -308,5 +309,6 @@ func toProjectItem(p agentproto.DockerProject) response.DockerProjectItem {
 		State:           p.State,
 		Services:        p.Services,
 		ContainersCount: p.ContainersCount,
+		Protected:       p.Protected,
 	}
 }

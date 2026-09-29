@@ -535,8 +535,21 @@ func Setup(deps Dependencies) *gin.Engine {
 			// 指令面：**无静态 perm**（权限按 action 决定，见 DockerDeps 的说明）。
 			docker.POST("/hosts/:id/cmds", deps.Docker.Hdl.SendCmd)
 			docker.GET("/hosts/:id/cmds/:ref", deps.Docker.Hdl.CmdResult)
+			// 日志流（三期）：**留在 auth 组**——日志走 fetch + ReadableStream，
+			// 浏览器能给这条请求带 Authorization 头；权限码与归属在处理器内判定。
+			docker.GET("/hosts/:id/cmds/:ref/stream", deps.Docker.Hdl.LogStream)
 		}
 	}
+
+	// 终端流（三期）：**必须挂在 api 组、不得挪进 auth 组** —— 浏览器的 WebSocket
+	// 带不了 Authorization 头，凭据是 result 里签发的一次性 ticket（30s、单次、
+	// 绑 userId+sessionId+device）。挂进 auth 组会让**每一次**终端连接在握手阶段
+	// 收到 401（正文是「未登录或 token 已过期」而不是票据结论），页面表现为
+	// 「终端永远连不上」—— 与 /agent/ws、/agent/releases/:version/download 同型的坑
+	//（2026-09-28 生产联调实测：日志流正常、终端 401，根因就在这里）。
+	// 权限不靠 JWT：票据只可能签发给「已通过 JWT + 权限码 + 归属校验」的人，
+	// 验证链在签发端（见 service/docker_stream.go 的 IssueTicket）。
+	api.GET("/docker/hosts/:id/stream/exec", deps.Docker.Hdl.ExecStream)
 
 	// WebSocket
 	api.GET("/ws", wsPkg.HandleUpgrade(deps.Infra.Hub, deps.Infra.Logger))

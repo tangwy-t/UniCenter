@@ -219,6 +219,14 @@ github.com/tangwy-t/UniCenter/uni_protocol v1.1.0 h1:VdISs6+XjOfoLsAAi8of2Eybg3s
 github.com/tangwy-t/UniCenter/uni_protocol v1.1.0/go.mod h1:EN9rQb1mvDpKN/cJWvbMvBBBCzFbSc4svvR386kqDRQ=
 github.com/tangwy-t/UniCenter/uni_protocol v1.2.0 h1:kOJGS3IYJBdcRxetu2thOb5Kjg6oCpsavTMZH+OdspI=
 github.com/tangwy-t/UniCenter/uni_protocol v1.2.0/go.mod h1:EN9rQb1mvDpKN/cJWvbMvBBBCzFbSc4svvR386kqDRQ=
+github.com/tangwy-t/UniCenter/uni_protocol v1.2.1 h1:dCLvp5MA+hVqMgcUd2TWouNFOzLgF+juriIorv1QmJ8=
+github.com/tangwy-t/UniCenter/uni_protocol v1.2.1/go.mod h1:EN9rQb1mvDpKN/cJWvbMvBBBCzFbSc4svvR386kqDRQ=
+github.com/tangwy-t/UniCenter/uni_protocol v1.2.2 h1:caPhqpgiyJJjqBfRoOYyYWrUZDHJcoD0OcScEsitTtw=
+github.com/tangwy-t/UniCenter/uni_protocol v1.2.2/go.mod h1:EN9rQb1mvDpKN/cJWvbMvBBBCzFbSc4svvR386kqDRQ=
+github.com/tangwy-t/UniCenter/uni_protocol v1.2.3 h1:tFWdzBQYpcBeHLJTB0Oy+oMm/Q37SOvtwU+/jIReJQA=
+github.com/tangwy-t/UniCenter/uni_protocol v1.2.3/go.mod h1:EN9rQb1mvDpKN/cJWvbMvBBBCzFbSc4svvR386kqDRQ=
+github.com/tangwy-t/UniCenter/uni_protocol v1.2.4 h1:gPMSEv35zVZ9k2haPtY7slYSesBPYLmuwW0iSDCbbL4=
+github.com/tangwy-t/UniCenter/uni_protocol v1.2.4/go.mod h1:EN9rQb1mvDpKN/cJWvbMvBBBCzFbSc4svvR386kqDRQ=
 github.com/tklauser/go-sysconf v0.3.12 h1:0QaGUFOdQaIVdPgfITYzaTegZvdCjmYO52cSFAEVmqU=
 github.com/tklauser/go-sysconf v0.3.12/go.mod h1:Ho14jnntGE1fpdOqQEEaiKRpvIavV0hSfmBq8nJbHYI=
 github.com/tklauser/numcpus v0.6.1 h1:ng9scYS7az0Bk4OZLvrNXNSAO2Pxr1XXRAPyjhIx+Fk=

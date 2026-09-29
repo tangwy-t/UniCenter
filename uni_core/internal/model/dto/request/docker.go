@@ -33,4 +33,14 @@ type DockerCmdOptionsReq struct {
 	Src           string          `json:"src"`
 	Dst           string          `json:"dst"`
 	Patch         json.RawMessage `json:"patch"`
+	// Follow 是 container:logs 的流式开关（三期）：true 时 agent 建日志流会话，
+	// 结果回 session_id，数据走 /cmds/:ref/stream。缺省/显式 false = 一次性取。
+	Follow *bool `json:"follow"`
+	// Command 是 container:exec 的 argv（三期）；缺省由协议定（["/bin/sh"]）。
+	// 校验在协议层（≤32 项、每项 ≤256B、不得含 NUL/换行），core 不重复实现。
+	Command []string `json:"command"`
+	// Backup 是 compose.file:write 的**回滚模式**（四期）：值是备份令牌
+	// （`YYYYMMDD-HHMMSS`），带它则不需要 content。**协议上永远不出现路径** ——
+	// agent 用令牌自行重建 `<配置文件>.bak-<令牌>`（§8 路径白名单纪律）。
+	Backup string `json:"backup"`
 }

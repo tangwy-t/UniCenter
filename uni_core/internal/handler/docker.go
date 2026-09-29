@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 
 	"github.com/tangwy-t/UniCenter/uni_core/internal/middleware"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/request"
@@ -12,6 +13,7 @@ import (
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/apperror"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/jwt"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/permission"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/service"
 )
 
@@ -36,13 +38,17 @@ type DockerHandler struct {
 	svc   *service.DockerService
 	cmds  *service.DockerCmdService
 	guard PermChecker
-	log   logger.LoggerInterface
+	// streams 是流通道面（三期）：结果签票据、日志 NDJSON、终端 WebSocket。
+	// nil = 未装配：流端点整体不可用（路由仍在，处理器给出 500 语义），
+	// 结果轮询不带 streamTicket —— 与「三期未交付」表现一致。
+	streams *service.DockerStreamService
+	log     logger.LoggerInterface
 }
 
 // NewDockerHandler 构造 handler。
 func NewDockerHandler(svc *service.DockerService, cmds *service.DockerCmdService,
-	guard PermChecker, log logger.LoggerInterface) *DockerHandler {
-	return &DockerHandler{svc: svc, cmds: cmds, guard: guard, log: log}
+	streams *service.DockerStreamService, guard PermChecker, log logger.LoggerInterface) *DockerHandler {
+	return &DockerHandler{svc: svc, cmds: cmds, streams: streams, guard: guard, log: log}
 }
 
 // Hosts 返回可管主机清单（docker:list）。
@@ -102,6 +108,8 @@ func (h *DockerHandler) State(c *gin.Context) {
 //  1. 先解参数与 body —— 没有 action 就无从知道要校验哪个权限码；
 //  2. **权限早于业务**：无权限的请求不该被受理、也不该暴露「这个 action 存不存在」
 //     （未知 action 归 400，但它排在权限之后只需一次 403 就能挡住探测）；
+//     action 的权限之外，body 里 `options.force=true` 还要再过一次 docker:exec 级
+//     权限（保护档的风险等价于 root shell）—— 两关都过了才轮到业务；
 //  3. 身份由 middleware 提供，缺了就是 401；
 //  4. 受理失败的错误形态由 service 决定（409 在飞 / 400 期次闸 / 500 设备离线），
 //     handler 只负责转达 —— 在这里再判断一次就会多出第二处口径。
@@ -117,7 +125,7 @@ func (h *DockerHandler) State(c *gin.Context) {
 // @Success      202  {object}  app.Response{data=response.DockerCmdResp}  "已受理（data.ref 为指令号）"
 // @Failure      400  {object}  app.Response  "参数错误 / 未知操作 / 该操作尚未开放"
 // @Failure      401  {object}  app.Response  "未登录"
-// @Failure      403  {object}  app.Response  "无操作权限"
+// @Failure      403  {object}  app.Response  "无操作权限（force=true 时还要求 docker:exec 级）"
 // @Failure      409  {object}  app.Response  "该目标上已有同一条指令在执行"
 // @Failure      500  {object}  app.Response  "设备离线 / docker 不可用 / 内部错误"
 // @Router       /docker/hosts/{id}/cmds [post]
@@ -141,6 +149,17 @@ func (h *DockerHandler) SendCmd(c *gin.Context) {
 	if !h.guard.Ensure(c, perm) {
 		return // Ensure 已写好 403（或 401/500），此处不得再写响应
 	}
+	// force 是「对受保护目标动手」的开关：保护清单（agent 侧 guard）对受保护目标的
+	// 停/删/重建默认拒绝，force=true 是唯一越过它的方式 —— 其风险等价于 root shell
+	//（spec §10 保护档，「uni-center 把自己删了」没有第二次机会），故它要求
+	// docker:exec 级权限（admin 通配同样放行）。这与「能不能删东西」（docker:delete）
+	// 刻意分开授予：持有 docker:delete 的人**不能** force —— 这正是「先停再删」
+	// 两步绕过保护清单被堵住的地方。
+	if req.Options != nil && req.Options.Force != nil && *req.Options.Force {
+		if !h.guard.Ensure(c, permission.PermDockerExec) {
+			return // 同上：Ensure 已写好 403
+		}
+	}
 	uid, ok := currentUserID(c)
 	if !ok {
 		app.Error(c, apperror.Unauthorized("未登录或 token 已过期"))
@@ -159,14 +178,18 @@ func (h *DockerHandler) SendCmd(c *gin.Context) {
 	})
 }
 
-// CmdResult 轮询指令结果（权限码取自记录，再校验一次归属）。
+// CmdResult 轮询指令结果（权限码取自记录，再校验发起人归属与签发流票据）。
 //
 // 权限**从记录里读**而不是从查询参数里读：记录是服务端写下的，
 // 用户改不了它；而「按 action 参数现算」会让同一个 ref 在不同请求上得到不同的判定。
 // Lookup 已保证「设备不匹配 = 不存在」（404），故此处不会拿别的主机的记录做判定。
 //
+// **归属校验**（spec §10.5）：ref 只对发起人可见。这不是锦上添花 —— 三期起结果
+// 里带着 streamTicket，若同权限用户 B 能轮询 A 的 ref，就能拿到 A 会话的入场券
+// （票据绑的是 A 的 userId），从而劫持 A 的终端。归属在这里拦下，票据才安全。
+//
 // @Summary      轮询 docker 指令结果
-// @Description  按指令号查询状态与载荷（pending/running/succeeded/failed/timeout）
+// @Description  按指令号查询状态与载荷（pending/running/succeeded/failed/timeout）；建立了流会话时附带一次性 streamTicket
 // @Tags         Docker 管理
 // @Produce      json
 // @Param        id   path      uint64  true  "设备ID"
@@ -174,7 +197,7 @@ func (h *DockerHandler) SendCmd(c *gin.Context) {
 // @Security     BearerAuth
 // @Success      200  {object}  app.Response{data=response.DockerCmdResultResp}  "查询成功"
 // @Failure      401  {object}  app.Response  "未登录"
-// @Failure      403  {object}  app.Response  "无操作权限"
+// @Failure      403  {object}  app.Response  "无操作权限 / 非发起人"
 // @Failure      404  {object}  app.Response  "指令不存在或已过期"
 // @Router       /docker/hosts/{id}/cmds/{ref} [get]
 func (h *DockerHandler) CmdResult(c *gin.Context) {
@@ -195,7 +218,31 @@ func (h *DockerHandler) CmdResult(c *gin.Context) {
 	if !h.guard.Ensure(c, rec.Perm) {
 		return // Ensure 已写好 403
 	}
-	app.Success(c, h.cmds.Result(rec))
+	uid, ok := currentUserID(c)
+	if !ok {
+		app.Error(c, apperror.Unauthorized("未登录或 token 已过期"))
+		return
+	}
+	if rec.UserID != uid {
+		app.Error(c, apperror.Forbidden("无权查看该指令的结果"))
+		return
+	}
+	out := h.cmds.Result(rec)
+	// 每次响应签一张**新**票据（plan §0）：前端轮询会取多次，用最新那张接流；
+	// 旧票不过期作废（各自 30s），时序上不存在「刚拿到就被顶掉」。
+	// 签发失败不阻断结果本身（最坏接流时拿到「票据无效」，页面可重试）。
+	if h.streams != nil && rec.SessionID != "" {
+		ticket, err := h.streams.IssueTicket(c.Request.Context(), rec)
+		if err != nil {
+			if h.log != nil {
+				h.log.Warn("docker stream ticket issue failed",
+					zap.String("ref", rec.Ref), zap.String("session", rec.SessionID), zap.Error(err))
+			}
+		} else {
+			out.StreamTicket = ticket
+		}
+	}
+	app.Success(c, out)
 }
 
 // currentUserID 取当前登录用户（身份唯一来源是 middleware.CtxClaims，

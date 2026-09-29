@@ -25,6 +25,14 @@ type DockerConfigProvider interface {
 	DockerConfig(ctx context.Context) *agentproto.DockerConfig
 }
 
+// DockerFrameDeliverer 把一条流数据帧交付给对应的会话（由 dockerstream.Registry 实现）。
+//
+// 返回错误只用于日志口径（会话不存在/已结束是取消后的正常时序），**不影响连接存活**：
+// docker 是搭便车能力，丢弃一帧的代价远小于断连（断连连累指标、心跳、升级）。
+type DockerFrameDeliverer interface {
+	DeliverDockerFrame(ctx context.Context, deviceID uint64, f *agentproto.DockerFrame) error
+}
+
 // ── 三个分派处理 ────────────────────────────────────────────────────────
 //
 // 共同的错误取向：docker 的载荷问题**只丢弃该帧、不断连**（与本文件里指标/升级的
@@ -80,11 +88,11 @@ func (c *Conn) handleDockerResult(ctx context.Context, m *agentproto.Message) bo
 	return true
 }
 
-// handleDockerFrame 处理流数据帧。
+// handleDockerFrame 处理流数据帧：投递给会话注册表（三期接线）。
 //
-// 一期**只丢弃**（流通道在三期接线）：类型已登记，故它不会走「未知类型」路径；
-// 记 Debug 是让「三期没接上」这件事在日志里可见，而不是让人猜数据去哪了。
-func (c *Conn) handleDockerFrame(_ context.Context, m *agentproto.Message) bool {
+// 未装配（DockerFrames == nil）时与三期之前一致地丢弃并记 Debug：docker 域是
+// 可选能力，装配缺失不得影响指标主链路 —— 与另外三个 docker 依赖同一取向。
+func (c *Conn) handleDockerFrame(ctx context.Context, m *agentproto.Message) bool {
 	decoded, err := agentproto.DecodeTypedFor(m, agentproto.DirAgentToCore)
 	if err != nil {
 		c.log.Warn("docker frame rejected (payload)",
@@ -95,7 +103,17 @@ func (c *Conn) handleDockerFrame(_ context.Context, m *agentproto.Message) bool 
 	if !ok {
 		return true
 	}
-	c.log.Debug("agenthub: docker 流帧被丢弃（三期接线）",
-		zap.Uint64("device_id", c.deviceID()), zap.String("session", f.SessionID), zap.Uint64("seq", f.Seq))
+	if c.deps.DockerFrames == nil {
+		c.log.Debug("agenthub: docker 流会话未装配，帧被丢弃",
+			zap.Uint64("device_id", c.deviceID()), zap.String("session", f.SessionID), zap.Uint64("seq", f.Seq))
+		return true
+	}
+	if err := c.deps.DockerFrames.DeliverDockerFrame(ctx, c.deviceID(), f); err != nil {
+		// 会话不存在/已结束（取消、超时、eof 后的迟到帧）是正常时序：Debug 即可。
+		// 归属不符等异常由投递方 Warn（它掌握 device/session 两侧的 id）。
+		c.log.Debug("docker frame not delivered",
+			zap.Uint64("device_id", c.deviceID()), zap.String("session", f.SessionID),
+			zap.Uint64("seq", f.Seq), zap.Error(err))
+	}
 	return true
 }

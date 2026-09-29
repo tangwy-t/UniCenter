@@ -16,6 +16,7 @@ import (
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/apperror"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/database"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockerstate"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockerstream"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/repository"
 )
@@ -67,6 +68,15 @@ type AgentIngestService struct {
 	cmd    *dockerstate.CmdStore
 	cfg    AgentConfigGetter
 	log    logger.LoggerInterface
+	// streams 是流会话登记面（三期；由 dockerstream.Registry 实现）。
+	// nil = 未装配：result 里的 session_id 被忽略（流端点会因此找不到会话），
+	// 不影响指令结果回写本身。
+	streams DockerSessionRegisterer
+}
+
+// DockerSessionRegisterer 是登记一条流会话的能力面（由 dockerstream.Registry 满足）。
+type DockerSessionRegisterer interface {
+	Register(meta dockerstream.Meta) error
 }
 
 func NewAgentIngestService(repo AgentDeviceRepository, raw AgentRawStore, latest AgentLatestStore,
@@ -74,6 +84,12 @@ func NewAgentIngestService(repo AgentDeviceRepository, raw AgentRawStore, latest
 	cfg AgentConfigGetter, log logger.LoggerInterface) *AgentIngestService {
 	return &AgentIngestService{repo: repo, raw: raw, latest: latest,
 		docker: docker, cmd: cmd, cfg: cfg, log: log}
+}
+
+// WithDockerSessions 注入流会话登记面（三期）。装配在 wireup 一处完成。
+func (s *AgentIngestService) WithDockerSessions(r DockerSessionRegisterer) *AgentIngestService {
+	s.streams = r
+	return s
 }
 
 // Enroll 处理带 enroll_token 的首次注册。
@@ -332,7 +348,38 @@ func (s *AgentIngestService) CompleteDockerCmd(ctx context.Context, deviceID uin
 			zap.Uint64("fromDevice", deviceID), zap.Uint64("expectDevice", rec.DeviceID), zap.String("ref", res.Ref))
 		return nil
 	}
-	return s.cmd.Complete(ctx, rec, res)
+	if err := s.cmd.Complete(ctx, rec, res); err != nil {
+		return err
+	}
+	s.registerStreamSession(rec, res)
+	return nil
+}
+
+// registerStreamSession 把「建立了会话的结果」登记进流注册表（三期）。
+//
+// 必须发生在**结果回写成功之后**（记录里要先有 session_id，轮询才能据此签 ticket）；
+// 也必须在本帧处理返回之前 —— 同一连接的读循环按序处理消息，帧一定晚于 result，
+// 登记晚于帧会让会话前几帧（PTY 的首屏输出）永远找不到主人。
+//
+// 登记失败只记日志（不返回错误）：结果已经落库、轮询路径完好，用户最坏看到
+// 「会话不存在或已结束」，而不是「指令失败」。
+func (s *AgentIngestService) registerStreamSession(rec *dockerstate.CmdRecord, res *agentproto.DockerCmdResult) {
+	if s.streams == nil || rec == nil || res == nil || !res.OK || res.SessionID == "" {
+		return
+	}
+	meta := dockerstream.Meta{
+		SessionID: res.SessionID,
+		DeviceID:  rec.DeviceID,
+		UserID:    rec.UserID,
+		Action:    rec.Action,
+		Ref:       rec.Ref,
+		Kind:      dockerstream.KindForAction(rec.Action),
+		CreatedAt: time.Now(),
+	}
+	if err := s.streams.Register(meta); err != nil {
+		s.log.Warn("docker stream session 登记失败（流端点将找不到会话）",
+			zap.String("ref", rec.Ref), zap.String("session", res.SessionID), zap.Error(err))
+	}
 }
 
 // ── 内部工具 ───────────────────────────────────────────

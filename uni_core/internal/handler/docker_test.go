@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/entity"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/agenthub"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockerstate"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockerstream"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/jwt"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/repository"
@@ -26,11 +28,15 @@ import (
 
 // ── 测试替身 ────────────────────────────────────────────────────────────
 
-// fakeDockerSender 是 service.DockerCmdSender 的替身：记录**解码后**的指令。
+// fakeDockerSender 是 service.DockerCmdSender 的替身：记录**解码后**的指令与
+// 下行控制帧（input/resize/cancel）。
 //
-// 断言原始消息只能证明「发出去了点什么」；受理路径的契约是「agent 能解回一条 DockerCmd」。
+// 断言原始消息只能证明「发出去了点什么」；受理路径的契约是「agent 能解回一条 DockerCmd」，
+// 流通道的契约是「agent 能解回一条 CoreDockerFrame」。
 type fakeDockerSender struct {
+	mu      sync.Mutex
 	sent    []*agentproto.DockerCmd
+	frames  []*agentproto.CoreDockerFrame
 	devices []uint64
 	// offline 打开时返回 agenthub.ErrDeviceOffline（受理流程据此不受理、不发 ref）。
 	offline bool
@@ -40,12 +46,40 @@ func (f *fakeDockerSender) SendToDevice(deviceID uint64, msg *agentproto.Message
 	if f.offline {
 		return agenthub.ErrDeviceOffline
 	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.devices = append(f.devices, deviceID)
-	var cmd agentproto.DockerCmd
-	if err := msg.DecodeData(&cmd); err == nil {
-		f.sent = append(f.sent, &cmd)
+	switch msg.Type {
+	case agentproto.TypeCoreDockerCmd:
+		var cmd agentproto.DockerCmd
+		if err := msg.DecodeData(&cmd); err == nil {
+			f.sent = append(f.sent, &cmd)
+		}
+	case agentproto.TypeCoreDockerFrame:
+		var fr agentproto.CoreDockerFrame
+		if err := msg.DecodeData(&fr); err == nil {
+			f.frames = append(f.frames, &fr)
+		}
 	}
 	return nil
+}
+
+// frameOps 返回已送达控制帧的 (op, cols, rows, data) 快照（并发安全）。
+func (f *fakeDockerSender) frameOps() []*agentproto.CoreDockerFrame {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]*agentproto.CoreDockerFrame, len(f.frames))
+	copy(out, f.frames)
+	return out
+}
+
+// deviceIDs 返回已送达消息的设备序列快照（并发安全）。
+func (f *fakeDockerSender) deviceIDs() []uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]uint64, len(f.devices))
+	copy(out, f.devices)
+	return out
 }
 
 // permAuthSvc / permStore / permCfg 是 PermissionGuard 的三个协作者的最小桩。
@@ -97,14 +131,20 @@ func (dockerCfg) GetInt(_ context.Context, _ string, def int) int  { return def 
 
 // dockerTestEnv 汇集一次 docker handler 测试的观测点。
 type dockerTestEnv struct {
-	handler *DockerHandler
-	cmds    *dockerstate.CmdStore
-	store   *dockerstate.Store
-	sender  *fakeDockerSender
+	handler  *DockerHandler
+	cmds     *dockerstate.CmdStore
+	store    *dockerstate.Store
+	sender   *fakeDockerSender
+	sessions *dockerstream.Registry
+	tickets  *dockerstate.TicketStore
+	streams  *service.DockerStreamService
+	redis    *goredis.Client
+	// mr 是 miniredis 实例：票据过期要能被 FastForward 确定性驱动。
+	mr *miniredis.Miniredis
 }
 
 // newTestDockerHandler 构造最小可用的 handler：真守卫（桩掉三个 IO 协作者）+
-// 真实构造的 DockerCmdService（miniredis），sender 为记录型替身。
+// 真实构造的三个 docker 服务（miniredis），sender 为记录型替身。
 func newTestDockerHandler(t *testing.T, perms []string) *dockerTestEnv {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
@@ -114,16 +154,24 @@ func newTestDockerHandler(t *testing.T, perms []string) *dockerTestEnv {
 
 	store := dockerstate.NewStore(rdb)
 	cmds := dockerstate.NewCmdStore(rdb)
+	tickets := dockerstate.NewTicketStore(rdb)
+	sessions := dockerstream.NewRegistry(logger.NewNop())
 	sender := &fakeDockerSender{}
 	guard := middleware.NewPermissionGuard(&permAuthSvc{perms: perms}, permStore{}, permCfg{}, logger.NewNop())
 
-	cmdsSvc := service.NewDockerCmdService(cmds, sender, store, logger.NewNop())
+	cmdsSvc := service.NewDockerCmdService(cmds, sender, store, logger.NewNop()).WithStreamSessions(sessions)
 	readSvc := service.NewDockerService(store, dockerDeviceReader{}, dockerCfg{}, logger.NewNop())
+	streamSvc := service.NewDockerStreamService(sessions, tickets, sender, logger.NewNop())
 	return &dockerTestEnv{
-		handler: NewDockerHandler(readSvc, cmdsSvc, guard, logger.NewNop()),
-		cmds:    cmds,
-		store:   store,
-		sender:  sender,
+		handler:  NewDockerHandler(readSvc, cmdsSvc, streamSvc, guard, logger.NewNop()),
+		cmds:     cmds,
+		store:    store,
+		sender:   sender,
+		sessions: sessions,
+		tickets:  tickets,
+		streams:  streamSvc,
+		redis:    rdb,
+		mr:       mr,
 	}
 }
 
@@ -187,6 +235,62 @@ func TestSendCmdRequiresActionPermission(t *testing.T) {
 	}
 }
 
+// TestSendCmdForceRequiresExecPermission：force 是「对受保护目标动手」的开关，风险
+// 等价于 root shell（spec §10 保护档）—— 它能越过保护清单的默认拒绝去停/删/重建
+// 底座。因此它要求 docker:exec 级（或 admin），与「能不能删东西」（docker:delete）
+// 分开授予：只有 docker:delete 的人**不能** force，这正是「先停再删」两步绕过
+// 保护清单被堵住的地方。
+func TestSendCmdForceRequiresExecPermission(t *testing.T) {
+	cases := []struct {
+		name       string
+		perms      []string
+		body       string
+		wantStatus int
+		wantForce  bool
+	}{
+		{"有 delete 但无 exec，force 被拒", []string{"docker:delete"},
+			`{"action":"container:remove","target":"mysql","options":{"force":true},"confirm":"DELETE"}`,
+			http.StatusForbidden, false},
+		{"有 delete 与 exec，force 放行", []string{"docker:delete", "docker:exec"},
+			`{"action":"container:remove","target":"mysql","options":{"force":true},"confirm":"DELETE"}`,
+			http.StatusAccepted, true},
+		{"admin 通配放行", []string{"admin"},
+			`{"action":"container:remove","target":"mysql","options":{"force":true},"confirm":"DELETE"}`,
+			http.StatusAccepted, true},
+		{"不带 force 只需 delete", []string{"docker:delete"},
+			`{"action":"container:remove","target":"mysql"}`,
+			http.StatusAccepted, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newTestDockerHandler(t, tc.perms)
+			w, c := newCmdContext(tc.body)
+			env.handler.SendCmd(c)
+			if w.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d (body=%s)", w.Code, tc.wantStatus, w.Body.String())
+			}
+			switch tc.wantStatus {
+			case http.StatusForbidden:
+				// force 权限不足时**不得**下发：403 只是响应，指令若已上路就是越权执行。
+				if len(env.sender.sent) != 0 {
+					t.Fatalf("force 权限不足的请求不得下发指令: %+v", env.sender.sent)
+				}
+				if !strings.Contains(w.Body.String(), "无操作权限") {
+					t.Fatalf("拒绝话术必须与权限入口同源, body=%s", w.Body.String())
+				}
+			case http.StatusAccepted:
+				if len(env.sender.sent) != 1 || env.sender.devices[0] != 7 {
+					t.Fatalf("受理后必须下发到该设备: %+v devices=%v", env.sender.sent, env.sender.devices)
+				}
+				// force 位必须原样到达 agent（保护强制在 agent 侧按 force 判定）。
+				if env.sender.sent[0].Options.Force != tc.wantForce {
+					t.Fatalf("force 位与请求不符: got %v want %v", env.sender.sent[0].Options.Force, tc.wantForce)
+				}
+			}
+		})
+	}
+}
+
 // TestSendCmdAcceptedEnvelopeMatchesSuccess：202 的信封必须与 app.Success **逐字同形**
 // （同一个 app.Response 结构体、同一个 code/message），否则前端拦截器认不出这个响应；
 // 同时 ref 必须是十进制串（协议 isDecimalID 的硬要求，JS 侧不能丢精度）。
@@ -242,12 +346,24 @@ func TestSendCmdRejectsBadRequests(t *testing.T) {
 		}
 	})
 
-	t.Run("二期 action 过期次闸", func(t *testing.T) {
+	t.Run("四期 action 已过期次闸（缺参数仍 400）", func(t *testing.T) {
 		env := newTestDockerHandler(t, []string{"admin"})
-		w, c := newCmdContext(`{"action":"container:start","target":"mysql"}`)
-		env.handler.SendCmd(c)
-		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "尚未开放") {
-			t.Fatalf("二期 action 必须 400 且给出「尚未开放」, got %d (%s)", w.Code, w.Body.String())
+		// 四期（配置编辑）已交付：期次闸不再拦这两条 —— 它们会走到参数校验，缺
+		// content/base_hash 时以「指令参数不合法」400 收场（与「尚未开放」是两回事：
+		// 前者要补参数，后者要升级 agent）。
+		for _, body := range []string{
+			`{"action":"compose.file:patch","target":"uni-center"}`,
+			`{"action":"compose.file:write","target":"uni-center"}`,
+		} {
+			w, c := newCmdContext(body)
+			env.handler.SendCmd(c)
+			if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "参数不合法") {
+				t.Fatalf("四期 action 缺参数必须 400「参数不合法」, body=%s got %d (%s)",
+					body, w.Code, w.Body.String())
+			}
+		}
+		if len(env.sender.sent) != 0 {
+			t.Fatalf("参数校验拒绝的请求不得下发: %+v", env.sender.sent)
 		}
 	})
 

@@ -20,7 +20,23 @@ import (
 // 而不是把它发给 agent 等一句「尚未开放」的结果 —— 后者会让页面出现「点了没反应」
 // 的按钮（§11.0 分期控件矩阵：不渲染 ≠ 禁用，服务端这道闸是它的兜底）。
 // 每期交付时改这一个常量。
-const CurrentPhase = 1
+//
+// 当前 = 4（四期配置编辑）：compose.file:write/validate/patch 已随 agent 0.5.4 落地，
+// 全表 29 条 action 至此全部放行 —— 不存在「已登记但未交付」的段了。
+const CurrentPhase = 4
+
+// SessionSetupTimeout 是**会话制** action 的受理记录终结时限。
+//
+// 会话制指令的「结果」是会话句柄，它必须在建立阶段到达（agent 起会话、回
+// result{session_id}）；建立之后记录已终结、生命周期交给流通道（10 分钟空闲
+// 判定在流会话侧）。给 30 秒与 container:logs 同档：建立会话是本地操作，不需要
+// 15 分钟级的窗口。
+//
+// 为什么不能用 0（Policy.Timeout 的「不适用」值）去 Create：sweep 的到期索引
+// 会把「deadline = 现在」的 pending 记录在下一轮（≤5s）就终结成 timeout ——
+// 那会在 result 到达前把一条**正在建立**的会话指令判成超时（result 迟到时
+// 还会来回覆盖，用户看到的状态反复横跳）。
+const SessionSetupTimeout = 30 * time.Second
 
 // Policy 是一个 action 的策略行。
 type Policy struct {
@@ -90,4 +106,12 @@ func Lookup(action string) (Policy, bool) {
 func RequiredPerm(action string) (string, bool) {
 	p, ok := Lookup(action)
 	return p.Perm, ok
+}
+
+// AcceptTimeout 返回受理记录的 sweep 终结时限（会话制用建立窗口，见 SessionSetupTimeout）。
+func (p Policy) AcceptTimeout() time.Duration {
+	if p.Session {
+		return SessionSetupTimeout
+	}
+	return p.Timeout
 }

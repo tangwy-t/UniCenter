@@ -20,6 +20,7 @@ import (
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/database"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/datascope"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockerstate"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockerstream"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/lifecycle"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/limiter"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
@@ -316,6 +317,11 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 	// 与配置提供者要的是原生客户端（与 WithCursorStore(redis) 同源）。
 	dockerStore := dockerstate.NewStore(redis)
 	dockerCmdStore := dockerstate.NewCmdStore(redis)
+	// 流会话注册表（三期）：**内存**而不是 Redis —— 会话的另一端是本进程持有的
+	// agent 连接，跨实例共享不能让另一实例投递帧（多实例在本域是已声明的限制）。
+	// 一次性 ticket 则必须跨实例可见（spec §4.3.2 的键），故走 Redis。
+	dockerSessions := dockerstream.NewRegistry(log)
+	dockerTickets := dockerstate.NewTicketStore(redis)
 	dockerCfgProvider := service.NewDockerConfigProvider(configSvc, redis, log)
 	// config.changed 订阅：只有 sys.docker.* 的变更会自增 docker:config_version
 	//（agent 据此判断「配置变了」，值哈希感知不到「改回原值」这种回摆）。
@@ -334,7 +340,7 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 	// 这就是 Plan 2B 留下的那条「2C 交接说明」的落点：这个服务至此有了真实
 	// 消费者，不再需要「构造出来只能赋给 `_`」的将就写法。
 	agentIngestSvc := service.NewAgentIngestService(deviceRepo, rawStore, latestStore,
-		dockerStore, dockerCmdStore, configSvc, log)
+		dockerStore, dockerCmdStore, configSvc, log).WithDockerSessions(dockerSessions)
 	// agentPolicy 是 sys.agent.* 节奏配置（reportInterval / heartbeatInterval）的
 	// 适配器（定义见文末 agentIntervalPolicy），**一个实例喂两处**：
 	//   - 查询服务：Redis 档的原生栅格 = reportInterval（上方的 rawStore Step 也取自
@@ -363,7 +369,17 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 	// 合成一个类型会让「只想看主机清单」的调用方被迫依赖整条下行链路。
 	// dockerCmdSvc 的 sender 就是上面这个 agentHub：本域不碰 socket，也不缓存连接。
 	dockerSvc := service.NewDockerService(dockerStore, deviceRepo, configSvc, log)
-	dockerCmdSvc := service.NewDockerCmdService(dockerCmdStore, agentHub, dockerStore, log)
+	// 上限预检注入同一个注册表：CountByDevice 与流端点的会话是同一份账目。
+	dockerCmdSvc := service.NewDockerCmdService(dockerCmdStore, agentHub, dockerStore, log).
+		WithStreamSessions(dockerSessions)
+	// 流通道面（三期）：ticket 签发/兑换、会话接入、下行 input/resize/cancel 与
+	// 两种清理（空闲超时、设备离线）。在线判定包装 hub.Get —— 设备掉线后它的会话
+	// 已无数据来源，尽快收摊好过让用户对着一个已经死掉的终端等到超时。
+	dockerStreamSvc := service.NewDockerStreamService(dockerSessions, dockerTickets, agentHub, log).
+		WithDeviceOnline(func(deviceID uint64) bool {
+			_, ok := agentHub.Get(deviceID)
+			return ok
+		})
 
 	// ── Agent 升级（编排 + 发布物）─────────────────────────────────────
 	// 编排服务是升级域的**唯一写入口**：agent 通道（对账/上报）与控制台 HTTP
@@ -436,12 +452,14 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 		// 阈值取 sys.agent.maxFramesPerMin（缺省 900），计数走与上方 rateLimiter 同一个
 		// cacheStore（同一个 Redis 客户端）。未注入 = fail-open，所以这里必须接上。
 		Limiter: newAgentFrameLimiter(cacheStore, configSvc),
-		// docker 域的三个依赖：快照落库、结果回写（都由 agentIngestSvc 承接，
-		// 它们的方法集逐字满足 agenthub 的两个窄接口）与 hello_ack 的配置块来源。
+		// docker 域的四个依赖：快照落库、结果回写（都由 agentIngestSvc 承接，
+		// 它们的方法集逐字满足 agenthub 的两个窄接口）、hello_ack 的配置块来源
+		// 与流数据帧的投递面（dockerSessions，三期）。
 		// nil 容忍在连接侧（未装配 = 丢弃并记日志），这里全部接上。
 		DockerState:  agentIngestSvc,
 		DockerResult: agentIngestSvc,
 		DockerConfig: dockerCfgProvider,
+		DockerFrames: dockerSessions,
 	}
 
 	// ── 启动期分区 reconcile（**必须**在 scheduler.NewScheduler 之前）─────
@@ -576,7 +594,7 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 	// handler 必须拿到 permGuard：指令面的权限码按 action 变化，路由上挂不了静态 perm，
 	// 由 handler 在解析出 action / 指令记录后调用 PermissionGuard.Ensure（同一套
 	// 缓存与 admin 通配语义，见 middleware/permission.go 与 router 的 /docker 组）。
-	dockerHdl := handler.NewDockerHandler(dockerSvc, dockerCmdSvc, permGuard, log)
+	dockerHdl := handler.NewDockerHandler(dockerSvc, dockerCmdSvc, dockerStreamSvc, permGuard, log)
 
 	// 指令 sweep：终结到期未回结果的指令（§4.1 的 timeout 状态）。
 	//
@@ -603,6 +621,11 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 				// 不该因为「钩子被人等超时了」而在半路被取消。
 				if _, err := dockerCmdSvc.Sweep(context.Background()); err != nil {
 					log.Warn("docker cmd sweep failed", zap.Error(err))
+				}
+				// 流会话 sweep（三期）：空闲超时与设备离线两条清理路径共用这一轮
+				// 心跳（同一张 5s 的钟，运维只需要看一个周期字段）。
+				if _, err := dockerStreamSvc.Sweep(context.Background()); err != nil {
+					log.Warn("docker stream sweep failed", zap.Error(err))
 				}
 			}
 		}

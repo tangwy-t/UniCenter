@@ -3,6 +3,7 @@ package agenthub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	agentproto "github.com/tangwy-t/UniCenter/uni_protocol"
@@ -27,6 +28,19 @@ type fakeDockerResult struct {
 func (f *fakeDockerResult) CompleteDockerCmd(ctx context.Context, deviceID uint64, res *agentproto.DockerCmdResult) error {
 	f.got = append(f.got, res.Ref)
 	return nil
+}
+
+// fakeDockerFrames 是 DockerFrameDeliverer 的替身：记录投递进来的帧与设备归属。
+type fakeDockerFrames struct {
+	got  []*agentproto.DockerFrame
+	devs []uint64
+	err  error
+}
+
+func (f *fakeDockerFrames) DeliverDockerFrame(ctx context.Context, deviceID uint64, fr *agentproto.DockerFrame) error {
+	f.got = append(f.got, fr)
+	f.devs = append(f.devs, deviceID)
+	return f.err
 }
 
 // newTestConn 构造一条**不接管 socket** 的连接（newConn 的测试态形态，与 conn_test.go
@@ -84,7 +98,7 @@ func TestDockerStateHandlerSaves(t *testing.T) {
 	}
 }
 
-// result 帧按 ref 归属落库；frame 帧一期只丢弃不报错。
+// result 帧按 ref 归属落库；frame 帧投递给会话注册表（三期接线）。
 func TestDockerResultAndFrameHandlers(t *testing.T) {
 	c := newTestConn(t)
 	sink := &fakeDockerResult{}
@@ -99,7 +113,31 @@ func TestDockerResultAndFrameHandlers(t *testing.T) {
 	}
 	frame := &agentproto.Message{V: agentproto.CurrentVersion, ID: "2", Type: agentproto.TypeAgentDockerFrame, TS: 1,
 		Data: rawJSON(`{"session_id":"0123456789abcdef","seq":1,"data":"aGk="}`)}
+	c.deps.DockerFrames = nil // 未装配投递面：丢弃但不 panic、不关连接
 	if keep := c.handleDockerFrame(context.Background(), frame); !keep {
-		t.Fatal("一期收到流帧只丢弃，不关连接")
+		t.Fatal("未装配投递面时收到流帧也不该关连接（nil 容忍）")
+	}
+}
+
+// TestDockerFrameHandlerDelivers：装配后帧必须带着**连接的 deviceID** 投递；
+// 投递错误（会话不存在/已结束）不得关连接 —— docker 帧的问题永远不断指标主链路。
+func TestDockerFrameHandlerDelivers(t *testing.T) {
+	c := newTestConn(t)
+	sink := &fakeDockerFrames{}
+	c.deps.DockerFrames = sink
+	frame := &agentproto.Message{V: agentproto.CurrentVersion, ID: "2", Type: agentproto.TypeAgentDockerFrame, TS: 1,
+		Data: rawJSON(`{"session_id":"0123456789abcdef","seq":3,"data":"aGk=","eof":true}`)}
+	if keep := c.handleDockerFrame(context.Background(), frame); !keep {
+		t.Fatal("投递成功也不该关连接")
+	}
+	if len(sink.got) != 1 || sink.got[0].Seq != 3 || !sink.got[0].EOF || string(sink.got[0].Data) != "hi" {
+		t.Fatalf("帧未原样投递: %+v", sink.got)
+	}
+	if sink.devs[0] != c.deviceID() {
+		t.Fatalf("投递必须带连接的 deviceID: %v vs %d", sink.devs, c.deviceID())
+	}
+	sink.err = errors.New("session gone")
+	if keep := c.handleDockerFrame(context.Background(), frame); !keep {
+		t.Fatal("投递失败必须保留连接（docker 载荷问题只丢帧）")
 	}
 }

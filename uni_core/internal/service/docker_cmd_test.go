@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -12,7 +13,9 @@ import (
 
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/request"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/agenthub"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockerpolicy"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockerstate"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockerstream"
 	agentproto "github.com/tangwy-t/UniCenter/uni_protocol"
 )
 
@@ -59,17 +62,139 @@ func TestDockerCmdServiceSend(t *testing.T) {
 	if _, err := svc.Send(ctx, 42, 7, &request.DockerCmdReq{Action: agentproto.DockerActionContainerLogs, Target: "mysql"}); err == nil {
 		t.Fatal("在飞指令必须拒绝（否则同一目标会并发执行两条）")
 	}
-	// 非一期 action → 尚未开放
-	if _, err := svc.Send(ctx, 42, 7, &request.DockerCmdReq{Action: agentproto.DockerActionContainerStart, Target: "mysql"}); err == nil ||
-		!strings.Contains(err.Error(), "尚未开放") {
-		t.Fatalf("二期 action 必须被期次闸挡住: %v", err)
+	// 四期（配置编辑）已交付：期次闸不再拦截，但「强确认」（照抄项目名）仍是硬要求。
+	if _, err := svc.Send(ctx, 42, 7, &request.DockerCmdReq{
+		Action: agentproto.DockerActionComposeFileWrite, Target: "uni-center",
+		Options: &request.DockerCmdOptionsReq{Content: "services: {}\n", BaseHash: strings.Repeat("a", 64)},
+	}); err == nil || !strings.Contains(err.Error(), "缺少确认信息") {
+		t.Fatalf("四期写的强确认必须被强制（缺 confirm 一律拒）: %v", err)
 	}
-	// 强确认档：一期没有强确认 action，用二期接口走期次闸已挡住；这里直接验证协议层确认校验
-	// 走 agent 侧（Task B4 已覆盖）。
+	if _, err := svc.Send(ctx, 42, 7, &request.DockerCmdReq{
+		Action: agentproto.DockerActionComposeFileWrite, Target: "uni-center",
+		Options: &request.DockerCmdOptionsReq{Content: "services: {}\n", BaseHash: strings.Repeat("a", 64)},
+		Confirm: "uni-center",
+	}); err != nil {
+		t.Fatalf("四期写带正确确认应被受理: %v", err)
+	}
 	// 离线 → 503 语义
 	sender.offline = true
 	if _, err := svc.Send(ctx, 42, 7, &request.DockerCmdReq{Action: agentproto.DockerActionImageInspect, Target: "mysql:8.0.22"}); err == nil {
 		t.Fatal("agent 离线必须不受理（503）")
+	}
+}
+
+// TestDockerCmdServiceStreamActions：三期放行后的四条受理纪律 ——
+//   - exec 带着 argv 下发；logs{follow:true} 原样下发 follow；
+//   - 会话制的受理记录用**建立窗口**（30s）而不是 0：0 会在下一轮 sweep 被判成 timeout；
+//   - 同设备流会话满 3 条时 core **先拒**（结论句比 agent 的 errStreamLimit 更贴近用户动作）。
+func TestDockerCmdServiceStreamActions(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rdb := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	sessions := dockerstream.NewRegistry(nil)
+	sender := &fakeCmdSender{}
+	svc := NewDockerCmdService(dockerstate.NewCmdStore(rdb), sender, dockerstate.NewStore(rdb), nil).
+		WithStreamSessions(sessions)
+	ctx := context.Background()
+
+	follow := true
+	if _, err := svc.Send(ctx, 42, 7, &request.DockerCmdReq{
+		Action: agentproto.DockerActionContainerLogs, Target: "mysql",
+		Options: &request.DockerCmdOptionsReq{Follow: &follow},
+	}); err != nil {
+		t.Fatalf("三期日志 Follow 必须被受理: %v", err)
+	}
+	if got := sender.sent[0]; !got.Options.Follow {
+		t.Fatalf("follow 位必须原样到达 agent: %+v", got.Options)
+	}
+
+	ref, err := svc.Send(ctx, 42, 7, &request.DockerCmdReq{
+		Action: agentproto.DockerActionContainerExec, Target: "mysql",
+		Options: &request.DockerCmdOptionsReq{Command: []string{"/bin/sh", "-lc", "ls -la"}},
+	})
+	if err != nil {
+		t.Fatalf("三期终端必须被受理: %v", err)
+	}
+	exec := sender.sent[1]
+	if len(exec.Options.Command) != 3 || exec.Options.Command[2] != "ls -la" {
+		t.Fatalf("argv 必须原样到达 agent: %+v", exec.Options.Command)
+	}
+	// 受理记录的到期时刻 = now + 建立窗口（不是 0、也不是 15 分钟级的旧值）。
+	score, err := mr.ZScore(dockerstate.CmdDeadlineKey, ref)
+	if err != nil {
+		t.Fatalf("会话制受理必须登记到期索引: %v", err)
+	}
+	deadline := time.UnixMilli(int64(score))
+	if d := time.Until(deadline); d < dockerpolicy.SessionSetupTimeout-time.Minute || d > dockerpolicy.SessionSetupTimeout+time.Minute {
+		t.Fatalf("会话制受理时限应约为建立窗口 %v，实际 %v", dockerpolicy.SessionSetupTimeout, d)
+	}
+
+	// 上限：塞满 3 条会话后，第 4 条被 core 先拒（不落到 agent 的 errStreamLimit 上）。
+	for i := 0; i < dockerstream.MaxSessionsPerDevice; i++ {
+		if err := sessions.Register(dockerstream.Meta{
+			SessionID: fmt.Sprintf("sess-%016d", i), DeviceID: 7, UserID: 42,
+			Action: agentproto.DockerActionContainerExec, Ref: "1",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := len(sender.sent)
+	if _, err := svc.Send(ctx, 42, 7, &request.DockerCmdReq{
+		Action: agentproto.DockerActionContainerExec, Target: "mysql3",
+	}); err == nil || !strings.Contains(err.Error(), "上限") {
+		t.Fatalf("流会话满 3 条必须被 core 先拒（带结论句）: %v", err)
+	}
+	if len(sender.sent) != before {
+		t.Fatal("被上限拒绝的指令不得下发")
+	}
+}
+
+// TestDockerCmdServiceConfirmNotBypassedByForce：二期放行后补测确认档 —— 复核的正是
+// 这个缺口：confirm 校验在 Send 的受理序里对**所有**请求无条件执行，force 只是保护档
+// 的开关，不能把它变成「无需确认」。否则带 force 的请求就能跳过「照抄一遍」这一层，
+// 而 force 恰恰是保护档里最该被确认的动作。大小写不做模糊匹配（模糊匹配会让确认
+// 退化成「随便填点东西」，确认档的价值在于稀缺）。
+func TestDockerCmdServiceConfirmNotBypassedByForce(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rdb := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	svc := NewDockerCmdService(dockerstate.NewCmdStore(rdb), &fakeCmdSender{}, dockerstate.NewStore(rdb), nil)
+	ctx := context.Background()
+
+	force := true
+	cases := []struct {
+		name    string
+		action  string
+		target  string
+		confirm string
+		force   bool
+		wantErr bool
+	}{
+		{"prune 缺 DELETE 确认", agentproto.DockerActionImagePrune, "", "", false, true},
+		{"prune 带 force 仍需 DELETE 确认", agentproto.DockerActionImagePrune, "", "", true, true},
+		{"prune 确认大小写不符", agentproto.DockerActionImagePrune, "", "delete", false, true},
+		{"compose:down 缺目标名确认 + force", agentproto.DockerActionComposeDown, "uni-center", "", true, true},
+		{"prune 照抄 DELETE → 受理", agentproto.DockerActionImagePrune, "", "DELETE", false, false},
+		{"compose:down 照抄目标名 → 受理", agentproto.DockerActionComposeDown, "uni-center", "uni-center", false, false},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := &request.DockerCmdReq{Action: tc.action, Target: tc.target, Confirm: tc.confirm}
+			if tc.force {
+				req.Options = &request.DockerCmdOptionsReq{Force: &force}
+			}
+			// 每条用例一台独立设备：避免「同目标在飞」的 409 混进确认档的判定。
+			_, err := svc.Send(ctx, 42, uint64(100+i), req)
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "缺少确认信息") {
+					t.Fatalf("强确认档缺确认必须拒绝（且与 force 无关）: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("带正确确认必须受理: %v", err)
+			}
+		})
 	}
 }
 
@@ -216,6 +341,29 @@ func TestDockerToProtocolOptions(t *testing.T) {
 		if err := agentproto.ValidateDockerCmdOptions(r.Action, o); err != nil {
 			t.Fatalf("缺省组出来的 options 必须能过协议校验: %v", err)
 		}
+	}
+
+	// 三期两个新字段：follow 是「显式 false 与缺席不同」的又一实例（指针解引用），
+	// command 是切片，必须复制（协议载荷不该与请求体共享底层数组）。
+	follow, noFollow := true, false
+	cmdReq := &request.DockerCmdReq{
+		Action: agentproto.DockerActionContainerExec, Target: "mysql",
+		Options: &request.DockerCmdOptionsReq{Follow: &follow, Command: []string{"/bin/sh", "-lc", "top"}},
+	}
+	o3 := toProtocolOptions(cmdReq)
+	if !o3.Follow || len(o3.Command) != 3 || o3.Command[2] != "top" {
+		t.Fatalf("三期字段未映射: %+v", o3)
+	}
+	cmdReq.Options.Command[2] = "rm -rf /"
+	if o3.Command[2] != "top" {
+		t.Fatal("command 必须复制，不能与请求体共享底层数组")
+	}
+	o4 := toProtocolOptions(&request.DockerCmdReq{
+		Action: agentproto.DockerActionContainerLogs, Target: "mysql",
+		Options: &request.DockerCmdOptionsReq{Follow: &noFollow},
+	})
+	if o4.Follow {
+		t.Fatal("显式 follow=false 必须保留 false（与缺席同值但语义不同，协议侧不受影响）")
 	}
 
 	// 解不开的 patch（不是 JSON 对象）不许被当成合法值发出去：保持空 → 协议校验拒绝 → 400。
