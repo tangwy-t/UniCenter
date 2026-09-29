@@ -26,13 +26,18 @@
 </template>
 
 <script setup lang="ts">
+  import { useAppBreakpoints } from '@/hooks/core/useAppBreakpoints'
+
   defineOptions({ name: 'ArtOrientationGuard' })
 
-  // 手机竖屏判定：宽度低于 tablet 断点(768)、竖屏、触屏主指针。
+  // 手机竖屏判定：竖屏 + 触屏主指针 + 宽度低于 tablet 断点。
+  // 宽度阈值走 useAppBreakpoints（复用断点单一事实源与缓存判定），
+  // 与 useResponsiveMenu 的 isPhone 同一来源，不在组件内另写阈值。
   // `pointer: coarse` 用于排除桌面端缩小窗口的误报（DevTools 移动端模拟会自动命中）。
-  const isPortraitPhone = useMediaQuery(
-    '(orientation: portrait) and (max-width: 767.98px) and (pointer: coarse)'
-  )
+  const { smaller } = useAppBreakpoints()
+  const isPhone = smaller('tablet')
+  const isPortraitTouch = useMediaQuery('(orientation: portrait) and (pointer: coarse)')
+  const isPortraitPhone = computed(() => isPhone.value && isPortraitTouch.value)
 
   // Screen Orientation API 的 lock 方法在部分 TS lib 版本中未声明，这里做局部补充
   // （本项目仅用到 'landscape'，按最小可用面声明）
