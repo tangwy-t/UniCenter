@@ -54,6 +54,7 @@ import type { SetOptionOpts } from 'echarts/core'
 import { storeToRefs } from 'pinia'
 import { useSettingStore } from '@/store/modules/setting'
 import { getCssVar } from '@/utils/ui'
+import { useResponsiveMenu } from './useResponsiveMenu'
 import type { BaseChartProps, ChartThemeConfig, UseChartOptions } from '@/types/component/chart'
 
 // 图表主题配置
@@ -87,7 +88,10 @@ export function useChart(options: UseChartOptions = {}) {
   const { initOptions, initDelay = 0, threshold = 0.1, autoTheme = true } = options
 
   const settingStore = useSettingStore()
-  const { isDark, menuOpen, menuType } = storeToRefs(settingStore)
+  const { isDark, menuType } = storeToRefs(settingStore)
+
+  // 菜单可见状态（手机端为抽屉、桌面端为用户偏好）：侧栏宽度变化时需要重算图表尺寸
+  const { isMenuVisible } = useResponsiveMenu()
 
   const chartRef = ref<HTMLElement>()
   let chart: echarts.ECharts | null = null
@@ -148,7 +152,7 @@ export function useChart(options: UseChartOptions = {}) {
   let menuTypeStopHandle: (() => void) | null = null
 
   const setupMenuWatchers = () => {
-    menuOpenStopHandle = watch(menuOpen, () => multiDelayResize(RESIZE_DELAYS))
+    menuOpenStopHandle = watch(isMenuVisible, () => multiDelayResize(RESIZE_DELAYS))
     menuTypeStopHandle = watch(menuType, () => {
       nextTick(requestAnimationResize)
       setTimeout(() => multiDelayResize(MENU_RESIZE_DELAYS), 0)

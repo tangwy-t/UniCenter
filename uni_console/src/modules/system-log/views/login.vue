@@ -103,21 +103,28 @@
     }
   }
 
+  // 列优先级：手机（<768）只保留"谁 / 结果 / 时间"；平板加序号与 IP；细节列（地点/浏览器/系统/提示消息）桌面才展示
   const { columns, columnChecks } = useTableColumns<Api.Log.LoginLog>(() => [
-    { type: 'index', width: 60, label: '序号' },
-    { prop: 'username', label: '用户名称', width: 120 },
-    { prop: 'ip', label: 'IP', width: 140 },
-    { prop: 'location', label: '地点', minWidth: 140 },
-    { prop: 'browser', label: '浏览器', minWidth: 140 },
-    { prop: 'os', label: '系统', minWidth: 140 },
+    { type: 'index', width: 60, label: '序号', hideBelow: 'tablet' },
+    { prop: 'username', label: '用户名称', minWidth: 110 },
+    { prop: 'ip', label: 'IP', minWidth: 140, hideBelow: 'tablet' },
+    { prop: 'location', label: '地点', minWidth: 140, hideBelow: 'desktop' },
+    { prop: 'browser', label: '浏览器', minWidth: 140, hideBelow: 'desktop' },
+    { prop: 'os', label: '系统', minWidth: 140, hideBelow: 'desktop' },
     {
       prop: 'code',
       label: '状态',
-      width: 130,
+      minWidth: 100,
       formatter: (row) => resultCodeDict.render(row.code)
     },
-    { prop: 'msg', label: '提示消息', minWidth: 160, showOverflowTooltip: true },
-    { prop: 'loginTime', label: '登录时间', width: 180 }
+    {
+      prop: 'msg',
+      label: '提示消息',
+      minWidth: 160,
+      showOverflowTooltip: true,
+      hideBelow: 'desktop'
+    },
+    { prop: 'loginTime', label: '登录时间', minWidth: 150 }
   ])
 
   function handleSearch() {

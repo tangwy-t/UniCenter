@@ -258,7 +258,7 @@
     return [
       { type: 'index', width: 60, label: '序号' },
       { prop: 'name', label: '任务名称', minWidth: 140, showOverflowTooltip: true },
-      { prop: 'jobGroup', label: '任务组', width: 100 },
+      { prop: 'jobGroup', label: '任务组', minWidth: 100 },
       {
         prop: 'invokeTarget',
         label: '调用目标',
@@ -304,15 +304,15 @@
       {
         prop: 'concurrent',
         label: '并发',
-        width: 80,
+        minWidth: 80,
         align: 'center',
         formatter: (row) => concurrentDict.render(row.concurrent)
       },
-      { prop: 'status', label: '状态', width: 140, useSlot: true, slotName: 'status' },
+      { prop: 'status', label: '状态', minWidth: 140, useSlot: true, slotName: 'status' },
       {
         prop: 'nextRunTime',
         label: '下次执行',
-        width: 175,
+        minWidth: 175,
         formatter: (row) => {
           const next = row.nextRunTime
           if (!next || row.status !== 1) {

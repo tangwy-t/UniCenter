@@ -1,4 +1,12 @@
 // 优化 Element Plus 组件库默认样式
+@use './breakpoints' as *;
+
+// 组件字体与正文统一：正文栈由 tailwind.css 的 --font-sans 定义。
+// 用 html:root 提升优先级——EP 的 :root 变量可能随异步 chunk 在本文档之后注入，
+// 同优先级的 :root 覆盖会因注入顺序不稳定而失效。
+html:root {
+  --el-font-family: var(--font-sans);
+}
 
 :root {
   // 系统主色
@@ -49,7 +57,7 @@ html.dark .el-card {
     --el-pagination-button-height: var(--el-pagination-button-width) !important;
   }
 
-  @media (max-width: 1180px) {
+  @include respond-at-most('compact') {
     & {
       --el-pagination-button-width: 28px !important;
     }
@@ -67,6 +75,29 @@ html.dark .el-card {
 .el-pager li {
   padding: 0 10px !important;
   // border: 1px solid red !important;
+}
+
+// 触屏设备（pointer: coarse）：放大交互热区，保证可点性。
+// 仅触屏生效，桌面端（pointer: fine）保持紧凑尺寸；
+// 组件高度 36 → 40px，分页按钮 28/32 → 36px
+// （WCAG 2.5.8 最低 24px，向移动端 44px 实践靠拢）
+@media (pointer: coarse) {
+  :root {
+    --el-component-custom-height: 40px !important;
+  }
+
+  .el-pagination--default {
+    --el-pagination-button-width: 36px !important;
+  }
+
+  // 消除双击缩放等待，提升点击响应（双指缩放不受影响）
+  .el-button,
+  .el-menu-item,
+  .el-sub-menu__title,
+  .el-dropdown-menu__item,
+  .el-pager li {
+    touch-action: manipulation;
+  }
 }
 
 // 优化菜单折叠展开动画（提升动画流畅度）
@@ -115,6 +146,11 @@ html.dark .el-card {
 .el-popover {
   min-width: 80px;
   border-radius: var(--el-border-radius-small) !important;
+
+  // 宽度自适应：显式 width 的弹层（如图标选择器 440px）在窄视口下不超出屏幕。
+  // 与 .el-dialog / .el-drawer 的钳制规则保持一致；popper 只能位移不能收缩，
+  // 必须由 max-width 强制收窄，否则 <470px 视口上 440px 弹层无法完整容纳。
+  max-width: calc(100vw - 32px);
 }
 
 .el-dialog {
@@ -122,10 +158,20 @@ html.dark .el-card {
   border-radius: calc(var(--custom-radius) / 1.2 + 2px) !important;
   overflow: hidden;
 
+  // 宽度自适应：显式 width 的弹窗（400-680px 不等）在窄视口下不超出屏幕。
+  // ≤ phone 时另有 calc(100% - 24px) 规则；这里补齐中间地带——
+  // 此前 641-679px 视口下 680px 的弹窗会溢出视口。
+  max-width: calc(100vw - 32px);
+
   // 弹窗高度自适应：最高不超过视口（上下预留 margin），防止弹窗过高时外层出现滚动条
   display: flex;
   flex-direction: column;
   max-height: calc(100vh - var(--el-dialog-margin-top, 15vh) - 50px);
+}
+
+// 抽屉宽度自适应：size 为固定 px 的抽屉（300/420/600px）在窄视口下不超出屏幕
+.el-drawer {
+  max-width: calc(100vw - 32px);
 }
 
 .el-dialog__header {
@@ -260,7 +306,7 @@ html.dark .el-card {
 }
 
 // 处理移动端组件兼容性
-@media screen and (max-width: 640px) {
+@include respond-at-most('phone') {
   .el-message-box,
   .el-dialog {
     width: calc(100% - 24px) !important;
@@ -279,6 +325,17 @@ html.dark .el-card {
   .el-picker-panel *[slot='sidebar'] + .el-picker-panel__body,
   .el-picker-panel__sidebar + .el-picker-panel__body {
     margin-left: 0;
+  }
+}
+
+// 移动端表单控件字号不低于 16px：
+// iOS Safari 会对字号 < 16px 的输入框在聚焦时自动放大整个页面，导致弹窗与布局错位。
+@include respond-at-most('tablet') {
+  .el-input__inner,
+  .el-textarea__inner,
+  .el-range-input,
+  .el-select__wrapper {
+    font-size: 16px !important;
   }
 }
 
@@ -406,7 +463,7 @@ html.dark .el-card {
 }
 
 // ipad 表单右侧按钮优化
-@media screen and (max-width: 1180px) {
+@include respond-at-most('compact') {
   .el-table-fixed-column--right {
     padding-right: 0 !important;
   }

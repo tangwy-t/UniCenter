@@ -88,7 +88,11 @@ describe('useDockerCmds · 五种终态', () => {
 
   it('image:save 第一段的 alreadyExists 原样透传（页面据此弹第二段）', async () => {
     mocks.send.mockResolvedValue({ ref: 'r1' })
-    mocks.result.mockResolvedValue({ status: 'failed', error: '产物文件已存在', alreadyExists: true })
+    mocks.result.mockResolvedValue({
+      status: 'failed',
+      error: '产物文件已存在',
+      alreadyExists: true
+    })
     const res = await makeCmds().run({
       action: 'image:save',
       target: 'uni-center-core:latest',

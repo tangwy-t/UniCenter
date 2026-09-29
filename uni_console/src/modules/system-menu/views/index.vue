@@ -291,7 +291,7 @@
       {
         prop: 'type',
         label: '类型',
-        width: 90,
+        minWidth: 90,
         align: 'center',
         formatter: (row) => {
           const m = typeMeta[row.type] ?? { label: row.type, tag: 'info' as any }
@@ -301,7 +301,7 @@
       {
         prop: 'sort',
         label: '排序',
-        width: 150,
+        minWidth: 150,
         align: 'center',
         useSlot: true,
         slotName: 'sort'
@@ -311,14 +311,14 @@
       {
         prop: 'visible',
         label: '显示',
-        width: 80,
+        minWidth: 80,
         align: 'center',
         formatter: (row) => visibleDict.render(row.visible)
       },
       {
         prop: 'status',
         label: '状态',
-        width: 80,
+        minWidth: 80,
         align: 'center',
         formatter: (row) => statusDict.render(row.status)
       },

@@ -6,7 +6,7 @@
     :width="240"
     :hide-after="0"
     :offset="10"
-    trigger="hover"
+    :trigger="isHoverDevice ? 'hover' : 'click'"
     :show-arrow="false"
     popper-class="user-menu-popover"
     popper-style="padding: 5px 16px;"
@@ -68,6 +68,13 @@
 
   const router = useRouter()
   const userStore = useUserStore()
+
+  /**
+   * 触屏设备检测：无 hover 能力的设备改用 click 触发菜单。
+   * hover-only Popover 在触屏上首次点击行为不稳定（部分浏览器点击外部即关闭），
+   * 退出登录等关键操作可能无法触达。
+   */
+  const isHoverDevice = useMediaQuery('(hover: hover) and (pointer: fine)')
 
   const { getUserInfo: userInfo } = storeToRefs(userStore)
   const userMenuPopover = ref()

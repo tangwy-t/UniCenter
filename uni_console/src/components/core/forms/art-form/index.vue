@@ -98,7 +98,6 @@
 </template>
 
 <script setup lang="ts">
-  import { useWindowSize } from '@vueuse/core'
   import { toRaw, type Component } from 'vue'
   import ArtButtonTable from '@/components/core/forms/art-button-table/index.vue'
   import {
@@ -120,6 +119,7 @@
     type FormInstance
   } from 'element-plus'
   import { calculateResponsiveSpan, type ResponsiveBreakpoint } from '@/utils/form/responsive'
+  import { useAppBreakpoints } from '@/hooks/core/useAppBreakpoints'
 
   defineOptions({ name: 'ArtForm' })
 
@@ -144,8 +144,8 @@
     treeselect: ElTreeSelect // 树选择器
   }
 
-  const { width } = useWindowSize()
-  const isMobile = computed(() => width.value < 500)
+  const { smaller } = useAppBreakpoints()
+  const isMobile = smaller('phoneNarrow')
 
   const formInstance = useTemplateRef<FormInstance>('formRef')
 

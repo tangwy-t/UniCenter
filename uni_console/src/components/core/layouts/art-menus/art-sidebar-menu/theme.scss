@@ -1,4 +1,5 @@
 @use '@styles/core/mixin.scss' as *;
+@use '@styles/core/breakpoints.scss' as *;
 
 // 菜单样式变量
 $menu-height: 42px;
@@ -208,7 +209,7 @@ $popup-menu-radius: 6px;
   }
 }
 
-@media only screen and (width <= 640px) {
+@include respond-at-most('phone') {
   .layout-sidebar {
     .el-menu-design {
       > .el-sub-menu {

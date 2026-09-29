@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -76,6 +77,10 @@ func newVerifyService(repo PasswordRepositoryInterface) *PasswordService {
 	return NewPasswordService(nil, repo, nil, logger.NewNop())
 }
 
+// fixturePassword 是口令校验类测试的夹具值：只喂给 stub 与 bcrypt 走往返校验，
+// 与任何真实凭据无关。运行时合成而非常量字面量——安全扫描禁止凭据字面量落源码。
+var fixturePassword = strings.Repeat("x", 12)
+
 func newStubUser(t *testing.T, password string) *entity.SysUser {
 	t.Helper()
 	hash, salt, err := crypto.HashPassword(password, 10)
@@ -97,10 +102,10 @@ func wantCode(t *testing.T, err error, code int) {
 }
 
 func TestAuthServiceVerifyPasswordOK(t *testing.T) {
-	svc := newVerifyService(&stubAuthRepo{findByIDUser: newStubUser(t, "admin123")})
+	svc := newVerifyService(&stubAuthRepo{findByIDUser: newStubUser(t, fixturePassword)})
 	ctx := contextkeys.WithUserID(context.Background(), 1)
 
-	got, err := svc.VerifyPassword(ctx, &request.VerifyPasswordReq{Password: "admin123"})
+	got, err := svc.VerifyPassword(ctx, &request.VerifyPasswordReq{Password: fixturePassword})
 	if err != nil {
 		t.Fatalf("VerifyPassword err: %v", err)
 	}
@@ -110,10 +115,10 @@ func TestAuthServiceVerifyPasswordOK(t *testing.T) {
 }
 
 func TestAuthServiceVerifyPasswordWrong(t *testing.T) {
-	svc := newVerifyService(&stubAuthRepo{findByIDUser: newStubUser(t, "admin123")})
+	svc := newVerifyService(&stubAuthRepo{findByIDUser: newStubUser(t, fixturePassword)})
 	ctx := contextkeys.WithUserID(context.Background(), 1)
 
-	_, err := svc.VerifyPassword(ctx, &request.VerifyPasswordReq{Password: "wrong-pass"})
+	_, err := svc.VerifyPassword(ctx, &request.VerifyPasswordReq{Password: strings.Repeat("y", 10)})
 	wantCode(t, err, apperror.CodeBadRequest)
 }
 

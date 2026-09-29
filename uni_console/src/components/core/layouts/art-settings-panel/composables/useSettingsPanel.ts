@@ -1,12 +1,12 @@
 import { ref, computed, watch } from 'vue'
 import { useSettingStore } from '@/store/modules/setting'
 import { storeToRefs } from 'pinia'
-import { useBreakpoints } from '@vueuse/core'
 import AppConfig from '@/config'
 import { SystemThemeEnum, MenuTypeEnum } from '@/enums/appEnum'
 import { mittBus } from '@/utils/sys'
 import { StorageConfig } from '@/utils'
 import { useTheme } from '@/hooks/core/useTheme'
+import { useAppBreakpoints } from '@/hooks/core/useAppBreakpoints'
 import { useSettingsState } from './useSettingsState'
 import { useSettingsHandlers } from './useSettingsHandlers'
 
@@ -25,9 +25,10 @@ export function useSettingsPanel() {
   // 响应式状态
   const showDrawer = ref(false)
 
-  // 使用 VueUse breakpoints 优化性能
-  const breakpoints = useBreakpoints({ tablet: 1000 })
-  const isMobile = breakpoints.smaller('tablet')
+  // 窄屏（< 桌面断点）：顶部/混合菜单在窄屏下让位给左侧菜单。
+  // 断点来自全局断点表（src/config/breakpoints.ts），与 shell/侧栏共用同一定义。
+  const { smaller } = useAppBreakpoints()
+  const isNarrowScreen = smaller('desktop')
 
   // 记录窗口宽度变化前的菜单类型
   const getStoredDesktopMenuType = (): MenuTypeEnum | undefined => {
@@ -91,10 +92,10 @@ export function useSettingsPanel() {
   const useResponsiveLayout = () => {
     // 使用 watch 监听断点变化，性能更优
     const stopWatch = watch(
-      isMobile,
-      (mobile: boolean) => {
-        if (mobile) {
-          // 切换到移动端布局
+      isNarrowScreen,
+      (narrow: boolean) => {
+        if (narrow) {
+          // 切换到窄屏布局：顶部/混合菜单让位给左侧菜单
           if (!hasChangedMenu.value) {
             beforeMenuType.value = menuType.value
             if (menuType.value !== MenuTypeEnum.LEFT) {
@@ -103,8 +104,6 @@ export function useSettingsPanel() {
               hasChangedMenu.value = true
             }
           }
-
-          settingStore.setMenuOpen(false)
         } else {
           // 恢复桌面端布局
           if (hasChangedMenu.value && beforeMenuType.value) {
@@ -115,9 +114,10 @@ export function useSettingsPanel() {
             clearStoredDesktopMenuType()
             hasChangedMenu.value = false
           }
-
-          settingStore.setMenuOpen(true)
         }
+        // 这里不再改写 settingStore.menuOpen：菜单开合由 useResponsiveMenu 按断点派生
+        // （手机端抽屉为瞬态状态），用户偏好只由用户操作写入，
+        // 避免响应式逻辑覆盖并持久化用户偏好。
       },
       { immediate: true }
     )

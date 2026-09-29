@@ -775,7 +775,7 @@
       {
         prop: 'size',
         label: '大小',
-        width: 150,
+        minWidth: 150,
         formatter: (row: Api.File.FileItem) =>
           h('div', { class: 'flex flex-col gap-1 py-1' }, [
             h('span', { class: 'text-[13px]' }, formatBytes(row.size)),
@@ -790,7 +790,7 @@
       {
         prop: 'category',
         label: '类型',
-        width: 110,
+        minWidth: 110,
         formatter: (row: Api.File.FileItem) => {
           const meta = fileMetaOf(row)
           return h(
@@ -805,7 +805,7 @@
       {
         prop: 'mimeType',
         label: '存储',
-        width: 110,
+        minWidth: 110,
         formatter: (row: Api.File.FileItem) =>
           h(
             'span',
@@ -816,7 +816,7 @@
       {
         prop: 'createdAt',
         label: '上传时间',
-        width: 150,
+        minWidth: 150,
         formatter: (row: Api.File.FileItem) => formatTime(row.createdAt)
       },
       ...(operationColumnConfig ? [operationColumnConfig] : [])
@@ -923,7 +923,9 @@
   refreshAll()
 </script>
 
-<style scoped>
+<style lang="scss" scoped>
+  @use '@styles/core/breakpoints.scss' as *;
+
   .file-page {
     display: flex;
     flex-direction: column;
@@ -933,7 +935,9 @@
   /* ── 统计卡 ── */
   .stats-grid {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    // 栅格自适应列数：宽屏 4 列（等于卡数上限），窄屏自动降到 3/2/1 列，无需媒体查询。
+    // min() 保证 minmax 的下限不大于容器宽度，极窄容器下不会横向溢出。
+    grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
     gap: 14px;
   }
 
@@ -1528,15 +1532,8 @@
   }
 
   /* ── 响应式 ── */
-  @media (max-width: 1280px) {
+  @include respond-at-most('tablet') {
     .stats-grid {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-  }
-
-  @media (max-width: 768px) {
-    .stats-grid {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 10px;
     }
 
@@ -1576,11 +1573,7 @@
     }
   }
 
-  @media (max-width: 560px) {
-    .stats-grid {
-      grid-template-columns: 1fr;
-    }
-
+  @include respond-at-most('phone') {
     .file-grid {
       grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
       gap: 8px;

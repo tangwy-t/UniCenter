@@ -204,6 +204,8 @@
 </script>
 
 <style lang="scss" scoped>
+  @use '@styles/core/breakpoints.scss' as *;
+
   .basic-banner {
     position: relative;
     display: flex;
@@ -321,7 +323,7 @@
     }
   }
 
-  @media (width <= 640px) {
+  @include respond-at-most('phone') {
     .basic-banner {
       box-sizing: border-box;
       justify-content: flex-start;

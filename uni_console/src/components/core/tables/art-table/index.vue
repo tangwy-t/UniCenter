@@ -5,9 +5,9 @@
 <template>
   <div class="art-table" :class="{ 'is-empty': isEmpty }" :style="containerHeight">
     <ElTable ref="elTableRef" v-loading="!!loading" v-bind="mergedTableProps">
-      <template v-for="col in columns" :key="col.prop || col.type">
+      <template v-for="col in renderedColumns" :key="col.prop || col.type">
         <!-- 渲染全局序号列 -->
-        <ElTableColumn v-if="col.type === 'globalIndex'" v-bind="{ ...col }">
+        <ElTableColumn v-if="col.type === 'globalIndex'" v-bind="cleanColumnProps(col)">
           <template #default="{ $index }">
             <span>{{ getGlobalIndex($index) }}</span>
           </template>
@@ -79,11 +79,16 @@
   import { useTableStore } from '@/store/modules/table'
   import { useCommon } from '@/hooks/core/useCommon'
   import { useTableHeight } from '@/hooks/core/useTableHeight'
-  import { useResizeObserver, useWindowSize } from '@vueuse/core'
+  import { useAppBreakpoints } from '@/hooks/core/useAppBreakpoints'
+  import { useResizeObserver } from '@vueuse/core'
+  import {
+    filterColumnsForViewport,
+    warnInvalidHideBelow,
+    warnNonPrefixFixedLeft
+  } from '../responsive-columns'
 
   defineOptions({ name: 'ArtTable' })
 
-  const { width } = useWindowSize()
   const elTableRef = ref<InstanceType<typeof ElTable> | null>(null)
   const paginationRef = ref<HTMLElement>()
   const tableHeaderRef = ref<HTMLElement>()
@@ -156,14 +161,33 @@
     DESKTOP: 'total, prev, pager, next, sizes, jumper'
   }
 
+  // 分页布局随断点表切换（阈值见 src/config/breakpoints.ts）
+  const { smaller, greaterOrEqual } = useAppBreakpoints()
+
   const layout = computed(() => {
-    if (width.value < 768) {
+    if (smaller('tablet').value) {
       return LAYOUT.MOBILE
-    } else if (width.value < 1024) {
+    } else if (smaller('desktop').value) {
       return LAYOUT.IPAD
     } else {
       return LAYOUT.DESKTOP
     }
+  })
+
+  /**
+   * 实际渲染的列：在用户列显隐（columnChecks）之上，再按视口过滤 hideBelow 列。
+   * smaller() 返回缓存过的 computed，可安全在 computed 内复用。
+   */
+  const renderedColumns = computed(() =>
+    filterColumnsForViewport(props.columns, (name) => smaller(name).value)
+  )
+
+  // 开发期校验：
+  // - hideBelow 拼写（无效值会让该列静默不隐藏）
+  // - 左固定列必须是渲染列表的前缀（否则 EP 会把固定列整体提前，列顺序与声明不一致）
+  watchEffect(() => {
+    warnInvalidHideBelow(props.columns)
+    warnNonPrefixFixedLeft(renderedColumns.value)
   })
 
   // 默认分页常量
@@ -174,7 +198,7 @@
     layout: layout.value,
     hideOnSinglePage: false,
     size: 'default',
-    pagerCount: width.value > 1200 ? 7 : 5
+    pagerCount: greaterOrEqual('xl').value ? 7 : 5
   }
 
   // 合并分页配置
@@ -286,6 +310,8 @@
     delete columnProps.headerSlotName
     delete columnProps.useSlot
     delete columnProps.slotName
+    // 断点隐藏由 ArtTable 在渲染前过滤，不应作为未知属性透传到 ElTableColumn 的 DOM
+    delete columnProps.hideBelow
     return columnProps
   }
 

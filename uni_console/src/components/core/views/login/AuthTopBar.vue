@@ -1,9 +1,9 @@
 <!-- 授权页右上角组件 -->
 <template>
   <div
-    class="absolute w-full flex-cb top-4.5 z-10 flex-c !justify-end max-[1180px]:!justify-between"
+    class="absolute w-full flex-cb top-4.5 z-10 flex-c !justify-end max-compact:!justify-between"
   >
-    <div class="flex-cc !hidden max-[1180px]:!flex ml-2 max-sm:ml-6">
+    <div class="flex-cc !hidden max-compact:!flex ml-2 max-sm:ml-6">
       <ArtLogo class="icon" size="46" />
       <h1 class="text-xl ont-mediumf ml-2">{{ AppConfig.systemInfo.name }}</h1>
     </div>

@@ -85,6 +85,11 @@
 
 /* ==================== Tailwind Theme Configuration ==================== */
 @theme {
+  /* Font Family (统一正文字体栈；Element Plus 组件通过 el-ui.scss 复用同一变量) */
+  --font-sans:
+    system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei',
+    'Noto Sans CJK SC', 'Helvetica Neue', Arial, sans-serif;
+
   /* Box Color (Light: white / Dark: black) */
   --color-box: var(--default-box-color);
 
@@ -119,6 +124,14 @@
   --color-g-700: var(--art-gray-700);
   --color-g-800: var(--art-gray-800);
   --color-g-900: var(--art-gray-900);
+
+  /* Project Breakpoints（与 src/config/breakpoints.ts、_breakpoints.scss 对齐）
+     Tailwind 默认 sm=640 / md=768 / lg=1024 / xl=1280 已对应 phone/tablet/desktop/xl；
+     以下为项目特有断点，供 max-* 命名前缀使用，避免模板写任意值（如 max-[1180px]）。 */
+  --breakpoint-phone-narrow: 500px;
+  --breakpoint-compact: 1180px;
+  --breakpoint-wide: 1440px;
+  --breakpoint-xwide: 1600px;
 }
 
 /* ==================== Custom Border Radius Utilities ==================== */

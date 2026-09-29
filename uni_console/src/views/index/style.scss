@@ -1,8 +1,14 @@
+@use '@styles/core/breakpoints.scss' as *;
+
 .app-layout {
   display: flex;
   width: 100%;
   min-height: 100vh;
   background: var(--default-bg-color);
+  // 安全区（刘海屏横屏 / 圆角）：viewport-fit=cover 后由 env() 提供，
+  // 非刘海设备 env() 为 0，对现有布局无影响
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
 
   #app-sidebar {
     flex-shrink: 0;
@@ -46,7 +52,7 @@
   }
 }
 
-@media only screen and (width <= 1180px) {
+@include respond-at-most('compact') {
   .app-layout {
     #app-main {
       height: 100dvh;
@@ -54,22 +60,27 @@
   }
 }
 
-@media only screen and (width <= 800px) {
+@include respond-at-most('tablet') {
   .app-layout {
     position: relative;
 
     #app-sidebar {
       position: fixed;
       top: 0;
-      left: 0;
+      // fixed 元素不受父级 padding 约束，单独避让左/右安全区
+      left: env(safe-area-inset-left);
       z-index: 300;
-      height: 100vh;
+      // 100dvh：手机浏览器地址栏收起/展开时与 #app-main(compact 下同为 dvh)保持一致，
+      // 避免 vh 计算包含地址栏导致侧栏底部被裁或与内容区错位
+      height: 100dvh;
     }
 
     #app-main {
       width: 100%;
       height: auto;
       overflow: visible;
+      // 移动端底部手势条：内容区上移，避免最后一行被遮挡
+      padding-bottom: env(safe-area-inset-bottom);
 
       #app-content {
         :deep(.layout-content) {
@@ -80,7 +91,7 @@
   }
 }
 
-@media only screen and (width <= 640px) {
+@include respond-at-most('phone') {
   .app-layout {
     #app-main {
       #app-content {

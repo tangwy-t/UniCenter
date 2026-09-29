@@ -242,31 +242,31 @@
       {
         prop: 'noticeType',
         label: '公告类型',
-        width: 100,
+        minWidth: 100,
         formatter: (row) => noticeTypeDict.render(row.noticeType)
       },
       {
         prop: 'status',
         label: '状态',
-        width: 100,
+        minWidth: 100,
         formatter: (row) => statusDict.render(row.status)
       },
       {
         prop: 'readStatus',
         label: '阅读状态',
-        width: 100,
+        minWidth: 100,
         formatter: (row) => (row.readStatus == null ? '—' : readStatusDict.render(row.readStatus))
       },
       {
         prop: 'priority',
         label: '优先级',
-        width: 100,
+        minWidth: 100,
         formatter: (row) => priorityDict.render(row.priority)
       },
       {
         prop: 'targetType',
         label: '接收范围',
-        width: 180,
+        minWidth: 180,
         showOverflowTooltip: true,
         formatter: (row) => {
           const label = targetTypeDict.labelOf(row.targetType)
@@ -279,8 +279,8 @@
             : targetTypeDict.render(row.targetType)
         }
       },
-      { prop: 'createBy', label: '创建者', width: 110, showOverflowTooltip: true },
-      { prop: 'publishTime', label: '发布时间', width: 170 },
+      { prop: 'createBy', label: '创建者', minWidth: 110, showOverflowTooltip: true },
+      { prop: 'publishTime', label: '发布时间', minWidth: 170 },
       ...(operationColumnConfig ? [operationColumnConfig] : [])
     ]
   })

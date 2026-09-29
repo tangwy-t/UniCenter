@@ -386,22 +386,22 @@
       {
         prop: 'triggerType',
         label: '触发方式',
-        width: 95,
+        minWidth: 95,
         align: 'center',
         formatter: (row) => triggerDict.render(row.triggerType)
       },
-      { prop: 'startTime', label: '开始时间', width: 165 },
+      { prop: 'startTime', label: '开始时间', minWidth: 165 },
       {
         prop: 'costTime',
         label: '耗时',
-        width: 90,
+        minWidth: 90,
         formatter: (row) =>
           h('span', { class: row.costTime > 10_000 ? 'text-danger' : '' }, formatCost(row.costTime))
       },
       {
         prop: 'status',
         label: '状态',
-        width: 90,
+        minWidth: 90,
         align: 'center',
         formatter: (row) => statusDict.render(row.status)
       },

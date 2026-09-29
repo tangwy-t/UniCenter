@@ -18,7 +18,9 @@
         <!-- 系统信息  -->
         <div class="flex-c c-p" @click="toHome" v-if="isTopMenu">
           <ArtLogo class="pl-4.5" />
-          <p v-if="width >= 1400" class="my-0 mx-2 ml-2 text-lg">{{ AppConfig.systemInfo.name }}</p>
+          <p v-if="showSystemName" class="my-0 mx-2 ml-2 text-lg">{{
+            AppConfig.systemInfo.name
+          }}</p>
         </div>
 
         <ArtLogo
@@ -121,7 +123,7 @@
 
 <script setup lang="ts">
   import { useRouter } from 'vue-router'
-  import { useFullscreen, useWindowSize } from '@vueuse/core'
+  import { useFullscreen } from '@vueuse/core'
   import { MenuTypeEnum } from '@/enums/appEnum'
   import { useSettingStore } from '@/store/modules/setting'
   import { useMenuStore } from '@/store/modules/menu'
@@ -130,13 +132,19 @@
   import { themeAnimation } from '@/utils/ui/animation'
   import { useCommon } from '@/hooks/core/useCommon'
   import { useHeaderBar } from '@/hooks/core/useHeaderBar'
+  import { useAppBreakpoints } from '@/hooks/core/useAppBreakpoints'
+  import { useResponsiveMenu } from '@/hooks/core/useResponsiveMenu'
   import { useSocketStore } from '@/store/modules/socket'
   import ArtUserMenu from './widget/ArtUserMenu.vue'
 
   defineOptions({ name: 'ArtHeaderBar' })
 
   const router = useRouter()
-  const { width } = useWindowSize()
+
+  // 宽屏才展示系统名称（与断点表保持单一事实源）
+  const { greaterOrEqual } = useAppBreakpoints()
+  const showSystemName = greaterOrEqual('wide')
+  const { toggleMenu } = useResponsiveMenu()
 
   const settingStore = useSettingStore()
   const menuStore = useMenuStore()
@@ -152,7 +160,7 @@
     shouldShowThemeToggle
   } = useHeaderBar()
 
-  const { menuOpen, systemThemeColor, showSettingGuide, menuType, isDark, tabStyle } =
+  const { systemThemeColor, showSettingGuide, menuType, isDark, tabStyle } =
     storeToRefs(settingStore)
 
   const { menuList } = storeToRefs(menuStore)
@@ -203,10 +211,10 @@
   }
 
   /**
-   * 切换菜单显示/隐藏状态
+   * 切换菜单显示/隐藏（手机端切抽屉，桌面端写用户偏好）
    */
   const visibleMenu = (): void => {
-    settingStore.setMenuOpen(!menuOpen.value)
+    toggleMenu()
   }
 
   const { homePath } = useCommon()
@@ -268,6 +276,8 @@
 </script>
 
 <style lang="scss" scoped>
+  @use '@styles/core/breakpoints.scss' as *;
+
   /* Custom animations */
   @keyframes rotate180 {
     0% {
@@ -456,13 +466,13 @@
   }
 
   /* iPad breakpoint adjustments */
-  @media screen and (width <= 768px) {
+  @include respond-at-most('tablet') {
     .logo2 {
       display: block !important;
     }
   }
 
-  @media screen and (width <= 640px) {
+  @include respond-at-most('phone') {
     .btn-box {
       width: 40px;
     }

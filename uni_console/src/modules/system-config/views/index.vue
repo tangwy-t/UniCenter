@@ -135,13 +135,13 @@
       {
         prop: 'configType',
         label: '类型',
-        width: 90,
+        minWidth: 90,
         formatter: (row) => typeLabels[row.configType] ?? row.configType
       },
       {
         prop: 'status',
         label: '状态',
-        width: 90,
+        minWidth: 90,
         formatter: (row) => statusDict.render(row.status)
       },
       { prop: 'remark', label: '备注', minWidth: 140, showOverflowTooltip: true },

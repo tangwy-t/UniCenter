@@ -407,21 +407,36 @@
     })
 
     return [
+      // 列优先级：手机保留"角色 / 状态 / 操作"，清掉序号、数据权限、排序、创建时间等桌面管理列
       { type: 'selection', width: 46 },
-      { type: 'index', width: 60, label: '序号' },
-      { prop: 'name', label: '角色', minWidth: 190, formatter: (row) => renderRoleCell(row) },
+      { type: 'index', width: 60, label: '序号', hideBelow: 'desktop' },
+      {
+        prop: 'name',
+        label: '角色',
+        minWidth: 150,
+        formatter: (row) => renderRoleCell(row)
+      },
       {
         prop: 'dataScope',
         label: '数据权限',
-        width: 110,
+        minWidth: 110,
+        hideBelow: 'tablet',
         formatter: (row) => renderDataScope(row)
       },
-      { prop: 'sort', label: '排序', width: 150, align: 'center', useSlot: true },
-      { prop: 'status', label: '状态', width: 104, formatter: (row) => renderStatus(row) },
+      {
+        prop: 'sort',
+        label: '排序',
+        minWidth: 150,
+        align: 'center',
+        useSlot: true,
+        hideBelow: 'desktop'
+      },
+      { prop: 'status', label: '状态', minWidth: 100, formatter: (row) => renderStatus(row) },
       {
         prop: 'createdAt',
         label: '创建时间',
-        width: 150,
+        minWidth: 140,
+        hideBelow: 'desktop',
         formatter: (row) => fmtTime(row.createdAt)
       },
       ...(operationColumnConfig ? [operationColumnConfig] : [])

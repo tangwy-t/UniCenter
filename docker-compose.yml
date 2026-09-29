@@ -75,6 +75,11 @@ services:
       # 单容器反向代理场景填 nginx 所在网段（见 .env.example），由 env 注入。
       SERVER_TRUSTEDPROXIES: ${SERVER_TRUSTEDPROXIES:-}
 
+      # ── 首次部署：admin 初始口令（可选）──
+      # 留空时迁移会随机生成一次性口令，并在首次启动日志中打印一次；
+      # 设置后即用该值创建 admin（登录后请立即修改）。仅对空库首次迁移生效。
+      ADMIN_INITIAL_PASSWORD: ${ADMIN_INITIAL_PASSWORD:-}
+
       # ── 关系数据库（MySQL / PostgreSQL）──
       DATABASE_DRIVER: ${DATABASE_DRIVER:-mysql}   # mysql | postgres
       DATABASE_HOST: ${DATABASE_HOST:-host.docker.internal}

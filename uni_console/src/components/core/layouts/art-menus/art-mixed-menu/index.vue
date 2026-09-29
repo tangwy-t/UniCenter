@@ -246,7 +246,9 @@
   }
 </style>
 
-<style scoped>
+<style lang="scss" scoped>
+  @use '@styles/core/breakpoints.scss' as *;
+
   :deep(.el-scrollbar__bar.is-horizontal) {
     bottom: 5px;
     display: none;
@@ -271,7 +273,7 @@
     background-color: var(--theme-color);
   }
 
-  @media (width <= 1440px) {
+  @include respond-at-most('wide') {
     :deep(.scrollbar-wrapper) {
       margin: 0 45px;
     }
