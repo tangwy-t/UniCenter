@@ -44,6 +44,9 @@ import Networks from '../views/networks.vue'
 import Projects from '../views/projects.vue'
 import ContainerDetail from '../views/container-detail.vue'
 import ImageDetail from '../views/image-detail.vue'
+import { BREAKPOINTS } from '@/config/breakpoints'
+import { filterColumnsForViewport } from '@/components/core/tables/responsive-columns'
+import type { ColumnOption } from '@/types/component'
 
 const HOSTS = {
   list: [
@@ -240,6 +243,85 @@ describe('页面渲染冒烟（挂载即验证，白屏类故障的守卫）', (
     const w = await mountPage(ImageDetail, { host: 'h1', id: 'i1' })
     expect(w.html().length).toBeGreaterThan(0)
     expect(w.find('.imd').exists()).toBe(true)
+  })
+})
+
+/* ── 各视口的列集合（手机横屏 / 平板 / 桌面） ─────────────────────
+ * hideBelow 是**声明式**的：断点名写错、该留的列被藏、或某次重构把声明弄丢，
+ * 现有测试一条都不会红（页面照样挂载、单测照样绿），只有真机上某个视口看不到
+ * 关键列时才暴露。这里把「哪档视口能看到哪些列」钉成两条不变量：
+ *   ① 关键列（行标识 / 状态 / 操作）在任何视口都必须可见；
+ *   ② 列集合随视口变宽**单调不减**（不会出现「大屏反而少一列」的倒挂）。
+ * 断言取的是页面真正传给 ArtTable 的列配置，过滤规则复用 responsive-columns 的同一函数
+ * （纯函数本身由 components/core/tables/responsive-columns.test.ts 覆盖）。
+ */
+describe('列集合随视口分档（hideBelow 的不变量守卫）', () => {
+  const WIDTHS = [500, 640, 768, 900, 1024, 1280, 1600]
+
+  /** 某视口宽度下，页面实际会渲染的列（标签；无标签的结构列回退为 type） */
+  const labelsAt = (wrapper: VueWrapper, width: number): string[] => {
+    const table = wrapper.findComponent({ name: 'ArtTable' })
+    expect(table.exists()).toBe(true)
+    // 替身没有声明 props（用 inheritAttrs: false + attrs 渲染），故列配置落在 $attrs 里；
+    // 真组件走 $props，两处都读一次，替身换成真组件也不会失效。
+    const vm = table.vm as unknown as {
+      $attrs: Record<string, unknown>
+      $props: Record<string, unknown>
+    }
+    const columns = (vm.$props.columns ?? vm.$attrs.columns ?? []) as ColumnOption<unknown>[]
+    expect(columns.length, '页面没有把列配置传给 ArtTable').toBeGreaterThan(0)
+    return filterColumnsForViewport(columns, (name) => width < BREAKPOINTS[name]).map((col) =>
+      String(col.label ?? col.type)
+    )
+  }
+
+  /** ①关键列恒在 + ②随视口单调不减 */
+  const assertInvariants = (wrapper: VueWrapper, essential: string[]) => {
+    const sets = WIDTHS.map((width) => {
+      const labels = labelsAt(wrapper, width)
+      for (const key of essential) {
+        expect(labels, `${width}px 下缺少关键列「${key}」`).toContain(key)
+      }
+      return new Set(labels)
+    })
+    for (let i = 1; i < WIDTHS.length; i++) {
+      for (const kept of sets[i - 1]!) {
+        expect(
+          sets[i]!.has(kept),
+          `${WIDTHS[i]}px 比更窄的 ${WIDTHS[i - 1]}px 少了一列「${kept}」（阈值写反了？）`
+        ).toBe(true)
+      }
+    }
+  }
+
+  it('容器页：名称/状态/操作恒在，网络吞吐只在桌面档出现', async () => {
+    const w = (await mountPage(Containers)) as VueWrapper
+    assertInvariants(w, ['名称', '状态', '操作'])
+    expect(labelsAt(w, 640)).not.toContain('网络')
+    expect(labelsAt(w, 1024)).toContain('网络')
+  })
+
+  it('镜像页：仓库:标签/使用/操作恒在，大小与创建时间窄屏让位', async () => {
+    const w = (await mountPage(Images)) as VueWrapper
+    assertInvariants(w, ['仓库:标签', '使用', '操作'])
+    expect(labelsAt(w, 640)).not.toContain('大小')
+    expect(labelsAt(w, 640)).not.toContain('创建于')
+    expect(labelsAt(w, 1024)).toContain('大小')
+  })
+
+  it('数据卷页：名称/使用/操作恒在，驱动与大小窄屏让位', async () => {
+    const w = (await mountPage(Volumes)) as VueWrapper
+    assertInvariants(w, ['名称', '使用', '操作'])
+    expect(labelsAt(w, 640)).not.toContain('驱动')
+    expect(labelsAt(w, 1024)).toContain('驱动')
+  })
+
+  it('网络页：名称/内部网络/操作恒在（内部网络决定容器能否出网）', async () => {
+    const w = (await mountPage(Networks)) as VueWrapper
+    assertInvariants(w, ['名称', '内部网络', '操作'])
+    expect(labelsAt(w, 640)).not.toContain('容器数')
+    expect(labelsAt(w, 640)).not.toContain('驱动')
+    expect(labelsAt(w, 768)).toContain('驱动')
   })
 })
 
