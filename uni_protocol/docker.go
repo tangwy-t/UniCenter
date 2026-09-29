@@ -108,6 +108,14 @@ const (
 	maxDockerScaleN = 100
 	// maxDockerTermSize 是终端 resize 的行列上限。
 	maxDockerTermSize = 1000
+	// maxDockerExecArgvItems / maxDockerExecArgvBytes 是 container:exec 的 argv 上限
+	//（v1.2.3 冻结契约：数组 ≤32 项、每项 ≤256B、元素非空、不得含 NUL 或换行）。
+	//
+	// 为什么只有尺寸与形态约束：argv **直传 daemon，不经 shell**（协议上也不接受
+	// 自由文本命令），故这里不存在「命令注入」这一面 —— 真正的护栏是 core 的
+	// docker:exec 权限与 agent 侧的「不拼 shell」执行纪律。
+	maxDockerExecArgvItems = 32
+	maxDockerExecArgvBytes = 256
 )
 
 // DockerActionSpec 是 action 的静态属性中**两端都必须一致**的那部分。
@@ -118,6 +126,15 @@ type DockerActionSpec struct {
 	Action string
 	// Required 是必须有值的 options 字段名（措辞与 JSON tag 一致，供 400 提示直接引用）。
 	Required []string
+	// OneOf 是「组内字段**恰好出现一个**」的互斥约束（组间彼此独立）。
+	//
+	// 为什么不把组内字段塞进 Required：Required 的语义是「每个都必须有」，用它表达
+	// 二选一会让两个不同的问题共用一列 —— 守卫测试（必填项必须能解析出非空值）
+	// 也就无法分别断言「都缺」与「都给」这两种相反的非法形态。
+	//
+	// v1.2.4 的唯一用例：compose.file:write 的 content|backup —— 全文写与备份回滚
+	// 是两条**互斥**的正文来源，都给时不猜优先级（拒绝），都缺时无从下手（拒绝）。
+	OneOf [][]string
 	// Confirm 是确认档形态：""（标准档）/ DockerConfirmDelete / DockerConfirmTarget /
 	// DockerConfirmFilename。取值来源由 ExpectedDockerConfirm 统一给出。
 	Confirm string
@@ -159,7 +176,10 @@ var dockerActionSpecs = []DockerActionSpec{
 	{Action: DockerActionComposeServiceRemoveContainers, Required: []string{"target"}, Confirm: DockerConfirmTarget},
 
 	{Action: DockerActionComposeFileRead, Required: []string{"target"}},
-	{Action: DockerActionComposeFileWrite, Required: []string{"target", "content", "base_hash"}, Confirm: DockerConfirmTarget},
+	// 写路径的正文来源是**二选一**（v1.2.4）：content（全文写）或 backup（回滚到某份
+	// 备份）。两者都不在 Required 里 —— 它们互斥，只能由 OneOf 表达（§9 两条保存路径）。
+	{Action: DockerActionComposeFileWrite, Required: []string{"target", "base_hash"},
+		OneOf: [][]string{{"content", "backup"}}, Confirm: DockerConfirmTarget},
 	{Action: DockerActionComposeFileValidate, Required: []string{"target", "content"}},
 	{Action: DockerActionComposeFilePatch, Required: []string{"target", "base_hash", "patch"}, Confirm: DockerConfirmTarget},
 }
@@ -168,6 +188,7 @@ var dockerActionSpecs = []DockerActionSpec{
 var dockerOptionFields = []string{
 	"target", "tail", "since", "n", "force", "filename", "overwrite", "all",
 	"remove_orphans", "volumes", "content", "base_hash", "src", "dst", "patch",
+	"follow", "command", "backup",
 }
 
 // AllDockerActions 返回全部合法 action（顺序 = 白名单书写顺序）。
@@ -206,6 +227,12 @@ var (
 	dockerImageRefRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9/._:@-]*$`)
 	// 容器/卷/网络名：比项目名多了「允许首字符之外的更多符号」的余地不做扩展，保持一致。
 	dockerNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
+	// 备份令牌：YYYYMMDD-HHMMSS（agent 挂钟时间）。
+	//
+	// **形态就是全部约束**：令牌在协议上是不可解释的 opaque 值，agent 自己拼
+	// `<配置文件>.bak-<令牌>` —— 路径分隔符/`..`/空白因此都不可能出现在这条通道上
+	// （§8 路径白名单：协议上永远不出现路径）。
+	dockerBackupTokenRe = regexp.MustCompile(`^\d{8}-\d{6}$`)
 )
 
 // IsDockerProjectName 报告 s 是否是合法的 compose 项目名。
@@ -216,6 +243,10 @@ func IsDockerTarFilename(s string) bool { return s != "" && dockerTarFilenameRe.
 
 // IsDockerImageRef 报告 s 是否是合法的镜像引用（含 digest 形态）。
 func IsDockerImageRef(s string) bool { return s != "" && dockerImageRefRe.MatchString(s) }
+
+// IsDockerBackupToken 报告 s 是否是合法的备份令牌（yyyyMMdd-HHmmss）。
+// 它是 compose.file:write 回滚模式的**唯一**现场输入，agent 据此重建备份文件路径。
+func IsDockerBackupToken(s string) bool { return s != "" && dockerBackupTokenRe.MatchString(s) }
 
 func isDockerName(s string) bool { return s != "" && dockerNameRe.MatchString(s) }
 
@@ -306,6 +337,17 @@ func dockerOptionValue(o *DockerCmdOptions, field string) string {
 			return ""
 		}
 		return "set"
+	case "follow":
+		return boolStr(o.Follow)
+	case "command":
+		// 数组的「有值/无值」：非空即已填（command 不在任何 Required 清单里，
+		// 这一支只为「字段名必须可解析」的守卫生效）。
+		if len(o.Command) == 0 {
+			return ""
+		}
+		return "set"
+	case "backup":
+		return o.Backup
 	default:
 		// 未知字段名返回空串 = 必填校验失败：字段名写错是可发现的红灯，不是静默放行。
 		return ""
@@ -338,6 +380,21 @@ func ValidateDockerCmdOptions(action string, o *DockerCmdOptions) error {
 			return decodeErr(StagePayload, field, ErrMissingField)
 		}
 	}
+	// 互斥组（v1.2.4）：恰好一个。都缺 = 缺字段（无从下手），都给 = 非法（不猜优先级）。
+	for _, group := range spec.OneOf {
+		filled := 0
+		for _, field := range group {
+			if dockerOptionValue(o, field) != "" {
+				filled++
+			}
+		}
+		if filled == 0 {
+			return decodeErr(StagePayload, group[0], ErrMissingField)
+		}
+		if filled > 1 {
+			return decodeErr(StagePayload, group[1], ErrInvalidPayload)
+		}
+	}
 	// 取值形态：与必填分开 —— 空值已在上面拦掉，这里只管「给了但非法」。
 	if o.Target != "" {
 		if err := validateDockerTarget(action, o.Target); err != nil {
@@ -367,6 +424,64 @@ func ValidateDockerCmdOptions(action string, o *DockerCmdOptions) error {
 	}
 	if len(o.Content) > MaxDockerComposeFileBytes {
 		return decodeErr(StagePayload, "content", ErrInvalidPayload)
+	}
+	// container:exec 的 argv（v1.2.3）：尺寸 + 形态。缺席是合法的（缺省 ["/bin/sh"]），
+	// 故这里只拒「给了但非法」。
+	if len(o.Command) > maxDockerExecArgvItems {
+		return decodeErr(StagePayload, "command", ErrInvalidPayload)
+	}
+	for _, arg := range o.Command {
+		if arg == "" || len(arg) > maxDockerExecArgvBytes || strings.ContainsAny(arg, "\x00\n") {
+			return decodeErr(StagePayload, "command", ErrInvalidPayload)
+		}
+	}
+	// 备份令牌（v1.2.4）：只有 compose.file:write 的回滚模式用它，且形态必须严格是
+	// yyyyMMdd-HHmmss。令牌是**不可解释**的 opaque 值（agent 自己拼备份文件路径），
+	// 任何别的形态（路径分隔符、`..`、空白、非数字）都必须在协议层出不去 —— §8 的
+	//「协议上永远不出现路径」就靠这一条 + 形态白名单共同成立。
+	if o.Backup != "" {
+		if action != DockerActionComposeFileWrite || !IsDockerBackupToken(o.Backup) {
+			return decodeErr(StagePayload, "backup", ErrInvalidPayload)
+		}
+	}
+	// 补丁形态（v1.2.4，compose.file:patch）：它是**,唯一一个形状由嵌套 JSON 决定的
+	// options**，不收口的话会在 agent 的文本手术里炸出各种半懂状态。收口点放在协议层
+	//（payload 的第一道闸），agent 侧仍有自己的拒绝分支（纵深防御）。
+	if action == DockerActionComposeFilePatch {
+		if err := validateDockerPatchShape(o.Patch); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// dockerPatchSections 是 compose.file:patch 允许出现的段落（§9 的文档模型范围）。
+//
+// 收在三个段落：configs/secrets/x-* 这些不进四期的表单模型 —— 它们要改就该切 YML 模式
+// 走全文 write，而不是让补丁带上一个 agent 不认识的手术面。
+var dockerPatchSections = map[string]bool{"services": true, "networks": true, "volumes": true}
+
+// validateDockerPatchShape 校验补丁的**形状**：段落白名单 + 「名字 → 键值映射 | null」。
+//
+// 值里的 null 是**删除该键**的语义（§9），故它是合法的叶子，不在这里拦。
+// 顶层 null（想整段删光）不合法：删除要逐名表达（保持「只发被改过的键」的口径）。
+func validateDockerPatchShape(patch map[string]any) error {
+	for section, v := range patch {
+		if !dockerPatchSections[section] {
+			return decodeErr(StagePayload, "patch", ErrInvalidPayload)
+		}
+		m, ok := v.(map[string]any)
+		if !ok {
+			return decodeErr(StagePayload, "patch", ErrInvalidPayload)
+		}
+		for _, entry := range m {
+			if entry == nil {
+				continue
+			}
+			if _, ok := entry.(map[string]any); !ok {
+				return decodeErr(StagePayload, "patch", ErrInvalidPayload)
+			}
+		}
 	}
 	return nil
 }
@@ -426,7 +541,18 @@ func ExpectedDockerConfirm(action string, o *DockerCmdOptions) string {
 		}
 		return o.Target
 	case DockerConfirmFilename:
-		if o == nil {
+		// 「覆盖时强」（spec §4.3.1：image:save = 覆盖时强(文件名)，§7.5 两段确认）：
+		// 只有**用户确认覆盖后的重发**（overwrite=true）才要求照抄文件名。
+		//
+		// 两段时序（复用 cmd/result，不另造机制）：
+		//   1) 首次导出不带 confirm → agent 以 O_EXCL 独占创建；目标已存在时不执行、
+		//      结果回 already_exists 标志；
+		//   2) UI 问过用户后，带 overwrite=true + confirm=<文件名> 重发 → 才允许覆盖。
+		//
+		// 为什么第一段不能就要 confirm：首次导出是常规路径（目标文件通常并不存在），
+		// 无条件要文件名会把「正常首次导出」挡成一次假失败（生产实测复现）；而且每次
+		// 导出都抄一遍会把确认档训练成例行公事，稀缺性一失，第二段也就形同虚设。
+		if o == nil || !o.Overwrite {
 			return ""
 		}
 		return o.Filename
@@ -550,6 +676,12 @@ type DockerVolume struct {
 	SizeMB    *float64 `json:"size_mb,omitempty"`
 	InUse     bool     `json:"in_use"`
 	MountedBy []string `json:"mounted_by,omitempty"`
+	// Protected 与容器条目同义：agent 按 sys.docker.protected 的 `volume:<名>`
+	// 粒度算好的**结论**（前端不重复实现判断；卷页删除据此提示「受保护」）。
+	//
+	// 与容器条目的 Protected 不同，这里带 omitempty：它是 **v1.2.2 新增的可选字段**，
+	// 老 agent 不发、老 core 收到也不认得，都不影响（形状漂移守卫只放行省略形态）。
+	Protected bool `json:"protected,omitempty"`
 }
 
 // DockerNetwork 是快照里的一个网络。
@@ -571,6 +703,13 @@ type DockerProject struct {
 	State           string `json:"state,omitempty"`
 	Services        int    `json:"services"`
 	ContainersCount int    `json:"containers_count"`
+	// Protected 与容器条目同义：agent 按 sys.docker.protected 的 `project:<名>`
+	// 粒度算好的**结论**（项目页据此显示 🔒）。
+	//
+	// 服务粒度（`project:<项目>/<服务>`）不在这里：它已由成员容器条目的
+	// Protected 承载（ContainerProtected 会做「项目/服务」成对命中）。
+	// 本字段带 omitempty，理由同 DockerVolume.Protected（v1.2.2 纯增量）。
+	Protected bool `json:"protected,omitempty"`
 }
 
 // Validate 校验快照信封。
@@ -726,6 +865,26 @@ type DockerCmdOptions struct {
 	Dst string `json:"dst,omitempty"`
 	// Patch 是 compose.file:patch 的增量文档 {services,networks,volumes}，只含被改过的键。
 	Patch map[string]any `json:"patch,omitempty"`
+
+	// ── v1.2.3 纯增量（三期流通道）─────────────────────────────────────
+	//
+	// Follow 是 container:logs 的流式标志：false/缺省 = 一次性取（既有行为不变），
+	// true = 走流会话（agent 侧 ContainerLogs(Follow:true) + 帧整形）。
+	Follow bool `json:"follow,omitempty"`
+	// Command 是 container:exec 的 argv；缺省 ["/bin/sh"]（空数组与缺席同义）。
+	//
+	// 直传 daemon 的 argv（**不经 shell**）：数组 ≤32 项、每项 ≤256B、元素非空、
+	// 不得含 NUL 或换行（ValidateDockerCmdOptions）。
+	Command []string `json:"command,omitempty"`
+
+	// ── v1.2.4 纯增量（四期配置编辑）───────────────────────────────────
+
+	// Backup 是 compose.file:write 的**回滚模式**：值是备份令牌（yyyyMMdd-HHmmss，
+	// 形态严格校验，见 IsDockerBackupToken），带它就不需要 content。
+	//
+	// 协议上**永远不出现路径**（§8 路径白名单）：agent 自己把令牌拼成
+	// `<配置文件>.bak-<令牌>`。与 content 互斥（都给不猜优先级，都缺无从下手）。
+	Backup string `json:"backup,omitempty"`
 }
 
 // DockerCmd 是一条操作指令。
@@ -875,6 +1034,9 @@ type DockerImageLayer struct {
 }
 
 // DockerComposeFilePayload 是 compose.file:read 的结果数据。
+//
+// v1.2.4 起它也是 compose.file:write/patch 成功后的结果数据：保存收尾以 agent 回读的
+// 内容为准（§8 的唯一事实源），前端据此刷新基线 hash 与备份历史。
 type DockerComposeFilePayload struct {
 	Content string `json:"content"`
 	// Hash 是内容的 sha256（64 位小写 hex）：四期写路径的乐观锁基线，一期只读取它
@@ -883,6 +1045,24 @@ type DockerComposeFilePayload struct {
 	// Path 是 agent 从 compose 标签解析出的真实文件路径（只读展示用；
 	// 协议上从不接受路径入参 —— 路径白名单纪律，§8 四条防护之一）。
 	Path string `json:"path,omitempty"`
+	// Backups 是备份历史（最多 10 份，按时间倒序）。**v1.2.4 纯增量**：老 agent
+	// 不发、老 core/前端忽略即可（形状漂移守卫只放行省略形态）。
+	Backups []DockerComposeBackup `json:"backups,omitempty"`
+}
+
+// DockerComposeBackup 是一份配置备份（v1.2.4）。
+//
+// 它是**展示 + 回滚选择**的数据：token 回填给 compose.file:write 的 backup，
+// 其余供「历史备份」视图展示与 diff。
+type DockerComposeBackup struct {
+	// Token 是令牌（yyyyMMdd-HHmmss）：agent 据此重建 <文件>.bak-<令牌>。
+	Token string `json:"token"`
+	// Hash 是该备份内容的 sha256（64 位小写 hex）——回滚前后比对「内容与备份一致」。
+	Hash string `json:"hash"`
+	// SizeBytes 是备份文件字节数（前端显示体积；也是 1MB 上限的事实核对点）。
+	SizeBytes int64 `json:"size_bytes"`
+	// At 是备份时刻（unix 秒）。
+	At int64 `json:"at"`
 }
 
 // ── 流：上行数据帧 / 下行控制帧（一期只登记，不接线）─────────────────────

@@ -331,6 +331,27 @@
       "type": "map[string]interface {}",
       "pointer": false,
       "omit_empty": true
+    },
+    {
+      "name": "Follow",
+      "json": "follow",
+      "type": "bool",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Command",
+      "json": "command",
+      "type": "[]string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Backup",
+      "json": "backup",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
     }
   ],
   "DockerCmdResult": [
@@ -384,6 +405,36 @@
       "omit_empty": true
     }
   ],
+  "DockerComposeBackup": [
+    {
+      "name": "Token",
+      "json": "token",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Hash",
+      "json": "hash",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "SizeBytes",
+      "json": "size_bytes",
+      "type": "int64",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "At",
+      "json": "at",
+      "type": "int64",
+      "pointer": false,
+      "omit_empty": false
+    }
+  ],
   "DockerComposeFilePayload": [
     {
       "name": "Content",
@@ -403,6 +454,13 @@
       "name": "Path",
       "json": "path",
       "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Backups",
+      "json": "backups",
+      "type": "[]agentproto.DockerComposeBackup",
       "pointer": false,
       "omit_empty": true
     }
@@ -1054,6 +1112,13 @@
       "type": "int",
       "pointer": false,
       "omit_empty": false
+    },
+    {
+      "name": "Protected",
+      "json": "protected",
+      "type": "bool",
+      "pointer": false,
+      "omit_empty": true
     }
   ],
   "DockerState": [
@@ -1154,6 +1219,13 @@
       "name": "MountedBy",
       "json": "mounted_by",
       "type": "[]string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Protected",
+      "json": "protected",
+      "type": "bool",
       "pointer": false,
       "omit_empty": true
     }

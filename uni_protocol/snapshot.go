@@ -55,6 +55,7 @@ func snapshottedDTOs() []struct {
 		{"DockerImageInspectPayload", DockerImageInspectPayload{}},
 		{"DockerImageLayer", DockerImageLayer{}},
 		{"DockerComposeFilePayload", DockerComposeFilePayload{}},
+		{"DockerComposeBackup", DockerComposeBackup{}},
 	}
 }
 
