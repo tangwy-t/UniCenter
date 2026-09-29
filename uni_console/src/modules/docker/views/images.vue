@@ -139,6 +139,7 @@
   import DockerActionConfirm from '../components/action-confirm.vue'
   import DockerActionMenu from '../components/action-menu.vue'
   import DockerPage from '../components/docker-page.vue'
+  import type { ColumnOption } from '@/types/component'
   import type { DockerImageItem } from '../api'
   import {
     runErrorMessage,
@@ -471,17 +472,21 @@
 
   // ── 表格列 ──
 
-  const columns = computed(() => {
+  const columns = computed<ColumnOption<DockerImageItem>[]>(() => {
     // 显式建立依赖：行内菜单的禁用态与权限显隐来自这些信号，而 formatter 要到表格
     // 渲染时才执行 —— 不在这里读一次，列配置就不会随它们变化而重算（表格会停在旧状态）。
     void pendingId.value
     void busy.value
     void canManage.value
     void canDelete.value
+    // 列优先级：手机横屏（<768）只留「仓库:标签 / 使用 / 操作」与勾选列（「使用」是
+    // 镜像的状态与回收决策依据）；序号在平板竖屏起出现；大小、创建时间是元数据，
+    // 低于桌面隐藏（底栏已给出合计，精确时刻在详情页）。数据列一律 minWidth，
+    // 固定宽度只留给 selection/index/操作这类结构性列，见 responsive-columns.ts 的约定。
     return [
       // 勾选列只在有管理权限时出现：只有底栏的打标签/导出 tar 用得上它。
       ...(canManage.value ? [{ type: 'selection' as const, width: 46 }] : []),
-      { type: 'index' as const, width: 60, label: '序号' },
+      { type: 'index' as const, width: 60, label: '序号', hideBelow: 'tablet' },
       {
         prop: 'repoTags',
         label: '仓库:标签',
@@ -492,19 +497,23 @@
       {
         prop: 'sizeMb',
         label: '大小',
-        width: 110,
+        minWidth: 110,
+        // 大小是元数据（底栏合计里已有），低于桌面隐藏。
+        hideBelow: 'desktop',
         formatter: (row: DockerImageItem) => formatByUnit('MB', row.sizeMb)
       },
       {
         prop: 'created',
         label: '创建于',
-        width: 140,
+        minWidth: 140,
+        // 相对时间是元数据，精确时刻在详情页给。
+        hideBelow: 'desktop',
         formatter: (row: DockerImageItem) => (row.created ? formatRelativeTime(row.created) : '—')
       },
       {
         prop: 'inUse',
         label: '使用',
-        width: 150,
+        minWidth: 150,
         showOverflowTooltip: true,
         formatter: (row: DockerImageItem) => inUseText(row)
       },

@@ -93,6 +93,7 @@
   import DockerActionConfirm from '../components/action-confirm.vue'
   import DockerActionMenu from '../components/action-menu.vue'
   import DockerPage from '../components/docker-page.vue'
+  import type { ColumnOption } from '@/types/component'
   import type { DockerVolumeItem } from '../api'
   import { runErrorMessage, useDockerCmds } from '../composables/useDockerCmds'
   import { useDockerHostState } from '../composables/useDockerHostState'
@@ -232,25 +233,33 @@
 
   // ── 表格列 ──
 
-  const columns = computed(() => {
+  const columns = computed<ColumnOption<DockerVolumeItem>[]>(() => {
     // 显式建立依赖：行内菜单的禁用态与保护结论来自这些信号，而 formatter 要到表格
     // 渲染时才执行 —— 不在这里读一次，列配置就不会随它们变化而重算（表格会停在旧状态）。
     void pendingId.value
     void busy.value
     void canExec.value
+    // 列优先级：手机横屏（<768）只留「名称 / 使用 / 操作」，序号让位；
+    // 平板竖屏（>=768）补上安全标记（保护）——「使用」是卷的状态与回收决策依据；
+    // 驱动与大小是摘要元数据（合计在底栏），桌面（>=1024）才展示。数据列一律 minWidth，
+    // 固定宽度只留给 index/操作这类结构性列，见 responsive-columns.ts 的约定。
     return [
-      { type: 'index' as const, width: 60, label: '序号' },
+      { type: 'index' as const, width: 60, label: '序号', hideBelow: 'tablet' },
       { prop: 'name', label: '名称', minWidth: 240, showOverflowTooltip: true },
       {
         prop: 'driver',
         label: '驱动',
-        width: 120,
+        minWidth: 120,
+        // 驱动是存储后端的分类摘要，非排查首看，桌面才展示。
+        hideBelow: 'desktop',
         formatter: (row: DockerVolumeItem) => row.driver || '—'
       },
       {
         prop: 'sizeMb',
         label: '大小',
-        width: 120,
+        minWidth: 120,
+        // 大小是元数据（合计在底栏，未知用量另有计数），桌面才展示。
+        hideBelow: 'desktop',
         // 未知用量显示「—」而不是 0：0 与「量不出来」在「空间去哪了」上是相反的结论。
         formatter: (row: DockerVolumeItem) =>
           row.sizeMb === undefined || row.sizeMb === null ? '—' : formatByUnit('MB', row.sizeMb)
@@ -265,7 +274,10 @@
       {
         prop: 'protected',
         label: '保护',
-        width: 180,
+        minWidth: 180,
+        // 「动手前必须看见」的安全标记（与容器页同口径）：小屏横屏让位后，
+        // 结论仍会出现在 ⋯ 菜单（禁用条目）与确认弹窗里。
+        hideBelow: 'tablet',
         formatter: (row: DockerVolumeItem) => protectionText(row)
       },
       // 操作列只在有删除权限时出现：没有可执行的动作，空操作列会让人以为

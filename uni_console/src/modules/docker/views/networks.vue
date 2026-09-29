@@ -75,6 +75,7 @@
   import DockerActionConfirm from '../components/action-confirm.vue'
   import DockerActionMenu from '../components/action-menu.vue'
   import DockerPage from '../components/docker-page.vue'
+  import type { ColumnOption } from '@/types/component'
   import type { DockerNetworkItem } from '../api'
   import { runErrorMessage, useDockerCmds } from '../composables/useDockerCmds'
   import { useDockerHostState } from '../composables/useDockerHostState'
@@ -156,31 +157,45 @@
 
   // ── 表格列 ──
 
-  const columns = computed(() => {
+  const columns = computed<ColumnOption<DockerNetworkItem>[]>(() => {
     // 显式建立依赖：行内菜单的禁用态来自这些信号，而 formatter 要到表格渲染时才执行 ——
     // 不在这里读一次，列配置就不会随它们变化而重算（表格会停在旧状态）。
     void pendingId.value
     void busy.value
+    // 列优先级：手机横屏（<768）只留「名称 / 内部网络 / 操作」，序号让位
+    //（内部网络决定容器能不能出去，是排障要看的事实）；驱动与作用域是平板竖屏
+    //（>=768）起的排查上下文；容器数是计数元数据，桌面（>=1024）才展示。
+    // 数据列一律 minWidth，固定宽度只留给 index/操作这类结构性列。
     return [
-      { type: 'index' as const, width: 60, label: '序号' },
+      { type: 'index' as const, width: 60, label: '序号', hideBelow: 'tablet' },
       { prop: 'name', label: '名称', minWidth: 240, showOverflowTooltip: true },
       {
         prop: 'driver',
         label: '驱动',
-        width: 120,
+        minWidth: 120,
+        // bridge/overlay/host 决定容器互通方式，平板竖屏起保留。
+        hideBelow: 'tablet',
         formatter: (row: DockerNetworkItem) => row.driver || '—'
       },
       {
         prop: 'scope',
         label: '作用域',
-        width: 110,
+        minWidth: 110,
+        // 本机 / 集群：切换主机排查时要看网络可见范围，平板竖屏起保留。
+        hideBelow: 'tablet',
         formatter: (row: DockerNetworkItem) => scopeText(row.scope)
       },
-      { prop: 'containersCount', label: '容器数', width: 100 },
+      {
+        prop: 'containersCount',
+        label: '容器数',
+        minWidth: 100,
+        // 计数是元数据，低于桌面隐藏。
+        hideBelow: 'desktop'
+      },
       {
         prop: 'internal',
         label: '内部网络',
-        width: 110,
+        minWidth: 110,
         // 「仅内部」才是要点：内部网络没有对外出口，排障时这条决定了容器能不能出去。
         formatter: (row: DockerNetworkItem) => (row.internal ? '仅内部' : '—')
       },

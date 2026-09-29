@@ -166,6 +166,7 @@
   import ArtTableHeader from '@/components/core/tables/art-table-header/index.vue'
   import DockerActionConfirm from '../components/action-confirm.vue'
   import DockerPage from '../components/docker-page.vue'
+  import type { ColumnOption } from '@/types/component'
   import type { DockerContainerItem } from '../api'
   import { runErrorMessage, useDockerCmds } from '../composables/useDockerCmds'
   import { useDockerHostState } from '../composables/useDockerHostState'
@@ -435,54 +436,73 @@
 
   // ── 表格列 ──
 
-  const columns = computed(() => {
+  const columns = computed<ColumnOption<DockerContainerItem>[]>(() => {
     // 显式建立依赖：行内菜单的禁用态来自这些信号，而 formatter 要到表格渲染时才执行 ——
     // 不在这里读一次，列配置就不会随它们变化而重算（表格会停在旧状态）。
     void pendingId.value
     void batchRunning.value
     void canExec.value
+    // 列优先级：手机横屏（<768）只留「名称 / 状态 / 操作」与勾选列，序号让位；
+    // 平板竖屏（>=768）补上排查要看的事实（CPU、内存、镜像、端口、保护）；
+    // 网络吞吐只在桌面（>=1024）展示。数据列一律 minWidth（宽屏按比例分摊），
+    // 固定宽度只留给 selection/index/操作这类结构性列，见 responsive-columns.ts 的约定。
     return [
       // 勾选列只在有写权限时出现：没这个权限的人看到一个用不上的勾选框只会困惑。
       ...(canWrite.value ? [{ type: 'selection' as const, width: 46 }] : []),
-      { type: 'index' as const, width: 60, label: '序号' },
+      { type: 'index' as const, width: 60, label: '序号', hideBelow: 'tablet' },
       { prop: 'name', label: '名称', minWidth: 200, showOverflowTooltip: true },
       {
         prop: 'statusText',
         label: '状态',
-        width: 190,
+        minWidth: 190,
         formatter: (row: DockerContainerItem) => containerStateText(row)
       },
       {
         prop: 'cpuPercent',
         label: 'CPU',
-        width: 90,
+        minWidth: 90,
+        hideBelow: 'tablet',
         formatter: (row: DockerContainerItem) => cpuText(row)
       },
       {
         prop: 'memUsageMb',
         label: '内存',
-        width: 170,
+        minWidth: 170,
+        hideBelow: 'tablet',
         formatter: (row: DockerContainerItem) => memText(row)
       },
       {
         prop: 'netTxBytesSec',
         label: '网络',
-        width: 190,
+        minWidth: 190,
+        // 吞吐是三类资源指标里最次要的（列也最宽），平板竖屏也隐藏，桌面起展示。
+        hideBelow: 'desktop',
         formatter: (row: DockerContainerItem) => netText(row)
       },
-      { prop: 'image', label: '镜像', minWidth: 180, showOverflowTooltip: true },
+      {
+        prop: 'image',
+        label: '镜像',
+        minWidth: 180,
+        showOverflowTooltip: true,
+        // 版本/来源是排查身份的一部分，平板竖屏保留。
+        hideBelow: 'tablet'
+      },
       {
         prop: 'ports',
         label: '端口',
-        width: 160,
+        minWidth: 160,
+        // 连通性排查的第一线索（服务为什么进不去），平板竖屏保留。
+        hideBelow: 'tablet',
         formatter: (row: DockerContainerItem) => portsText(row.ports)
       },
       {
         prop: 'protected',
         label: '保护',
-        width: 96,
+        minWidth: 96,
         // 保护是「动手前必须看见」的事实（spec §11.1 草图的 🔒）：列表上给可见标记，
         // 权限不足时的结论句写在被禁用的菜单条目上（那里才是用户看得到的地方）。
+        // 小屏横屏让位后，这条结论仍会出现在 ⋯ 菜单（禁用条目）与确认弹窗里。
+        hideBelow: 'tablet',
         formatter: (row: DockerContainerItem) => (row.protected ? '🔒 受保护' : '—')
       },
       {
