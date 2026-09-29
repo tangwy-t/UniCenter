@@ -1,65 +1,68 @@
 /**
- * 守卫：一期页面**不得出现**二期及以后的动作。
+ * 守卫：docker 模块的 action 字面量白名单 + 四期编辑入口（**收尾形态**）。
  *
- * 为什么需要它：spec §11.0 的分期控件矩阵写着「不渲染 ≠ 禁用」——一期页面上画一个
- * 二期按钮，用户点下去只会拿到 400，而他无从知道原因（「为什么点不了」）。这条纪律
- * 靠人记是不可靠的（把后期按钮顺手加上去是极自然的事），故把它变成红灯。
+ * 四期（配置编辑）已交付，期次边界守完最后一班岗：
+ *   - 一期只读 4 条 + 二期写 21 条 + 三期 exec 1 条 + 四期 compose.file 3 条 = 协议
+ *     白名单 29 条（`uni_protocol/docker.go` 的 `AllDockerActions()` / `dockerActionSpecs`）。
+ *     本守卫**不再有「后期动作」清单**：模块源码里出现的 action 字面量必须全部落在
+ *     这 29 条内（新增动作而忘了同步，就会以「不在白名单」红灯）。
+ *   - 四份清单互补的条数断言保留（清单少一条、注册表多一条都不行）。
+ *   - 「四期控件零 DOM」已随本期交付失效：编辑入口现在**存在**，改为断言
+ *     「入口存在且受 docker:config 权限门控」（不渲染 ≠ 禁用；没有权限的人连按钮
+ *     都不该看到 —— spec §11.0 分期控件矩阵）。
  *
- * 扫描口径：docker 模块的 .vue 与 .ts 源码里出现任何非一期 action 字面量即失败。
- * 一期允出现的就是 PHASE1_ACTIONS 那四个（它们出现在 utils/cmd.ts 的常量里）。
+ * ── 扫描口径 ────────────────────────────────────────────────────────
+ * 只扫 action 的六种前缀（container/image/volume/network/compose/compose.service/
+ * compose.file）；不扫 `docker:` —— 那是权限码（docker:config 等），不是动作名。
+ * 注释与字符串里的字面量同样计入（action 名不该以任何形态出现在别的语义里）。
  *
  * ── 为什么要跳过隐藏目录 ──────────────────────────────────────────
  * 模块目录里可能落下工具产物（例如安全扫描 hook 的 `.mimosa/`，它已在 .gitignore
  * 但确实存在于磁盘上）。遍历时连它们一起读毫无意义，还会让守卫的失败信息被噪音
- * 淹没（prettier 撞上同类目录会直接报 `No parser could be inferred`）。以 `.` 开头
- * 的目录一律跳过 —— 源码目录不存在合法的「点开头」子目录。
+ * 淹没。以 `.` 开头的目录一律跳过 —— 源码目录不存在合法的「点开头」子目录。
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { PHASE1_ACTIONS } from '../utils/cmd'
+import { DOCKER_ACTION_REGISTRY } from '../utils/actions'
 
 const ROOT = new URL('..', import.meta.url).pathname
 
 /**
- * 全部后期动作 = 协议白名单去掉一期四个。
+ * 四期动作（协议白名单 29 条去掉一期只读 4 条、二期写 21 条与三期 1 条后的**恰 3 条**）。
  *
- * **来源与核对**（跨语言没法互相 import，这份清单必须自己与协议对齐，差一条就等于
- * 少守一个动作）：`uni_protocol/docker.go` 的 `AllDockerActions()`（由
- * `dockerActionSpecs` 枚举，共 29 条）去掉一期四个后恰为 25 条；2026-09-24 用脚本
- * 做过一次逐条比对：`protocol − PHASE1` 与下面这份的**差集为空、条数一致**
- * （29 = 25 + 4）。以后往 `dockerActionSpecs` 里加动作时，要同步往这里加一条。
+ * 跨语言没法互相 import，这份清单必须自己与协议对齐（差一条就等于少守一个动作）：
+ * `uni_protocol/docker.go` 的 `AllDockerActions()`；`uni_core/internal/pkg/dockerpolicy`
+ * 的 `policies` 里 Phase=4 的行逐条数也是这 3 条。以后往 `dockerActionSpecs`
+ * 里加动作时，要同步往这里加一条。
  */
-const LATER_ACTIONS = [
-  'container:start',
-  'container:stop',
-  'container:restart',
-  'container:remove',
-  'container:exec',
-  'image:remove',
-  'image:prune',
-  'image:pull',
-  'image:tag',
-  'image:save',
-  'image:load',
-  'volume:remove',
-  'volume:prune',
-  'network:remove',
-  'compose:up',
-  'compose:stop',
-  'compose:start',
-  'compose:restart',
-  'compose:pull',
-  'compose:down',
-  'compose.service:scale',
-  'compose.service:remove-containers',
-  'compose.file:write',
-  'compose.file:validate',
-  'compose.file:patch'
+const PHASE4_ACTIONS = ['compose.file:write', 'compose.file:validate', 'compose.file:patch']
+
+/** 三期动作（终端；单列是为了条数互补与「确实接线了」的正向断言）。 */
+const PHASE3_ACTIONS = ['container:exec']
+
+/** 协议白名单的总条数（`AllDockerActions()` 的返回长度）。 */
+const PROTOCOL_ACTION_COUNT = 29
+
+/** 白名单全集（模块里允许出现的 action 字面量只能来自它）。 */
+const ACTION_WHITELIST: readonly string[] = [
+  ...PHASE1_ACTIONS,
+  ...DOCKER_ACTION_REGISTRY.map((e) => e.action),
+  ...PHASE3_ACTIONS,
+  ...PHASE4_ACTIONS
 ]
 
-/** 协议白名单的总条数（`AllDockerActions()` 的返回长度）：25 条后期 + 4 条一期。 */
-const PROTOCOL_ACTION_COUNT = 29
+/**
+ * action 字面量形态：六种前缀之一 + `:` + 小写连字符名。
+ * `compose.service:`/`compose.file:` 必须在 `compose:` 之前尝试（正则交替是有序的）。
+ */
+const ACTION_LITERAL_RE =
+  /\b(?:container|image|volume|network|compose\.service|compose\.file|compose):[a-z][a-z-]*\b/g
+
+function actionLiteralsIn(src: string): string[] {
+  return src.match(ACTION_LITERAL_RE) ?? []
+}
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
@@ -75,23 +78,41 @@ function walk(dir: string, out: string[] = []): string[] {
   return out
 }
 
-describe('分期控件矩阵（一期页面不出现后期动作）', () => {
-  it('扫描不是空转：确实扫到了模块源码', () => {
+describe('分期控件矩阵收尾：action 字面量全在白名单内', () => {
+  it('扫描不是空转：确实扫到了模块源码与全部四期组件', () => {
     const files = walk(ROOT)
     expect(files.length).toBeGreaterThan(0)
-    expect(files.some((f) => f.endsWith('.vue'))).toBe(true)
     expect(files.some((f) => f.endsWith('utils/cmd.ts'))).toBe(true)
+    expect(files.some((f) => f.endsWith('utils/actions.ts'))).toBe(true)
+    expect(files.some((f) => f.endsWith('components/pty-terminal.vue'))).toBe(true)
+    expect(files.some((f) => f.endsWith('components/compose-editor/compose-editor.vue'))).toBe(true)
+    expect(files.some((f) => f.endsWith('components/compose-editor/form-mode.vue'))).toBe(true)
+    expect(files.some((f) => f.endsWith('components/compose-editor/yaml-mode.vue'))).toBe(true)
   })
 
-  it('模块源码里没有任何后期动作字面量', () => {
+  it('模块源码里出现的每个 action 字面量都在 29 条白名单内', () => {
+    const whitelist = new Set(ACTION_WHITELIST)
+    const seen = new Set<string>()
     for (const file of walk(ROOT)) {
       const src = readFileSync(file, 'utf8')
-      for (const action of LATER_ACTIONS) {
+      for (const literal of actionLiteralsIn(src)) {
+        seen.add(literal)
         expect(
-          src.includes(action),
-          `${file} 出现了后期动作 ${action}（一期不该渲染它的入口）`
-        ).toBe(false)
+          whitelist.has(literal),
+          `${file} 出现了白名单之外的 action 字面量「${literal}」（协议 29 条的名单见本文件头）`
+        ).toBe(true)
       }
+    }
+    // 反向自检：扫描确实命中了四期与三期的关键动作（不然这个守卫可能空转）。
+    for (const must of [
+      'compose.file:read',
+      'compose.file:validate',
+      'compose.file:write',
+      'compose.file:patch',
+      'container:exec',
+      'compose:up'
+    ]) {
+      expect(seen.has(must), `扫描没有命中 ${must}（守空转）`).toBe(true)
     }
   })
 
@@ -99,21 +120,56 @@ describe('分期控件矩阵（一期页面不出现后期动作）', () => {
     expect([...PHASE1_ACTIONS]).toHaveLength(4)
   })
 
-  it('两份清单互补：29 条 = 25 条后期 + 4 条一期，无重复、无交集', () => {
-    // 防的是「从 LATER_ACTIONS 里删掉一条」这种静默失守：条数不对就红灯。
-    expect(new Set(LATER_ACTIONS).size).toBe(LATER_ACTIONS.length)
+  it('四份清单互补：29 条 = 4 只读 + 21 二期写 + 1 三期 + 3 四期，无重复、无交集', () => {
+    // 防的是「从清单或注册表里删掉一条」这种静默失守：条数不对就红灯。
+    const phase2 = DOCKER_ACTION_REGISTRY.map((e) => e.action)
+    expect(DOCKER_ACTION_REGISTRY).toHaveLength(21)
+    expect(new Set(PHASE4_ACTIONS).size).toBe(PHASE4_ACTIONS.length)
+    expect(new Set(PHASE3_ACTIONS).size).toBe(PHASE3_ACTIONS.length)
     expect(new Set(PHASE1_ACTIONS).size).toBe(PHASE1_ACTIONS.length)
-    expect(LATER_ACTIONS.length + PHASE1_ACTIONS.length).toBe(PROTOCOL_ACTION_COUNT)
+    expect(new Set(phase2).size).toBe(phase2.length)
+    expect(
+      PHASE4_ACTIONS.length + PHASE3_ACTIONS.length + PHASE1_ACTIONS.length + phase2.length
+    ).toBe(PROTOCOL_ACTION_COUNT)
+    const all = [...PHASE1_ACTIONS, ...phase2, ...PHASE3_ACTIONS, ...PHASE4_ACTIONS]
+    expect(new Set(all).size).toBe(PROTOCOL_ACTION_COUNT)
+    for (const a of [...PHASE3_ACTIONS, ...PHASE4_ACTIONS]) {
+      expect(phase2, `后期动作 ${a} 不该进二期写动作注册表`).not.toContain(a)
+    }
     for (const a of PHASE1_ACTIONS) {
-      expect(LATER_ACTIONS, `一期动作 ${a} 不该出现在后期清单里`).not.toContain(a)
+      expect(PHASE4_ACTIONS, `一期动作 ${a} 不该出现在四期清单里`).not.toContain(a)
+      expect(phase2, `一期动作 ${a} 不该进二期写动作注册表`).not.toContain(a)
     }
   })
 
-  it('终端与 Follow 这两类三期控件不出现在模板里', () => {
-    for (const file of walk(ROOT).filter((f) => f.endsWith('.vue'))) {
-      const src = readFileSync(file, 'utf8')
-      expect(src.includes('xterm'), `${file} 引入了三期终端`).toBe(false)
-      expect(/Follow/.test(src), `${file} 出现 Follow 开关（三期才渲染）`).toBe(false)
-    }
+  it('三期控件已接线：终端引入 xterm、日志查看器有跟随开关', () => {
+    const files = walk(ROOT)
+    const terminal = files.find((f) => f.endsWith('components/pty-terminal.vue'))
+    expect(terminal).toBeTruthy()
+    const terminalSrc = readFileSync(terminal as string, 'utf8')
+    expect(terminalSrc.includes('@xterm/xterm')).toBe(true)
+    expect(terminalSrc.includes('container:exec')).toBe(true)
+    const viewerSrc = readFileSync(join(ROOT, 'components/log-viewer.vue'), 'utf8')
+    expect(viewerSrc.includes('followable')).toBe(true)
+    expect(viewerSrc.includes('following')).toBe(true)
+  })
+
+  it('四期编辑入口存在且受 docker:config 权限门控（渲染 + 组件两层）', () => {
+    // 页面层：入口受 canConfig（= hasAuth(PermDockerConfig)）门控，并挂上了编辑器组件。
+    const projectsSrc = readFileSync(join(ROOT, 'views/projects.vue'), 'utf8')
+    expect(projectsSrc).toContain('PermDockerConfig')
+    expect(
+      /canConfig\s*=\s*computed\(\s*\(\)\s*=>\s*hasAuth\(PermDockerConfig\)\s*\)/.test(projectsSrc)
+    ).toBe(true)
+    expect(projectsSrc).toContain('v-if="canConfig"')
+    expect(projectsSrc).toContain('ComposeEditor')
+    expect(projectsSrc).toContain('＋添加服务')
+    // 组件层：保存/回滚按钮同样只在有配置编辑权限时渲染。
+    const editorSrc = readFileSync(
+      join(ROOT, 'components/compose-editor/compose-editor.vue'),
+      'utf8'
+    )
+    expect(editorSrc).toContain('PermDockerConfig')
+    expect(editorSrc).toContain('v-if="canConfig"')
   })
 })

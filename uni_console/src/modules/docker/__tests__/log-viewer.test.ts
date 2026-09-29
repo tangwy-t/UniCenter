@@ -99,4 +99,12 @@ describe('提示文案', () => {
   it('被截断时说清楚保留了哪一段', () => {
     expect(logHint('a\nb\n', true)).toBe('共 2 行（仅显示最近 5000 行）')
   })
+
+  it('跟随流给累计行数时，「共 N 行」报真实累计而不是缓冲里剩下的', () => {
+    const text = Array.from({ length: 3 }, (_, i) => `l${i + 1}`).join('\n')
+    expect(logHint(text, true, 12000)).toBe('共 12000 行（仅显示最近 5000 行）')
+    // 累计数不大于文本行数时以文本为准（避免把「尚未取到」说成有行）
+    expect(logHint(text, false, 2)).toBe('共 3 行')
+    expect(logHint('', false, 0)).toBe('尚未取到日志')
+  })
 })

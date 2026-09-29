@@ -1,64 +1,102 @@
 <template>
-  <DockerPage
-    :loading="loading"
-    :stale="state?.stale ?? false"
-    :age-seconds="state?.ageSeconds ?? 0"
-    :never-reported="state?.neverReported ?? false"
-    @refresh="loadState"
-  >
-    <template #search>
-      <ArtSearchBar
-        v-show="showSearchBar"
-        v-model="searchForm"
-        :items="searchItems"
-        @search="onSearch"
-        @reset="onReset"
-      />
-    </template>
+  <!-- ⚠ 单根包装：页面**必须只有一个根节点**（布局把页面放进 `<Transition mode="out-in">`，
+       而 Transition 只支持单根元素）。二期起本页多了确认弹窗，与容器页同一处理：
+       页面与弹窗收进一个根 div —— 双根会在切页时白屏（single-root.test.ts 扫描钉住）。 -->
+  <div class="docker-volumes-page">
+    <DockerPage
+      :loading="loading"
+      :stale="stale"
+      :age-seconds="ageSeconds"
+      :never-reported="neverReported"
+      @refresh="refresh"
+    >
+      <template #search>
+        <ArtSearchBar
+          v-show="showSearchBar"
+          v-model="searchForm"
+          :items="searchItems"
+          @search="onSearch"
+          @reset="onReset"
+        />
+      </template>
 
-    <template #table>
-      <ArtTableHeader
-        v-model:showSearchBar="showSearchBar"
-        :loading="loading"
-        @refresh="loadState"
-      />
+      <template #table>
+        <ArtTableHeader
+          v-model:showSearchBar="showSearchBar"
+          :loading="loading"
+          @refresh="refresh"
+        />
 
-      <!-- 两种空态分开：主机上没有数据卷 vs 筛选没命中（后者给「清除筛选」）。
-           纪律与容器/镜像页一致（「没有」与「筛没了」说成一句会让人以为机器空了）；
-           空态渲染在本页、不写进 ArtTable 的 `#empty` 插槽：ArtTable 不转发该插槽
-           （内部把 ElTable 的空态写死成「暂无数据」），写进去会被静默丢弃。
-           清单还没到时也不喊「没有数据卷」（那时还不知道有没有主机），故 v-if 把
-           主机清单的加载态一并算进来。 -->
-      <ArtTable v-if="showTable" :loading="listLoading" :data="filtered" :columns="columns" />
-      <!-- host-context.ts 的 reload 注释承诺：清单拉不到时页面显示「没有可管理的主机」 -->
-      <ElEmpty v-else-if="!ctx.hosts.length" class="docker-empty" description="没有可管理的主机" />
-      <ElEmpty v-else-if="hasFilter" class="docker-empty" description="没有符合筛选条件的数据卷">
-        <ElButton size="small" @click="onReset">清除筛选</ElButton>
-      </ElEmpty>
-      <ElEmpty v-else class="docker-empty" description="该主机上还没有数据卷" />
-    </template>
+        <!-- 两种空态分开：主机上没有数据卷 vs 筛选没命中（后者给「清除筛选」）。
+             纪律与容器/镜像页一致（「没有」与「筛没了」说成一句会让人以为机器空了）；
+             空态渲染在本页、不写进 ArtTable 的 `#empty` 插槽：ArtTable 不转发该插槽
+             （内部把 ElTable 的空态写死成「暂无数据」），写进去会被静默丢弃。
+             清单还没到时也不喊「没有数据卷」（那时还不知道有没有主机），故 v-if 把
+             主机清单的加载态一并算进来。 -->
+        <ArtTable v-if="showTable" :loading="listLoading" :data="filtered" :columns="columns" />
+        <!-- host-context.ts 的 reload 注释承诺：清单拉不到时页面显示「没有可管理的主机」 -->
+        <ElEmpty
+          v-else-if="!ctx.hosts.length"
+          class="docker-empty"
+          description="没有可管理的主机"
+        />
+        <ElEmpty v-else-if="hasFilter" class="docker-empty" description="没有符合筛选条件的数据卷">
+          <ElButton size="small" @click="onReset">清除筛选</ElButton>
+        </ElEmpty>
+        <ElEmpty v-else class="docker-empty" description="该主机上还没有数据卷" />
+      </template>
 
-    <template #footer>
-      <!-- 底部合计跟着筛选走（与镜像页同一取向）：底栏与表格里的行必须自洽。
-           「未知」与「未使用」是两件不同的事，分开计数：前者是**量不出来**（旧版
-           Docker 没给用量），后者是**没人用**（可回收的候选）。 -->
-      <div class="docker-total">
-        <span>合计 {{ totals.count }} 个 · {{ formatByUnit('MB', totals.totalMB) }}</span>
-        <span v-if="totalsNote" class="docker-total__sub">{{ totalsNote }}</span>
-      </div>
-    </template>
-  </DockerPage>
+      <template #footer>
+        <!-- 底部合计跟着筛选走（与镜像页同一取向）：底栏与表格里的行必须自洽。
+             「未知」与「未使用」是两件不同的事，分开计数：前者是**量不出来**（旧版
+             Docker 没给用量），后者是**没人用**（可回收的候选）。 -->
+        <div class="docker-total">
+          <span>合计 {{ totals.count }} 个 · {{ formatByUnit('MB', totals.totalMB) }}</span>
+          <span v-if="totalsNote" class="docker-total__sub">{{ totalsNote }}</span>
+        </div>
+
+        <!-- 底栏写操作（spec §11.3 的分期矩阵）：清理未使用卷是强档（弹窗里逐字
+             输入 DELETE，由组件的确认档推导）；该动作没有 options 变体，弹窗里
+             不放任何勾选项。指令在途时禁用，防重复提交。 -->
+        <div v-if="canDelete" class="docker-bar">
+          <ElButton size="small" type="danger" plain :disabled="busy" @click="openPrune">
+            清理未使用卷…
+          </ElButton>
+        </div>
+      </template>
+    </DockerPage>
+
+    <!-- 确认弹窗覆盖两个入口：单卷删除（标准档）与清理未使用卷（强档逐字 DELETE）。
+         形态、逐字期望值与保护提示全部由组件按动作注册表推导；页面只传事实。
+         受保护卷的「强制操作」开关也由组件按 docker:exec 权限判定后渲染。 -->
+    <DockerActionConfirm
+      v-model="confirmState.visible"
+      :action="confirmState.action"
+      :target="confirmState.target"
+      :target-protected="confirmState.protected"
+      target-kind="数据卷"
+      :loading="confirmLoading"
+      @confirm="onConfirmSubmit"
+    />
+  </div>
 </template>
 
 <script setup lang="ts">
-  import { computed, ref, watch } from 'vue'
-  import { ElButton, ElEmpty } from 'element-plus'
+  import { computed, h, ref } from 'vue'
+  import { ElButton, ElEmpty, ElMessage } from 'element-plus'
+  import { useAuth } from '@/hooks/core/useAuth'
+  import { PermDockerDelete, PermDockerExec } from '@/enums/permission'
   import { formatByUnit } from '@/modules/device/utils/display'
   import ArtSearchBar from '@/components/core/forms/art-search-bar/index.vue'
   import ArtTable from '@/components/core/tables/art-table/index.vue'
   import ArtTableHeader from '@/components/core/tables/art-table-header/index.vue'
+  import DockerActionConfirm from '../components/action-confirm.vue'
+  import DockerActionMenu from '../components/action-menu.vue'
   import DockerPage from '../components/docker-page.vue'
-  import { fetchDockerState, type DockerStateResp, type DockerVolumeItem } from '../api'
+  import type { DockerVolumeItem } from '../api'
+  import { runErrorMessage, useDockerCmds } from '../composables/useDockerCmds'
+  import { useDockerHostState } from '../composables/useDockerHostState'
+  import { protectedGate } from '../utils/actions'
   import { filterVolumes, volumeTotals } from '../utils/snapshot'
   import { provideDockerHost } from '../utils/host-context'
 
@@ -66,13 +104,25 @@
   // 而模块里没有别的 provide 调用方 —— 页面就是这一层的提供者，故在这里 provide 并直接用其返回值。
   // 不要解构：上下文字段是 getter，解构会把 hostId 定格成进入页面时的 ''（主机清单尚未到达）。
   const ctx = provideDockerHost()
+  const { hasAuth } = useAuth()
 
-  const loading = ref(false)
   const showSearchBar = ref(false)
-  const state = ref<DockerStateResp | null>(null)
   const searchForm = ref<{ keyword?: string; unusedOnly?: boolean }>({})
-  /** 请求序号：只有最新一次请求的响应能落盘（见 loadState 的备注）。 */
-  let loadSeq = 0
+
+  const canDelete = computed(() => hasAuth(PermDockerDelete))
+  const canExec = computed(() => hasAuth(PermDockerExec))
+
+  // 快照与四态收口在 composable（hosts 清单、seq 守卫、主机切换后的重拉都在它里面）。
+  // 主机切换 = 换一台机器：本页既有重置纪律是「清空筛选」。
+  const { state, loading, listLoading, stale, ageSeconds, neverReported, refresh } =
+    useDockerHostState({
+      onHostSwitch: () => {
+        searchForm.value = {}
+      }
+    })
+
+  // 写指令通道：受理 + 轮询 + 成功后重拉（重拉就是上面的 refresh）。
+  const { run, pendingId, busy } = useDockerCmds({ refresh })
 
   const searchItems = computed(() => [
     {
@@ -102,62 +152,145 @@
     return notes.join(' ')
   })
 
-  /** 表格的加载态：快照在拉，或主机清单还没到（后者尚不知有没有主机，不能先喊「没有数据卷」）。 */
-  const listLoading = computed(() => loading.value || ctx.loading)
-
   /** 有命中行就渲染表格；纯加载中也用表格的 loading 遮罩，空态只在加载结束后判断。 */
   const showTable = computed(() => listLoading.value || filtered.value.length > 0)
 
-  const columns = computed(() => [
-    { type: 'index' as const, width: 60, label: '序号' },
-    { prop: 'name', label: '名称', minWidth: 240, showOverflowTooltip: true },
-    {
-      prop: 'driver',
-      label: '驱动',
-      width: 120,
-      formatter: (row: DockerVolumeItem) => row.driver || '—'
-    },
-    {
-      prop: 'sizeMb',
-      label: '大小',
-      width: 120,
-      // 未知用量显示「—」而不是 0：0 与「量不出来」在「空间去哪了」上是相反的结论。
-      formatter: (row: DockerVolumeItem) =>
-        row.sizeMb === undefined || row.sizeMb === null ? '—' : formatByUnit('MB', row.sizeMb)
-    },
-    {
-      prop: 'inUse',
-      label: '使用',
-      minWidth: 220,
-      formatter: (row: DockerVolumeItem) =>
-        row.inUse ? `被 ${(row.mountedBy ?? []).join('、') || '容器'} 挂载` : '未使用'
-    }
-    // 一期卷没有只读动作（详情/查看都是二期起），故**不渲染操作列** ——
-    // 空操作列会让人以为「有东西没加载出来」（分期控件矩阵，spec §11.0）。
-  ])
-
   /**
-   * 拉一次快照。静默失败：陈旧/离线由页面头部标注，不弹错（与设备页同一取向）。
-   *
-   * seq 守卫（照 system-monitor/views/server.vue 的既有模式）：主机切换会并发两份请求，
-   * 旧主机那份可能**晚于**新主机返回 —— 直接落盘会把列表换回上一台机器的数据卷。
-   * 故递增序号，回头发现已被更新的请求取代就丢弃（loading 也由最新那次收尾）。
+   * 保护列的结论句（受保护是「动手前必须看见」的事实，spec §11.1 草图的 🔒）：
+   * agent 算好的 protected 结论 + 本账号能否操作合在一处显示 ——
+   * 没有强制权限时禁用的删除项在菜单里，用户需要在这里看到「为什么」。
    */
-  async function loadState() {
-    if (!ctx.hostId) return
-    const seq = ++loadSeq
-    loading.value = true
-    try {
-      const res = await fetchDockerState(ctx.hostId)
-      if (seq !== loadSeq) return
-      state.value = res
-    } catch {
-      if (seq !== loadSeq) return
-      state.value = null
-    } finally {
-      if (seq === loadSeq) loading.value = false
+  function protectionText(row: DockerVolumeItem): string {
+    if (row.protected !== true) return '—'
+    const gate = protectedGate(row, canExec.value)
+    return gate.allowed ? '🔒 受保护' : `🔒 ${gate.conclusion}`
+  }
+
+  // ── 行内删除（标准确认档；受保护卷的额外要求见 action-menu/action-confirm）──
+
+  interface ConfirmState {
+    visible: boolean
+    kind: 'row' | 'prune'
+    action: string
+    target: string
+    /** 目标是否受保护（快照里 agent 算好的结论，前端不重复判断）。 */
+    protected: boolean
+  }
+
+  const confirmState = ref<ConfirmState>({
+    visible: false,
+    kind: 'row',
+    action: '',
+    target: '',
+    protected: false
+  })
+  const confirmLoading = ref(false)
+
+  /** ⋯ 菜单选中：删除走确认弹窗（受保护时弹窗里多出「强制操作」开关）。 */
+  function onRowMenu(row: DockerVolumeItem, item: { action: string }) {
+    if (item.action !== 'volume:remove') return
+    confirmState.value = {
+      visible: true,
+      kind: 'row',
+      action: 'volume:remove',
+      target: row.name,
+      protected: row.protected === true
     }
   }
+
+  /** 清理未使用卷：强档（组件按注册表给逐字 DELETE 形态），没有 options 变体。 */
+  function openPrune() {
+    confirmState.value = {
+      visible: true,
+      kind: 'prune',
+      action: 'volume:prune',
+      target: '',
+      protected: false
+    }
+  }
+
+  /** 确认弹窗提交：force 只在「强制操作」开关出现且被勾选时为 true。 */
+  async function onConfirmSubmit(payload: { confirm: string; force: boolean }) {
+    const st = confirmState.value
+    const options: Record<string, unknown> = {}
+    if (st.kind === 'row' && payload.force) options.force = true
+    confirmLoading.value = true
+    try {
+      const res = await run({
+        action: st.action,
+        target: st.target || undefined,
+        options,
+        confirm: payload.confirm
+      })
+      if (res.ok) ElMessage.success(res.detail || '操作已完成')
+      else ElMessage.error(runErrorMessage(res, '操作未完成'))
+    } finally {
+      confirmLoading.value = false
+      confirmState.value = { ...st, visible: false }
+    }
+  }
+
+  // ── 表格列 ──
+
+  const columns = computed(() => {
+    // 显式建立依赖：行内菜单的禁用态与保护结论来自这些信号，而 formatter 要到表格
+    // 渲染时才执行 —— 不在这里读一次，列配置就不会随它们变化而重算（表格会停在旧状态）。
+    void pendingId.value
+    void busy.value
+    void canExec.value
+    return [
+      { type: 'index' as const, width: 60, label: '序号' },
+      { prop: 'name', label: '名称', minWidth: 240, showOverflowTooltip: true },
+      {
+        prop: 'driver',
+        label: '驱动',
+        width: 120,
+        formatter: (row: DockerVolumeItem) => row.driver || '—'
+      },
+      {
+        prop: 'sizeMb',
+        label: '大小',
+        width: 120,
+        // 未知用量显示「—」而不是 0：0 与「量不出来」在「空间去哪了」上是相反的结论。
+        formatter: (row: DockerVolumeItem) =>
+          row.sizeMb === undefined || row.sizeMb === null ? '—' : formatByUnit('MB', row.sizeMb)
+      },
+      {
+        prop: 'inUse',
+        label: '使用',
+        minWidth: 200,
+        formatter: (row: DockerVolumeItem) =>
+          row.inUse ? `被 ${(row.mountedBy ?? []).join('、') || '容器'} 挂载` : '未使用'
+      },
+      {
+        prop: 'protected',
+        label: '保护',
+        width: 180,
+        formatter: (row: DockerVolumeItem) => protectionText(row)
+      },
+      // 操作列只在有删除权限时出现：没有可执行的动作，空操作列会让人以为
+      //「有东西没加载出来」（分期控件矩阵，spec §11.0）。
+      ...(canDelete.value
+        ? [
+            {
+              prop: 'operation',
+              label: '操作',
+              width: 100,
+              fixed: 'right' as const,
+              formatter: (row: DockerVolumeItem) =>
+                h(DockerActionMenu, {
+                  actions: ['volume:remove'],
+                  target: row.name,
+                  protected: row.protected === true,
+                  pendingId: pendingId.value,
+                  disabled: busy.value,
+                  onSelect: (item: { action: string }) => onRowMenu(row, item)
+                })
+            }
+          ]
+        : [])
+    ]
+  })
 
   function onSearch() {
     // 搜索是**本地筛选**（快照已在手）：不打接口，故不需要分页重置。
@@ -166,19 +299,6 @@
   function onReset() {
     searchForm.value = {}
   }
-
-  // 主机切换 = 换一台机器：清空筛选并重新拉快照。
-  watch(
-    () => ctx.hostId,
-    () => {
-      searchForm.value = {}
-      void loadState()
-    }
-  )
-
-  // 首次进入：先拉主机清单（query 里的主机写回/落到第一台），再拉快照。
-  // 若 hostId 要等清单到达才从 '' 变成首台 id，上面的 watch 会补一次。
-  void ctx.reload().then(loadState)
 </script>
 
 <style lang="scss" scoped>
@@ -200,5 +320,14 @@
       color: var(--el-text-color-secondary);
       font-size: 13px;
     }
+  }
+
+  // 底栏操作区：与合计同一套留白，按钮换行不挤压。
+  .docker-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    padding: 10px 16px 12px;
   }
 </style>

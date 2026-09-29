@@ -90,9 +90,9 @@ describe('镜像截图与筛选', () => {
 
   it('卷的合计把未知用量排除在大小之外（只计数）', () => {
     const vols: DockerVolumeItem[] = [
-      { name: 'a', sizeMb: 10, inUse: true },
-      { name: 'b', inUse: false }, // 用量未知
-      { name: 'c', sizeMb: 5, inUse: false }
+      { name: 'a', sizeMb: 10, inUse: true, protected: false },
+      { name: 'b', inUse: false, protected: false }, // 用量未知
+      { name: 'c', sizeMb: 5, inUse: false, protected: false }
     ]
     const t = volumeTotals(vols)
     expect(t.count).toBe(3)
@@ -105,9 +105,16 @@ describe('镜像截图与筛选', () => {
 describe('卷与网络的筛选', () => {
   // 大小未知（null / 缺省）的卷也要能搜能筛 —— 筛选只看名称与使用状态。
   const vols: DockerVolumeItem[] = [
-    { name: 'uni-center_uploads', driver: 'local', sizeMb: 12, inUse: true, mountedBy: ['core'] },
-    { name: 'uni-center_mysql-data', driver: 'local', sizeMb: null, inUse: true },
-    { name: 'orphan-vol', driver: 'local', inUse: false }
+    {
+      name: 'uni-center_uploads',
+      driver: 'local',
+      sizeMb: 12,
+      inUse: true,
+      mountedBy: ['core'],
+      protected: true
+    },
+    { name: 'uni-center_mysql-data', driver: 'local', sizeMb: null, inUse: true, protected: false },
+    { name: 'orphan-vol', driver: 'local', inUse: false, protected: false }
   ]
   const nets: DockerNetworkItem[] = [
     { name: 'bridge', driver: 'bridge', scope: 'local', internal: false, containersCount: 2 },

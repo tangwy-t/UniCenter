@@ -3,8 +3,10 @@
 /**
  * 一期页面上**唯一允许出现**的四个只读动作。
  *
- * 这份常量与「分期控件矩阵」（spec §11.0）同源：页面据此渲染操作入口，
- * 二/三/四期的动作连字符串都不该出现在模块里（由 __tests__/phase-gate.test.ts 扫描钉住）。
+ * 这份常量与「分期控件矩阵」（spec §11.0）同源：一期页面据此渲染操作入口。
+ * 四期收尾后，模块里出现的 action 字面量由 __tests__/phase-gate.test.ts 统一按
+ * 协议 29 条白名单守卫；二期写动作在 utils/actions.ts 的注册表，三期/四期动作
+ * 分别只在终端与配置编辑器里使用。
  */
 export const PHASE1_ACTIONS = [
   'container:inspect',

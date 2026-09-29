@@ -69,9 +69,13 @@ export function visibleLines(text: string, keyword = '', maxLines = MAX_LOG_LINE
  *
  * 「仅显示最近 5000 行」而不是「已截断」：前者说清了**保留了哪一段** —— 用户据此才知道
  * 该往回翻还是换个更大的行数重拉；只说「已截断」，他连丢的是头还是尾都不确定。
+ *
+ * `totalOverride`：跟随流（三期）里缓冲上限之外的**累计**行数由流侧单独给 —— 文本只剩
+ * 最近 5000 行，但「共 N 行」应该报真实累计数，否则数字与「仅显示最近 5000 行」自相矛盾。
  */
-export function logHint(text: string, truncated: boolean): string {
-  const total = splitLogLines(text).length
+export function logHint(text: string, truncated: boolean, totalOverride?: number): string {
+  const counted = splitLogLines(text).length
+  const total = totalOverride != null && totalOverride > counted ? totalOverride : counted
   if (total === 0) return '尚未取到日志'
   const base = `共 ${total} 行`
   return truncated ? `${base}（仅显示最近 ${MAX_LOG_LINES} 行）` : base

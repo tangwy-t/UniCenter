@@ -979,6 +979,7 @@ declare namespace Api {
       sizeMb?: number | null
       inUse: boolean
       mountedBy?: string[]
+      protected: boolean
     }
 
     interface DockerNetworkItem {
@@ -995,6 +996,7 @@ declare namespace Api {
       state?: string
       services: number
       containersCount: number
+      protected: boolean
     }
 
     interface DockerCmdResp {
@@ -1007,6 +1009,7 @@ declare namespace Api {
       detail?: string
       sessionId?: string
       alreadyExists?: boolean
+      streamTicket?: string
       payload?: unknown
     }
   }

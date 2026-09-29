@@ -1,70 +1,152 @@
 <template>
-  <DockerPage
-    :loading="loading"
-    :stale="state?.stale ?? false"
-    :age-seconds="state?.ageSeconds ?? 0"
-    :never-reported="state?.neverReported ?? false"
-    @refresh="loadState"
-  >
-    <template #search>
-      <ArtSearchBar
-        v-show="showSearchBar"
-        v-model="searchForm"
-        :items="searchItems"
-        @search="onSearch"
-        @reset="onReset"
-      />
-    </template>
+  <!-- ⚠ 单根包装：页面**必须只有一个根节点**（布局把页面放进 `<Transition mode="out-in">`，
+       而 Transition 只支持单根元素）。二期起本页多了确认弹窗，与容器页同一处理：
+       页面与弹窗收进一个根 div —— 双根会在切页时白屏（single-root.test.ts 扫描钉住）。 -->
+  <div class="docker-images-page">
+    <DockerPage
+      :loading="loading"
+      :stale="stale"
+      :age-seconds="ageSeconds"
+      :never-reported="neverReported"
+      @refresh="refresh"
+    >
+      <template #search>
+        <ArtSearchBar
+          v-show="showSearchBar"
+          v-model="searchForm"
+          :items="searchItems"
+          @search="onSearch"
+          @reset="onReset"
+        />
+      </template>
 
-    <template #table>
-      <ArtTableHeader
-        v-model:showSearchBar="showSearchBar"
-        :loading="loading"
-        @refresh="loadState"
-      />
+      <template #table>
+        <ArtTableHeader
+          v-model:showSearchBar="showSearchBar"
+          :loading="loading"
+          @refresh="refresh"
+        />
 
-      <!-- 两种空态分开：主机上没有镜像 vs 筛选没命中（后者给「清除筛选」）。
-           纪律与容器页一致（「没有」与「筛没了」说成一句会让人以为机器空了）；
-           空态渲染在本页、不写进 ArtTable 的 `#empty` 插槽：ArtTable 不转发该插槽
-           （内部把 ElTable 的空态写死成「暂无数据」），写进去会被静默丢弃。
-           清单还没到时也不喊「没有镜像」（那时还不知道有没有主机），故 v-if 把
-           主机清单的加载态一并算进来。 -->
-      <ArtTable v-if="showTable" :loading="listLoading" :data="filtered" :columns="columns" />
-      <!-- host-context.ts 的 reload 注释承诺：清单拉不到时页面显示「没有可管理的主机」 -->
-      <ElEmpty v-else-if="!ctx.hosts.length" class="docker-empty" description="没有可管理的主机" />
-      <ElEmpty v-else-if="hasFilter" class="docker-empty" description="没有符合筛选条件的镜像">
-        <ElButton size="small" @click="onReset">清除筛选</ElButton>
-      </ElEmpty>
-      <ElEmpty v-else class="docker-empty" description="该主机上还没有镜像" />
-    </template>
+        <!-- 两种空态分开：主机上没有镜像 vs 筛选没命中（后者给「清除筛选」）。
+             纪律与容器页一致（「没有」与「筛没了」说成一句会让人以为机器空了）；
+             空态渲染在本页、不写进 ArtTable 的 `#empty` 插槽：ArtTable 不转发该插槽
+             （内部把 ElTable 的空态写死成「暂无数据」），写进去会被静默丢弃。
+             清单还没到时也不喊「没有镜像」（那时还不知道有没有主机），故 v-if 把
+             主机清单的加载态一并算进来。 -->
+        <ArtTable
+          v-if="showTable"
+          :loading="listLoading"
+          :data="filtered"
+          :columns="columns"
+          @selection-change="onSelectionChange"
+        />
+        <!-- host-context.ts 的 reload 注释承诺：清单拉不到时页面显示「没有可管理的主机」 -->
+        <ElEmpty
+          v-else-if="!ctx.hosts.length"
+          class="docker-empty"
+          description="没有可管理的主机"
+        />
+        <ElEmpty v-else-if="hasFilter" class="docker-empty" description="没有符合筛选条件的镜像">
+          <ElButton size="small" @click="onReset">清除筛选</ElButton>
+        </ElEmpty>
+        <ElEmpty v-else class="docker-empty" description="该主机上还没有镜像" />
+      </template>
 
-    <template #footer>
-      <!-- 底部合计是这一页的入口数字（「空间去哪了」）：总大小与可回收大小并列。
-           合计跟着筛选走 —— 底栏与表格里的行必须自洽，否则「合计」会被当成
-           与眼前行数无关的另一个数。 -->
-      <div class="docker-total">
-        <span>合计 {{ totals.count }} 个 · {{ formatByUnit('MB', totals.totalMB) }}</span>
-        <span class="docker-total__sub">
-          {{ totals.danglingCount }} 个可回收 · {{ formatByUnit('MB', totals.danglingMB) }}
-        </span>
-      </div>
-    </template>
-  </DockerPage>
+      <template #footer>
+        <!-- 底部合计是这一页的入口数字（「空间去哪了」）：总大小与可回收大小并列。
+             合计跟着筛选走 —— 底栏与表格里的行必须自洽，否则「合计」会被当成
+             与眼前行数无关的另一个数。 -->
+        <div class="docker-total">
+          <span>合计 {{ totals.count }} 个 · {{ formatByUnit('MB', totals.totalMB) }}</span>
+          <span class="docker-total__sub">
+            {{ totals.danglingCount }} 个可回收 · {{ formatByUnit('MB', totals.danglingMB) }}
+          </span>
+        </div>
+
+        <!-- 底栏写操作（spec §11.3）：清理悬空 / 拉取 / 打标签 / 导出 tar / 载入。
+             打标签与导出 tar 的输入是**选中的那一行**：未选中一行时按钮禁用，
+             结论句（要选一行）写在按钮旁。 -->
+        <div v-if="canWrite" class="docker-bar">
+          <ElButton
+            v-if="canDelete"
+            size="small"
+            type="danger"
+            plain
+            :disabled="busy"
+            @click="openPrune"
+          >
+            清理悬空镜像…
+          </ElButton>
+          <ElButton v-if="canManage" size="small" :disabled="busy" @click="askPull">
+            拉取镜像…
+          </ElButton>
+          <ElButton
+            v-if="canManage"
+            size="small"
+            :disabled="tagSaveDisabled"
+            @click="onTagSelected"
+          >
+            打标签…
+          </ElButton>
+          <ElButton
+            v-if="canManage"
+            size="small"
+            :disabled="tagSaveDisabled"
+            @click="onSaveSelected"
+          >
+            导出 tar…
+          </ElButton>
+          <ElButton v-if="canManage" size="small" :disabled="busy" @click="askLoad">
+            载入镜像…
+          </ElButton>
+          <span v-if="canManage && !singleSelected" class="docker-bar__hint">
+            打标签与导出 tar 需先在列表中选中一行镜像
+          </span>
+        </div>
+      </template>
+    </DockerPage>
+
+    <!-- 确认弹窗覆盖三种入口：清理悬空（强档逐字 DELETE）、单删（标准档）、导出覆盖（文件名档）。
+         形态、逐字期望值与保护提示全部由组件按动作注册表推导；页面只传事实与 options。
+         清理的补充输入（是否连带清理未使用镜像）由本页作为插槽内容给出。 -->
+    <DockerActionConfirm
+      v-model="confirmState.visible"
+      :action="confirmState.action"
+      :target="confirmState.target"
+      :options="confirmState.options"
+      target-kind="镜像"
+      :loading="confirmLoading"
+      @confirm="onConfirmSubmit"
+    >
+      <ElCheckbox v-if="confirmState.kind === 'prune'" v-model="pruneIncludeAll" class="prune-all">
+        同时清理未被任何容器使用的镜像
+      </ElCheckbox>
+    </DockerActionConfirm>
+  </div>
 </template>
 
 <script setup lang="ts">
-  import { computed, h, ref, watch } from 'vue'
+  import { computed, h, ref } from 'vue'
   import { useRouter } from 'vue-router'
-  import { ElButton, ElEmpty } from 'element-plus'
+  import { ElButton, ElCheckbox, ElEmpty, ElMessage, ElMessageBox } from 'element-plus'
   import { formatByUnit } from '@/modules/device/utils/display'
   import { useAuth } from '@/hooks/core/useAuth'
-  import { PermDockerInspect } from '@/enums/permission'
+  import { PermDockerDelete, PermDockerInspect, PermDockerManage } from '@/enums/permission'
   import ArtButtonTable from '@/components/core/forms/art-button-table/index.vue'
   import ArtSearchBar from '@/components/core/forms/art-search-bar/index.vue'
   import ArtTable from '@/components/core/tables/art-table/index.vue'
   import ArtTableHeader from '@/components/core/tables/art-table-header/index.vue'
+  import DockerActionConfirm from '../components/action-confirm.vue'
+  import DockerActionMenu from '../components/action-menu.vue'
   import DockerPage from '../components/docker-page.vue'
-  import { fetchDockerState, type DockerImageItem, type DockerStateResp } from '../api'
+  import type { DockerImageItem } from '../api'
+  import {
+    runErrorMessage,
+    useDockerCmds,
+    type DockerCmdRunResult
+  } from '../composables/useDockerCmds'
+  import { useDockerHostState } from '../composables/useDockerHostState'
+  import { lookupDockerAction } from '../utils/actions'
   import { filterImages, imageTotals } from '../utils/snapshot'
   import { formatRelativeTime, imageRefText, inUseText } from '../utils/display'
   import { provideDockerHost } from '../utils/host-context'
@@ -76,12 +158,28 @@
   const ctx = provideDockerHost()
   const { hasAuth } = useAuth()
 
-  const loading = ref(false)
   const showSearchBar = ref(false)
-  const state = ref<DockerStateResp | null>(null)
   const searchForm = ref<{ keyword?: string; danglingOnly?: boolean; unusedOnly?: boolean }>({})
-  /** 请求序号：只有最新一次请求的响应能落盘（见 loadState 的备注）。 */
-  let loadSeq = 0
+  /** 当前勾选的行：底栏「打标签 / 导出 tar」一次只作用于选中的那一行。 */
+  const selected = ref<DockerImageItem[]>([])
+
+  const canManage = computed(() => hasAuth(PermDockerManage))
+  const canDelete = computed(() => hasAuth(PermDockerDelete))
+  /** 至少有一个写权限才渲染底栏操作区（没有可执行的动作就不占版面）。 */
+  const canWrite = computed(() => canManage.value || canDelete.value)
+
+  // 快照与四态收口在 composable（hosts 清单、seq 守卫、主机切换后的重拉都在它里面）。
+  // 主机切换 = 换一台机器：本页既有重置纪律是「清空筛选 + 清空勾选」。
+  const { state, loading, listLoading, stale, ageSeconds, neverReported, refresh } =
+    useDockerHostState({
+      onHostSwitch: () => {
+        selected.value = []
+        searchForm.value = {}
+      }
+    })
+
+  // 写指令通道：受理 + 轮询 + 成功后重拉（重拉就是上面的 refresh）。
+  const { run, pendingId, busy } = useDockerCmds({ refresh })
 
   const searchItems = computed(() => [
     {
@@ -107,88 +205,340 @@
   /** 底栏合计：与表格里的行同源（筛选后合计的是筛出来的这批）。 */
   const totals = computed(() => imageTotals(filtered.value))
 
-  /** 表格的加载态：快照在拉，或主机清单还没到（后者尚不知有没有主机，不能先喊「没有镜像」）。 */
-  const listLoading = computed(() => loading.value || ctx.loading)
-
   /** 有命中行就渲染表格；纯加载中也用表格的 loading 遮罩，空态只在加载结束后判断。 */
   const showTable = computed(() => listLoading.value || filtered.value.length > 0)
 
-  const columns = computed(() => [
-    { type: 'index' as const, width: 60, label: '序号' },
-    {
-      prop: 'repoTags',
-      label: '仓库:标签',
-      minWidth: 240,
-      showOverflowTooltip: true,
-      formatter: (row: DockerImageItem) => imageRefText(row)
-    },
-    {
-      prop: 'sizeMb',
-      label: '大小',
-      width: 110,
-      formatter: (row: DockerImageItem) => formatByUnit('MB', row.sizeMb)
-    },
-    {
-      prop: 'created',
-      label: '创建于',
-      width: 140,
-      formatter: (row: DockerImageItem) => (row.created ? formatRelativeTime(row.created) : '—')
-    },
-    {
-      prop: 'inUse',
-      label: '使用',
-      width: 150,
-      showOverflowTooltip: true,
-      formatter: (row: DockerImageItem) => inUseText(row)
-    },
-    {
-      prop: 'operation',
-      label: '操作',
-      width: 90,
-      fixed: 'right' as const,
-      formatter: (row: DockerImageItem) =>
-        // 一期：只有详情。打标签/导出/删除是二期（分期控件矩阵，spec §11.0），
-        // 页面连它们的存在都不该暗示 —— 无权限时不渲染空操作列。
-        hasAuth(PermDockerInspect)
-          ? h('div', { class: 'flex items-center' }, [
-              h(ArtButtonTable, {
-                type: 'view',
-                title: '详情',
-                onClick: () =>
-                  router.push({
-                    name: 'DockerImageDetail',
-                    // 镜像 id 带 `sha256:` 冒号，作为路由参数必须编码（详情页解码后回显短 id）。
-                    params: { id: encodeURIComponent(row.id) },
-                    query: { host: ctx.hostId }
-                  })
-              })
-            ])
-          : null
-    }
-  ])
+  // ── 底栏写操作的输入 ──
 
-  /**
-   * 拉一次快照。静默失败：陈旧/离线由页面头部标注，不弹错（与设备页同一取向）。
-   *
-   * seq 守卫（照 system-monitor/views/server.vue 的既有模式）：主机切换会并发两份请求，
-   * 旧主机那份可能**晚于**新主机返回 —— 直接落盘会把列表换回上一台机器的镜像。
-   * 故递增序号，回头发现已被更新的请求取代就丢弃（loading 也由最新那次收尾）。
-   */
-  async function loadState() {
-    if (!ctx.hostId) return
-    const seq = ++loadSeq
-    loading.value = true
+  const singleSelected = computed(() => selected.value.length === 1)
+  /** 打标签/导出 tar 的门槛：指令不在途，且恰好选中一行（结论句在按钮旁给出）。 */
+  const tagSaveDisabled = computed(() => busy.value || !singleSelected.value)
+
+  function onSelectionChange(rows: DockerImageItem[]) {
+    selected.value = rows
+  }
+
+  /** 底栏打标签/导出 tar：输入是选中的那一行（未选中时按钮已禁用，这里再兜一道）。 */
+  function onTagSelected() {
+    if (selected.value.length !== 1) return
+    void askTag(selected.value[0])
+  }
+  function onSaveSelected() {
+    if (selected.value.length !== 1) return
+    void askSave(selected.value[0])
+  }
+
+  // ── 指令引用与结果回执 ──
+
+  /** 该行的指令引用：有仓库标签用它；无标签的镜像退回镜像 id（两者都是协议认的引用）。 */
+  function actionRef(image: DockerImageItem): string {
+    return image.repoTags?.[0] || image.id
+  }
+
+  /** 结果 → 界面回执：成功优先用结果的 detail（agent 的结论句），失败用统一的结论句。 */
+  function reportResult(res: DockerCmdRunResult): void {
+    if (res.ok) ElMessage.success(res.detail || '操作已完成')
+    else ElMessage.error(runErrorMessage(res, '操作未完成'))
+  }
+
+  async function runWrite(
+    action: string,
+    target: string | undefined,
+    options: Record<string, unknown>,
+    confirm?: string
+  ): Promise<DockerCmdRunResult> {
+    const res = await run({ action, target, options, confirm })
+    reportResult(res)
+    return res
+  }
+
+  /** 收集一段输入的弹窗；取消/关闭返回空串（调用方据此中止，不发送指令）。 */
+  async function promptText(title: string, message: string, placeholder: string): Promise<string> {
     try {
-      const res = await fetchDockerState(ctx.hostId)
-      if (seq !== loadSeq) return
-      state.value = res
+      const { value } = await ElMessageBox.prompt(message, title, {
+        confirmButtonText: '确定',
+        cancelButtonText: '取消',
+        inputPlaceholder: placeholder,
+        inputPattern: /\S/,
+        inputErrorMessage: '内容不能为空'
+      })
+      return (value ?? '').trim()
     } catch {
-      if (seq !== loadSeq) return
-      state.value = null
-    } finally {
-      if (seq === loadSeq) loading.value = false
+      return ''
     }
   }
+
+  // ── 底栏动作 ──
+
+  /** 清理悬空镜像：强档（组件按注册表给逐字 DELETE 形态），勾选项决定是否连带清理未使用镜像。 */
+  function openPrune() {
+    pruneIncludeAll.value = false
+    confirmState.value = {
+      visible: true,
+      kind: 'prune',
+      action: 'image:prune',
+      target: '',
+      options: {}
+    }
+  }
+
+  /** 拉取镜像：目标引用由用户输入（支持仓库前缀与 digest 形态）。 */
+  async function askPull() {
+    const ref = await promptText('拉取镜像', '输入要拉取的镜像引用。', '例如 nginx:latest')
+    if (!ref) return
+    await runWrite('image:pull', ref, {})
+  }
+
+  /** 打标签：src 取目标镜像的引用，dst 由用户输入。 */
+  async function askTag(image: DockerImageItem) {
+    const src = actionRef(image)
+    const dst = await promptText(
+      '打标签',
+      `为镜像「${imageRefText(image)}」输入新的引用。`,
+      '例如 仓库/名称:标签'
+    )
+    if (!dst) return
+    await runWrite('image:tag', undefined, { src, dst })
+  }
+
+  /**
+   * 导出 tar（两段时序）：
+   *   1) 先不带覆盖标记发一次 —— 产物不存在时这就是常规路径；
+   *   2) 结果 alreadyExists=true 时弹确认（组件据此推导「输入文件名」形态），
+   *      用户照抄文件名后带 overwrite=true 重发。
+   */
+  async function askSave(image: DockerImageItem) {
+    const target = actionRef(image)
+    const filename = await promptText(
+      '导出 tar',
+      `导出镜像「${imageRefText(image)}」。只填文件名，产物落在该主机的 agent 下载目录。`,
+      '例如 镜像名.tar'
+    )
+    if (!filename) return
+    const res = await run({ action: 'image:save', target, options: { filename } })
+    if (res.ok) {
+      reportResult(res)
+      return
+    }
+    if (res.alreadyExists === true) {
+      confirmState.value = {
+        visible: true,
+        kind: 'save',
+        action: 'image:save',
+        target,
+        options: { filename, overwrite: true }
+      }
+      return
+    }
+    reportResult(res)
+  }
+
+  /** 载入镜像：产物需已在该主机的 agent 下载目录（结论句写在输入提示里）。 */
+  async function askLoad() {
+    const filename = await promptText(
+      '载入镜像',
+      '只填文件名，文件需已放在该主机的 agent 下载目录。',
+      '例如 镜像名.tar'
+    )
+    if (!filename) return
+    await runWrite('image:load', undefined, { filename })
+  }
+
+  /** 删除镜像：标准档确认；使用中的镜像不发指令（服务端也会拒绝），只给结论。 */
+  function openRemove(image: DockerImageItem) {
+    if (image.inUse) {
+      ElMessage.warning('镜像正被容器使用，需先删除相关容器后再删除镜像')
+      return
+    }
+    confirmState.value = {
+      visible: true,
+      kind: 'remove',
+      action: 'image:remove',
+      target: actionRef(image),
+      options: {}
+    }
+  }
+
+  // ── 确认弹窗（清理 / 删除 / 导出覆盖共用一个入口）──
+
+  interface ConfirmState {
+    visible: boolean
+    /** 三种入口的提交分支不同：清理带勾选项、删除带 confirm、导出覆盖带文件名。 */
+    kind: 'prune' | 'remove' | 'save'
+    action: string
+    target: string
+    options: Record<string, unknown>
+  }
+
+  const confirmState = ref<ConfirmState>({
+    visible: false,
+    kind: 'prune',
+    action: '',
+    target: '',
+    options: {}
+  })
+  const confirmLoading = ref(false)
+  /** 清理弹窗里的「同时清理未被任何容器使用的镜像」：勾选后请求带 all=true。 */
+  const pruneIncludeAll = ref(false)
+
+  async function onConfirmSubmit(payload: { confirm: string; force: boolean }) {
+    const st = confirmState.value
+    confirmLoading.value = true
+    try {
+      if (st.kind === 'prune') {
+        const options: Record<string, unknown> = pruneIncludeAll.value ? { all: true } : {}
+        await runWrite('image:prune', undefined, options, payload.confirm)
+      } else if (st.kind === 'remove') {
+        await runWrite('image:remove', st.target, {}, payload.confirm)
+      } else {
+        // 第二段：覆盖标记 + 文件名逐字确认一起带上，服务端逐字校验后才会覆盖。
+        const filename = String(st.options.filename ?? '')
+        await runWrite('image:save', st.target, { filename, overwrite: true }, filename)
+      }
+    } finally {
+      confirmLoading.value = false
+      confirmState.value = { ...st, visible: false }
+    }
+  }
+
+  // ── 行内操作 ──
+
+  interface RowMenuItem {
+    key: string
+    label: string
+    icon?: string
+    auth?: string
+    color?: string
+    disabled?: boolean
+  }
+
+  /**
+   * 行 ⋯ 菜单的条目。
+   *
+   * 只读的「详情」走 action-menu 的 extraItems（写动作的权限/禁用/🔒 规则都在它里面对，
+   * 页面另拼一份等于两处各维护一遍）；写动作（打标签/导出/删除）走 actions，标签、权限、
+   * 危险色全部取自动作注册表。
+   *
+   * 「使用中」的镜像不把删除放进 actions：action-menu 的 disabled 是**整组**禁用，表达不了
+   * 「只禁删除」（打标签/导出对在用镜像依然合法），故删除改为 extraItems 里的**禁用条目**，
+   * 结论写在条目上（禁用的条目点不动，结论只能在看得见的地方给）。这是基础设施的缺口。
+   */
+  function rowMenuItems(row: DockerImageItem): { actions: string[]; extraItems: RowMenuItem[] } {
+    const extraItems: RowMenuItem[] = [
+      { key: 'detail', label: '详情', icon: 'ri:eye-line', auth: PermDockerInspect }
+    ]
+    const actions = ['image:tag', 'image:save']
+    if (row.inUse) {
+      const entry = lookupDockerAction('image:remove')
+      extraItems.push({
+        key: 'image:remove',
+        label: '删除（需先删除使用该镜像的容器）',
+        icon: entry?.icon ?? 'ri:delete-bin-5-line',
+        auth: entry?.perm ?? PermDockerDelete,
+        color: 'var(--art-danger)',
+        disabled: true
+      })
+    } else {
+      actions.push('image:remove')
+    }
+    return { actions, extraItems }
+  }
+
+  function onRowMenu(row: DockerImageItem, item: { action: string }) {
+    switch (item.action) {
+      case 'detail':
+        openDetail(row)
+        return
+      case 'image:tag':
+        void askTag(row)
+        return
+      case 'image:save':
+        void askSave(row)
+        return
+      case 'image:remove':
+        openRemove(row)
+    }
+  }
+
+  function openDetail(row: DockerImageItem) {
+    void router.push({
+      name: 'DockerImageDetail',
+      // 镜像 id 带 `sha256:` 冒号，作为路由参数必须编码（详情页解码后回显短 id）。
+      params: { id: encodeURIComponent(row.id) },
+      query: { host: ctx.hostId }
+    })
+  }
+
+  // ── 表格列 ──
+
+  const columns = computed(() => {
+    // 显式建立依赖：行内菜单的禁用态与权限显隐来自这些信号，而 formatter 要到表格
+    // 渲染时才执行 —— 不在这里读一次，列配置就不会随它们变化而重算（表格会停在旧状态）。
+    void pendingId.value
+    void busy.value
+    void canManage.value
+    void canDelete.value
+    return [
+      // 勾选列只在有管理权限时出现：只有底栏的打标签/导出 tar 用得上它。
+      ...(canManage.value ? [{ type: 'selection' as const, width: 46 }] : []),
+      { type: 'index' as const, width: 60, label: '序号' },
+      {
+        prop: 'repoTags',
+        label: '仓库:标签',
+        minWidth: 240,
+        showOverflowTooltip: true,
+        formatter: (row: DockerImageItem) => imageRefText(row)
+      },
+      {
+        prop: 'sizeMb',
+        label: '大小',
+        width: 110,
+        formatter: (row: DockerImageItem) => formatByUnit('MB', row.sizeMb)
+      },
+      {
+        prop: 'created',
+        label: '创建于',
+        width: 140,
+        formatter: (row: DockerImageItem) => (row.created ? formatRelativeTime(row.created) : '—')
+      },
+      {
+        prop: 'inUse',
+        label: '使用',
+        width: 150,
+        showOverflowTooltip: true,
+        formatter: (row: DockerImageItem) => inUseText(row)
+      },
+      {
+        prop: 'operation',
+        label: '操作',
+        width: 100,
+        fixed: 'right' as const,
+        formatter: (row: DockerImageItem) => {
+          const buttons: ReturnType<typeof h>[] = []
+          if (hasAuth(PermDockerInspect)) {
+            // 主操作「详情」常驻图标按钮，次要操作收进 ⋯（spec §11.0：不把详情埋进下拉）。
+            buttons.push(
+              h(ArtButtonTable, { type: 'view', title: '详情', onClick: () => openDetail(row) })
+            )
+          }
+          if (canManage.value || canDelete.value) {
+            const menu = rowMenuItems(row)
+            buttons.push(
+              h(DockerActionMenu, {
+                actions: menu.actions,
+                extraItems: menu.extraItems,
+                target: actionRef(row),
+                pendingId: pendingId.value,
+                disabled: busy.value,
+                onSelect: (item: { action: string; target: string }) => onRowMenu(row, item)
+              })
+            )
+          }
+          return buttons.length ? h('div', { class: 'flex items-center' }, buttons) : null
+        }
+      }
+    ]
+  })
 
   function onSearch() {
     // 搜索是**本地筛选**（快照已在手）：不打接口，故不需要分页重置。
@@ -197,19 +547,6 @@
   function onReset() {
     searchForm.value = {}
   }
-
-  // 主机切换 = 换一台机器：清空筛选并重新拉快照。
-  watch(
-    () => ctx.hostId,
-    () => {
-      searchForm.value = {}
-      void loadState()
-    }
-  )
-
-  // 首次进入：先拉主机清单（query 里的主机写回/落到第一台），再拉快照。
-  // 若 hostId 要等清单到达才从 '' 变成首台 id，上面的 watch 会补一次。
-  void ctx.reload().then(loadState)
 </script>
 
 <style lang="scss" scoped>
@@ -231,5 +568,25 @@
       color: var(--el-text-color-secondary);
       font-size: 13px;
     }
+  }
+
+  // 底栏操作区：与合计同一套留白，按钮换行不挤压。
+  .docker-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    padding: 10px 16px 12px;
+
+    &__hint {
+      color: var(--el-text-color-secondary);
+      font-size: 13px;
+    }
+  }
+
+  // 清理弹窗里的补充勾选项：与上面的结论行拉开一点距离。
+  .prune-all {
+    display: flex;
+    margin-top: 10px;
   }
 </style>

@@ -17,9 +17,30 @@
             <span class="imd-hero__id" :title="imageId">{{ shortId }}</span>
           </p>
         </div>
-        <!-- 一期没有任何操作按钮：打标签/导出/删除都是二期能力（分期控件矩阵，spec §11.0）。
-             这里连它们的位置都不留 —— 「不渲染 ≠ 禁用」，画一个二期按钮就是让用户点了拿 400。
-             层历史是一次读取的静态事实，故也没有「刷新」：重新进入页面即重新读取。 -->
+        <div class="imd-hero__actions">
+          <!-- 二期写操作（spec §11.4）：打标签/导出 tar 无确认档，删除是标准档（经弹窗）。
+               使用中的镜像不能删除：按钮禁用并把结论句放在旁边（服务端也会拒绝，不该发出去）。
+               指令在途时一并禁用。 -->
+          <ElButton v-if="canManage" size="small" :disabled="busy" @click="onTag">
+            打标签…
+          </ElButton>
+          <ElButton v-if="canManage" size="small" :disabled="busy" @click="onSave">
+            导出 tar…
+          </ElButton>
+          <ElButton
+            v-if="canDelete"
+            size="small"
+            type="danger"
+            plain
+            :disabled="removeDisabled"
+            @click="openRemove"
+          >
+            删除…
+          </ElButton>
+          <span v-if="removeBlockedConclusion" class="imd-hero__blocked">
+            {{ removeBlockedConclusion }}
+          </span>
+        </div>
       </div>
 
       <!-- 摘要行：大小 / 创建于 / 使用 —— 第一屏只回答「这是什么」。 -->
@@ -120,6 +141,19 @@
         </ElTabs>
       </ElCard>
     </div>
+
+    <!-- 删除（标准档）与导出覆盖（文件名档）的确认弹窗：形态、逐字期望值与保护提示
+         全部由组件按动作注册表推导，页面只传事实与 options。删除成功后回列表
+         （列表挂载时自己拉最新快照）。 -->
+    <DockerActionConfirm
+      v-model="confirmState.visible"
+      :action="confirmState.action"
+      :target="confirmState.target"
+      :options="confirmState.options"
+      target-kind="镜像"
+      :loading="confirmLoading"
+      @confirm="onConfirmSubmit"
+    />
   </div>
 </template>
 
@@ -132,13 +166,18 @@
     ElDescriptions,
     ElDescriptionsItem,
     ElEmpty,
+    ElMessage,
+    ElMessageBox,
     ElSkeleton,
     ElTabPane,
     ElTabs
   } from 'element-plus'
+  import { useAuth } from '@/hooks/core/useAuth'
+  import { PermDockerDelete, PermDockerManage } from '@/enums/permission'
   import ArtButtonTable from '@/components/core/forms/art-button-table/index.vue'
   import ArtTable from '@/components/core/tables/art-table/index.vue'
   import { formatByUnit, formatUnixSeconds } from '@/modules/device/utils/display'
+  import DockerActionConfirm from '../components/action-confirm.vue'
   import {
     fetchDockerCmdResult,
     fetchDockerState,
@@ -148,6 +187,11 @@
     type DockerImageItem,
     type DockerStateResp
   } from '../api'
+  import {
+    runErrorMessage,
+    useDockerCmds,
+    type DockerCmdRunResult
+  } from '../composables/useDockerCmds'
   import {
     parseImageInspectPayload,
     pollDelay,
@@ -440,6 +484,165 @@
     })
   }
 
+  // ── 二期写操作（头部按钮区）──────────────────────────────────────────
+  // 确认档与列表页同一来源（utils/actions + components/action-confirm）：删除是标准档，
+  // 导出覆盖要逐字输入文件名（两段），打标签无需确认；镜像没有保护粒度。
+  // 使用中的镜像不能删除（快照里的 inUse 是 agent 算好的结论）：按钮禁用 + 结论句。
+  const { hasAuth } = useAuth()
+  const canManage = computed(() => hasAuth(PermDockerManage))
+  const canDelete = computed(() => hasAuth(PermDockerDelete))
+
+  // 写指令通道：受理 + 轮询 + 成功后重读（inspect 与快照都重读 —— 打标签会改引用、
+  // 删除会让详情失效，两者都要反映在页面上）。
+  const { run, busy } = useDockerCmds({
+    refresh: () => {
+      void loadInspect()
+      void loadSnapshot()
+    }
+  })
+
+  /** 写操作的 target：优先快照/详情的仓库标签，无标签的镜像退回路由里的镜像 id。 */
+  const actionTarget = computed(
+    () => snapshotImage.value?.repoTags?.[0] || view.value?.repoTags?.[0] || imageId.value
+  )
+
+  const inUseBlocked = computed(() => snapshotImage.value?.inUse === true)
+
+  /** 使用中的删除结论句（快照未到时不拦：那时并不知道有没有容器在用，猜一个是不诚实的）。 */
+  const removeBlockedConclusion = computed(() => {
+    if (!inUseBlocked.value) return ''
+    const names = snapshotImage.value?.inUseBy ?? []
+    return names.length
+      ? `镜像正被容器 ${names.join('、')} 使用，需先删除相关容器后再删除`
+      : '镜像正被容器使用，需先删除相关容器后再删除'
+  })
+  const removeDisabled = computed(() => busy.value || inUseBlocked.value)
+
+  interface ConfirmState {
+    visible: boolean
+    /** 两个入口的提交分支不同：删除（标准档）与导出覆盖（文件名档）。 */
+    kind: 'remove' | 'save'
+    action: string
+    target: string
+    options: Record<string, unknown>
+  }
+
+  const confirmState = ref<ConfirmState>({
+    visible: false,
+    kind: 'remove',
+    action: '',
+    target: '',
+    options: {}
+  })
+  const confirmLoading = ref(false)
+
+  /** 结果 → 界面回执：成功优先用结果的 detail（agent 的结论句），失败用统一的结论句。 */
+  function reportResult(res: DockerCmdRunResult): void {
+    if (res.ok) ElMessage.success(res.detail || '操作已完成')
+    else ElMessage.error(runErrorMessage(res, '操作未完成'))
+  }
+
+  /** 收集一段输入的弹窗；取消/关闭返回空串（调用方据此中止，不发送指令）。 */
+  async function promptText(title: string, message: string, placeholder: string): Promise<string> {
+    try {
+      const { value } = await ElMessageBox.prompt(message, title, {
+        confirmButtonText: '确定',
+        cancelButtonText: '取消',
+        inputPlaceholder: placeholder,
+        inputPattern: /\S/,
+        inputErrorMessage: '内容不能为空'
+      })
+      return (value ?? '').trim()
+    } catch {
+      return ''
+    }
+  }
+
+  /** 打标签：src 取当前镜像引用，dst 由用户输入。 */
+  async function onTag() {
+    const src = actionTarget.value
+    const dst = await promptText(
+      '打标签',
+      `为镜像「${title.value}」输入新的引用。`,
+      '例如 仓库/名称:标签'
+    )
+    if (!dst) return
+    reportResult(await run({ action: 'image:tag', options: { src, dst } }))
+  }
+
+  /** 导出 tar（两段时序）：先不带覆盖标记发一次；产物已存在时确认文件名后带覆盖标记重发。 */
+  async function onSave() {
+    const target = actionTarget.value
+    const filename = await promptText(
+      '导出 tar',
+      '只填文件名，产物落在该主机的 agent 下载目录。',
+      '例如 镜像名.tar'
+    )
+    if (!filename) return
+    const res = await run({ action: 'image:save', target, options: { filename } })
+    if (res.ok) {
+      reportResult(res)
+      return
+    }
+    if (res.alreadyExists === true) {
+      confirmState.value = {
+        visible: true,
+        kind: 'save',
+        action: 'image:save',
+        target,
+        options: { filename, overwrite: true }
+      }
+      return
+    }
+    reportResult(res)
+  }
+
+  /** 删除镜像：标准档确认；使用中的镜像不发指令（服务端也会拒绝），只给结论。 */
+  function openRemove() {
+    if (inUseBlocked.value) {
+      ElMessage.warning('镜像正被容器使用，需先删除相关容器后再删除镜像')
+      return
+    }
+    confirmState.value = {
+      visible: true,
+      kind: 'remove',
+      action: 'image:remove',
+      target: actionTarget.value,
+      options: {}
+    }
+  }
+
+  async function onConfirmSubmit(payload: { confirm: string; force: boolean }) {
+    const st = confirmState.value
+    confirmLoading.value = true
+    try {
+      if (st.kind === 'remove') {
+        const res = await run({
+          action: 'image:remove',
+          target: st.target,
+          confirm: payload.confirm
+        })
+        reportResult(res)
+        // 删除成功 → 回列表页：列表挂载时会自己拉最新快照（删掉的镜像不会再出现）。
+        if (res.ok) back()
+      } else {
+        // 第二段：覆盖标记 + 文件名逐字确认一起带上，服务端逐字校验后才会覆盖。
+        const filename = String(st.options.filename ?? '')
+        reportResult(
+          await run({
+            action: 'image:save',
+            target: st.target,
+            options: { filename, overwrite: true },
+            confirm: filename
+          })
+        )
+      }
+    } finally {
+      confirmLoading.value = false
+      confirmState.value = { ...st, visible: false }
+    }
+  }
+
   // 主机到达/切换：重新读详情与快照。首次进入时 hostId 从 '' 变成首台 id，也是这里兜住。
   watch(
     () => ctx.hostId,
@@ -494,6 +697,19 @@
     &__id {
       color: var(--el-text-color-secondary);
       font-family: var(--el-font-family-mono, ui-monospace, 'SFMono-Regular', Consolas, monospace);
+    }
+
+    &__actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+
+    // 「不能删除」的结论句：与陈旧标注同一套颜色语言（琥珀色 = 需要注意的结论）。
+    &__blocked {
+      color: var(--el-color-warning);
+      font-size: 12px;
     }
   }
 

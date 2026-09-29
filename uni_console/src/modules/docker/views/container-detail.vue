@@ -19,6 +19,28 @@
           </p>
         </div>
         <div class="cd-hero__actions">
+          <!-- 二期写操作：启停按状态二选一；受保护目标统一经确认弹窗（在里面勾「强制操作」才带
+               force），无强制权限时全部禁用并给结论句（判定与列表页同一来源：protectedGate）。
+               指令在途时一并禁用。 -->
+          <ElButton v-if="canManage" size="small" :disabled="writeDisabled" @click="onToggle">
+            {{ isRunning ? '停止' : '启动' }}
+          </ElButton>
+          <ElButton v-if="canManage" size="small" :disabled="writeDisabled" @click="onRestart">
+            重启
+          </ElButton>
+          <ElButton
+            v-if="canDelete"
+            size="small"
+            type="danger"
+            plain
+            :disabled="writeDisabled"
+            @click="openRemove"
+          >
+            删除…
+          </ElButton>
+          <span v-if="protectedBlockedConclusion" class="cd-hero__blocked">
+            {{ protectedBlockedConclusion }}
+          </span>
           <ElButton size="small" :loading="loading" @click="reloadAll">刷新</ElButton>
         </div>
       </div>
@@ -88,16 +110,48 @@
           <ElTabPane label="日志" name="logs">
             <div class="cd-logs__bar">
               <span class="cd-logs__label">行数</span>
-              <ElSelect v-model="tail" class="cd-logs__tail" size="small" :disabled="logsLoading">
+              <ElSelect
+                v-model="tail"
+                class="cd-logs__tail"
+                size="small"
+                :disabled="logsLoading || logsFollowing"
+              >
                 <ElOption :value="100" label="最近 100 行" />
                 <ElOption :value="500" label="最近 500 行" />
                 <ElOption :value="2000" label="最近 2000 行" />
               </ElSelect>
-              <ElButton size="small" :loading="logsLoading" @click="loadLogs">拉取</ElButton>
+              <ElButton
+                size="small"
+                :loading="logsLoading"
+                :disabled="logsFollowing"
+                @click="loadLogs"
+              >
+                拉取
+              </ElButton>
+              <!-- 跟随中改行数不会重开会话，故行数/拉取都在跟随期间锁住（跟随开关本身不受限）。 -->
               <span v-if="logsError" class="cd-logs__error">{{ logsError }}</span>
+              <span v-else-if="logsNote" class="cd-logs__note">{{ logsNote }}</span>
             </div>
-            <!-- 日志正文交给查看器：缓冲上限、查找、复制、下载、上滚自动暂停都在它里面。 -->
-            <LogViewer :lines="logLines" :truncated="logTruncated" />
+            <!-- 日志正文交给查看器：缓冲上限、查找、复制、下载、上滚自动暂停、跟随都在它里面。 -->
+            <LogViewer
+              v-model:following="logsFollowing"
+              :lines="logLines"
+              :truncated="logTruncated"
+              :followable="canInspect"
+              :total-lines="logTotal"
+            />
+          </ElTabPane>
+
+          <!-- 终端是三期能力：仅具备执行权限时渲染（不渲染 ≠ 禁用，spec §11.0）。 -->
+          <ElTabPane v-if="canExec" label="终端" name="pty">
+            <!-- 首次切到本 Tab 才建立会话（v-if 挂 activeTab）：进详情页不会顺手起 shell；
+                 切走即卸载 → 组件在卸载时发 cancel 并释放会话。 -->
+            <PtyTerminal
+              v-if="activeTab === 'pty'"
+              :key="`${ctx.hostId}:${containerId}`"
+              :host-id="ctx.hostId"
+              :container-id="containerId"
+            />
           </ElTabPane>
 
           <ElTabPane label="环境变量与配置" name="env">
@@ -143,11 +197,24 @@
         </ElTabs>
       </ElCard>
     </div>
+
+    <!-- 写操作的确认弹窗：删除是标准档必走它；受保护目标上的启停/重启也走它 ——
+         「强制操作」开关是这个弹窗唯一的输入面（开关是否渲染由组件按 docker:exec
+         权限判定，页面只传目标事实）。删除成功 → 回列表页（列表挂载时自己拉最新快照）。 -->
+    <DockerActionConfirm
+      v-model="writeConfirmVisible"
+      :action="writeConfirmAction"
+      :target="actionTarget"
+      :target-protected="protectedFlag"
+      target-kind="容器"
+      :loading="writeConfirmLoading"
+      @confirm="onWriteConfirm"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
-  import { computed, ref, watch } from 'vue'
+  import { computed, defineAsyncComponent, onBeforeUnmount, ref, watch } from 'vue'
   import { useRoute, useRouter } from 'vue-router'
   import {
     ElAlert,
@@ -156,6 +223,7 @@
     ElDescriptions,
     ElDescriptionsItem,
     ElEmpty,
+    ElMessage,
     ElOption,
     ElSelect,
     ElSkeleton,
@@ -163,18 +231,29 @@
     ElTabs,
     ElTag
   } from 'element-plus'
+  import {
+    PermDockerDelete,
+    PermDockerExec,
+    PermDockerInspect,
+    PermDockerManage
+  } from '@/enums/permission'
   import ArtButtonTable from '@/components/core/forms/art-button-table/index.vue'
   import ArtTable from '@/components/core/tables/art-table/index.vue'
+  import { useAuth } from '@/hooks/core/useAuth'
   import { formatUnixSeconds } from '@/modules/device/utils/display'
+  import DockerActionConfirm from '../components/action-confirm.vue'
   import LogViewer from '../components/log-viewer.vue'
   import {
     fetchDockerCmdResult,
     fetchDockerState,
+    openDockerLogStream,
     sendDockerCmd,
     type DockerCmdResultResp,
     type DockerContainerItem,
     type DockerPortItem
   } from '../api'
+  import { runErrorMessage, useDockerCmds } from '../composables/useDockerCmds'
+  import { actionGuarded, needsConfirm, protectedGate } from '../utils/actions'
   import {
     parseContainerInspectPayload,
     parseLogsPayload,
@@ -184,10 +263,15 @@
   } from '../utils/cmd'
   import { containerStateText, portsText } from '../utils/display'
   import { provideDockerHost } from '../utils/host-context'
+  import { createLogFeed } from '../utils/stream'
 
   defineOptions({ name: 'DockerContainerDetail' })
 
-  type TabName = 'overview' | 'logs' | 'env'
+  type TabName = 'overview' | 'logs' | 'env' | 'pty'
+
+  // 终端组件按需加载：xterm 的体积不小，只有真的要开终端时才把这块代码拉下来
+  // （与「首次切到终端 Tab 才建立会话」是同一取向）。
+  const PtyTerminal = defineAsyncComponent(() => import('../components/pty-terminal.vue'))
 
   /** 详情视图：F1 的解析结果 + 端口（概览要显示端口，而解析视图里没有这一项）。 */
   interface ContainerDetailView extends ContainerInspectView {
@@ -200,6 +284,14 @@
   // query/清单还原，返回列表时又要把它带回去。不要解构：上下文字段是 getter，
   // 解构会把 hostId 定格成进入页面时的 ''（主机清单尚未到达）。
   const ctx = provideDockerHost()
+  const { hasAuth } = useAuth()
+
+  // 权限在 Tab 初始化**之前**就绪：终端 Tab 是否渲染、?tab=pty 落不落到终端都看它。
+  const canManage = computed(() => hasAuth(PermDockerManage))
+  const canDelete = computed(() => hasAuth(PermDockerDelete))
+  const canExec = computed(() => hasAuth(PermDockerExec))
+  // 日志（含 Follow）的权限码与 container:logs 同一档：docker:inspect。
+  const canInspect = computed(() => hasAuth(PermDockerInspect))
 
   /** 路由参数里的容器：列表页传的就是容器 id（与快照里的 id 同一份口径）。 */
   const containerId = computed(() => String(route.params.id ?? ''))
@@ -215,13 +307,22 @@
   // ── 同一容器在主机快照里的那一行（只用于头部摘要：保护标记与列表的状态句）──
   const snapshotItem = ref<DockerContainerItem | null>(null)
 
-  // ── 日志：按需拉取（一期非流式）──
+  // ── 日志：按需拉取（一期非流式）+ 跟随（三期 NDJSON 流）──
   const tail = ref(100)
   const logLines = ref('')
   const logTruncated = ref(false)
+  /** 跟随缓冲的累计行数（不受本地上限影响；暂停计数与「共 N 行」用）。 */
+  const logTotal = ref(0)
   const logsLoading = ref(false)
   const logsError = ref('')
+  /** 流动的结论句（例如「日志流已结束。」），与错误分开显示。 */
+  const logsNote = ref('')
   const logsPulled = ref(false)
+  const logsFollowing = ref(false)
+  /** 跟随流的断开手柄：abort 即触发服务端取消会话。 */
+  let logStreamAbort: AbortController | null = null
+  /** 跟随的生命周期序号：断开/换主机会让在飞的「建立 + 读循环」失效。 */
+  let followSeq = 0
 
   // 请求序号（照列表页的既有模式）：主机切换会并发两份请求，旧的那份可能**晚于**新的返回 ——
   // 直接落盘会把页面换回上一台机器的事实。
@@ -337,7 +438,11 @@
   }
 
   function tabFromQuery(raw: unknown): TabName {
-    return raw === 'logs' ? 'logs' : raw === 'env' ? 'env' : 'overview'
+    if (raw === 'logs') return 'logs'
+    if (raw === 'env') return 'env'
+    // 终端 Tab 只在有执行权限时存在：无权限的链接（或无权限账号）落回概览。
+    if (raw === 'pty' && canExec.value) return 'pty'
+    return 'overview'
   }
 
   /**
@@ -463,8 +568,10 @@
       }
       const payload = parseLogsPayload(res.payload)
       logsError.value = ''
+      logsNote.value = ''
       logLines.value = payload.lines
       logTruncated.value = payload.truncated
+      logTotal.value = 0
     } catch (e) {
       if (seq !== logsSeq) return
       logsError.value = errMsg(e, '读取日志失败，请稍后重试')
@@ -473,21 +580,223 @@
     }
   }
 
+  /**
+   * 开启跟随（三期）：建立日志流会话 → 接入 NDJSON 流 → 持续喂进行缓冲。
+   *
+   * 两步与后端契约一一对应：`container:logs{follow:true}` 的结果**只有会话句柄**
+   * （payload 为空），数据从 `cmds/:ref/stream` 以 NDJSON 收；这里的 AbortController
+   * 一断开，服务端就会向 agent 下发取消（会话随之释放）。
+   */
+  async function startLogFollow() {
+    if (!ctx.hostId || !containerId.value) {
+      logsFollowing.value = false
+      return
+    }
+    const seq = ++followSeq
+    logsLoading.value = true
+    logsError.value = ''
+    logsNote.value = ''
+    try {
+      const accepted = await sendDockerCmd(ctx.hostId, {
+        action: 'container:logs',
+        target: containerId.value,
+        options: { tail: tail.value, follow: true }
+      })
+      // 轮询到会话建立（结果只给会话句柄）；节奏与一期 runRead 同一套。
+      let attempt = 0
+      for (;;) {
+        if (seq !== followSeq) return
+        const res = await fetchDockerCmdResult(ctx.hostId, accepted.ref)
+        if (res.status !== 'pending') {
+          if (res.status !== 'succeeded') {
+            throw new Error(res.error || '日志跟随未能建立，请稍后重试')
+          }
+          break
+        }
+        await new Promise((r) => setTimeout(r, pollDelay(attempt++)))
+        if (attempt > 20) throw new Error('日志跟随建立超时，请重试')
+      }
+      if (seq !== followSeq) return
+
+      // 接入流之前先把缓冲清空：会话自己会从 tail 行开始发，不叠上页面上旧的日志。
+      logsSeq++ // 在飞的一次性拉取（若有）作废：它的结果不该落进跟随缓冲
+      const feed = createLogFeed()
+      logLines.value = ''
+      logTotal.value = 0
+      logTruncated.value = false
+      logsPulled.value = true
+
+      const controller = new AbortController()
+      logStreamAbort = controller
+      const res = await openDockerLogStream(ctx.hostId, accepted.ref, controller.signal)
+      if (!res.ok || !res.body) {
+        throw new Error(streamOpenConclusion(res.status))
+      }
+      logsLoading.value = false
+
+      const reader = res.body.getReader()
+      const chunkDecoder = new TextDecoder('utf-8')
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done || seq !== followSeq) break
+        feed.pushRaw(chunkDecoder.decode(value, { stream: true }))
+        logLines.value = feed.text
+        logTotal.value = feed.totalLines
+        logTruncated.value = feed.truncated
+        if (feed.eof) break
+      }
+      if (seq !== followSeq) return
+      // 流自然收尾（agent 发了 eof）：最后一帧可能还带着数据。
+      feed.pushRaw(chunkDecoder.decode())
+      logLines.value = feed.text
+      logTotal.value = feed.totalLines
+      logTruncated.value = feed.truncated
+      logStreamAbort = null
+      logsFollowing.value = false
+      // eof 是流自然收尾；没有 eof 的结束是连接被中途掐断，说清区别。
+      logsNote.value = feed.eof ? '日志流已结束。' : '日志流已断开。'
+    } catch (e) {
+      if (seq !== followSeq) return
+      // 主动断开（关跟随/切 Tab/离开页面）不是错误：不弹结论句。
+      if ((e as { name?: string })?.name === 'AbortError') return
+      logStreamAbort = null
+      logsFollowing.value = false
+      logsError.value = errMsg(e, '日志跟随失败，请稍后重试')
+    } finally {
+      if (seq === followSeq) {
+        logsLoading.value = false
+        logStreamAbort = null
+      }
+    }
+  }
+
+  /** 流端点接入失败的结论句（状态码是排障线索，不进页面）。 */
+  function streamOpenConclusion(status: number): string {
+    if (status === 401) return '登录状态已失效，请重新登录后再试。'
+    if (status === 403) return '没有接入该日志流的权限。'
+    if (status === 404) return '该日志会话已过期，请重新跟随。'
+    if (status === 409) return '该日志会话已有连接，请稍后重试。'
+    return '日志跟随未能建立，请稍后重试'
+  }
+
+  /** 断开跟随（关开关/切 Tab/切主机/离开页面都会走到这里）。 */
+  function stopLogFollow() {
+    const controller = logStreamAbort
+    // 只在真的有东西在飞时让序号失效（幂等调用——例如 eof 后开关回调再走一次——不扰动别的流程）。
+    const inFlight = controller !== null || logsFollowing.value
+    logStreamAbort = null
+    if (!inFlight) return
+    followSeq++ // 让在飞的建立流程与读循环失效
+    logsLoading.value = false
+    if (controller) controller.abort()
+    if (logsFollowing.value) logsFollowing.value = false
+  }
+
   /** 首次切到日志 Tab 自动拉一次；之后由「拉取」按钮驱动（一期按需拉取，非流式）。 */
   function ensureLogs() {
-    if (logsPulled.value || logsLoading.value) return
+    if (logsPulled.value || logsLoading.value || logsFollowing.value) return
     void loadLogs()
   }
 
   function reloadAll() {
     void loadInspect()
     void loadSnapshot()
-    if (logsPulled.value) void loadLogs()
+    // 跟随中不重拉：一次性拉取会把流缓冲整段替换掉（跟随按钮一关即可回到拉取模式）。
+    if (logsPulled.value && !logsFollowing.value) void loadLogs()
   }
 
   /** 返回容器列表：带上当前主机，列表页据此还原到同一台机器。 */
   function back() {
     router.push({ name: 'DockerContainers', query: { host: ctx.hostId } })
+  }
+
+  // ── 二期写操作（头部按钮区）──────────────────────────────────────────
+  // 确认档/保护档复用列表页的同一套判定（utils/actions + components/action-confirm）：
+  // 删除是标准档；受保护目标上的启停/重启也必须带 force，统一走弹窗里的「强制操作」开关；
+  // 普通容器的启停/重启无确认档，点了直接发。
+  // （canManage/canDelete/canExec 在页面顶部已声明：终端 Tab 的渲染要先于它们。）
+
+  /** 写指令通道：受理 + 轮询 + 成功后重读（重读就是 reloadAll：inspect/快照/日志一起刷新）。 */
+  const { run, busy } = useDockerCmds({ refresh: reloadAll })
+
+  /** 写操作的 target：优先快照/详情里的容器名（与列表页同一口径），名字未知时退化用路由里的 id。 */
+  const actionTarget = computed(
+    () => snapshotItem.value?.name || view.value?.name || containerId.value
+  )
+
+  /** 受保护档判定（agent 算好的结论）：受保护 + 没有强制权限 = 动作不可执行。 */
+  const protectionGate = computed(() =>
+    protectedGate({ protected: protectedFlag.value }, canExec.value)
+  )
+  const protectedBlockedConclusion = computed(() =>
+    protectionGate.value.allowed ? '' : protectionGate.value.conclusion
+  )
+  /** 头部写按钮的禁用条件：指令在途，或保护档不允许。 */
+  const writeDisabled = computed(() => busy.value || !protectionGate.value.allowed)
+
+  const writeConfirmVisible = ref(false)
+  const writeConfirmAction = ref('')
+  const writeConfirmLoading = ref(false)
+
+  /** 发一条写指令并把结论给用户；成功后的重读由 composable 统一触发。 */
+  async function runWrite(action: string) {
+    const res = await run({ action, target: actionTarget.value })
+    if (res.ok) ElMessage.success(res.detail || '操作已完成')
+    else ElMessage.error(runErrorMessage(res, '操作未完成'))
+    return res
+  }
+
+  /** 该动作此刻是否必须经确认弹窗：注册表的确认档，或受保护目标的保护档。 */
+  function needsDialog(action: string): boolean {
+    return needsConfirm(action) || (protectedFlag.value && actionGuarded(action))
+  }
+
+  function openWriteConfirm(action: string) {
+    writeConfirmAction.value = action
+    writeConfirmVisible.value = true
+  }
+
+  function onToggle() {
+    // 启停二选一由容器状态决定（与列表页同一口径）。
+    const action = isRunning.value ? 'container:stop' : 'container:start'
+    if (needsDialog(action)) openWriteConfirm(action)
+    else void runWrite(action)
+  }
+
+  function onRestart() {
+    if (needsDialog('container:restart')) openWriteConfirm('container:restart')
+    else void runWrite('container:restart')
+  }
+
+  function openRemove() {
+    // 删除是标准档：无论是否受保护都先过确认弹窗（受保护时弹窗里多出「强制操作」开关）。
+    openWriteConfirm('container:remove')
+  }
+
+  /** 确认弹窗提交：force 只在「强制操作」开关出现且被勾选时为 true。 */
+  async function onWriteConfirm(payload: { confirm: string; force: boolean }) {
+    const action = writeConfirmAction.value
+    const options: Record<string, unknown> = { target: actionTarget.value }
+    if (payload.force) options.force = true
+    writeConfirmLoading.value = true
+    try {
+      const res = await run({
+        action,
+        target: actionTarget.value,
+        options,
+        confirm: payload.confirm
+      })
+      if (res.ok) {
+        ElMessage.success(res.detail || '操作已完成')
+        // 删除成功 → 回列表页：列表挂载时会自己拉最新快照（删掉的容器不会再出现）。
+        if (action === 'container:remove') back()
+      } else {
+        ElMessage.error(runErrorMessage(res, '操作未完成'))
+      }
+    } finally {
+      writeConfirmLoading.value = false
+      writeConfirmVisible.value = false
+    }
   }
 
   /**
@@ -511,15 +820,29 @@
     }
   )
 
-  // 切到日志 Tab 就自动拉一次（?tab=logs 直接进来也算）。
+  // 切到日志 Tab 就自动拉一次（?tab=logs 直接进来也算）；切走或切到终端就断开跟随
+  //（「切换 Tab → AbortController 断开」，断流后开关回到可重连状态）。
   watch(activeTab, (t) => {
     if (t === 'logs') ensureLogs()
+    else stopLogFollow()
   })
 
+  // 跟随开关的翻转 = 建立/断开流。结束（eof）或失败时 startLogFollow 自己把开关拨回，
+  // 于是这里再走一次 stopLogFollow（幂等）。
+  watch(logsFollowing, (on) => {
+    if (on) void startLogFollow()
+    else stopLogFollow()
+  })
+
+  // 离开页面：断开跟随（服务端随之下发取消）。
+  onBeforeUnmount(() => stopLogFollow())
+
   // 主机到达/切换：重新读详情与快照；日志已拉过（或正停在日志 Tab）就一并重拉。
+  // 正在跟随的流属于旧主机 —— 先断开（换主机后由用户决定要不要重新跟随）。
   watch(
     () => ctx.hostId,
     () => {
+      stopLogFollow()
       if (!ctx.hostId) return
       void loadInspect()
       void loadSnapshot()
@@ -575,8 +898,15 @@
 
     &__actions {
       display: flex;
+      flex-wrap: wrap;
       gap: 8px;
       align-items: center;
+    }
+
+    // 保护档结论句：与陈旧标注同一套颜色语言（琥珀色 = 需要注意的结论）。
+    &__blocked {
+      color: var(--el-color-warning);
+      font-size: 12px;
     }
   }
 
@@ -674,6 +1004,12 @@
 
   .cd-logs__error {
     color: var(--el-color-danger);
+    font-size: 13px;
+  }
+
+  // 流动的结论句（例如「日志流已结束」）：次要文字色，不与错误同色。
+  .cd-logs__note {
+    color: var(--el-text-color-secondary);
     font-size: 13px;
   }
 
