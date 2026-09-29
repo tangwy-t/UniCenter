@@ -12,6 +12,10 @@ FROM node:22-alpine AS builder
 # 如需官方源：docker compose build --build-arg NPM_REGISTRY=https://registry.npmjs.org
 ARG NPM_REGISTRY=https://registry.npmmirror.com
 
+# corepack 拉取 pnpm 二进制时**不读** npm 的 registry 配置，需单独指定镜像源，
+# 否则会回落到 registry.npmjs.org（本环境实测该下载耗时约 10 分钟）。
+ENV COREPACK_NPM_REGISTRY=$NPM_REGISTRY
+
 RUN npm config set registry "$NPM_REGISTRY" \
     && corepack enable
 
@@ -19,7 +23,22 @@ WORKDIR /app
 
 # 先拷贝依赖清单，利用构建缓存
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-RUN pnpm install --frozen-lockfile
+
+# pnpm store 走 BuildKit 缓存挂载：依赖包在多次构建之间复用，
+# 首次构建仍需下载，之后命中缓存（日志会出现 reused > 0）。
+# store 挂在镜像层之外，不增大最终镜像体积。
+# ⚠️ 需要 BuildKit（Docker 23+ 默认启用）；DOCKER_BUILDKIT=0 会因不认识
+#    --mount 而构建失败。
+#
+# 网络调优（本环境实测必要）：镜像源延迟高（单个 tarball 重定向可达 18s），
+# 且容器 nofile 软限仅 1024，pnpm 默认并发会大面积超时（UND_ERR_CONNECT_TIMEOUT）
+# 与句柄耗尽（error 23），实测直接安装失败。降并发 + 加长重试与超时后可稳定完成。
+RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
+    pnpm install --frozen-lockfile --store-dir=/pnpm/store \
+        --network-concurrency=4 \
+        --fetch-retries=5 \
+        --fetch-retry-maxtimeout=120000 \
+        --fetch-timeout=300000
 
 # 再拷贝源码；.dockerignore 已排除 node_modules/dist 等
 COPY . .

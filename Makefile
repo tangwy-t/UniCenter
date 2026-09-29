@@ -293,8 +293,9 @@ compose-check: ## 校验 docker-compose.yml 可解析(重复键/语法)
 # docker-build: 计算版本三件套并注入 uni_core 镜像(监控页「构建时间/提交 Hash」
 # 数据源)。直接 docker compose build 不传参时,Dockerfile 兜底为
 # BUILD_TIME=构建时刻、VERSION=docker、COMMIT_HASH=unknown。
-# 本部署环境 BuildKit 不可用时,DOCKER_BUILDKIT=0 构建:
-#   DOCKER_BUILDKIT=0 make docker-build
+# 注意:uni_console 的 Dockerfile 用 --mount=type=cache 复用 pnpm store(见 uni_console/Dockerfile),
+# 该语法只有 BuildKit 认识,故不再支持 DOCKER_BUILDKIT=0(会直接构建失败)。
+# 本环境 Docker 23+ 已默认启用 BuildKit,无需额外设置。
 docker-build: ## 构建全部镜像(uni_core + uni_console),注入版本信息
 	docker compose build \
 		--build-arg VERSION="$(VERSION)" \

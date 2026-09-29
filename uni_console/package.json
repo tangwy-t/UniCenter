@@ -2,6 +2,7 @@
   "name": "uni-console",
   "version": "0.1.0",
   "type": "module",
+  "packageManager": "pnpm@11.24.0",
   "engines": {
     "node": ">=20.19.0",
     "pnpm": ">=8.8.0"
@@ -46,7 +47,7 @@
     "vue": "3.5.22",
     "vue-draggable-plus": "^0.6.0",
     "vue-router": "^4.5.1",
-    "xlsx": "^0.18.5",
+"xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
     "yaml": "^2.9.1"
   },
   "devDependencies": {

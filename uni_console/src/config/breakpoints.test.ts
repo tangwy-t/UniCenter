@@ -1,4 +1,5 @@
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
+import { basename, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { BREAKPOINTS } from './breakpoints'
@@ -127,5 +128,48 @@ describe('断点单一事实源（Tailwind @theme ↔ TS）', () => {
     const known = new Set([...Object.keys(projectSpecific), ...Object.keys(defaultAligned)])
     const unknown = Object.keys(tailwindBreakpoints).filter((name) => !known.has(name))
     expect(unknown, `发现未在断点表登记的 @theme 断点：${unknown.join(', ')}`).toEqual([])
+  })
+})
+
+// 断点的第四个载体：组件/工具里内联写死的阈值（matchMedia 字符串、组件内 @media）。
+// 前三个载体的一致性断言覆盖不到它，任何一处断点调整都会与它无声错位
+// （竖屏守卫组件曾把 tablet 写成 767.98px 字面量）。
+// 这里扫描源码，强制宽度判定只走 respond-* mixin 或 useAppBreakpoints。
+describe('断点单一事实源（源码无内联阈值）', () => {
+  const srcRoot = fileURLToPath(new URL('..', import.meta.url))
+
+  // 只匹配"媒体查询形态"的阈值：`(max-width: 768px)` / `(width <= 768px)`。
+  // 普通 CSS 属性（`max-width: 220px;`）不以 `(` 开头，不会误伤。
+  const INLINE_BREAKPOINT = /\((?:max|min)-width:\s*[\d.]+px|\(width\s*[<>]=?\s*[\d.]+px/
+
+  /** 滤掉注释行与块注释，避免文档示例（如 mixin 用法说明）被当成真实阈值 */
+  function stripComments(source: string): string {
+    return source
+      .split('\n')
+      .filter((line) => {
+        const trimmed = line.trim()
+        return !trimmed.startsWith('//') && !trimmed.startsWith('*') && !trimmed.startsWith('/*')
+      })
+      .join('\n')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+  }
+
+  it('源码中不存在内联的宽度媒体查询阈值', () => {
+    const offenders: string[] = []
+
+    for (const relative of readdirSync(srcRoot, { recursive: true }) as string[]) {
+      if (!/\.(ts|vue|scss|css)$/.test(relative)) continue
+      // 本测试自身与自动生成的类型文件不在扫描范围
+      if (basename(relative).endsWith('.test.ts')) continue
+      if (relative.includes('types/import')) continue
+
+      const source = stripComments(readFileSync(join(srcRoot, relative), 'utf8'))
+      if (INLINE_BREAKPOINT.test(source)) offenders.push(relative)
+    }
+
+    expect(
+      offenders,
+      `以下文件内联了宽度阈值，应改用 respond-* mixin 或 useAppBreakpoints：\n${offenders.join('\n')}`
+    ).toEqual([])
   })
 })
