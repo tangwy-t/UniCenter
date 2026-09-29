@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/volume"
@@ -364,6 +366,196 @@ func runCompose(ctx context.Context, name string, args ...string) (string, error
 	cmd := exec.CommandContext(ctx, name, args...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// ── 二期：写操作的 SDK 实现（只做一次调用，权限/确认/保护/路径都在上层）──────
+
+func (a *sdkAdapter) ContainerStart(ctx context.Context, id string) error {
+	return a.cli.ContainerStart(ctx, id, container.StartOptions{})
+}
+
+func (a *sdkAdapter) ContainerStop(ctx context.Context, id string) error {
+	return a.cli.ContainerStop(ctx, id, container.StopOptions{})
+}
+
+func (a *sdkAdapter) ContainerRestart(ctx context.Context, id string) error {
+	return a.cli.ContainerRestart(ctx, id, container.StopOptions{})
+}
+
+func (a *sdkAdapter) ContainerRemove(ctx context.Context, id string, force bool) error {
+	// RemoveVolumes 保持 false：卷的删除必须走独立的 volume:remove（各自确认）。
+	return a.cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: force})
+}
+
+func (a *sdkAdapter) ImageRemove(ctx context.Context, ref string, force bool) error {
+	// PruneChildren 对应 docker rmi 的「连带删除子镜像」：不打它会有大量 <none> 残留，
+	// 而残留会挤占磁盘正是用户点删除的理由。
+	_, err := a.cli.ImageRemove(ctx, ref, image.RemoveOptions{Force: force, PruneChildren: true})
+	return err
+}
+
+// ImagePrune 清理镜像。
+//
+// 悬浮判定交给 daemon 的过滤器（dangling=!all）：`docker image prune`（默认）清的正是
+// 这个集合，而本地按 RepoTags 判悬空与 daemon 口径有实测差异（见快照的 digest-only 用例）。
+func (a *sdkAdapter) ImagePrune(ctx context.Context, all bool) (int64, error) {
+	report, err := a.cli.ImagesPrune(ctx, filters.NewArgs(filters.Arg("dangling", strconv.FormatBool(!all))))
+	if err != nil {
+		return 0, err
+	}
+	return int64(report.SpaceReclaimed), nil
+}
+
+// ImagePull 拉取镜像。
+//
+// **必须把响应体读到 EOF 再关闭**：拉取的实际工作在响应体流上完成，提前 Close 会让
+// 拉取半途中断（镜像不完整），而调用方看到的却是「没有错误」。进度文本直接丢弃 ——
+// 指令结果只回结论，进度二期不属于本通道（spec §7.5）。
+func (a *sdkAdapter) ImagePull(ctx context.Context, ref string) error {
+	rc, err := a.cli.ImagePull(ctx, ref, image.PullOptions{})
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+	if _, err := io.Copy(io.Discard, rc); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (a *sdkAdapter) ImageTag(ctx context.Context, src, dst string) error {
+	return a.cli.ImageTag(ctx, src, dst)
+}
+
+// ImageSave 把镜像导出成 tar 文件。
+//
+// 打开方式由 overwrite 决定，且**只有这两种形态**：
+//   - overwrite=false：O_CREATE|O_EXCL —— 已存在（含符号链接）时返回 alreadyExists，
+//     由上层折成「产物文件已存在，确认覆盖后重试」；绝不静默覆盖别人放的文件；
+//   - overwrite=true：用户已在两段确认里明确要覆盖，此时才允许截断重写。
+func (a *sdkAdapter) ImageSave(ctx context.Context, ref, path string, overwrite bool) (bool, error) {
+	flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
+	if overwrite {
+		flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+	}
+	f, err := os.OpenFile(path, flags, 0o600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) && !overwrite {
+			return true, nil
+		}
+		return false, err
+	}
+	defer f.Close()
+	rc, err := a.cli.ImageSave(ctx, []string{ref})
+	if err != nil {
+		return false, err
+	}
+	defer rc.Close()
+	if _, err := io.Copy(f, rc); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
+// ImageLoad 从 tar 文件导入镜像。
+//
+// 与 ImagePull 同理：响应体要读到 EOF，否则导入可能半途而废（失败只表现为镜像不完整）。
+func (a *sdkAdapter) ImageLoad(ctx context.Context, path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	res, err := a.cli.ImageLoad(ctx, f)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if _, err := io.Copy(io.Discard, res.Body); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (a *sdkAdapter) VolumeRemove(ctx context.Context, name string, force bool) error {
+	return a.cli.VolumeRemove(ctx, name, force)
+}
+
+// VolumePrune 清理卷。
+//
+// 空过滤器 = daemon 的默认口径（只清**匿名且未使用**的卷），与 spec §4.3.1 一致；
+// 命名卷（含保护清单里的底座数据卷）不在其中 —— 这正是这里不需要 guard 的原因。
+func (a *sdkAdapter) VolumePrune(ctx context.Context) (int64, error) {
+	report, err := a.cli.VolumesPrune(ctx, filters.NewArgs())
+	if err != nil {
+		return 0, err
+	}
+	return int64(report.SpaceReclaimed), nil
+}
+
+func (a *sdkAdapter) NetworkRemove(ctx context.Context, name string) error {
+	return a.cli.NetworkRemove(ctx, name)
+}
+
+// ── 三期：流会话的 SDK 实现 ───────────────────────────────────────────────
+
+// ContainerLogsFollow 打开日志流（follow=true）。
+//
+// 与一次性读取的 ContainerLogs 不同，这里**不能**用「先试 stdcopy、失败按原样」的启发式：
+// 流式读取读过的字节回不去，猜错一次就把 8 字节头混进用户看到的日志（或反过来吞掉正文）。
+// 故先 inspect 拿 Config.Tty：TTY 容器是裸流，非 TTY 才是多路复用帧，各自只有一条路。
+func (a *sdkAdapter) ContainerLogsFollow(ctx context.Context, name string, tail int, since int64) (io.ReadCloser, error) {
+	opts := container.LogsOptions{ShowStdout: true, ShowStderr: true, Follow: true, Tail: strconv.Itoa(tail)}
+	if since > 0 {
+		opts.Since = time.Unix(since, 0).UTC().Format(time.RFC3339)
+	}
+	// TTY 判定放在开流**之前**：先开流再 inspect 也没问题，但错误路径会多一次 Close。
+	v, err := a.cli.ContainerInspect(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	rc, err := a.cli.ContainerLogs(ctx, name, opts)
+	if err != nil {
+		return nil, err
+	}
+	if v.Config != nil && v.Config.Tty {
+		return rc, nil
+	}
+	// 非 TTY：用管道把解复用后的文本流出去（stdcopy 在两个写端合并 stdout/stderr）。
+	pr, pw := io.Pipe()
+	go func() {
+		_, err := stdcopy.StdCopy(pw, pw, rc)
+		_ = rc.Close()
+		_ = pw.CloseWithError(err)
+	}()
+	return pr, nil
+}
+
+// ContainerExecAttach 建 TTY exec 并挂接。
+//
+// 三个 Attach 位全开（stdin/stdout/stderr）：TTY 模式下 daemon 把 stderr 也合进同一流，
+// 不开 AttachStderr 会丢掉错误输出。Cmd 是调用方校验过的 argv（缺省 ["/bin/sh"]）。
+func (a *sdkAdapter) ContainerExecAttach(ctx context.Context, name string, argv []string) (*ExecSession, error) {
+	created, err := a.cli.ContainerExecCreate(ctx, name, container.ExecOptions{
+		Tty: true, AttachStdin: true, AttachStdout: true, AttachStderr: true, Cmd: argv,
+	})
+	if err != nil {
+		return nil, err
+	}
+	hj, err := a.cli.ContainerExecAttach(ctx, created.ID, container.ExecAttachOptions{Tty: true})
+	if err != nil {
+		return nil, err
+	}
+	return &ExecSession{
+		Reader: hj.Reader,
+		Writer: hj.Conn,
+		Resize: func(ctx context.Context, cols, rows int) error {
+			return a.cli.ContainerExecResize(ctx, created.ID, container.ResizeOptions{
+				Height: uint(rows), Width: uint(cols),
+			})
+		},
+		Close: func() error { hj.Close(); return nil },
+	}, nil
 }
 
 // round2 保留两位小数（页面上的百分比与 MB 只用到这个精度）。

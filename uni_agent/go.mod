@@ -6,7 +6,8 @@ require (
 	github.com/docker/docker v28.5.2+incompatible
 	github.com/gorilla/websocket v1.5.3
 	github.com/shirou/gopsutil/v3 v3.24.5
-	github.com/tangwy-t/UniCenter/uni_protocol v1.2.0
+	github.com/tangwy-t/UniCenter/uni_protocol v1.2.4
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

@@ -3,7 +3,9 @@ package dockerops
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"time"
@@ -25,11 +27,14 @@ const (
 type Deps struct {
 	// StateDir 是 agent 的状态目录：flavor 探测结果与配置快照落在这里。
 	StateDir string
-	// SendState / SendResult 是上行出口（由 transport 注入）。
+	// SendState / SendResult / SendFrame 是上行出口（由 transport 注入）。
 	SendState  func(*agentproto.DockerState) error
 	SendResult func(*agentproto.DockerCmdResult) error
-	Log        Logger
-	Now        func() time.Time
+	// SendFrame 是流数据帧的出口。**可短暂阻塞**（最多 5 秒）：会话的泵在它上面
+	// 等待队列腾位，等不到就结束会话（而不是静默丢数据）。
+	SendFrame func(*agentproto.DockerFrame) error
+	Log       Logger
+	Now       func() time.Time
 	// API 是 Docker 能力面。nil = 由 NewForProcess 填 SDK 真身。
 	API DockerAPI
 	// Interval 是初始快照周期（hello_ack 下发后覆盖）。
@@ -57,6 +62,14 @@ type Runtime struct {
 
 	snapshotter *Snapshotter
 	exec        Executor
+	// write 是二期写执行器：dispatcher 只认识 r.exec 这个单一入口，但配置更新
+	//（保护清单/产物目录/flavor）要送进写执行器，故这里保留一份具体引用。
+	write *WriteExecutor
+	// sessions 是流会话管理器（三期）：控制帧与帧纪律都在它手里。
+	sessions *SessionManager
+	// projects 是「项目 → 配置文件」持久化索引：快照从中学习，compose 解析在标签
+	// 给不出路径时回落到它（down → up 的关键，见 project_index.go）。
+	projects *projectIndex
 	// dispOnce/disp 是分派器的**懒构造**（见 dispatcher()）：构造时点必须在
 	// 「第一次真正要用」而不是 New —— 在 New 里立刻把 exec 拷进分派器，会让
 	// 调用方随后替换 exec 的动作静默失效（跑的还是旧执行器）。
@@ -94,13 +107,79 @@ func New(deps Deps) *Runtime {
 		protected: ParseProtected(""),
 	}
 	r.loadPersisted()
+	r.projects = newProjectIndex(deps.StateDir, deps.Log)
 	r.snapshotter = NewSnapshotter(deps.API, r.protected, deps.Log, deps.Now)
+	r.snapshotter.SetProjectIndex(r.projects)
 	if r.flavor != "" {
 		r.snapshotter.SetCompose(r.flavor, r.flavorVer)
 	}
-	r.exec = NewReadExecutor(deps.API)
+	// 二期写执行器：flavor/protected/transferDir 先按（可能来自落盘的）当前值注入，
+	// 之后配置变化由 OnConfig / probeComposeOnce 继续同步。
+	//
+	// API 句柄上挂着项目索引（withProjectIndex）：读/写的 compose 配置文件解析在
+	// 标签给不出路径时（down 之后、旧版 compose）回落到它。挂在句柄上而不是给
+	// 各执行器加字段，是为了让两条解析路径在构造处一并拿到，不留漏注入的暗角。
+	api := withProjectIndex(deps.API, r.projects)
+	r.write = NewWriteExecutor(api, r.protected, r.transferDir, r.flavor, exec.CommandContext)
+	// 挂钟沿用 Deps.Now：四期的备份令牌取它，测试因此能确定性地产出同秒连续保存。
+	r.write.SetNow(deps.Now)
+	// 流会话管理器（三期）：出口由 transport 注入；未注入时给一个「发不出去」的
+	// 兜底（宁可会话带着一句明确结论结束，也不要在泵里空指针崩溃）。
+	sendFrame := deps.SendFrame
+	if sendFrame == nil {
+		sendFrame = func(*agentproto.DockerFrame) error { return errNoFrameSink }
+	}
+	r.sessions = newSessionManager(sessionConfig{
+		send: sendFrame,
+		log:  deps.Log,
+		now:  deps.Now,
+	})
+	r.exec = &nodeExecutor{
+		read:   NewReadExecutor(api),
+		write:  r.write,
+		stream: NewStreamExecutor(api, r.sessions),
+	}
 	return r
 }
+
+// errNoFrameSink 是「transport 没注入帧出口」时的兜底错误（装配缺陷，不是运行时状况）。
+var errNoFrameSink = errors.New("docker frame sink not configured")
+
+// readActions 是一期只读 action（收口时据此选执行器）。
+var readActions = map[string]bool{
+	agentproto.DockerActionContainerInspect: true,
+	agentproto.DockerActionContainerLogs:    true,
+	agentproto.DockerActionImageInspect:     true,
+	agentproto.DockerActionComposeFileRead:  true,
+}
+
+// nodeExecutor 是 dispatcher 看到的**唯一**执行器：只读、二期写与三期流在这里收口。
+//
+// 为什么要有这一层：dispatcher 的串行队列、参数/确认二次校验与按时限超时都对执行器
+// 只有一个入口，分派逻辑不该知道有几个执行器；而读/写/流三个类型各自保持窄依赖。
+type nodeExecutor struct {
+	read   *ReadExecutor
+	write  *WriteExecutor
+	stream *StreamExecutor
+}
+
+func (e *nodeExecutor) Do(ctx context.Context, cmd *agentproto.DockerCmd) ([]byte, error) {
+	// 流判定要**排在只读之前**：container:logs{follow:true} 与一次性日志是同一个
+	// action，分流依据只有 options.follow（IsStreamAction 是唯一判据）。
+	if IsStreamAction(cmd) {
+		return e.stream.Do(ctx, cmd)
+	}
+	if readActions[cmd.Action] {
+		return e.read.Do(ctx, cmd)
+	}
+	return e.write.Do(ctx, cmd)
+}
+
+// takeNote 转发写执行器的成功附注（实现 dispatcher 的 successNoter，见 dispatcher.go）。
+func (e *nodeExecutor) takeNote() string { return e.write.takeNote() }
+
+// takeSessionID 转发流执行器的会话句柄（实现 dispatcher 的 sessionNamer）。
+func (e *nodeExecutor) takeSessionID() string { return e.stream.takeSessionID() }
 
 // NewForProcess 构造**面向真实进程**的门面：把 API 填成 SDK 真身。
 //
@@ -122,8 +201,38 @@ func NewForProcess(deps Deps) (*Runtime, error) {
 // 懒构造而不是在 New 里建：exec 是可以在构造之后被替换的字段，提前把它拷进分派器
 // 会让替换无效 —— 症状是「换了执行器，跑的还是旧的」，且只有走到那条路径才看得见。
 func (r *Runtime) dispatcher() *Dispatcher {
-	r.dispOnce.Do(func() { r.disp = NewDispatcher(r.exec, r.deps.SendResult, r.log) })
+	r.dispOnce.Do(func() {
+		r.disp = NewDispatcher(r.exec, r.deps.SendResult, r.log)
+		// 写操作成功后立即采帧（见 onCmdSettled）：这是前端「操作后列表立刻变」
+		// 的关键 —— core 的 /state 只是周期上报的缓存（默认 30s），不补这一帧，
+		// 页面重拉只会拿到旧数据。
+		r.disp.SetOnSettled(r.onCmdSettled)
+	})
 	return r.disp
+}
+
+// onCmdSettled 是一条指令落定后的回调：**写操作成功**才请求一次立即采帧。
+//
+// 为什么读操作不触发：读不改主机状态，采一帧只是白跑一次 daemon。
+// 为什么失败不触发：失败（含未知 action / 排队满 / 参数非法）频繁且不代表
+// 「改动已发生」；把失败也变成采集会让触发频率取决于错误率。
+// 真正改了状态的失败（例如 compose down 中断在半途）由下一拍周期兜底。
+func (r *Runtime) onCmdSettled(action string, ok bool) {
+	if !ok || readActions[action] {
+		return
+	}
+	r.triggerSnapshot()
+}
+
+// triggerSnapshot 非阻塞地请求一次立即采帧。
+//
+// 通道深度 1：连续触发合并成一次采集（快照是覆盖式数据，采两次没有意义）。
+// 它在指令 worker 的落定回调里被调用，故绝不能阻塞。
+func (r *Runtime) triggerSnapshot() {
+	select {
+	case r.trigger <- struct{}{}:
+	default:
+	}
 }
 
 // loadPersisted 载入上次落盘的配置（文件不存在是正常情形：首次启动）。
@@ -205,12 +314,7 @@ func (r *Runtime) Run(ctx context.Context) { r.dispatcher().Run(ctx) }
 //
 // **非阻塞**：它在连接的读循环里被调用，故只做一个「塞进触发通道」的动作。
 // 通道深度 1：连续两次触发合并成一次采集（快照是覆盖式数据，采两次没有意义）。
-func (r *Runtime) OnConnected() {
-	select {
-	case r.trigger <- struct{}{}:
-	default:
-	}
-}
+func (r *Runtime) OnConnected() { r.triggerSnapshot() }
 
 // OnConfig 应用 hello_ack 下发的 docker 配置块。
 //
@@ -235,10 +339,14 @@ func (r *Runtime) OnConfig(cfg *agentproto.DockerConfig) {
 	if cfg.SnapshotInterval > 0 {
 		r.interval = time.Duration(cfg.SnapshotInterval) * time.Second
 	}
-	protected, interval := r.protected, r.interval
+	protected, interval, transferDir := r.protected, r.interval, r.transferDir
 	r.mu.Unlock()
 
 	r.snapshotter.SetProtected(protected)
+	// 写执行器也要拿到新配置：保护清单是**拒绝依据**，构造时的旧清单会让
+	// 「配置页里刚加的保护」对这一版进程无效（不可逆的失败模式）。
+	r.write.SetProtected(protected)
+	r.write.SetTransferDir(transferDir)
 	if changed {
 		r.log.Info("docker config applied",
 			"configVersion", cfg.ConfigVersion,
@@ -284,14 +392,16 @@ func (r *Runtime) OnCmd(cmd *agentproto.DockerCmd) {
 	}
 }
 
-// OnFrame 收到一条流控制帧。**一期只忽略**：流通道（日志 follow / 终端）在三期接线，
-// 但类型已在协议里登记，老 agent 忽略未知 core.* 不断连 —— 这里显式记 Debug，
-// 让「三期没接上」这件事在日志里是可见的而不是猜的。
+// OnFrame 收到一条流控制帧。**非阻塞**：它在连接的读循环里被调用，故只做一次
+// 查表 + 投递（input/resize 进会话的小队列，实际动作在会话自己的协程里做）。
+//
+// 会话已结束/未知的帧只记 Debug：core 的 sweep 与 agent 的释放之间有窗口，
+// 「用户点取消，帧晚到」是正常时序而不是错误。
 func (r *Runtime) OnFrame(f *agentproto.CoreDockerFrame) {
 	if f == nil {
 		return
 	}
-	r.log.Debug("docker stream frame ignored (phase 3)", "session", f.SessionID, "op", f.Op)
+	r.sessions.OnFrame(f)
 }
 
 // currentInterval 返回当前快照周期（每次采集后重读，配置变更下一轮即生效）。
@@ -332,6 +442,7 @@ func (r *Runtime) probeComposeOnce(ctx context.Context) {
 	r.flavor, r.flavorVer = flavor, version
 	r.mu.Unlock()
 	r.snapshotter.SetCompose(flavor, version)
+	r.write.SetFlavor(flavor)
 	r.log.Info("compose flavor detected", "flavor", flavor, "version", version)
 	r.persist()
 }

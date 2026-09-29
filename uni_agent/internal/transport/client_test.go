@@ -368,3 +368,48 @@ func TestBadCAFileFailsBeforeDial(t *testing.T) {
 		t.Fatalf("应在拨号前报 CA 文件读取失败，实际 %v", err)
 	}
 }
+
+// CAClient/LoadCAPool 的两条边界：空路径 = 用系统信任库（返回 nil，调用方保留默认客户端）；
+// CA 文件不可用必须**报错**而不是静默退化 —— 静默退化的症状是「以为配了 CA」却走了另一套
+// 信任链，而升级下载会在**下一次升级**时才以 x509 报出来（与证书配置的联想距离很远）。
+func TestCAClientAndLoadCAPool(t *testing.T) {
+	if c, err := CAClient("", time.Minute); err != nil || c != nil {
+		t.Fatalf("空路径应返回 (nil, nil)，实际 client=%v err=%v", c, err)
+	}
+	dir := t.TempDir()
+	bad := filepath.Join(dir, "bad.crt")
+	if err := os.WriteFile(bad, []byte("not a pem"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CAClient(bad, time.Minute); err == nil {
+		t.Fatal("坏 CA 文件必须报错（不得静默退化到系统信任库）")
+	}
+	if _, err := LoadCAPool(filepath.Join(dir, "missing.crt")); err == nil {
+		t.Fatal("CA 文件缺失必须报错")
+	}
+}
+
+// TestSendDockerFrameRequiresConnection：断线时不排队（与服务端会把流判超时的语义一致），
+// 在线时进 docker 队列（与会话的帧纪律配套：队列满时最多等 5 秒，等不到由会话收摊）。
+func TestSendDockerFrameRequiresConnection(t *testing.T) {
+	c := New(Config{URL: "ws://unused", HeartbeatInterval: time.Second})
+	f := &agentproto.DockerFrame{SessionID: "0123456789abcdef", Seq: 1, Data: []byte("x")}
+	if err := c.SendDockerFrame(f); err == nil {
+		t.Fatal("未连接时必须立刻返回错误（而不是排队等待）")
+	}
+	c.state = stateActive
+	if err := c.SendDockerFrame(f); err != nil {
+		t.Fatalf("在线时应入队: %v", err)
+	}
+	if len(c.dockerCh) != 1 {
+		t.Fatalf("帧必须进 docker 队列，实际 %d", len(c.dockerCh))
+	}
+	// 帧载荷必须能原样解码（base64 的 data 与 seq 都在线上）。
+	msg := <-c.dockerCh
+	if msg.Type != agentproto.TypeAgentDockerFrame {
+		t.Fatalf("类型不符: %s", msg.Type)
+	}
+	if _, err := agentproto.DecodeTypedFor(msg, agentproto.DirAgentToCore); err != nil {
+		t.Fatalf("帧必须能按方向解码: %v", err)
+	}
+}

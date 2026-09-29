@@ -6,8 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"os"
-	"path/filepath"
-	"strings"
 
 	agentproto "github.com/tangwy-t/UniCenter/uni_protocol"
 )
@@ -65,49 +63,38 @@ func (e *ReadExecutor) Do(ctx context.Context, cmd *agentproto.DockerCmd) ([]byt
 
 // composeFile 读一个 compose 项目的配置文件。
 //
-// 路径**只能**来自容器标签（com.docker.compose.project.config_files），协议上从不接受
-// 路径入参 —— 路径白名单纪律（§8 四条防护之一）：UI 只传项目名，路径逃逸面因此不存在。
+// 路径解析（**只能**来自容器标签）与 compose 写路径共用 composeConfigFileOf
+// （见 compose_exec.go）—— 复制两份会让「路径白名单」有两个实现，而它只需要一个。
 func (e *ReadExecutor) composeFile(ctx context.Context, project string) (*agentproto.DockerComposeFilePayload, error) {
-	cs, err := e.api.Containers(ctx)
+	path, err := composeConfigFileOf(ctx, e.api, project)
 	if err != nil {
-		return nil, &ExecError{Msg: "读取项目信息失败", Detail: err.Error()}
+		return nil, err
 	}
-	for _, c := range cs {
-		if c.Labels[composeProjectLabel] != project {
-			continue
-		}
-		raw := c.Labels[composeConfigFilesLabel]
-		if strings.TrimSpace(raw) == "" {
-			// 旧版 compose 不写这个标签：如实说「位置未知」，不猜、不去扫目录。
-			return nil, &ExecError{Msg: "这个项目的配置文件位置未知（旧版 compose 未记录）"}
-		}
-		// 可能是多个文件（-f a.yml -f b.yml）：取第一个（主文件）。
-		path := strings.TrimSpace(strings.Split(raw, ",")[0])
-		if !filepath.IsAbs(path) {
-			return nil, &ExecError{Msg: "配置文件位置异常（不是绝对路径）"}
-		}
-		fi, err := os.Stat(path)
-		if err != nil {
-			return nil, &ExecError{Msg: "读取配置文件失败", Detail: err.Error()}
-		}
-		if fi.IsDir() {
-			return nil, &ExecError{Msg: "配置文件位置异常（它是一个目录）"}
-		}
-		if fi.Size() > agentproto.MaxDockerComposeFileBytes {
-			return nil, &ExecError{Msg: "配置文件过大（超过 1MB）"}
-		}
-		b, err := os.ReadFile(path)
-		if err != nil {
-			return nil, &ExecError{Msg: "读取配置文件失败", Detail: err.Error()}
-		}
-		sum := sha256.Sum256(b)
-		return &agentproto.DockerComposeFilePayload{
-			Content: string(b),
-			Hash:    hex.EncodeToString(sum[:]),
-			Path:    path,
-		}, nil
+	// 先看大小再读：超限的文件不该被读进内存（上限见 §13）。
+	fi, err := os.Stat(path)
+	if err != nil {
+		return nil, &ExecError{Msg: "读取配置文件失败", Detail: err.Error()}
 	}
-	return nil, &ExecError{Msg: "没有找到这个项目（它可能已经被删除）"}
+	if fi.Size() > agentproto.MaxDockerComposeFileBytes {
+		return nil, &ExecError{Msg: "配置文件过大（超过 1MB）"}
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, &ExecError{Msg: "读取配置文件失败", Detail: err.Error()}
+	}
+	sum := sha256.Sum256(b)
+	// 备份历史（v1.2.4）：与写路径的列表共用同一个扫描（最多 10 份、时间倒序、
+	// 含各自 hash/size/at）——「读到的备份」与「回滚用的令牌」同源。
+	backups, err := listComposeBackups(path)
+	if err != nil {
+		return nil, &ExecError{Msg: "读取备份列表失败", Detail: err.Error()}
+	}
+	return &agentproto.DockerComposeFilePayload{
+		Content: string(b),
+		Hash:    hex.EncodeToString(sum[:]),
+		Path:    path,
+		Backups: backups,
+	}, nil
 }
 
 // containerInspectPayload 把 inspect 结果映射成协议载荷（导出的结构在协议侧，

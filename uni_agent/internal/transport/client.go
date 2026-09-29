@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"net/http"
 	"os"
 	"strconv"
 	"sync"
@@ -226,6 +227,30 @@ func (c *Client) active() bool {
 	return c.state == stateActive
 }
 
+// SendDockerFrame 上报一帧流数据（日志 chunk / PTY 输出）。**最多等 5 秒**。
+//
+// 为什么不像快照那样立即失败：帧是「已经发生」的数据（终端回显、日志行），丢掉就
+// 不会再来。但也不能无限等 —— 它在会话的泵里被调用，无限等会把帧整形（合帧/限速）
+// 一起拖住。等不到时如实返回错误，由会话管理器结束会话（消费端看到流结束，
+// 而不是一份静默缺行的日志）。
+func (c *Client) SendDockerFrame(f *agentproto.DockerFrame) error {
+	msg, err := agentproto.NewMessage(newID(), agentproto.TypeAgentDockerFrame, f)
+	if err != nil {
+		return err
+	}
+	if !c.active() {
+		return errors.New("not connected")
+	}
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	select {
+	case c.dockerCh <- msg:
+		return nil
+	case <-timer.C:
+		return errors.New("docker send queue full after 5s")
+	}
+}
+
 // SetDockerHook 注入 docker 运行时（必须在 Run 之前调用，与 SetHook 同一契约）。
 func (c *Client) SetDockerHook(h DockerHook) {
 	c.mu.Lock()
@@ -372,13 +397,9 @@ func (c *Client) runOnce(ctx context.Context) error {
 	// 这段必须在 DialContext **之前**：CA 文件坏掉时静默退化到系统信任库，
 	// 会让人以为「配了 CA」而实际走的是另一套信任链（排障时最难发现的一类）。
 	if c.cfg.CAFile != "" {
-		pem, err := os.ReadFile(c.cfg.CAFile)
+		pool, err := LoadCAPool(c.cfg.CAFile)
 		if err != nil {
-			return fmt.Errorf("读取 CA 文件失败: %w", err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pem) {
-			return fmt.Errorf("CA 文件不含可用的证书: %s", c.cfg.CAFile)
+			return err
 		}
 		dialer.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 	}
@@ -781,3 +802,39 @@ type nopLogger struct{}
 func (nopLogger) Info(string, ...any)  {}
 func (nopLogger) Warn(string, ...any)  {}
 func (nopLogger) Debug(string, ...any) {}
+
+// LoadCAPool 读取 PEM 文件并构造根证书池。
+//
+// 单独提出来是因为它有两个消费方：WS 拨号器（wss）与**升级产物的下载客户端**（https）。
+// 只给 WS 配 CA 而漏掉下载客户端，症状是「连接一直正常，但下一次 agent 升级永远失败在
+// x509: certificate signed by unknown authority」—— 故障出现在升级链路上，与「证书配置」
+// 的联想距离很远，故让两处共用同一份实现：漏配时至少是同一处代码。
+func LoadCAPool(path string) (*x509.CertPool, error) {
+	pem, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("读取 CA 文件失败: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("CA 文件不含可用的证书: %s", path)
+	}
+	return pool, nil
+}
+
+// CAClient 返回信任给定 CA 的 HTTP 客户端；path 为空时返回 (nil, nil)，
+// 表示「用默认客户端（系统信任库）」——调用方据此保留 nil 即可。
+func CAClient(path string, timeout time.Duration) (*http.Client, error) {
+	if path == "" {
+		return nil, nil
+	}
+	pool, err := LoadCAPool(path)
+	if err != nil {
+		return nil, err
+	}
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
+		},
+	}, nil
+}

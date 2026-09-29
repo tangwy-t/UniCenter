@@ -3,8 +3,11 @@ package dockerops
 import (
 	"context"
 	"errors"
+	"io"
 	"slices"
 	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,6 +37,130 @@ type stubAPI struct {
 	logLines        string
 	logTruncated    bool
 	composeContent  string
+
+	// ── 二期写操作的记录型实现（Task B1）────────────────────────────────────
+	// 每个写方法只把收到的参数记进下面的切片（不碰 docker.sock、不真跑 docker 命令、
+	// 不改变状态），供断言「执行器到底调了什么、带没带 force/overwrite/拼出的路径」。
+	started          []string
+	stopped          []string
+	restarted        []string
+	removed          []containerRemoveCall
+	imagesRemoved    []imageRemoveCall
+	imagePrunedAll   []bool
+	imagePruneFreed  int64
+	pulled           []string
+	tagged           []tagCall
+	saved            []saveCall
+	loaded           []string
+	volumesRemoved   []volumeRemoveCall
+	volumePruneCalls int
+	volumePruneFreed int64
+	networksRemoved  []string
+	// saveAlreadyExists：目标已存在且调用方未要求覆盖时，ImageSave 返回 already_exists。
+	saveAlreadyExists bool
+
+	// ── 三期流会话（S1）────────────────────────────────────────────────────
+	// 记录与读取都可能发生在会话 goroutine 里，故这一组统一走 streamMu。
+	streamMu       sync.Mutex
+	logStream      io.ReadCloser
+	logStreamFn    func() io.ReadCloser
+	logStreamErr   error
+	logFollowCalls []logsFollowCall
+	execSession    *ExecSession
+	execErr        error
+	execCalls      []execCall
+	resized        []termSize
+}
+
+// 记录型替身用的参数快照（字段名与被记的方法参数一一对应）。
+type containerRemoveCall struct {
+	id    string
+	force bool
+}
+
+type imageRemoveCall struct {
+	ref   string
+	force bool
+}
+
+type tagCall struct{ src, dst string }
+
+type saveCall struct {
+	ref, path string
+	overwrite bool
+}
+
+type volumeRemoveCall struct {
+	name  string
+	force bool
+}
+
+func (s *stubAPI) ContainerStart(_ context.Context, id string) error {
+	s.started = append(s.started, id)
+	return nil
+}
+
+func (s *stubAPI) ContainerStop(_ context.Context, id string) error {
+	s.stopped = append(s.stopped, id)
+	return nil
+}
+
+func (s *stubAPI) ContainerRestart(_ context.Context, id string) error {
+	s.restarted = append(s.restarted, id)
+	return nil
+}
+
+func (s *stubAPI) ContainerRemove(_ context.Context, id string, force bool) error {
+	s.removed = append(s.removed, containerRemoveCall{id: id, force: force})
+	return nil
+}
+
+func (s *stubAPI) ImageRemove(_ context.Context, ref string, force bool) error {
+	s.imagesRemoved = append(s.imagesRemoved, imageRemoveCall{ref: ref, force: force})
+	return nil
+}
+
+func (s *stubAPI) ImagePrune(_ context.Context, all bool) (int64, error) {
+	s.imagePrunedAll = append(s.imagePrunedAll, all)
+	return s.imagePruneFreed, nil
+}
+
+func (s *stubAPI) ImagePull(_ context.Context, ref string) error {
+	s.pulled = append(s.pulled, ref)
+	return nil
+}
+
+func (s *stubAPI) ImageTag(_ context.Context, src, dst string) error {
+	s.tagged = append(s.tagged, tagCall{src: src, dst: dst})
+	return nil
+}
+
+func (s *stubAPI) ImageSave(_ context.Context, ref, path string, overwrite bool) (bool, error) {
+	s.saved = append(s.saved, saveCall{ref: ref, path: path, overwrite: overwrite})
+	if s.saveAlreadyExists && !overwrite {
+		return true, nil
+	}
+	return false, nil
+}
+
+func (s *stubAPI) ImageLoad(_ context.Context, path string) error {
+	s.loaded = append(s.loaded, path)
+	return nil
+}
+
+func (s *stubAPI) VolumeRemove(_ context.Context, name string, force bool) error {
+	s.volumesRemoved = append(s.volumesRemoved, volumeRemoveCall{name: name, force: force})
+	return nil
+}
+
+func (s *stubAPI) VolumePrune(context.Context) (int64, error) {
+	s.volumePruneCalls++
+	return s.volumePruneFreed, nil
+}
+
+func (s *stubAPI) NetworkRemove(_ context.Context, name string) error {
+	s.networksRemoved = append(s.networksRemoved, name)
+	return nil
 }
 
 func (s *stubAPI) Ping(context.Context) error { return s.pingErr }
@@ -65,6 +192,79 @@ func (s *stubAPI) ImageInspect(context.Context, string) (ImageDetail, error) {
 }
 func (s *stubAPI) ComposeVersion(context.Context) (string, string, error) {
 	return s.flavor, s.flavorVer, nil
+}
+
+// ── 三期流会话的替身（记录型）──────────────────────────────────────────────
+//
+// 这两个方法的调用发生在会话的 goroutine 里（不是测试 goroutine），故记录用独立的
+// 互斥锁保护 —— 否则 -race 会把「测试读、生产写」报成数据竞争。
+
+func (s *stubAPI) ContainerLogsFollow(_ context.Context, name string, tail int, since int64) (io.ReadCloser, error) {
+	s.streamMu.Lock()
+	s.logFollowCalls = append(s.logFollowCalls, logsFollowCall{name: name, tail: tail, since: since})
+	fn, rc, err := s.logStreamFn, s.logStream, s.logStreamErr
+	s.streamMu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	if fn != nil {
+		return fn(), nil
+	}
+	if rc != nil {
+		return rc, nil
+	}
+	return io.NopCloser(strings.NewReader("")), nil
+}
+
+func (s *stubAPI) ContainerExecAttach(_ context.Context, name string, argv []string) (*ExecSession, error) {
+	s.streamMu.Lock()
+	s.execCalls = append(s.execCalls, execCall{name: name, argv: append([]string(nil), argv...)})
+	es, err := s.execSession, s.execErr
+	s.streamMu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	if es != nil {
+		return es, nil
+	}
+	return &ExecSession{Reader: strings.NewReader(""), Writer: io.Discard, Close: func() error { return nil }}, nil
+}
+
+// logsFollowCall / execCall 是流接口的调用快照。
+type logsFollowCall struct {
+	name  string
+	tail  int
+	since int64
+}
+
+type execCall struct {
+	name string
+	argv []string
+}
+
+func (s *stubAPI) followCalls() []logsFollowCall {
+	s.streamMu.Lock()
+	defer s.streamMu.Unlock()
+	return append([]logsFollowCall(nil), s.logFollowCalls...)
+}
+
+func (s *stubAPI) execArgvs() []execCall {
+	s.streamMu.Lock()
+	defer s.streamMu.Unlock()
+	return append([]execCall(nil), s.execCalls...)
+}
+
+// resizeCalls 记录 Terminal resize（由 ExecSession.Resize 包装写入）。
+func (s *stubAPI) resizes() []termSize {
+	s.streamMu.Lock()
+	defer s.streamMu.Unlock()
+	return append([]termSize(nil), s.resized...)
+}
+
+func (s *stubAPI) recordResize(cols, rows int) {
+	s.streamMu.Lock()
+	s.resized = append(s.resized, termSize{cols: cols, rows: rows})
+	s.streamMu.Unlock()
 }
 
 func testLogger() *recLogger { return &recLogger{} }
@@ -125,6 +325,17 @@ func containerNames(cs []agentproto.DockerContainer) []string {
 		out = append(out, c.Name)
 	}
 	return out
+}
+
+func findProject(t *testing.T, ps []agentproto.DockerProject, name string) agentproto.DockerProject {
+	t.Helper()
+	for _, p := range ps {
+		if p.Name == name {
+			return p
+		}
+	}
+	t.Fatalf("快照里没有项目 %q", name)
+	return agentproto.DockerProject{}
 }
 
 // imageSortKeys 复刻「有标签用第一个 tag、无标签用 id」这条排序键，用来独立断言镜像顺序。
@@ -250,11 +461,15 @@ func TestSnapshotCollectsEverything(t *testing.T) {
 	if uploads.SizeMB == nil || *uploads.SizeMB == 0 {
 		t.Fatalf("有用量数据的卷必须带上体积: %+v", uploads)
 	}
-	if other := findVolume(t, st.Volumes, "other"); other.SizeMB != nil {
-		t.Fatalf("用量未知必须是 nil（页面显示「—」而不是 0）: %+v", other)
+	if other := findVolume(t, st.Volumes, "other"); other.SizeMB != nil || other.Protected {
+		t.Fatalf("用量未知必须是 nil（页面显示「—」而不是 0），未列出的卷不得被标记: %+v", other)
 	}
 	if !uploads.InUse || uploads.MountedBy[0] != "uni-center-core" {
 		t.Fatalf("被挂载的卷必须标记在用并给出容器名: %+v", uploads)
+	}
+	// 卷的 protected 由 agent 按 `volume:<名>` 粒度算好（前端不重复实现判断）
+	if !uploads.Protected {
+		t.Fatalf("volume:uni-center-uploads 在清单里 → 卷条目必须带 protected: %+v", uploads)
 	}
 	// 项目归纳
 	pr := st.Projects[0]
@@ -267,6 +482,9 @@ func TestSnapshotCollectsEverything(t *testing.T) {
 	if len(pr.ConfigFiles) != 1 || pr.ConfigFiles[0] != "/data/UniCenter/docker-compose.yml" {
 		t.Fatalf("配置文件路径应来自标签: %+v", pr)
 	}
+	if !pr.Protected {
+		t.Fatalf("project:uni-center 在清单里 → 项目条目必须带 protected: %+v", pr)
+	}
 	if st.Compose == nil || st.Compose.Flavor != agentproto.DockerComposeFlavorPlugin || st.Compose.Version != "v2.27.0" {
 		t.Fatalf("compose 形态未带出: %+v", st.Compose)
 	}
@@ -277,6 +495,74 @@ func TestSnapshotCollectsEverything(t *testing.T) {
 	// 端口映射逐项带出（容器详情页与列表页共用同一套字段）
 	if len(c1.Ports) != 1 || c1.Ports[0].PrivatePort != 8088 || c1.Ports[0].PublicPort != 20080 || c1.Ports[0].Type != "tcp" {
 		t.Fatalf("端口映射未带出: %+v", c1.Ports)
+	}
+}
+
+// 项目条目的 protected 是**项目粒度**（project:<名>），不是「有任何成员受保护」的合成；
+// 服务粒度（project:<项目>/<服务>）仍由成员容器条目的 protected 承载 ——
+// 前端拿到的每一行都是 agent 算好的结论，不在页面上重算。
+func TestSnapshotProjectProtectedIsProjectGranularity(t *testing.T) {
+	api := &stubAPI{
+		containers: []ContainerInfo{
+			// shop 项目只在**服务粒度**上受保护：项目条目本身不该被标记。
+			{ID: "c1", Name: "shop-db-1", Image: "postgres:16", State: "running",
+				Labels: map[string]string{composeProjectLabel: "shop", composeServiceLabel: "db"}},
+			{ID: "c2", Name: "shop-web-1", Image: "nginx:1", State: "running",
+				Labels: map[string]string{composeProjectLabel: "shop", composeServiceLabel: "web"}},
+			// blog 项目整体受保护：项目条目与成员容器都要带标记。
+			{ID: "c3", Name: "blog-web-1", Image: "nginx:1", State: "running",
+				Labels: map[string]string{composeProjectLabel: "blog", composeServiceLabel: "web"}},
+		},
+		volumes: []VolumeInfo{{Name: "data"}, {Name: "logs"}},
+	}
+	st := newTestSnapshotter(api, "project:shop/db,project:blog,volume:data", testLogger()).Collect(context.Background())
+	if err := st.Validate(); err != nil {
+		t.Fatalf("采集结果必须能过协议校验: %v", err)
+	}
+	if findProject(t, st.Projects, "shop").Protected {
+		t.Fatal("shop 只有服务粒度保护 → 项目条目不得标记为受保护（两份口径会打架）")
+	}
+	if !findProject(t, st.Projects, "blog").Protected {
+		t.Fatal("project:blog 必须标记整个项目")
+	}
+	// 服务粒度落在容器条目上：db 受保护、web 不受（同项目不误伤）。
+	if !findContainer(t, st.Containers, "shop-db-1").Protected {
+		t.Fatal("project:shop/db 必须标记 shop 项目下的 db 服务容器")
+	}
+	if findContainer(t, st.Containers, "shop-web-1").Protected {
+		t.Fatal("project:shop/db 不得标记同项目下的 web 服务（服务粒度必须成对命中）")
+	}
+	if !findVolume(t, st.Volumes, "data").Protected || findVolume(t, st.Volumes, "logs").Protected {
+		t.Fatalf("卷的 protected 口径不符: %+v", st.Volumes)
+	}
+}
+
+// 快照是「项目 → 配置文件」索引的常态学习路径：带两个标签的容器必须被学进索引
+// （多文件取第一个），缺 config_files 的（旧版 compose）不得学习 —— 学了就是编造路径。
+func TestSnapshotLearnsProjectConfigIndex(t *testing.T) {
+	api := &stubAPI{containers: []ContainerInfo{
+		{ID: "c1", Name: "core", State: "running", Labels: map[string]string{
+			composeProjectLabel:     "uni-center",
+			composeServiceLabel:     "uni_core",
+			composeConfigFilesLabel: "/data/UniCenter/docker-compose.yml, /data/UniCenter/override.yml",
+		}},
+		{ID: "c2", Name: "old", State: "running", Labels: map[string]string{
+			composeProjectLabel: "legacy",
+		}},
+	}}
+	idx := newProjectIndex(t.TempDir(), testLogger())
+	s := newTestSnapshotter(api, "", testLogger())
+	s.SetProjectIndex(idx)
+
+	if st := s.Collect(context.Background()); !st.DockerOK {
+		t.Fatalf("采集应成功: %+v", st)
+	}
+	got, ok := idx.Lookup("uni-center")
+	if !ok || got != "/data/UniCenter/docker-compose.yml" {
+		t.Fatalf("必须学到主配置文件（多文件取第一个、去空白），got %q ok=%v", got, ok)
+	}
+	if _, ok := idx.Lookup("legacy"); ok {
+		t.Fatal("缺 config_files 标签的容器不得学习（不能编造路径）")
 	}
 }
 

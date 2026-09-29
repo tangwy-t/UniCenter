@@ -42,8 +42,11 @@ const statsTimeout = 10 * time.Second
 type Snapshotter struct {
 	api       DockerAPI
 	protected *ProtectedList
-	log       Logger
-	now       func() time.Time
+	// projects 是「项目 → 配置文件」持久化索引：Collect 从容器标签持续学习（见
+	// project_index.go）。没有它，down 之后的项目就解析不到配置文件路径。
+	projects *projectIndex
+	log      Logger
+	now      func() time.Time
 
 	mu        sync.Mutex
 	prevNet   map[string]netCounters
@@ -80,6 +83,14 @@ func (s *Snapshotter) SetProtected(p *ProtectedList) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.protected = p
+}
+
+// SetProjectIndex 注入「项目 → 配置文件」索引（Runtime 构造后调用，与
+// SetProtected/SetCompose 同款）：每一帧采集都会把标签里的路径学进去。
+func (s *Snapshotter) SetProjectIndex(idx *projectIndex) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.projects = idx
 }
 
 // Collect 采集一帧快照。**永不返回 nil**（调用方会直接把它发出去）。
@@ -125,8 +136,13 @@ func (s *Snapshotter) Collect(ctx context.Context) *agentproto.DockerState {
 
 	s.mu.Lock()
 	protected := s.protected
+	projects := s.projects
 	flavor, flavorVer := s.flavor, s.flavorVer
 	s.mu.Unlock()
+
+	// 快照是 30s 一次的常态路径：每一帧都从容器标签刷新「项目 → 配置文件」索引，
+	// 于是 down 之后（容器没了、标签没了）写路径仍能解析出上次学到的位置。
+	learnProjects(projects, containers)
 
 	st.DockerOK = true
 	st.Containers = make([]agentproto.DockerContainer, 0, len(containers))
@@ -153,7 +169,10 @@ func (s *Snapshotter) Collect(ctx context.Context) *agentproto.DockerState {
 	st.Volumes = make([]agentproto.DockerVolume, 0, len(volumes))
 	for _, v := range volumes {
 		names := mountedBy[v.Name]
-		out := agentproto.DockerVolume{Name: v.Name, Driver: v.Driver, InUse: len(names) > 0, MountedBy: names}
+		out := agentproto.DockerVolume{Name: v.Name, Driver: v.Driver, InUse: len(names) > 0, MountedBy: names,
+			// 卷是**独立粒度**（volume:<名>）：停止容器后它就是无主的，只有它自己能堵住
+			// 「先停容器、再删卷」那条两步绕过路径。
+			Protected: protected.Volume(v.Name)}
 		if v.SizeBytes != nil {
 			size := round2(float64(*v.SizeBytes) / (1024 * 1024))
 			out.SizeMB = &size
@@ -169,6 +188,11 @@ func (s *Snapshotter) Collect(ctx context.Context) *agentproto.DockerState {
 	// 项目归纳读的是**本域**类型而不是 st.Containers：config_files 只存在于容器标签里，
 	// 而 proto 的 DockerContainer 不带 Labels（把它塞进协议会让每帧多背一份标签）。
 	st.Projects = projectsFromContainers(containers)
+	// 项目条目的 protected 按 `project:<名>` **项目粒度**填（服务粒度已由成员容器条目的
+	// Protected 承载，见 ContainerProtected）；结论只在 agent 算一次，前端不重算。
+	for i := range st.Projects {
+		st.Projects[i].Protected = protected.Project(st.Projects[i].Name)
+	}
 	if flavor != "" {
 		st.Compose = &agentproto.DockerComposeInfo{Flavor: flavor, Version: flavorVer}
 	}

@@ -7,7 +7,10 @@
 //  3. 面向用户的错误一律是**结论句**（中文、不含英文原文与内部术语）；原始细节走 Detail。
 package dockerops
 
-import "context"
+import (
+	"context"
+	"io"
+)
 
 // ── 本域数据类型（**不是** SDK 类型的别名）──────────────────────────────
 //
@@ -148,6 +151,53 @@ type DockerAPI interface {
 	ImageInspect(ctx context.Context, ref string) (ImageDetail, error)
 	// ComposeVersion 探测 compose 形态与版本（单一 flavor 纪律：只在进程内第一次调用时真正执行）。
 	ComposeVersion(ctx context.Context) (flavor, version string, err error)
+
+	// ── 二期：写操作（每条都只做一件事，权限与确认由 core 强制）──────────
+	ContainerStart(ctx context.Context, id string) error
+	ContainerStop(ctx context.Context, id string) error
+	// ContainerRestart 是 docker restart 的原子版本（**不是** stop+start 两次调用：
+	// 两次调用之间容器可以被别人拉起来，且 stop 的宽限期会被算两遍）。
+	ContainerRestart(ctx context.Context, id string) error
+	// ContainerRemove 删除容器。force 对应 docker rm -f；**不动容器持有的卷**
+	//（卷的删除是独立的 volume:remove，两段确认各自成立）。
+	ContainerRemove(ctx context.Context, id string, force bool) error
+
+	ImageRemove(ctx context.Context, ref string, force bool) error
+	// ImagePrune 清理：all=false 只清悬空（与 docker image prune 同口径）。
+	ImagePrune(ctx context.Context, all bool) (freedBytes int64, err error)
+	ImagePull(ctx context.Context, ref string) error
+	ImageTag(ctx context.Context, src, dst string) error
+	// ImageSave 把镜像写成 tar；path 由调用方按 transferDir 拼好。
+	// 目标已存在且未要求覆盖时返回 alreadyExists=true（**不覆盖**，两段确认由上层承载）。
+	ImageSave(ctx context.Context, ref, path string, overwrite bool) (alreadyExists bool, err error)
+	ImageLoad(ctx context.Context, path string) error
+
+	VolumeRemove(ctx context.Context, name string, force bool) error
+	VolumePrune(ctx context.Context) (freedBytes int64, err error)
+
+	NetworkRemove(ctx context.Context, name string) error
+
+	// ── 三期：流会话（日志 follow / 终端）────────────────────────────────
+
+	// ContainerLogsFollow 打开容器日志流（follow=true，tail/since 同一次性读）：
+	// 返回的流是**已解复用**的文本（TTY 容器是裸流），由调用方 Close。
+	ContainerLogsFollow(ctx context.Context, name string, tail int, since int64) (io.ReadCloser, error)
+	// ContainerExecAttach 建一条 TTY exec 并挂接：argv **直传** daemon，不经 shell。
+	ContainerExecAttach(ctx context.Context, name string, argv []string) (*ExecSession, error)
+}
+
+// ExecSession 是一条已挂接的终端流（TTY 模式：daemon 侧不做 8 字节头的多路复用，
+// 输出是裸字节流 —— 与一次性日志读取里「先试解复用」的启发式不同，流的字节读过就
+// 回不去了，故 TTY 判定必须在挂接前由 inspect 得出，见 adapter）。
+type ExecSession struct {
+	// Reader 是 PTY 输出（stdout/stderr 已合流）。
+	Reader io.Reader
+	// Writer 是进程 stdin。
+	Writer io.Writer
+	// Resize 调整终端尺寸（daemon 侧发 SIGWINCH）。
+	Resize func(ctx context.Context, cols, rows int) error
+	// Close 断开挂接（幂等；daemon 侧据此结束该 exec 会话）。
+	Close func() error
 }
 
 // ExecError 是执行失败的**结论句 + 排障细节**。
@@ -157,6 +207,10 @@ type DockerAPI interface {
 type ExecError struct {
 	Msg    string
 	Detail string
+	// AlreadyExists 是 image:save 特有的「目标产物已存在」标志：它是**失败结论**
+	//（拒绝覆盖），但服务端要把它透出给前端，用户确认后带 overwrite=true 重发
+	//（两段确认复用 cmd/result，§7.5）。dispatcher 会把它原样搬到 result。
+	AlreadyExists bool
 }
 
 func (e *ExecError) Error() string { return e.Msg }

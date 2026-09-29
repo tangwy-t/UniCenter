@@ -106,6 +106,15 @@ func run() error {
 	}
 	// **用 NewForProcess**：它填好 os.Executable / syscall.Exec / runtime.GOOS ——
 	// 这三个字段漏设不会报错，只会让升级「替换了文件却不重启进程」（端到端抓到过）。
+	//
+	// 下载客户端要与 WS 用**同一份 CA 信任**：切到 wss 之后产物地址由 wss→https 推导
+	//（config.DownloadBaseURL），服务端仍是那张自签证书 —— 只给 WS 配 CA 而漏了这里，
+	// 症状是「连接一直正常，但下一次升级永远失败在 x509」，且失败出现在升级链路上。
+	downloadClient, err := transport.CAClient(cfg.CAFile, 5*time.Minute)
+	if err != nil {
+		// 不阻断启动：指数上报是主链路，升级是可选能力（与 downloadBase 推导失败同一取向）。
+		log.Warn("cannot build download client with CA, auto-upgrade may fail", "err", err.Error())
+	}
 	upgradeRuntime := upgrade.NewForProcess(upgrade.Deps{
 		Version:      cfg.AgentVersion,
 		StateDir:     cfg.StateDir,
@@ -113,6 +122,7 @@ func run() error {
 		Token:        client.AgentToken,
 		SendStatus:   client.SendUpgradeStatus,
 		SaveToken:    store.SaveAgentToken,
+		HTTPClient:   downloadClient,
 		Log:          log,
 		JitterMax:    30 * time.Second,
 	})
@@ -130,7 +140,10 @@ func run() error {
 		StateDir:   cfg.StateDir,
 		SendState:  client.SendDockerState,
 		SendResult: client.SendDockerResult,
-		Log:        log,
+		// 流数据帧出口（三期日志 follow / 终端）：与会话管理器一起构成帧纪律
+		//（agent 侧绝不能被 core 的 4006 限流断连 —— 那会连带指标与指令）。
+		SendFrame: client.SendDockerFrame,
+		Log:       log,
 		// 初始周期用协议默认值；真实值由 hello_ack 下发覆盖（重连生效，§3.1.1）。
 		Interval: 30 * time.Second,
 	}); err != nil {
