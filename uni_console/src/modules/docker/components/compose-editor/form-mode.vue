@@ -260,7 +260,7 @@
     <div v-if="doc.volumes.keys.length === 0" class="form-mode__hint">没有数据卷定义</div>
 
     <!-- ── 添加服务：模板 + 名称（spec §8 模板化） ──────────────────────── -->
-    <ElDialog v-model="tplDialog.visible" title="添加服务" width="560px">
+    <ElDialog v-model="tplDialog.visible" title="添加服务" width="min(560px, 92vw)">
       <div class="fm-tpl">
         <ElRadioGroup v-model="tplDialog.templateKey" class="fm-tpl__list">
           <ElRadio v-for="t in SERVICE_TEMPLATES" :key="t.key" :value="t.key" class="fm-tpl__item">
@@ -544,6 +544,8 @@
 </script>
 
 <style lang="scss" scoped>
+  @use '@styles/core/breakpoints.scss' as *;
+
   .form-mode {
     &__head {
       display: flex;
@@ -717,6 +719,32 @@
       gap: 10px;
       align-items: center;
       margin-top: 14px;
+    }
+  }
+
+  /* ── 响应式 ─────────────────────────────────────── */
+
+  // 手机横屏（<768）：折叠卡标题里的「已修改 · 保存将重写此块…」标注较长，
+  // 允许换行（原为固定 48px 单行），否则网元名会被挤出可视区；
+  // 网络/数据卷行的驱动输入改为可伸缩（原为固定 220px）。
+  @include respond-below('tablet') {
+    .fm-cards :deep(.el-collapse-item__header) {
+      height: auto;
+      min-height: 48px;
+      padding: 8px 0;
+      flex-wrap: wrap;
+      row-gap: 4px;
+      line-height: 1.5;
+    }
+
+    .fm-svc__name {
+      word-break: break-all;
+    }
+
+    .fm-entry__input {
+      width: auto;
+      min-width: 0;
+      flex: 1 1 160px;
     }
   }
 </style>

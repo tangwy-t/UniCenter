@@ -313,6 +313,8 @@
 </script>
 
 <style lang="scss" scoped>
+  @use '@styles/core/breakpoints.scss' as *;
+
   .pty-terminal {
     position: relative;
     border-radius: 6px;
@@ -341,6 +343,17 @@
       margin: 0;
       color: #e6e6e6;
       font-size: 13px;
+    }
+  }
+
+  /* ── 响应式 ─────────────────────────────────────── */
+
+  // 窄屏（<1024，覆盖平板竖屏与手机横屏）：终端高度跟视口高度走 —— 固定 420px
+  // 在低矮的横屏窗口里会让输入行落到屏幕之外，必须滚动才能打字。
+  // 宽度本身是流式的（xterm 的 fit addon 按宿主尺寸算行列，窗口变化时自动 refit）。
+  @include respond-below('desktop') {
+    .pty-terminal__screen {
+      height: clamp(240px, 60vh, 420px);
     }
   }
 </style>

@@ -108,6 +108,8 @@
 </script>
 
 <style lang="scss" scoped>
+  @use '@styles/core/breakpoints.scss' as *;
+
   .yaml-mode {
     &__editor {
       height: 420px;
@@ -136,6 +138,16 @@
       font-size: 12px;
       color: var(--el-text-color-secondary);
       text-align: right;
+    }
+  }
+
+  /* ── 响应式 ─────────────────────────────────────── */
+
+  // 窄屏（<1024，覆盖平板竖屏与手机横屏）：编辑区高度跟视口走 —— 固定 420px
+  // 在低矮的横屏窗口里会把校验结论和弹窗页脚顶到屏幕之外。
+  @include respond-below('desktop') {
+    .yaml-mode__editor {
+      height: clamp(240px, 55vh, 420px);
     }
   }
 </style>

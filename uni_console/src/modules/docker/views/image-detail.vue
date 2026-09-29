@@ -92,7 +92,7 @@
               <ElButton size="small" @click="loadInspect">重试</ElButton>
             </ElEmpty>
             <template v-else-if="view">
-              <ElDescriptions :column="2" border size="small">
+              <ElDescriptions :column="descriptionColumns" border size="small">
                 <ElDescriptionsItem label="架构">{{ view.architecture || '—' }}</ElDescriptionsItem>
                 <ElDescriptionsItem label="系统">{{ view.os || '—' }}</ElDescriptionsItem>
                 <ElDescriptionsItem label="暴露端口" :span="2">{{
@@ -172,6 +172,7 @@
     ElTabPane,
     ElTabs
   } from 'element-plus'
+  import { useAppBreakpoints } from '@/hooks/core/useAppBreakpoints'
   import { useAuth } from '@/hooks/core/useAuth'
   import { PermDockerDelete, PermDockerManage } from '@/enums/permission'
   import ArtButtonTable from '@/components/core/forms/art-button-table/index.vue'
@@ -224,6 +225,11 @@
   // 主机要从 query 还原，返回列表与跳容器详情时又要把它带回去。不要解构：上下文字段是
   // getter，解构会把 hostId 定格成进入页面时的 ''（主机清单尚未到达）。
   const ctx = provideDockerHost()
+
+  // 元数据信息表（ElDescriptions）的列数：平板竖屏以下（<768）改单列 —— 两列在手机横屏里
+  // 会把「标签 + 值」挤成一条缝，长架构/端口串会被截断。
+  const { smaller } = useAppBreakpoints()
+  const descriptionColumns = computed(() => (smaller('tablet').value ? 1 : 2))
 
   // 分层历史是默认屏；Tab 是本页的本地状态（列表页没有带 tab 的入口，故不必写进 URL）。
   const activeTab = ref<TabName>('layers')
@@ -315,9 +321,11 @@
   )
 
   /** 指令列等宽显示（Dockerfile 指令是代码，等宽才读得出参数边界）。 */
+  // 数据列用 minWidth（列宽口径见 responsive-columns.ts：只有结构性列用固定 width）；
+  // 「时间」列在手机横屏（<768）隐藏，保留「层大小（标识）+ 指令（内容）」。
   const layerColumns = [
-    { prop: 'sizeText', label: '层大小', width: 130 },
-    { prop: 'timeText', label: '时间', width: 130 },
+    { prop: 'sizeText', label: '层大小', minWidth: 130 },
+    { prop: 'timeText', label: '时间', minWidth: 130, hideBelow: 'tablet' as const },
     {
       prop: 'createdBy',
       label: '指令',
@@ -336,7 +344,7 @@
     Object.entries(view.value?.labels ?? {}).map(([name, value]) => ({ name, value }))
   )
   const labelColumns = [
-    { prop: 'name', label: '标签', width: 260, showOverflowTooltip: true },
+    { prop: 'name', label: '标签', minWidth: 260, showOverflowTooltip: true },
     { prop: 'value', label: '值', minWidth: 300, showOverflowTooltip: true }
   ]
 
@@ -359,12 +367,13 @@
     {
       prop: 'state',
       label: '状态',
-      width: 180,
+      minWidth: 180,
       showOverflowTooltip: true,
       // 原生状态句（"Up 16 hours"）与容器列表逐字一致，不在这里另造措辞。
       formatter: (row: DockerContainerItem) => containerStateText(row)
     },
     {
+      // 操作性列（内容宽度恒定）是唯一保留固定 width 的一列。
       prop: 'operation',
       label: '操作',
       width: 90,
@@ -660,6 +669,8 @@
 </script>
 
 <style lang="scss" scoped>
+  @use '@styles/core/breakpoints.scss' as *;
+
   // 实体头（与容器详情的 hero 同一骨架：左身份、右动作）。
   .imd-hero {
     display: flex;
@@ -800,6 +811,33 @@
     &__sub {
       color: var(--el-text-color-secondary);
       font-size: 13px;
+    }
+  }
+
+  /* ── 响应式 ─────────────────────────────────────── */
+
+  // 窄屏（<1024，覆盖平板竖屏与手机横屏）：身份与动作分成上下两段 ——
+  // 并排时右侧按钮组会把镜像名/短 id 挤成窄条。
+  @include respond-below('desktop') {
+    .imd-hero__identity,
+    .imd-hero__actions {
+      width: 100%;
+    }
+  }
+
+  // 手机横屏（<768）：摘要行每条占满一行，避免两条挤在一行里互相截断。
+  @include respond-below('tablet') {
+    .imd-hero {
+      padding: 12px;
+    }
+
+    .imd-facts {
+      gap: 8px 16px;
+      padding: 12px;
+    }
+
+    .imd-fact {
+      flex: 1 1 100%;
     }
   }
 </style>

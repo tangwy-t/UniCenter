@@ -181,6 +181,8 @@
 </script>
 
 <style lang="scss" scoped>
+  @use '@styles/core/breakpoints.scss' as *;
+
   .log-viewer {
     display: flex;
     flex-direction: column;
@@ -234,6 +236,39 @@
       font-family: var(--el-font-family-mono, ui-monospace, 'SFMono-Regular', Consolas, monospace);
       font-size: 12px;
       line-height: 1.7;
+    }
+  }
+
+  /* ── 响应式 ─────────────────────────────────────── */
+
+  // 窄屏（<1024，覆盖平板竖屏与手机横屏）：正文上限跟视口高度挂钩 —— 固定 560px
+  // 在低矮的横屏窗口里会把正文顶到屏幕之外，日志区和工具栏无法同屏。
+  @include respond-below('desktop') {
+    .log-viewer__body {
+      max-height: min(560px, 60vh);
+    }
+  }
+
+  // 手机横屏（<768）：查找框改成可伸缩（不再固定 220px），与其它工具项同排换行；
+  // 「共 N 行」的注脚挪到工具行之后独占一行，不跟按钮抢宽度。
+  @include respond-below('tablet') {
+    .log-viewer__bar {
+      gap: 6px;
+    }
+
+    .log-viewer__hint {
+      flex: 1 1 100%;
+      order: 10;
+    }
+
+    .log-viewer__search {
+      width: auto;
+      min-width: 0;
+      flex: 1 1 180px;
+    }
+
+    .log-viewer__body {
+      min-height: 200px;
     }
   }
 </style>

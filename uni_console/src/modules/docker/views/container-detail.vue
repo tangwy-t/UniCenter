@@ -78,7 +78,7 @@
               <ElButton size="small" @click="loadInspect">重试</ElButton>
             </ElEmpty>
             <template v-else-if="view">
-              <ElDescriptions :column="2" border size="small">
+              <ElDescriptions :column="descriptionColumns" border size="small">
                 <ElDescriptionsItem label="状态">{{ stateText || '—' }}</ElDescriptionsItem>
                 <ElDescriptionsItem label="镜像">{{ imageText }}</ElDescriptionsItem>
                 <ElDescriptionsItem label="创建时刻">{{ createdText }}</ElDescriptionsItem>
@@ -239,6 +239,7 @@
   } from '@/enums/permission'
   import ArtButtonTable from '@/components/core/forms/art-button-table/index.vue'
   import ArtTable from '@/components/core/tables/art-table/index.vue'
+  import { useAppBreakpoints } from '@/hooks/core/useAppBreakpoints'
   import { useAuth } from '@/hooks/core/useAuth'
   import { formatUnixSeconds } from '@/modules/device/utils/display'
   import DockerActionConfirm from '../components/action-confirm.vue'
@@ -285,6 +286,11 @@
   // 解构会把 hostId 定格成进入页面时的 ''（主机清单尚未到达）。
   const ctx = provideDockerHost()
   const { hasAuth } = useAuth()
+
+  // 概览信息表（ElDescriptions）的列数：平板竖屏以下（<768）改单列 —— 两列在手机横屏里
+  // 会把「标签 + 值」挤成一条缝，长镜像引用/网络名会被截断。
+  const { smaller } = useAppBreakpoints()
+  const descriptionColumns = computed(() => (smaller('tablet').value ? 1 : 2))
 
   // 权限在 Tab 初始化**之前**就绪：终端 Tab 是否渲染、?tab=pty 落不落到终端都看它。
   const canManage = computed(() => hasAuth(PermDockerManage))
@@ -412,12 +418,14 @@
     Object.entries(view.value?.labels ?? {}).map(([name, value]) => ({ name, value }))
   )
 
+  // 数据列用 minWidth（口径见 components/core/tables/responsive-columns.ts）：
+  // 窄屏下表格收缩到各自最小宽度后出现横向滚动，不裁掉变量名/值。
   const envColumns = [
-    { prop: 'name', label: '变量名', width: 260, showOverflowTooltip: true },
+    { prop: 'name', label: '变量名', minWidth: 260, showOverflowTooltip: true },
     { prop: 'value', label: '值', minWidth: 300, showOverflowTooltip: true }
   ]
   const labelColumns = [
-    { prop: 'name', label: '标签', width: 260, showOverflowTooltip: true },
+    { prop: 'name', label: '标签', minWidth: 260, showOverflowTooltip: true },
     { prop: 'value', label: '值', minWidth: 300, showOverflowTooltip: true }
   ]
 
@@ -857,6 +865,8 @@
 </script>
 
 <style lang="scss" scoped>
+  @use '@styles/core/breakpoints.scss' as *;
+
   // 实体头（与设备详情的 hero 同一骨架：左身份、右动作）。
   .cd-hero {
     display: flex;
@@ -1034,6 +1044,37 @@
     &__value {
       font-family: var(--el-font-family-mono, ui-monospace, 'SFMono-Regular', Consolas, monospace);
       word-break: break-all;
+    }
+  }
+
+  /* ── 响应式 ─────────────────────────────────────── */
+
+  // 窄屏（<1024，覆盖平板竖屏与手机横屏）：身份与动作分成上下两段 ——
+  // 并排时右侧按钮组会把容器名/短 id 挤成窄条；日志工具条允许换行。
+  @include respond-below('desktop') {
+    .cd-hero__identity,
+    .cd-hero__actions {
+      width: 100%;
+    }
+
+    .cd-logs__bar {
+      flex-wrap: wrap;
+    }
+  }
+
+  // 手机横屏（<768）：摘要行每条占满一行，避免两条挤在一行里互相截断。
+  @include respond-below('tablet') {
+    .cd-hero {
+      padding: 12px;
+    }
+
+    .cd-facts {
+      gap: 8px 16px;
+      padding: 12px;
+    }
+
+    .cd-fact {
+      flex: 1 1 100%;
     }
   }
 </style>

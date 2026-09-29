@@ -36,7 +36,7 @@
     </ElDropdown>
 
     <!-- 选中一版后的详情：可核对的信息 + 一键回滚（回滚仍有独立强确认，由调用方弹）。 -->
-    <ElDialog v-model="detail.visible" title="备份详情" width="460px">
+    <ElDialog v-model="detail.visible" title="备份详情" width="min(460px, 92vw)">
       <div v-if="detail.backup" class="backup-history__detail">
         <div class="backup-history__row">
           <span class="backup-history__label">备份时间</span>
@@ -154,6 +154,8 @@
 </script>
 
 <style lang="scss" scoped>
+  @use '@styles/core/breakpoints.scss' as *;
+
   .backup-history {
     display: inline-flex;
 
@@ -213,6 +215,25 @@
         white-space: pre-wrap;
         word-break: break-all;
       }
+    }
+  }
+
+  /* ── 响应式 ─────────────────────────────────────── */
+
+  // 手机横屏（<768）：详情行改成上下堆叠（原来固定 72px 标签列在窄屏下会把值挤窄）；
+  // 正文预览高度跟视口走，避免弹窗正文把页脚按钮顶出屏幕。
+  @include respond-below('tablet') {
+    .backup-history__row {
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .backup-history__label {
+      width: auto;
+    }
+
+    .backup-history__current-body {
+      max-height: min(220px, 40vh);
     }
   }
 </style>

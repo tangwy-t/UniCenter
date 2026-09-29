@@ -3,7 +3,7 @@
     <ElDialog
       v-model="visible"
       :title="`配置编辑 · ${project}`"
-      width="900px"
+      width="min(900px, 94vw)"
       top="6vh"
       :close-on-click-modal="false"
       @closed="reset"
@@ -91,7 +91,7 @@
     </ElDialog>
 
     <!-- diff 预览（保存收尾的第 b 步；写全文时给逐行差异，走最小改动时给变更明细）。 -->
-    <ElDialog v-model="preview.visible" title="保存预览" width="760px">
+    <ElDialog v-model="preview.visible" title="保存预览" width="min(760px, 94vw)">
       <div class="compose-editor__preview">
         <p class="compose-editor__summary">{{ preview.summary }}</p>
         <ul v-if="preview.details.length > 0" class="compose-editor__details">
@@ -661,6 +661,8 @@
 </script>
 
 <style lang="scss" scoped>
+  @use '@styles/core/breakpoints.scss' as *;
+
   .compose-editor {
     &__body {
       min-height: 200px;
@@ -754,6 +756,31 @@
     &__more {
       padding: 4px 8px;
       color: var(--el-text-color-secondary);
+    }
+  }
+
+  /* ── 响应式 ─────────────────────────────────────── */
+
+  // 手机横屏（<768）：文件行与模式切换分成上下两行；页脚改成堆叠 ——
+  // 「历史备份」独占一行，保存/应用等动作留在第二行右对齐，不再互相挤压。
+  @include respond-below('tablet') {
+    .compose-editor__bar {
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .compose-editor__file {
+      flex: 1 1 100%;
+    }
+
+    .compose-editor__footer {
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+
+    .compose-editor__spacer {
+      flex: 1 1 100%;
     }
   }
 </style>
