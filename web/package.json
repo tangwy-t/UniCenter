@@ -2,6 +2,7 @@
   "name": "web-admin",
   "version": "0.1.0",
   "type": "module",
+  "packageManager": "pnpm@11.24.0",
   "engines": {
     "node": ">=20.19.0",
     "pnpm": ">=8.8.0"
