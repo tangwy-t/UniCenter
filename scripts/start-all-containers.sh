@@ -63,7 +63,11 @@ for i in $(seq 1 30); do
   sleep 2
 done
 echo "  UniCenter 前端 : HTTP $code"
-echo "  登录接口      : HTTP $(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:18080/api/v1/login -H 'Content-Type: application/json' -d '{"username":"admin","password":"admin123"}' --max-time 10 2>/dev/null || echo 000)"
+# 后端探活用 /api/v1/health（与 core 容器的 healthcheck 同一端点，且经前端 nginx 的
+# location /api/ 转发，顺带验证了这段代理）。这里刻意不再打登录接口：v004 迁移起
+# 已无内置默认口令（留空时随机生成、只在首次启动日志打印一次），拿固定口令去打
+# 既验不出凭据对不对，又会往登录日志里写失败记录。
+echo "  后端探活      : HTTP $(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/api/v1/health --max-time 10 2>/dev/null || echo 000)"
 echo
 echo "  各端口："
 for p in 18080 18088 8080 8081 16686 3306 6379 5432; do

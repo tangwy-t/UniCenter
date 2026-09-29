@@ -50,13 +50,6 @@ services:
       # 时区：与宿主机/MySQL/Redis 对齐（日志时间戳、time.Now()、DSN loc=Local）
       TZ: ${TZ:-Asia/Shanghai}
 
-      # admin 初始密码：v004 迁移建 admin 账号时读取（seed 侧键名为
-      # ADMIN_INITIAL_PASSWORD，见 migrations/v004_seed_admin_user.go）。
-      # ⚠️ 留空时 seed 会回退到内置默认值 admin123 —— 生产必须注入本项，
-      # 否则首个超级管理员是公开的弱口令。仅在**首次**迁移（空库）时生效，
-      # 之后改这里不会改已有账号的密码。
-      ADMIN_INITIAL_PASSWORD: ${ADMIN_INITIAL_PASSWORD:-}
-
       # ── 服务 ──
       # ⚠️ 端口固定 8088，不能用 ${SERVER_PORT} 覆盖：uni_console 的
       # nginx.conf 里 proxy_pass http://uni_core:8088 是写死的，且下方
@@ -76,8 +69,10 @@ services:
       SERVER_TRUSTEDPROXIES: ${SERVER_TRUSTEDPROXIES:-}
 
       # ── 首次部署：admin 初始口令（可选）──
-      # 留空时迁移会随机生成一次性口令，并在首次启动日志中打印一次；
-      # 设置后即用该值创建 admin（登录后请立即修改）。仅对空库首次迁移生效。
+      # v004 迁移建 admin 账号时读取（seed 侧键名 ADMIN_INITIAL_PASSWORD，
+      # 见 migrations/v004_seed_admin_user.go）。留空时迁移会随机生成一次性
+      # 口令，并在首次启动日志中打印一次；设置后即用该值创建 admin（登录后
+      # 请立即修改）。仅对空库首次迁移生效，之后改这里不会改已有账号的密码。
       ADMIN_INITIAL_PASSWORD: ${ADMIN_INITIAL_PASSWORD:-}
 
       # ── 关系数据库（MySQL / PostgreSQL）──
