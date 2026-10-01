@@ -6,17 +6,18 @@
  *   - action 清单 / options 必填 / confirm 判定：`uni_protocol/docker.go` 的
  *     `dockerActionSpecs` 与 `ExpectedDockerConfirm`；
  *   - 权限码 / 期次：`uni_core/internal/pkg/dockerpolicy` 的 `policies`（spec §4.3.1 的表）。
- * `__tests__/actions.test.ts` 用条数互补（4 只读 + 21 二期写 + 1 三期 + 3 四期 = 29）与
- * 逐条断言把「镜像漂移」变成红灯。
+ * `__tests__/actions.test.ts` 用条数互补（4 只读 + 22 二期写 + 1 三期 + 3 四期 +
+ * 1 五期 = 31）与逐条断言把「镜像漂移」变成红灯。
  *
  * ── 为什么注册表只收二期写动作 ──────────────────────────────────────
  * 一期四个只读动作在 `utils/cmd.ts` 的 `PHASE1_ACTIONS` 里；三期终端（会话制，确认档/
  * 保护档与写动作不是同一套）与四期配置编辑类动作不进本文件 —— 四期三条（write/
  * validate/patch）在 `utils/compose.ts` 的 `COMPOSE_ACTIONS` 里，确认档由
  * compose-editor 以 override 形式传给确认弹窗（协议 §4.3.1 的「强 = 照抄项目名」）。
- * phase-gate 守卫现在的口径是「模块里出现的 action 字面量必须都在协议 29 条白名单
- * 内」，四期之后不再有「后期动作」清单；但**本注册表的 21 条条数断言仍然有效**，
- * 不要为了「表看起来完整」把三/四期动作加进来（会破坏四份清单互补的断言）。
+ * phase-gate 守卫现在的口径是「模块里出现的 action 字面量必须都在协议白名单
+ * （六前缀口径）内」，四期之后不再有「后期动作」清单；但**本注册表的条数断言
+ * 仍然有效**（4a 起 22 条 —— container:create 随四支柱创建面归操作面二期），
+ * 不要为了「表看起来完整」把三/四/五期动作加进来（会破坏五份清单互补的断言）。
  */
 import { PermDockerDelete, PermDockerManage } from '@/enums/permission'
 
@@ -42,8 +43,9 @@ export interface DockerActionOptions {
   [key: string]: unknown
 }
 
-/** 一期四个只读动作之外的**二期写动作全集**（21 条，顺序 = spec §4.3.1 书写顺序）。 */
+/** 一期四个只读动作之外的**二期写动作全集**（22 条，顺序 = spec §4.3.1 书写顺序）。 */
 export const PHASE2_ACTIONS = [
+  'container:create',
   'container:start',
   'container:stop',
   'container:restart',
@@ -88,8 +90,25 @@ export interface DockerActionEntry {
   conclusion: string
 }
 
-/** 注册表（21 条，逐条对照 spec §4.3.1 的「二」档）。 */
+/** 注册表（22 条，逐条对照 spec §4.3.1 的「二」档）。 */
 export const DOCKER_ACTION_REGISTRY: readonly DockerActionEntry[] = [
+  {
+    // 创建面（4a）：**没有 target**（动作对象是将要诞生的容器，语义都在 image/name ——
+    // 协议 validateDockerContainerCreate 显式拒绝带 target）；危险度低（不删不停任何
+    // 现存目标，与启停同级 docker:manage）；标准档确认（create 是「多出来一个东西」
+    // 的决定，值得让用户在弹窗里再核对一次镜像名与容器名）。
+    action: 'container:create',
+    label: '创建容器',
+    icon: 'ri:add-circle-line',
+    perm: PermDockerManage,
+    phase: 2,
+    danger: 'normal',
+    needsTarget: false,
+    confirm: 'confirm',
+    // 保护清单管的是**现存**容器/卷的停删重建；create 的对象还不存在，谈不上受保护。
+    guarded: false,
+    conclusion: ''
+  },
   {
     action: 'container:start',
     label: '启动',

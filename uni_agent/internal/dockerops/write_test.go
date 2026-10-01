@@ -352,6 +352,7 @@ func TestWriteExecutorPruneReportsFreedSpace(t *testing.T) {
 // 指令被 5 分钟兜底提前判死，值漂移会让 agent 与 core 的 sweep 对「超时」给出两个答案。
 func TestWriteTimeoutsMirrorSpec(t *testing.T) {
 	spec := map[string]time.Duration{
+		agentproto.DockerActionContainerCreate:  30 * time.Second, // 四支柱·创建面（4a）
 		agentproto.DockerActionContainerStart:   30 * time.Second,
 		agentproto.DockerActionContainerStop:    30 * time.Second,
 		agentproto.DockerActionContainerRestart: 60 * time.Second,

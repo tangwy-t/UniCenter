@@ -65,6 +65,10 @@ type Runtime struct {
 	// write 是二期写执行器：dispatcher 只认识 r.exec 这个单一入口，但配置更新
 	//（保护清单/产物目录/flavor）要送进写执行器，故这里保留一份具体引用。
 	write *WriteExecutor
+	// stream 是流会话执行器（三期 + 5a 聚合日志）：保留具体引用是为了把 compose
+	// flavor 查询函数注进去（SetComposeCLI —— flavor 由此成为唯一事实源，
+	// probeComposeOnce 探测到新形态不需要「记得通知第二个执行器」）。
+	stream *StreamExecutor
 	// sessions 是流会话管理器（三期）：控制帧与帧纪律都在它手里。
 	sessions *SessionManager
 	// projects 是「项目 → 配置文件」持久化索引：快照从中学习，compose 解析在标签
@@ -134,10 +138,19 @@ func New(deps Deps) *Runtime {
 		log:  deps.Log,
 		now:  deps.Now,
 	})
+	// 拉取进度（4b）：写执行器的 pull 路径借会话管理器开 streamPull 会话。顺序在
+	// 写执行器构造之后 —— 它俩互相引用（执行器要会话、会话不依赖执行器），会话先
+	// 建好再注入即可。
+	r.write.SetSessions(r.sessions)
+	r.stream = NewStreamExecutor(api, r.sessions)
+	// 聚合日志（5a）：compose CLI 的执行入口 + flavor 查询函数。flavor 传**函数**
+	// 而不是当时的值 —— 首次探测可能晚于构造（probeComposeOnce 在首个快照循环），
+	// 函数让 Runtime 持有唯一事实源，探测结果落定时流执行器自动可见。
+	r.stream.SetComposeCLI(r.flavorValue, exec.CommandContext)
 	r.exec = &nodeExecutor{
 		read:   NewReadExecutor(api),
 		write:  r.write,
-		stream: NewStreamExecutor(api, r.sessions),
+		stream: r.stream,
 	}
 	return r
 }
@@ -310,11 +323,16 @@ func (r *Runtime) SnapshotLoop(ctx context.Context) {
 // 一条 15 分钟的 save 不该让快照停摆）。
 func (r *Runtime) Run(ctx context.Context) { r.dispatcher().Run(ctx) }
 
-// OnConnected 握手完成：立刻采一帧（首帧不等周期，spec §2）。
+// OnConnected 握手完成：立刻采一帧（首帧不等周期，spec §2），并收掉上一段连接
+// 的**常驻会话**（events）—— 常驻订阅与连接同寿：连接更换后旧订阅的帧已送不出去，
+// 而它占的专属槽位会挡住 core 重连后的重订（见 SessionManager.OnReconnected）。
 //
 // **非阻塞**：它在连接的读循环里被调用，故只做一个「塞进触发通道」的动作。
 // 通道深度 1：连续两次触发合并成一次采集（快照是覆盖式数据，采两次没有意义）。
-func (r *Runtime) OnConnected() { r.triggerSnapshot() }
+func (r *Runtime) OnConnected() {
+	r.sessions.OnReconnected()
+	r.triggerSnapshot()
+}
 
 // OnConfig 应用 hello_ack 下发的 docker 配置块。
 //
@@ -421,6 +439,14 @@ func (r *Runtime) collectAndSend(ctx context.Context) {
 	if err := r.deps.SendState(st); err != nil {
 		r.log.Debug("docker state not sent", "err", err.Error())
 	}
+}
+
+// flavorValue 返回当前 compose 形态（空 = 尚未探测到）。探测结果在 r.mu 下更新，
+// 读侧（流执行器的 compose:logs）经注入的查询函数每次现取 —— 单一事实源。
+func (r *Runtime) flavorValue() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.flavor
 }
 
 // probeComposeOnce 探测一次 compose 形态并缓存（单一 flavor 纪律：主机上定下不再改）。

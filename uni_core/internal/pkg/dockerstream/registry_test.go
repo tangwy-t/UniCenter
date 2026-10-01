@@ -259,15 +259,74 @@ func TestRegistryRegisterRejectsBadMeta(t *testing.T) {
 	}
 }
 
-// KindForAction：exec 是终端，其余（含日志 Follow 与未知 action）按日志处理。
+// KindForAction：exec 是终端、stats 是统计流，其余（含日志 Follow 与未知 action）
+// 按日志处理。
 func TestKindForAction(t *testing.T) {
 	if KindForAction(agentproto.DockerActionContainerExec) != KindPTY {
 		t.Fatal("exec 必须判为终端会话")
+	}
+	if KindForAction(agentproto.DockerActionContainerStats) != KindStats {
+		t.Fatal("stats 必须判为统计流会话")
 	}
 	if KindForAction(agentproto.DockerActionContainerLogs) != KindLog {
 		t.Fatal("logs 必须判为日志会话")
 	}
 	if KindForAction("some:unknown") != KindLog {
 		t.Fatal("未知 action 按日志兜底（少登记比错登记更糟）")
+	}
+}
+
+// ── 拉取进度会话（4b）───────────────────────────────────────────────────
+
+// TestRegistryPullExemptFromDeviceLimitAndIdle：拉取进度会话不进「每设备 3 条用户流」
+// 的账目（不占号、不被淘汰、不算上限），且豁免空闲判定期 —— 它的寿命 = 指令寿命
+// （排队几十分钟一帧没有是常态），由 docker_stream 服务的终态对账回收；空闲清退对它
+// 的语义是「腰斩一场合法的拉取」。
+func TestRegistryPullExemptFromDeviceLimitAndIdle(t *testing.T) {
+	r, now := newClockedRegistry(t, Options{MaxSessionsPerDevice: 2, IdleTimeout: 10 * time.Minute})
+	base := *now
+	for i, id := range []string{"sess-0000000000000001", "sess-0000000000000002"} {
+		m := testMeta(id, 7, 42)
+		m.CreatedAt = base.Add(time.Duration(i) * time.Second)
+		if err := r.Register(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 用户流已满额时拉取会话必须照常登记（它是写指令的一部分，不是用户又开了一条流）。
+	if err := r.Register(Meta{
+		SessionID: "pull_1790000000000000001", DeviceID: 7, UserID: 42,
+		Action: agentproto.DockerActionImagePull, Ref: "1790000000000000001",
+		Kind: KindPull, CreatedAt: *now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if r.Get("sess-0000000000000001") == nil || r.Get("sess-0000000000000002") == nil {
+		t.Fatal("拉取会话不得挤掉任何一条用户流")
+	}
+	if got := r.CountByDevice(7); got != 2 {
+		t.Fatalf("用户流账目不得计入拉取会话（受理预检的 409 才会正确）: %d", got)
+	}
+
+	// 空闲多久都不过期（豁免只给拉取会话）：24 小时后两条用户流照常过期，
+	// 拉取会话不在其列。
+	*now = now.Add(24 * time.Hour)
+	got := r.Expired(*now)
+	if len(got) != 2 {
+		t.Fatalf("用户流照常按空闲过期，实际 %d 条", len(got))
+	}
+	for _, s := range got {
+		if s.ID() == "pull_1790000000000000001" {
+			t.Fatal("拉取会话豁免空闲判定期，不得出现在过期名单里")
+		}
+	}
+
+	// 帧照常投递（device 归属校验不因 kind 放宽）：拉取会话自己收得到帧。
+	if err := r.DeliverDockerFrame(context.Background(), 7,
+		frame("pull_1790000000000000001", 1, "x", false)); err != nil {
+		t.Fatalf("拉取会话必须能收帧: %v", err)
+	}
+	if err := r.DeliverDockerFrame(context.Background(), 8,
+		frame("pull_1790000000000000001", 2, "x", false)); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("异设备的同句柄帧必须被拒（归属不因 kind 放宽）: %v", err)
 	}
 }

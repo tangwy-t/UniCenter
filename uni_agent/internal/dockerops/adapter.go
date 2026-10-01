@@ -14,12 +14,18 @@ import (
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/api/types/registry"
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
+	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/pkg/stdcopy"
+	"github.com/docker/go-connections/nat"
+
+	agentproto "github.com/tangwy-t/UniCenter/uni_protocol"
 )
 
 // maxLogBytes 是单次日志读取的字节上限（协议 result.payload 上限 256KB 的内侧余量）。
@@ -118,6 +124,63 @@ func (a *sdkAdapter) ContainerStats(ctx context.Context, id string) (StatsInfo, 
 	}, nil
 }
 
+// ContainerStatsStream 打开容器 stats 实时流（stream=true）。
+//
+// 样本计算与 one-shot **同一套函数**（cpuPercent / mb / sumNet 直接复用），速率按
+// 相邻样本的累计计数求差（rateDelta —— 与快照 collectStats 的公式逐项一致）。
+// 首样本的速率恒为 0：这是 docker stats CLI 的同款行为（第一行没有可求差的基线），
+// 而 CPU%、内存首样本就有真值 —— daemon 流式 API 的第一条记录带 precpu_stats，
+// cpuPercent 的差值算法对首样本同样成立，这正是「抽屉打开即有数据」的根据。
+func (a *sdkAdapter) ContainerStatsStream(ctx context.Context, name string) (<-chan StatsSample, io.Closer, error) {
+	resp, err := a.cli.ContainerStats(ctx, name, true)
+	if err != nil {
+		return nil, nil, err
+	}
+	ch := make(chan StatsSample, 1)
+	go func() {
+		defer close(ch)
+		defer resp.Body.Close()
+		dec := json.NewDecoder(resp.Body)
+		var prevRX, prevTX uint64
+		var prevT time.Time
+		for {
+			var v container.StatsResponse
+			if err := dec.Decode(&v); err != nil {
+				// 流结束（容器停止/被删、ctx 取消、连接关闭都表现为读不到下一条记录）：
+				// 通道关闭就是 eof 信号，错误细节不向外区分 —— 与日志流同纪律。
+				return
+			}
+			rx := sumNet(&v, func(n container.NetworkStats) uint64 { return n.RxBytes })
+			tx := sumNet(&v, func(n container.NetworkStats) uint64 { return n.TxBytes })
+			s := StatsSample{
+				CPUPercent: cpuPercent(v),
+				MemUsageMB: mb(float64(v.MemoryStats.Usage)),
+				MemLimitMB: mb(float64(v.MemoryStats.Limit)),
+			}
+			if !prevT.IsZero() {
+				s.NetRXBytesSec = rateDelta(prevRX, rx, v.Read.Sub(prevT).Seconds())
+				s.NetTXBytesSec = rateDelta(prevTX, tx, v.Read.Sub(prevT).Seconds())
+			}
+			prevRX, prevTX, prevT = rx, tx, v.Read
+			select {
+			case ch <- s:
+			case <-ctx.Done():
+				return // 会话取消：别把样本堵在一个没人读的通道上
+			}
+		}
+	}()
+	return ch, resp.Body, nil
+}
+
+// rateDelta 按相邻两次读数的累计值求速率（B/s）。口径与快照 collectStats 完全一致：
+// 计数回绕（容器重启/网络重建后归零）或间隔异常时给 0 —— 编一个负数比给 0 更糟。
+func rateDelta(prev, cur uint64, dt float64) float64 {
+	if cur < prev || dt <= 0 {
+		return 0
+	}
+	return round2(float64(cur-prev) / dt)
+}
+
 // cpuPercent 计算容器 CPU 占比。
 //
 // 与 docker CLI 同一算法：用 cpu_stats 与 precpu_stats 的差值。ContainerStatsOneShot
@@ -161,32 +224,64 @@ func (a *sdkAdapter) Images(ctx context.Context) ([]ImageInfo, error) {
 	return out, nil
 }
 
-// Volumes 列出卷与用量。
+// VolumesAndDf 列出卷与用量，并从**同一次** df 响应算出磁盘占用汇总（6a 磁盘治理）。
 //
 // 用量取自 system df（verbose）—— `volume ls` 本身不含体积。df 不可用时退化为
-// `volume ls`：**用量未知比列不出卷好得多**，页面把未知显示成「—」。
-func (a *sdkAdapter) Volumes(ctx context.Context) ([]VolumeInfo, error) {
-	if du, err := a.cli.DiskUsage(ctx, types.DiskUsageOptions{}); err == nil && len(du.Volumes) > 0 {
-		out := make([]VolumeInfo, 0, len(du.Volumes))
-		for _, v := range du.Volumes {
-			vi := VolumeInfo{Name: v.Name, Driver: v.Driver}
-			if v.UsageData != nil {
-				size := v.UsageData.Size
-				vi.SizeBytes = &size
-			}
-			out = append(out, vi)
-		}
-		return out, nil
-	}
-	res, err := a.cli.VolumeList(ctx, volume.ListOptions{})
+// `volume ls`：**用量未知比列不出卷好得多**，页面把未知显示成「—」；此时 df 汇总为
+// nil（「数据不可用」），绝不把缺失当 0。
+//
+// df 成功即信任其卷清单（含空清单 —— 零卷主机的清单同样为空，老实现里「df 成功但
+// 零卷时再跑一遍 volume ls」的绕路只复制出同一个空清单；真正要防的是 df 失败，那
+// 走 ls 退化）。
+func (a *sdkAdapter) VolumesAndDf(ctx context.Context) ([]VolumeInfo, *DiskUsageSummary, error) {
+	du, err := a.cli.DiskUsage(ctx, types.DiskUsageOptions{})
 	if err != nil {
-		return nil, err
+		res, lerr := a.cli.VolumeList(ctx, volume.ListOptions{})
+		if lerr != nil {
+			return nil, nil, lerr
+		}
+		out := make([]VolumeInfo, 0, len(res.Volumes))
+		for _, v := range res.Volumes {
+			out = append(out, VolumeInfo{Name: v.Name, Driver: v.Driver})
+		}
+		return out, nil, nil
 	}
-	out := make([]VolumeInfo, 0, len(res.Volumes))
-	for _, v := range res.Volumes {
-		out = append(out, VolumeInfo{Name: v.Name, Driver: v.Driver})
+	out := make([]VolumeInfo, 0, len(du.Volumes))
+	var volumesTotal int64
+	for _, v := range du.Volumes {
+		vi := VolumeInfo{Name: v.Name, Driver: v.Driver}
+		// Size>=0 才是已知体积：daemon 对非 local 驱动给 -1（「未知」哨兵），放进
+		// SizeBytes 会被快照折成 0 MB —— 「未知」被渲染成「零占用」，正是卷体积
+		// 字段自己注释里反对的事。未知保持 nil（页面「—」），求和也只加已知项。
+		if v.UsageData != nil && v.UsageData.Size >= 0 {
+			size := v.UsageData.Size
+			vi.SizeBytes = &size
+			volumesTotal += size
+		}
+		out = append(out, vi)
 	}
-	return out, nil
+	// df 的镜像与缓存明细只在 df 响应里有（镜像清单来自另一趟 /images/json）——
+	// 汇总从**这一帧**的 df 算，三类数字出自同一时刻，不会被两次调用的时差弄出
+	//「面板一个数、列表另一个数」的永久疑问。
+	var imagesTotal, imagesDangling int64
+	for _, im := range du.Images {
+		imagesTotal += im.Size
+		// 悬空判据 = 无标签：与 daemon 的悬空过滤器、image:prune 的目标集合同一口径
+		//（见快照 isDanglingImage 的实测论证；CLI 的 dangling=false 展示口径相反，不采）。
+		if len(im.RepoTags) == 0 {
+			imagesDangling += im.Size
+		}
+	}
+	var buildCache int64
+	for _, c := range du.BuildCache {
+		buildCache += c.Size
+	}
+	return out, &DiskUsageSummary{
+		ImagesTotalBytes:    imagesTotal,
+		ImagesDanglingBytes: imagesDangling,
+		VolumesTotalBytes:   volumesTotal,
+		BuildCacheBytes:     buildCache,
+	}, nil
 }
 
 func (a *sdkAdapter) Networks(ctx context.Context) ([]NetworkInfo, error) {
@@ -387,6 +482,84 @@ func (a *sdkAdapter) ContainerRemove(ctx context.Context, id string, force bool)
 	return a.cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: force})
 }
 
+// createSentinelError 是容器创建错误的哨兵包装：Unwrap 返回哨兵（执行器 errors.Is
+// 判队），Error() 只带 daemon 原文（进 result.detail）。结论句不进这个类型 ——
+// 文案是执行器的事，adapter 不决定用户看到哪句话。
+type createSentinelError struct {
+	sentinel, cause error
+}
+
+func (e *createSentinelError) Error() string { return e.cause.Error() }
+func (e *createSentinelError) Unwrap() error { return e.sentinel }
+
+// ContainerCreate 创建容器：Config/HostConfig 逐项映射（端口绑定、重启策略、
+// 资源限额、网络、挂载），全部参数直传 daemon —— 不经 shell、不做任何字符串拼接
+// 之外的加工。所有字段在执行器已被协议白名单校验过，这里是纯映射。
+func (a *sdkAdapter) ContainerCreate(ctx context.Context, spec ContainerCreateSpec) (string, error) {
+	cfg := &container.Config{
+		Image:        spec.Image,
+		Env:          spec.Env,
+		ExposedPorts: nat.PortSet{},
+	}
+	host := &container.HostConfig{
+		Binds:        []string{},
+		PortBindings: nat.PortMap{},
+		Resources:    container.Resources{},
+	}
+	// 端口绑定：容器端口进 ExposedPorts（对应 docker run -p 的自动 expose），
+	// 宿主端口进 PortBindings。
+	for _, p := range spec.Ports {
+		port := nat.Port(strconv.Itoa(p.Container) + "/" + p.Proto)
+		cfg.ExposedPorts[port] = struct{}{}
+		host.PortBindings[port] = []nat.PortBinding{{HostPort: strconv.Itoa(p.Host)}}
+	}
+	// 挂载：命名卷与 bind 都是 Binds 的一串（daemon 按源是否路径自动分辨；
+	// 命名卷不存在时 daemon 全程自动创建 —— 与 docker run -v vol:/dst 同行为）。
+	for _, m := range spec.Mounts {
+		b := m.Source + ":" + m.Dest
+		if m.ReadOnly {
+			b += ":ro"
+		}
+		host.Binds = append(host.Binds, b)
+	}
+	switch spec.RestartPolicy {
+	case "", "no": // 默认就是 disabled，不写出。空串 = 没设。
+	default:
+		host.RestartPolicy = container.RestartPolicy{Name: container.RestartPolicyMode(spec.RestartPolicy)}
+	}
+	if spec.Network != "" {
+		host.NetworkMode = container.NetworkMode(spec.Network)
+	}
+	if spec.CPULimit > 0 {
+		host.Resources.NanoCPUs = int64(spec.CPULimit * 1e9)
+	}
+	if spec.MemLimitMB > 0 {
+		host.Resources.Memory = int64(spec.MemLimitMB) << 20
+	}
+	created, err := a.cli.ContainerCreate(ctx, cfg, host, nil, nil, spec.Name)
+	if err != nil {
+		return "", classifyCreateError(err)
+	}
+	return created.ID, nil
+}
+
+// classifyCreateError 把 daemon 的创建错误折成哨兵包装。两个可预期失败分别对号：
+//   - 镜像缺失：404 且带 "No such image" —— 404 也可能是网络不存在（"network ...
+//     not found"），只有原文对得上才翻成镜像哨兵，别把两种处置方向糊成一句；
+//   - 名字冲突：409（create 上的 409 只有名字被占用一种来源）。
+//
+// 其余错误原样上抛，由 wrapDocker 兜成通用结论句。
+func classifyCreateError(err error) error {
+	msg := err.Error()
+	if errdefs.IsNotFound(err) && strings.Contains(msg, "No such image") {
+		return &createSentinelError{sentinel: errImageNotFound, cause: err}
+	}
+	if errdefs.IsConflict(err) {
+		return &createSentinelError{sentinel: errContainerNameConflict, cause: err}
+	}
+	return err
+}
+
 func (a *sdkAdapter) ImageRemove(ctx context.Context, ref string, force bool) error {
 	// PruneChildren 对应 docker rmi 的「连带删除子镜像」：不打它会有大量 <none> 残留，
 	// 而残留会挤占磁盘正是用户点删除的理由。
@@ -406,21 +579,125 @@ func (a *sdkAdapter) ImagePrune(ctx context.Context, all bool) (int64, error) {
 	return int64(report.SpaceReclaimed), nil
 }
 
-// ImagePull 拉取镜像。
+// ImagePull 拉取镜像（4b：进度产出；4c：按指令注入仓库认证）。
 //
 // **必须把响应体读到 EOF 再关闭**：拉取的实际工作在响应体流上完成，提前 Close 会让
-// 拉取半途中断（镜像不完整），而调用方看到的却是「没有错误」。进度文本直接丢弃 ——
-// 指令结果只回结论，进度二期不属于本通道（spec §7.5）。
-func (a *sdkAdapter) ImagePull(ctx context.Context, ref string) error {
-	rc, err := a.cli.ImagePull(ctx, ref, image.PullOptions{})
+// 拉取半途中断（镜像不完整），而调用方看到的却是「没有错误」（spec §7.5 的既有纪律，
+// 4b 之后依然成立 —— 差别只在「读的过程顺带产出进度」）。
+//
+// emit 收 daemon 进度行的本域记录（拉取期间同步回调、绝不阻塞）；emit 为 nil 时走
+// 老链路的 io.Discard 快路径（读满、丢弃、只回结论）。
+//
+// auth（4c）为 nil 时 PullOptions 保持空 —— 与一期/4b 逐字一致（公共仓库或主机侧
+// docker login 自行解决）；非 nil 时折成 SDK 的 RegistryAuth 头（base64 的
+// {username,password,serveraddress}）：明文密码只出现在发给 daemon 的这一个编码头里，
+// 不回写任何日志/进度帧/结果。SDK 类型不出 adapter 的边界在这里收口。
+func (a *sdkAdapter) ImagePull(ctx context.Context, ref string, auth *PullAuth, emit func(PullProgress)) error {
+	opts := image.PullOptions{}
+	if auth != nil {
+		encoded, err := encodePullAuth(auth)
+		if err != nil {
+			return err
+		}
+		opts.RegistryAuth = encoded
+	}
+	rc, err := a.cli.ImagePull(ctx, ref, opts)
 	if err != nil {
 		return err
 	}
 	defer rc.Close()
-	if _, err := io.Copy(io.Discard, rc); err != nil {
+	if emit == nil {
+		_, err = io.Copy(io.Discard, rc)
 		return err
 	}
-	return nil
+	return consumePullStream(rc, emit)
+}
+
+// encodePullAuth 把本域 PullAuth 折成 daemon 认识的 X-Registry-Auth 头值
+// （base64 的 {username,password,serveraddress}）。
+//
+// 提取成纯函数而不是内联在 ImagePull 里：包边界纪律说「只有 adapter 碰 SDK」，
+// 而这段映射正是 4c 的关键路径 —— 必须让它在没有 docker daemon 的 CI 里
+// 直接可测（adapter_test.go 用 DecodeAuthConfig 做往返断言），否则
+// 「认证有没有真的按 SDK 口径折成头」就成了 CI 盲区。
+func encodePullAuth(a *PullAuth) (string, error) {
+	return registry.EncodeAuthConfig(registry.AuthConfig{
+		Username:      a.Username,
+		Password:      a.Password,
+		ServerAddress: a.Registry,
+	})
+}
+
+// PullProgress 是 daemon 一条进度行的本域记录（SDK 的 jsonmessage 类型不出 adapter）。
+//
+// 字段即页面需要的全部：ID 是层 id（空 = 没有层的消息行，如 "Pulling from …"），
+// Status 是原文状态文案，Current/Total 是该层已传输/总字节（progressDetail 缺失时
+// 两者为 0 —— 「未知大小」与「0 字节」在协议上同形，前端显示「进行中」即可）。
+type PullProgress struct {
+	ID      string
+	Status  string
+	Current int64
+	Total   int64
+}
+
+// pullJSONLine 是 daemon 拉取流的一行。刻意**自定义最小结构**而不是引用 SDK 的
+// jsonmessage.JSONMessage —— 那个包在 SDK v28 已被标记废弃，且其字段随版本漂移；
+// 本域只取进度面用得到的五个键，漂移在解码时表现为零值（记录照发，只是字段空），
+// 而不是编译/行为两级断裂。
+type pullJSONLine struct {
+	ID     string `json:"id,omitempty"`
+	Status string `json:"status,omitempty"`
+	// ProgressDetail 是 {current,total}；用指针区分「缺失（未知）」与「0」。
+	ProgressDetail *struct {
+		Current int64 `json:"current,omitempty"`
+		Total   int64 `json:"total,omitempty"`
+	} `json:"progressDetail,omitempty"`
+	ErrorDetail *struct {
+		Message string `json:"message,omitempty"`
+	} `json:"errorDetail,omitempty"`
+	Error string `json:"error,omitempty"`
+}
+
+// consumePullStream 把 daemon 的 JSON 进度流逐行解析成 PullProgress 交给 emit，
+// 直到 EOF 再收口。
+//
+// 错误行的处理照 docker CLI 的口径：先记下不立刻返回 —— 读满到 EOF 保证「放弃拉取」
+// 的决定由上层在**流结束后**做，半途 abort 会把账号的并发拉取槽位挂在 daemon 上；
+// EOF 时返回记下的错误（daemon 的错误行是它的**失败结论**，不是可忽略的噪音）。
+// errorDetail.message 优先（最贴近原因），缺席时退回 error 串。
+func consumePullStream(r io.Reader, emit func(PullProgress)) error {
+	dec := json.NewDecoder(r)
+	var pullErr error
+	for {
+		var line pullJSONLine
+		if err := dec.Decode(&line); err != nil {
+			if errors.Is(err, io.EOF) {
+				return pullErr
+			}
+			// 流半途损坏：不是 daemon 会给出的形态（每行都是合法 JSON），返回它。
+			if pullErr != nil {
+				return pullErr
+			}
+			return err
+		}
+		if line.ErrorDetail != nil && line.ErrorDetail.Message != "" {
+			if pullErr == nil {
+				pullErr = errors.New(line.ErrorDetail.Message)
+			}
+			continue // 错误行不进进度流：它会被折成终态 Error 项（由执行器在流末恰发一条）
+		}
+		if line.Error != "" {
+			if pullErr == nil {
+				pullErr = errors.New(line.Error)
+			}
+			continue
+		}
+		p := PullProgress{ID: line.ID, Status: line.Status}
+		if d := line.ProgressDetail; d != nil {
+			p.Current, p.Total = d.Current, d.Total
+		}
+		emit(p)
+	}
 }
 
 func (a *sdkAdapter) ImageTag(ctx context.Context, src, dst string) error {
@@ -556,6 +833,82 @@ func (a *sdkAdapter) ContainerExecAttach(ctx context.Context, name string, argv 
 		},
 		Close: func() error { hj.Close(); return nil },
 	}, nil
+}
+
+// ── 事件流（docker events，host 级）───────────────────────────────────────
+
+// eventsTypeFilter 是事件订阅的类型过滤：只收四类资源的动作。daemon 侧过滤而不是
+// 收下再丢 —— 掉进通道的既有取舍就是在浪费带宽与通道槽位（与快照「只取本域字段」
+// 同一取向）。
+var eventsTypeFilter = filters.NewArgs(
+	filters.Arg("type", agentproto.DockerEventTypeContainer),
+	filters.Arg("type", agentproto.DockerEventTypeImage),
+	filters.Arg("type", agentproto.DockerEventTypeVolume),
+	filters.Arg("type", agentproto.DockerEventTypeNetwork),
+)
+
+// cancelCloser 把「取消订阅」折成 io.Closer：会话 teardown 走 attachUpstream 关上游，
+// 事件流的「上游」就是派生出来的订阅 ctx（取消它，SDK 的读循环随之退出）。
+type cancelCloser struct{ cancel context.CancelFunc }
+
+func (c cancelCloser) Close() error { c.cancel(); return nil }
+
+// Events 打开 docker events 订阅。
+//
+// SDK 的错误通道在两个时刻发错：**建立阶段**（query 拼错/连不上）与**流中途**
+// （daemon 断开、body 读失败）。前一种要折成返回值（执行器据此回结论句、不占槽位）；
+// 后一种与 stats/日志流同纪律 —— 通道关闭即结束，不向外区分错误细节。SDK 在返回前
+// 已启动请求（内部等过 started 信号），故建立错误此刻已在容量 1 的错误通道里，
+// 非阻塞取一次即可分辨「没连上」与「正常开始」。
+func (a *sdkAdapter) Events(ctx context.Context) (<-chan EventItem, io.Closer, error) {
+	subCtx, cancel := context.WithCancel(ctx)
+	msgCh, errCh := a.cli.Events(subCtx, events.ListOptions{Filters: eventsTypeFilter})
+	select {
+	case err := <-errCh:
+		cancel()
+		return nil, nil, err
+	default:
+	}
+	ch := make(chan EventItem, 1)
+	go func() {
+		defer close(ch)
+		defer cancel()
+		for {
+			select {
+			case <-subCtx.Done():
+				return
+			case msg, ok := <-msgCh:
+				if !ok {
+					return
+				}
+				select {
+				case ch <- toEventItem(msg):
+				case <-subCtx.Done():
+					return
+				}
+			case _, ok := <-errCh:
+				if !ok {
+					return
+				}
+				// 流中途错误：与日志/stats 流的收尾同纪律 —— 通道关闭就是结束信号，
+				// 错误细节不向外区分（重启后 core 的重订机制会自愈）。
+				return
+			}
+		}
+	}()
+	return ch, cancelCloser{cancel}, nil
+}
+
+// toEventItem 把 SDK 事件折成本域记录：主体名取 Actor.Attributes["name"]
+// （容器/卷/网络名、镜像引用是属性而不是 Message 的顶层字段）。字段漂移只在这一行
+// 被拦 —— 本域之外不再出现 SDK 的 events 类型。
+func toEventItem(msg events.Message) EventItem {
+	return EventItem{
+		Type:      string(msg.Type),
+		Action:    string(msg.Action),
+		ActorName: msg.Actor.Attributes["name"],
+		ActorID:   msg.Actor.ID,
+	}
 }
 
 // round2 保留两位小数（页面上的百分比与 MB 只用到这个精度）。

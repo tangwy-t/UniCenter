@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  COMPOSE_LOGS_ACTIONS,
   isPhase1Action,
   parseContainerInspectPayload,
   parseImageInspectPayload,
@@ -31,6 +32,15 @@ describe('一期可用的动作', () => {
     ]) {
       expect(isPhase1Action(a)).toBe(false)
     }
+  })
+})
+
+describe('5a 聚合日志动作（compose:logs）', () => {
+  it('恰好一条，且不进一期 runRead 清单（会话制流，不走轮询闭环）', () => {
+    expect(COMPOSE_LOGS_ACTIONS).toEqual(['compose:logs'])
+    expect(isPhase1Action('compose:logs')).toBe(false)
+    // 与五份清单（一期/二期/三/四/五期）都没有交集 —— 互补条数断言靠它单列。
+    expect([...PHASE1_ACTIONS]).not.toContain('compose:logs')
   })
 })
 

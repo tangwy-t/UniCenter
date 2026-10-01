@@ -3,6 +3,7 @@ package agentproto
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,8 +52,8 @@ func TestDockerGoldenPayloadsDecode(t *testing.T) {
 // 多一条 → 协议承诺了一个没有策略的动作。
 func TestDockerActionWhiteListIsComplete(t *testing.T) {
 	all := AllDockerActions()
-	if len(all) != 29 {
-		t.Fatalf("action 白名单应为 29 条（spec §12.1），实际 %d 条: %v", len(all), all)
+	if len(all) != 33 {
+		t.Fatalf("action 白名单应为 33 条（含创建面 container:create、监控面 container:stats、常驻事件流 docker:events 与聚合日志 compose:logs），实际 %d 条: %v", len(all), all)
 	}
 	seen := map[string]bool{}
 	for _, a := range all {
@@ -82,6 +83,9 @@ func TestDockerActionWhiteListIsComplete(t *testing.T) {
 // intPtr 是测试用的小工具（缩容到 0 这类「指针 + 零值有意义」的字段要用它）。
 func intPtr(v int) *int { return &v }
 
+// boolPtr 是 start 这类「显式 false 与缺席不同义」的字段的测试工具。
+func boolPtr(v bool) *bool { return &v }
+
 // 必填清单里的字段名必须真的存在：名字写错会让必填校验恒真（永远「已填」），
 // 这类错误在协议层是静默的 —— 只有把「填了就该非空」钉住才看得见。
 func TestDockerOptionFieldNamesResolve(t *testing.T) {
@@ -91,6 +95,10 @@ func TestDockerOptionFieldNamesResolve(t *testing.T) {
 		Volumes: true, Content: "x", BaseHash: strings.Repeat("a", 64),
 		Src: "a", Dst: "b", Patch: map[string]any{"services": map[string]any{}},
 		Follow: true, Command: []string{"/bin/sh"}, Backup: "20260101-000000",
+		Image: "img:1", Name: "n", Ports: []string{"8080:80"}, Env: []string{"A=B"},
+		Mounts: []string{"v:/d"}, RestartPolicy: "always", CPULimit: 1, MemLimitMB: 1,
+		Network: "net", Start: boolPtr(false),
+		Registry: "harbor.example.com:8443",
 	}
 	for _, f := range dockerOptionFields {
 		if dockerOptionValue(filled, f) == "" {
@@ -147,6 +155,18 @@ func TestDockerOptionValidation(t *testing.T) {
 		{"content 超 1MB", DockerActionComposeFileWrite,
 			ok(&DockerCmdOptions{Target: "uni-center", Content: strings.Repeat("x", MaxDockerComposeFileBytes+1),
 				BaseHash: strings.Repeat("0", 64)}), ErrInvalidPayload},
+		// events 是 host 级 action：零必填、零确认 —— 空 options 就是完整形态；
+		// 带上 target 也被放行（host 级动作无视 options 内容，机制上它不产生任何指令）。
+		{"events 空 options 合法", DockerActionEvents, &DockerCmdOptions{}, nil},
+		{"events 带 target 也放行", DockerActionEvents, ok(&DockerCmdOptions{Target: "anything"}), nil},
+		// compose:logs（5a）：target 走项目名白名单（复用 compose 项目的校验）；
+		// since 显式拒绝（CLI 公共子集没有 --since —— 静默无视会答非所问）。
+		{"聚合日志缺项目名", DockerActionComposeLogs, &DockerCmdOptions{}, ErrMissingField},
+		{"聚合日志合法", DockerActionComposeLogs, ok(&DockerCmdOptions{Target: "uni-center", Follow: true, Tail: 100}), nil},
+		{"聚合日志不带 follow 也合法（读完即 eof）", DockerActionComposeLogs, ok(&DockerCmdOptions{Target: "uni-center"}), nil},
+		{"聚合日志项目名含斜杠被拒", DockerActionComposeLogs, ok(&DockerCmdOptions{Target: "uni-center/uni_core"}), ErrInvalidPayload},
+		{"聚合日志带 since 被拒", DockerActionComposeLogs, ok(&DockerCmdOptions{Target: "uni-center", Since: 1790000000}), ErrInvalidPayload},
+		{"聚合日志 tail 越界被拒", DockerActionComposeLogs, ok(&DockerCmdOptions{Target: "uni-center", Tail: 100001}), ErrInvalidPayload},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -162,6 +182,213 @@ func TestDockerOptionValidation(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ── 四支柱·创建面（4a）：container:create 的 options 逐字段校验 ───────────────
+//
+// 每个字段独立的正反例：正例证「合法形态不误伤」，反例证「注入/越界形态出不去」。
+// 失败结论句带字段名（decodeErr 的 field 就是它）——core 的 400 与 agent 的执行
+// 拒绝都引用这个字段名。
+func TestDockerContainerCreateOptions(t *testing.T) {
+	okCreate := func(o *DockerCmdOptions) *DockerCmdOptions { return o }
+	cases := []struct {
+		name string
+		opts *DockerCmdOptions
+		want error
+	}{
+		{"缺 image", &DockerCmdOptions{}, ErrMissingField},
+		{"只给 image 就是完整形态", okCreate(&DockerCmdOptions{Image: "nginx:1.27"}), nil},
+		// create 没有 target（对象语义在 image/name）：带 target 是字段归属错误。
+		{"带 target 被拒", okCreate(&DockerCmdOptions{Image: "nginx", Target: "web-1"}), ErrInvalidPayload},
+		{"完整形态合法", okCreate(&DockerCmdOptions{
+			Image: "reg.local:5000/app@sha256:abc", Name: "web-1",
+			Ports: []string{"8080:80", "53:53/udp"}, Env: []string{"MODE=prod", "EMPTY="},
+			Mounts:        []string{"data:/var/lib/app", "/srv/app:/etc/app:ro"},
+			RestartPolicy: "unless-stopped", CPULimit: 2, MemLimitMB: 2048,
+			Network: "app-net", Start: boolPtr(false),
+		}), nil},
+
+		{"image 含空白", okCreate(&DockerCmdOptions{Image: "nginx latest"}), ErrInvalidPayload},
+		{"name 含斜杠", okCreate(&DockerCmdOptions{Image: "nginx", Name: "a/b"}), ErrInvalidPayload},
+		{"name 短横开头", okCreate(&DockerCmdOptions{Image: "nginx", Name: "-x"}), ErrInvalidPayload},
+		{"name 合法", okCreate(&DockerCmdOptions{Image: "nginx", Name: "web_1.0"}), nil},
+
+		{"端口 host:container:tcp", okCreate(&DockerCmdOptions{Image: "nginx", Ports: []string{"8080:80/tcp"}}), nil},
+		{"端口缺协议默认 tcp", okCreate(&DockerCmdOptions{Image: "nginx", Ports: []string{"8080:80"}}), nil},
+		{"端口 udp", okCreate(&DockerCmdOptions{Image: "nginx", Ports: []string{"53:53/udp"}}), nil},
+		{"端口宿主为 0", okCreate(&DockerCmdOptions{Image: "nginx", Ports: []string{"0:80"}}), ErrInvalidPayload},
+		{"端口容器为 0", okCreate(&DockerCmdOptions{Image: "nginx", Ports: []string{"8080:0"}}), ErrInvalidPayload},
+		{"端口越界", okCreate(&DockerCmdOptions{Image: "nginx", Ports: []string{"8080:99999"}}), ErrInvalidPayload},
+		{"端口三段", okCreate(&DockerCmdOptions{Image: "nginx", Ports: []string{"1:80:80"}}), ErrInvalidPayload},
+		{"端口协议非白名单", okCreate(&DockerCmdOptions{Image: "nginx", Ports: []string{"8080:80/sctp"}}), ErrInvalidPayload},
+		{"端口空宿主段", okCreate(&DockerCmdOptions{Image: "nginx", Ports: []string{":80"}}), ErrInvalidPayload},
+		{"端口条数超限", okCreate(&DockerCmdOptions{Image: "nginx", Ports: repeatDocker("8080:80", 33)}), ErrInvalidPayload},
+
+		{"env 合法", okCreate(&DockerCmdOptions{Image: "nginx", Env: []string{"MYSQL_ROOT_PASSWORD=x"}}), nil},
+		{"env 值可为空", okCreate(&DockerCmdOptions{Image: "nginx", Env: []string{"EMPTY="}}), nil},
+		{"env 缺等号", okCreate(&DockerCmdOptions{Image: "nginx", Env: []string{"FOO"}}), ErrInvalidPayload},
+		{"env 键数字开头", okCreate(&DockerCmdOptions{Image: "nginx", Env: []string{"1FOO=x"}}), ErrInvalidPayload},
+		{"env 值含换行", okCreate(&DockerCmdOptions{Image: "nginx", Env: []string{"FOO=a\nb"}}), ErrInvalidPayload},
+		{"env 值含 NUL", okCreate(&DockerCmdOptions{Image: "nginx", Env: []string{"FOO=a\x00b"}}), ErrInvalidPayload},
+		{"env 超长", okCreate(&DockerCmdOptions{Image: "nginx", Env: []string{"K=" + strings.Repeat("x", MaxDockerStringBytes)}}), ErrInvalidPayload},
+		{"env 条数超限", okCreate(&DockerCmdOptions{Image: "nginx", Env: repeatDocker("K=v", 33)}), ErrInvalidPayload},
+
+		{"挂载命名卷", okCreate(&DockerCmdOptions{Image: "nginx", Mounts: []string{"data:/var/lib/mysql"}}), nil},
+		{"挂载命名卷 ro", okCreate(&DockerCmdOptions{Image: "nginx", Mounts: []string{"data:/d:ro"}}), nil},
+		{"挂载 bind 路径", okCreate(&DockerCmdOptions{Image: "nginx", Mounts: []string{"/srv/conf:/etc/conf"}}), nil},
+		{"挂载 bind ro", okCreate(&DockerCmdOptions{Image: "nginx", Mounts: []string{"/a:/b:ro"}}), nil},
+		{"挂载模式非 ro", okCreate(&DockerCmdOptions{Image: "nginx", Mounts: []string{"data:/d:z"}}), ErrInvalidPayload},
+		{"挂载源相对路径", okCreate(&DockerCmdOptions{Image: "nginx", Mounts: []string{"data/x:/d"}}), ErrInvalidPayload},
+		{"挂载源点段", okCreate(&DockerCmdOptions{Image: "nginx", Mounts: []string{"../x:/d"}}), ErrInvalidPayload},
+		{"挂载目的地相对", okCreate(&DockerCmdOptions{Image: "nginx", Mounts: []string{"v:rel"}}), ErrInvalidPayload},
+		{"挂载四段", okCreate(&DockerCmdOptions{Image: "nginx", Mounts: []string{"a:b:c:d"}}), ErrInvalidPayload},
+		{"挂载无冒号", okCreate(&DockerCmdOptions{Image: "nginx", Mounts: []string{"nodst"}}), ErrInvalidPayload},
+		{"挂载条数超限", okCreate(&DockerCmdOptions{Image: "nginx", Mounts: repeatDocker("v:/d", 33)}), ErrInvalidPayload},
+
+		{"restart always", okCreate(&DockerCmdOptions{Image: "nginx", RestartPolicy: "always"}), nil},
+		{"restart 非枚举", okCreate(&DockerCmdOptions{Image: "nginx", RestartPolicy: "on-success"}), ErrInvalidPayload},
+		{"cpu_limit 上限内", okCreate(&DockerCmdOptions{Image: "nginx", CPULimit: 32}), nil},
+		{"cpu_limit 越界", okCreate(&DockerCmdOptions{Image: "nginx", CPULimit: 32.5}), ErrInvalidPayload},
+		{"cpu_limit 负", okCreate(&DockerCmdOptions{Image: "nginx", CPULimit: -0.5}), ErrInvalidPayload},
+		{"cpu_limit NaN", okCreate(&DockerCmdOptions{Image: "nginx", CPULimit: math.NaN()}), ErrInvalidPayload},
+		{"mem_limit_mb 上限内", okCreate(&DockerCmdOptions{Image: "nginx", MemLimitMB: 32768}), nil},
+		{"mem_limit_mb 越界", okCreate(&DockerCmdOptions{Image: "nginx", MemLimitMB: 32769}), ErrInvalidPayload},
+		{"mem_limit_mb 负", okCreate(&DockerCmdOptions{Image: "nginx", MemLimitMB: -1}), ErrInvalidPayload},
+		{"network 合法", okCreate(&DockerCmdOptions{Image: "nginx", Network: "app-net"}), nil},
+		{"network 含斜杠", okCreate(&DockerCmdOptions{Image: "nginx", Network: "a/b"}), ErrInvalidPayload},
+		{"start 显式 false 合法", okCreate(&DockerCmdOptions{Image: "nginx", Start: boolPtr(false)}), nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := ValidateDockerCmdOptions(DockerActionContainerCreate, c.opts)
+			if c.want == nil {
+				if err != nil {
+					t.Fatalf("应通过，实际 %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, c.want) {
+				t.Fatalf("err = %v, want errors.Is(..., %v)", err, c.want)
+			}
+		})
+	}
+}
+
+// create 专属字段挂在别的 action 上 = 字段归属错误：必须拒绝而不是无视
+// （照 backup 的纪律 —— 协议上字段归属唯一的 action）。
+func TestDockerCreateFieldsRejectedOnOtherActions(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		action string
+		opts   *DockerCmdOptions
+	}{
+		{"image 挂在 logs", DockerActionContainerLogs, &DockerCmdOptions{Target: "mysql", Image: "nginx"}},
+		{"ports 挂在 stats", DockerActionContainerStats, &DockerCmdOptions{Target: "mysql", Ports: []string{"80:80"}}},
+		{"start 挂在 exec", DockerActionContainerExec, &DockerCmdOptions{Target: "mysql", Start: boolPtr(false)}},
+		{"restart_policy 挂在 pull", DockerActionImagePull, &DockerCmdOptions{Target: "nginx:1", RestartPolicy: "always"}},
+		// events 是零参数 host 级 action：它对 target 的宽松（带也放行）不应扩大到
+		// create 专属字段 —— 那仍是归属错误。
+		{"image 挂在 events", DockerActionEvents, &DockerCmdOptions{Image: "nginx"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if err := ValidateDockerCmdOptions(c.action, c.opts); !errors.Is(err, ErrInvalidPayload) {
+				t.Fatalf("create 专属字段挂在 %s 上必须拒，实际 %v", c.action, err)
+			}
+		})
+	}
+}
+
+// 确认档：create 是标准档 —— ExpectedDockerConfirm 恒空，confirm 带不带都放行。
+func TestDockerContainerCreateConfirmIsStandard(t *testing.T) {
+	opts := &DockerCmdOptions{Image: "nginx:1.27"}
+	if got := ExpectedDockerConfirm(DockerActionContainerCreate, opts); got != "" {
+		t.Fatalf("create 是标准档，期望空确认值，实际 %q", got)
+	}
+	if err := CheckDockerConfirm(DockerActionContainerCreate, opts, ""); err != nil {
+		t.Fatalf("标准档不带 confirm 应放行，实际 %v", err)
+	}
+	if err := CheckDockerConfirm(DockerActionContainerCreate, opts, "whatever"); err != nil {
+		t.Fatalf("标准档带 confirm 也应放行（带不带都可），实际 %v", err)
+	}
+}
+
+// 形状纪律：create 的十个新字段必须全部带 omitempty —— 协议只能新增可选字段
+// （加字段是纯粹的增量，老 agent 收不到新字段、老协议不认识它们都无碍；去掉
+// omitempty 会触发形状漂移守卫的破坏性变更判定）。
+func TestDockerContainerCreateFieldsAreAdditive(t *testing.T) {
+	shapes := map[string]FieldShape{}
+	for _, f := range Snapshot()["DockerCmdOptions"] {
+		shapes[f.Name] = f
+	}
+	for _, name := range []string{"Image", "Name", "Ports", "Env", "Mounts",
+		"RestartPolicy", "CPULimit", "MemLimitMB", "Network", "Start"} {
+		f, ok := shapes[name]
+		if !ok {
+			t.Fatalf("DockerCmdOptions 缺少 %s", name)
+		}
+		if !f.OmitEmpty {
+			t.Fatalf("%s 必须带 omitempty（创建面是纯增量，不能收紧形状）", name)
+		}
+	}
+	if shapes["Start"].Type != "*bool" {
+		t.Fatalf("start 的字段类型应为 *bool（显式 false 与缺席不同义），实际 %s", shapes["Start"].Type)
+	}
+}
+
+// 线上形态回环：带全量 create options 的指令编码后必须能原样解码 ——
+// 钉住 JSON tag（snake_case）与载荷结构不被工程化悄悄改动。
+func TestDockerContainerCreateRoundTrip(t *testing.T) {
+	cmd := &DockerCmd{Ref: "1700000000001", Action: DockerActionContainerCreate,
+		Options: DockerCmdOptions{
+			Image: "nginx:1.27", Name: "web-1", Ports: []string{"8080:80"},
+			Env: []string{"MODE=prod"}, Mounts: []string{"data:/d:ro"},
+			RestartPolicy: "always", CPULimit: 1.5, MemLimitMB: 512,
+			Network: "app-net", Start: boolPtr(false),
+		}}
+	if err := cmd.Validate(); err != nil {
+		t.Fatalf("全量 create 应通过: %v", err)
+	}
+	m, err := NewMessage("1", TypeCoreDockerCmd, cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := m.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// omitempty 语义：显式 false 必须在线上（缺省 true 由 agent 判），其余按蛇形 tag。
+	for _, want := range []string{
+		`"image":"nginx:1.27"`, `"restart_policy":"always"`, `"cpu_limit":1.5`,
+		`"mem_limit_mb":512`, `"start":false`,
+	} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("编码缺 %s: %s", want, raw)
+		}
+	}
+	m2, err := Decode(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got DockerCmd
+	if err := m2.DecodeData(&got); err != nil {
+		t.Fatal(err)
+	}
+	o := got.Options
+	if o.Image != "nginx:1.27" || o.Name != "web-1" || len(o.Ports) != 1 || o.Ports[0] != "8080:80" ||
+		len(o.Env) != 1 || len(o.Mounts) != 1 || o.RestartPolicy != "always" ||
+		o.CPULimit != 1.5 || o.MemLimitMB != 512 || o.Network != "app-net" ||
+		o.Start == nil || *o.Start {
+		t.Fatalf("create options 回环不符: %+v", o)
+	}
+}
+
+// repeatDocker 造一个 n 项同值切片（条目上限的反例）。
+func repeatDocker(v string, n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = v
+	}
+	return out
 }
 
 // v1.2.3 纯增量：container:logs 的 follow 与 container:exec 的 command。
@@ -557,6 +784,15 @@ func TestDockerConfirmRules(t *testing.T) {
 	if got := ExpectedDockerConfirm(DockerActionImageSave, saveOver); got != "mysql.tar" {
 		t.Fatalf("覆盖重发的确认值应是文件名，实际 %q", got)
 	}
+	// compose:logs 是标准档（与 container:logs 对齐）：读日志不改状态，
+	//「照抄项目名」的强确认对它没有意义（稀缺性一失，确认档就形同虚设）。
+	logs := &DockerCmdOptions{Target: "uni-center", Follow: true}
+	if got := ExpectedDockerConfirm(DockerActionComposeLogs, logs); got != "" {
+		t.Fatalf("聚合日志不该要 confirm，实际要求 %q", got)
+	}
+	if err := CheckDockerConfirm(DockerActionComposeLogs, logs, ""); err != nil {
+		t.Fatalf("聚合日志不带 confirm 应通过: %v", err)
+	}
 }
 
 // image:save 的确认档是「覆盖时强(文件名)」（spec §4.3.1；§7.5 两段确认复用 cmd/result）：
@@ -685,6 +921,68 @@ func TestDockerProjectVolumeProtectedRoundTrip(t *testing.T) {
 	// omitempty：false 不得出现在线上（增量字段的形态纪律，守卫同样按它放行）。
 	if strings.Count(string(raw), `"protected"`) != 2 {
 		t.Fatalf("只有两个受保护条目的 protected 应出现，实际载荷: %s", raw)
+	}
+}
+
+// df 汇总（6a 磁盘治理）的三件事：
+//   - 真值能被编码进载荷、能被解码回来（字段确实在线上存在）；
+//   - 带快照级 omitempty（nil = 这帧没有 df 数据：df 失败或老 agent 不发，页面显示
+//     「数据不可用」而不是 0）；不可达帧带 df 与带清单一样被拒；
+//   - 负数占用被拒（-1 是 daemon 的「未知」哨兵，必须在 agent 求和前排除，
+//     溜进来会被渲染成负数占用）。
+func TestDockerDiskUsageRoundTripAndValidate(t *testing.T) {
+	st := &DockerState{T: 1, DockerOK: true,
+		DiskUsage: &DockerDiskUsage{ImagesTotalMB: 1234.5, ImagesDanglingMB: 367.25,
+			VolumesTotalMB: 13.5, BuildCacheMB: 0}}
+	m, err := NewMessage("1", TypeAgentDockerState, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := m.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 线形态：disk_usage 编码进载荷（build_cache_mb 为 0 也出现 —— 汇总数字 0 是
+	// 真值「没有占用」，不是「没有数据」；nil 整块缺席才是「没有数据」）。
+	if !strings.Contains(string(raw), `"disk_usage"`) || !strings.Contains(string(raw), `"build_cache_mb":0`) {
+		t.Fatalf("df 汇总必须编码进载荷: %s", raw)
+	}
+	var decoded DockerState
+	m2, err := Decode(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m2.DecodeData(&decoded); err != nil {
+		t.Fatal(err)
+	}
+	if err := decoded.Validate(); err != nil {
+		t.Fatalf("回环后的快照必须语义合法: %v", err)
+	}
+	if decoded.DiskUsage == nil || decoded.DiskUsage.ImagesTotalMB != 1234.5 ||
+		decoded.DiskUsage.ImagesDanglingMB != 367.25 || decoded.DiskUsage.VolumesTotalMB != 13.5 ||
+		decoded.DiskUsage.BuildCacheMB != 0 {
+		t.Fatalf("df 汇总必须原样回环: %+v", decoded.DiskUsage)
+	}
+
+	// 缺席形态合法（老 agent / df 失败的那帧）。
+	if err := (&DockerState{T: 1, DockerOK: true}).Validate(); err != nil {
+		t.Fatalf("不带 df 的快照必须合法: %v", err)
+	}
+	// 不可达帧带 df：与带清单同一句话 —— 「一边说不可用、一边带着账目」。
+	if err := (&DockerState{T: 1, Error: "无法连接 docker.sock",
+		DiskUsage: &DockerDiskUsage{}}).Validate(); !errors.Is(err, ErrInvalidPayload) {
+		t.Fatalf("不可达帧不得携带 df 汇总，实际 %v", err)
+	}
+	// 负数占用：采集侧把未知哨兵求了进去，必须在协议层出不去。
+	for name, du := range map[string]*DockerDiskUsage{
+		"镜像合计为负": {ImagesTotalMB: -1},
+		"悬空合计为负": {ImagesDanglingMB: -0.5},
+		"卷合计为负":  {VolumesTotalMB: -1},
+		"构建缓存为负": {BuildCacheMB: -1},
+	} {
+		if err := (&DockerState{T: 1, DockerOK: true, DiskUsage: du}).Validate(); !errors.Is(err, ErrInvalidPayload) {
+			t.Fatalf("%s必须被拒，实际 %v", name, err)
+		}
 	}
 }
 
@@ -847,5 +1145,130 @@ func TestHelloAckDockerBlockIsOptional(t *testing.T) {
 	bad := &HelloAck{Accepted: true, DeviceID: "1", ReportInterval: 10, Docker: &DockerConfig{SnapshotInterval: 3}}
 	if err := bad.Validate(); !errors.Is(err, ErrInvalidPayload) {
 		t.Fatal("快照周期小于 10 秒的握手必须被拒")
+	}
+}
+
+// ── 拉取进度（image:pull，4b 进度面）─────────────────────────────────────
+
+// TestPullSessionIDIsDerivedAndValid：进度会话句柄是 ref 的**确定性派生**（core 在
+// 受理时预登记、agent 在开始拉取时重建 —— 两端必须得到同一个串），派生结果过
+// IsDockerSessionID（帧校验与其他会话同一条闸）。
+func TestPullSessionIDIsDerivedAndValid(t *testing.T) {
+	ref := "1790000000000000001"
+	got := DockerPullSessionID(ref)
+	if got != "pull_"+ref {
+		t.Fatalf("会话句柄必须是确定性派生: %q", got)
+	}
+	if !IsDockerSessionID(got) {
+		t.Fatalf("派生结果必须过会话 id 校验: %q", got)
+	}
+	// 同一 ref 恒得同一句柄（core 与 agent 双方各自的派生必须一致）。
+	if DockerPullSessionID(ref) != got {
+		t.Fatal("派生必须稳定（同 ref 同句柄）")
+	}
+	// 不同 ref 不得撞号。
+	if DockerPullSessionID("1790000000000000002") == got {
+		t.Fatal("不同 ref 的句柄不得相同")
+	}
+}
+
+// TestPullProgressItemValidate：终态标记互斥、负进度与超界进度拒绝、字段长度闸、
+// 合法形态（进度行 / 消息行 / 终态行）放行。
+func TestPullProgressItemValidate(t *testing.T) {
+	ok := func(p DockerPullProgressItem) {
+		t.Helper()
+		if err := p.Validate(); err != nil {
+			t.Fatalf("合法记录被拒: %+v %v", p, err)
+		}
+	}
+	bad := func(p DockerPullProgressItem) {
+		t.Helper()
+		if err := p.Validate(); !errors.Is(err, ErrInvalidPayload) {
+			t.Fatalf("非法记录必须被拒: %+v %v", p, err)
+		}
+	}
+
+	ok(DockerPullProgressItem{T: 1, ID: "sha256:abc", Status: "Downloading",
+		Current: 4096, Total: 8192})
+	ok(DockerPullProgressItem{T: 1, Status: "Pulling from library/nginx"})
+	ok(DockerPullProgressItem{T: 1, Done: true})
+	ok(DockerPullProgressItem{T: 1, Error: "denied: requested access to the resource is denied"})
+
+	bad(DockerPullProgressItem{Done: true, Error: "x"})      // 双终态标记
+	bad(DockerPullProgressItem{})                            // 无时刻
+	bad(DockerPullProgressItem{T: 1, Current: -1})           // 负进度
+	bad(DockerPullProgressItem{T: 1, Current: 10, Total: 5}) // 超界进度
+	bad(DockerPullProgressItem{T: 1, Status: strings.Repeat("x", MaxDockerStringBytes+1)})
+}
+
+// TestDockerRegistryAddrValidate：仓库地址形态闸 —— 主机名/IP + 可选端口，
+// 协议头、镜像路径、空白、超长一律拒（它是 RegistryAuth.ServerAddress 与
+// 凭据键的同一个值，非法形态不能进入凭据查找）。
+func TestDockerRegistryAddrValidate(t *testing.T) {
+	ok := []string{"docker.io", "gcr.io", "harbor.example.com:8443", "registry:5000",
+		"localhost:5000", "192.168.1.5:5000", "REGISTRY.INTERNAL"}
+	for _, s := range ok {
+		if !IsDockerRegistryAddr(s) {
+			t.Errorf("合法仓库地址被拒: %q", s)
+		}
+	}
+	bad := []string{"", "https://registry.io", "registry.io/library/nginx",
+		"registry.io:99999", " registry.io", "reg istry.io", "registry.io/v1",
+		"-registry.io", "registry..io", strings.Repeat("a", 256)}
+	for _, s := range bad {
+		if IsDockerRegistryAddr(s) {
+			t.Errorf("非法仓库地址必须被拒: %q", s)
+		}
+	}
+}
+
+// TestDockerCmdAuthValidate：认证三元组只许挂在 image:pull 上、registry 与
+// options.registry 必须同一把键、空用户名/空密码/超长密码拒。
+func TestDockerCmdAuthValidate(t *testing.T) {
+	auth := &DockerRegistryAuth{Registry: "harbor.example.com", Username: "robot$ci", Password: "s3cret"}
+	ok := &DockerCmd{Ref: "1", Action: DockerActionImagePull,
+		Options: DockerCmdOptions{Target: "harbor.example.com/app:1", Registry: "harbor.example.com"}, Auth: auth}
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("带凭据的拉取指令应通过: %v", err)
+	}
+
+	bad := func(cmd *DockerCmd) {
+		t.Helper()
+		if err := cmd.Validate(); !errors.Is(err, ErrInvalidPayload) {
+			t.Fatalf("非法认证指令必须被拒: %+v %v", cmd, err)
+		}
+	}
+	bad(&DockerCmd{Ref: "1", Action: DockerActionImagePull,
+		Options: DockerCmdOptions{Target: "x"}, Auth: auth}) // options 没有 registry
+	bad(&DockerCmd{Ref: "1", Action: DockerActionImageRemove,
+		Options: DockerCmdOptions{Target: "harbor.example.com/app", Registry: "harbor.example.com"}, Auth: auth}) // 非 pull
+	bad(&DockerCmd{Ref: "1", Action: DockerActionImagePull,
+		Options: DockerCmdOptions{Target: "x", Registry: "other.example.com"}, Auth: auth}) // 键漂移
+	bad(&DockerCmd{Ref: "1", Action: DockerActionImagePull,
+		Options: DockerCmdOptions{Target: "x", Registry: "harbor.example.com"},
+		Auth:    &DockerRegistryAuth{Registry: "harbor.example.com", Username: "u", Password: ""}}) // 空密码
+	bad(&DockerCmd{Ref: "1", Action: DockerActionImagePull,
+		Options: DockerCmdOptions{Target: "x", Registry: "harbor.example.com"},
+		Auth:    &DockerRegistryAuth{Registry: "harbor.example.com", Username: "", Password: "p"}}) // 空用户名
+	bad(&DockerCmd{Ref: "1", Action: DockerActionImagePull,
+		Options: DockerCmdOptions{Target: "x", Registry: "harbor.example.com"},
+		Auth: &DockerRegistryAuth{Registry: "harbor.example.com", Username: "u",
+			Password: strings.Repeat("p", maxDockerRegistrySecretBytes+1)}}) // 超长密码
+}
+
+// TestDockerCmdOptionsRegistryOwnership：registry 字段只归 image:pull；
+// 挂在其它 action 上是字段归属错误（照 backup 的先例），而不是静默无视。
+func TestDockerCmdOptionsRegistryOwnership(t *testing.T) {
+	if err := ValidateDockerCmdOptions(DockerActionImagePull,
+		&DockerCmdOptions{Target: "x", Registry: "harbor.example.com"}); err != nil {
+		t.Fatalf("pull 带仓库字段应通过: %v", err)
+	}
+	if err := ValidateDockerCmdOptions(DockerActionContainerLogs,
+		&DockerCmdOptions{Target: "x", Registry: "harbor.example.com"}); !errors.Is(err, ErrInvalidPayload) {
+		t.Fatalf("logs 带仓库字段必须被拒: %v", err)
+	}
+	if err := ValidateDockerCmdOptions(DockerActionImagePull,
+		&DockerCmdOptions{Target: "x", Registry: "https://harbor.example.com"}); !errors.Is(err, ErrInvalidPayload) {
+		t.Fatalf("带协议头的仓库地址必须被拒: %v", err)
 	}
 }

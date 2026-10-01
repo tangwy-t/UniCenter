@@ -12,6 +12,8 @@
       :stale="stale"
       :age-seconds="ageSeconds"
       :never-reported="neverReported"
+      :load-error="loadError"
+      :has-state="hasState"
       @refresh="refresh"
     >
       <template #table>
@@ -45,6 +47,17 @@
                     {{ projectBlockedConclusion(row) }}
                   </span>
                   <span class="proj-view__spacer"></span>
+                  <!-- 5b 工作台入口：项目是主机作用域的，host 必带（工作台据此还原同一台机器）；
+                       路由 authMark 是 docker:inspect，无该权限的人连入口都不渲染（不渲染 ≠ 禁用）。 -->
+                  <ElButton
+                    v-if="canInspect"
+                    size="small"
+                    type="primary"
+                    plain
+                    @click="openWorkspace(row)"
+                  >
+                    打开工作台
+                  </ElButton>
                   <ElButton
                     v-if="canManage"
                     size="small"
@@ -306,6 +319,7 @@
 
 <script setup lang="ts">
   import { computed, ref } from 'vue'
+  import { useRouter } from 'vue-router'
   import {
     ElAlert,
     ElButton,
@@ -350,6 +364,7 @@
   // 不要解构：上下文字段是 getter，解构会把 hostId 定格成进入页面时的 ''（主机清单尚未到达）。
   const ctx = provideDockerHost()
   const { hasAuth } = useAuth()
+  const router = useRouter()
 
   const canManage = computed(() => hasAuth(PermDockerManage))
   const canDelete = computed(() => hasAuth(PermDockerDelete))
@@ -560,20 +575,29 @@
 
   // 快照与四态收口在 composable（hosts 清单、seq 守卫、主机切换后的重拉都在它里面）。
   // 主机切换 = 换一台机器：关掉全部对话框（它们属于上一台主机）并重新拉快照。
-  const { state, loading, listLoading, stale, ageSeconds, neverReported, refresh } =
-    useDockerHostState({
-      onHostSwitch: () => {
-        configDialog.value.visible = false
-        projConfirm.value.visible = false
-        svcConfirm.value.visible = false
-        upRemoveOrphans.value = false
-        downVolumes.value = false
-        // 四期状态也属于上一台主机：编辑器/回滚弹窗收起，备份缓存清空（换机后重拉）。
-        editor.value = { visible: false, project: '', addService: false, protected: false }
-        rollbackConfirm.value = { ...rollbackConfirm.value, visible: false, backup: null }
-        backupState.value = {}
-      }
-    })
+  const {
+    state,
+    loading,
+    listLoading,
+    stale,
+    ageSeconds,
+    neverReported,
+    loadError,
+    hasState,
+    refresh
+  } = useDockerHostState({
+    onHostSwitch: () => {
+      configDialog.value.visible = false
+      projConfirm.value.visible = false
+      svcConfirm.value.visible = false
+      upRemoveOrphans.value = false
+      downVolumes.value = false
+      // 四期状态也属于上一台主机：编辑器/回滚弹窗收起，备份缓存清空（换机后重拉）。
+      editor.value = { visible: false, project: '', addService: false, protected: false }
+      rollbackConfirm.value = { ...rollbackConfirm.value, visible: false, backup: null }
+      backupState.value = {}
+    }
+  })
 
   // 写指令通道：受理 + 轮询 + 成功后重拉（重拉就是上面的 refresh）。「查看配置」也走它，
   // 受理/轮询/结论句的处置与写动作同一套（展示行为不变：结果落进配置对话框）。
@@ -728,6 +752,18 @@
   }
 
   // ── 项目级动作（展开区头部按钮）──
+
+  /**
+   * 5b 工作台入口：本切片只加入口，列表页其余行为不动。host 随行（工作台是
+   * 主机作用域的页面，返回列表时也带回同一台机器）。
+   */
+  function openWorkspace(project: DockerProjectItem) {
+    void router.push({
+      name: 'DockerProjectWorkspace',
+      params: { name: project.name },
+      query: { host: ctx.hostId }
+    })
+  }
 
   /**
    * 项目级动作入口：注册表标了确认档的（Up/停止/Down 是输入项目名强档）走弹窗；

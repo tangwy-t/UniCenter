@@ -910,11 +910,118 @@ declare namespace Api {
       images: number
       lastSync?: number
       stale: boolean
+      disk?: Api.Docker.DockerHostDiskItem | null
     }
 
     interface DockerHostListResp {
       list: Api.Docker.DockerHostItem[]
       snapshotInterval: number
+    }
+
+    interface DockerOverviewResp {
+      fleet: Api.Docker.DockerOverviewFleet
+      hosts: Api.Docker.DockerHostItem[]
+      anomalies: Api.Docker.DockerOverviewAnomalies
+    }
+
+    interface DockerOverviewFleet {
+      hosts: Api.Docker.DockerFleetHosts
+      containers: Api.Docker.DockerFleetContainers
+      images: Api.Docker.DockerFleetImages
+      volumes: Api.Docker.DockerFleetVolumes
+      networks: Api.Docker.DockerFleetNetworks
+      projects: Api.Docker.DockerFleetProjects
+      disk: Api.Docker.DockerFleetDisk
+    }
+
+    interface DockerFleetDisk {
+      hosts: number
+      imagesTotalMb: number
+      volumesTotalMb: number
+      buildCacheMb: number
+      imagesDanglingMb: number
+    }
+
+    interface DockerHostDiskItem {
+      imagesMb: number
+      volumesMb: number
+      buildCacheMb: number
+      imagesDanglingMb: number
+      danglingImages: number
+      unusedVolumes: number
+    }
+
+    interface DockerFleetHosts {
+      total: number
+      dockerOk: number
+    }
+
+    interface DockerFleetContainers {
+      total: number
+      running: number
+      stopped: number
+      protected: number
+    }
+
+    interface DockerFleetImages {
+      total: number
+      unused: number
+    }
+
+    interface DockerFleetVolumes {
+      total: number
+      unused: number
+    }
+
+    interface DockerFleetNetworks {
+      total: number
+    }
+
+    interface DockerFleetProjects {
+      total: number
+      running: number
+    }
+
+    interface DockerOverviewAnomalies {
+      total: number
+      items: Api.Docker.DockerOverviewAnomalyItem[]
+    }
+
+    interface DockerOverviewAnomalyItem {
+      id: string
+      hostId: string
+      hostname: string
+      name: string
+      image: string
+      state: string
+      statusText?: string
+      protected: boolean
+    }
+
+    interface DockerWorkloadListResp {
+      items: Api.Docker.DockerWorkloadItem[]
+      total: number
+    }
+
+    interface DockerWorkloadItem {
+      id: string
+      name: string
+      image: string
+      state: string
+      statusText?: string
+      created?: number
+      startedAt?: number
+      cpuPercent: number
+      memUsageMb: number
+      memLimitMb: number
+      netRxBytesSec: number
+      netTxBytesSec: number
+      composeProject?: string
+      composeService?: string
+      ports?: Api.Docker.DockerPortItem[]
+      protected: boolean
+      hostId: string
+      hostname: string
     }
 
     interface DockerStateResp {
@@ -1011,6 +1118,34 @@ declare namespace Api {
       alreadyExists?: boolean
       streamTicket?: string
       payload?: unknown
+    }
+
+    interface DockerRegistryItem {
+      registry: string
+      username: string
+      remark?: string
+      password: string
+      createdAt?: number
+    }
+
+    interface DockerRegistryListResp {
+      list: Api.Docker.DockerRegistryItem[]
+    }
+
+    interface DockerTaskItem {
+      ref: string
+      hostId: string
+      hostname: string
+      action: string
+      target: string
+      username: string
+      createdAt: number
+      status: string
+      summary: string
+    }
+
+    interface DockerTaskListResp {
+      items: Api.Docker.DockerTaskItem[]
     }
   }
 

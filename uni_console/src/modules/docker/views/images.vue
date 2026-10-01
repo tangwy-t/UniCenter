@@ -8,6 +8,8 @@
       :stale="stale"
       :age-seconds="ageSeconds"
       :never-reported="neverReported"
+      :load-error="loadError"
+      :has-state="hasState"
       @refresh="refresh"
     >
       <template #search>
@@ -63,10 +65,12 @@
           </span>
         </div>
 
-        <!-- 底栏写操作（spec §11.3）：清理悬空 / 拉取 / 打标签 / 导出 tar / 载入。
+        <!-- 底栏写操作（spec §11.3）：清理悬空 / 仓库凭据 / 拉取 / 打标签 / 导出 tar / 载入。
              打标签与导出 tar 的输入是**选中的那一行**：未选中一行时按钮禁用，
-             结论句（要选一行）写在按钮旁。 -->
-        <div v-if="canWrite" class="docker-bar">
+             结论句（要选一行）写在按钮旁。仓库凭据（4c）与镜像写动作不同档
+             （docker:config）：它有自己的权限门槛，不能被 canWrite 顺带挡掉 ——
+             只有 config 权限的账号也要进得了这条入口，故底栏的渲染条件把它并进来。 -->
+        <div v-if="canWrite || canConfig" class="docker-bar">
           <ElButton
             v-if="canDelete"
             size="small"
@@ -76,6 +80,9 @@
             @click="openPrune"
           >
             清理悬空镜像…
+          </ElButton>
+          <ElButton v-if="canConfig" size="small" @click="registryVisible = true">
+            仓库凭据…
           </ElButton>
           <ElButton v-if="canManage" size="small" :disabled="busy" @click="askPull">
             拉取镜像…
@@ -122,6 +129,15 @@
         同时清理未被任何容器使用的镜像
       </ElCheckbox>
     </DockerActionConfirm>
+
+    <!-- 拉取进度对话框（4b）：底栏「拉取镜像…」的黑盒等待换成逐层实时进度。
+         hostId 跟当前主机走（对话框在受理时钉死）、成功关闭后双次重拉本页快照。 -->
+    <PullProgressDialog v-model="pullVisible" :host-id="ctx.hostId" :refresh="refresh" />
+
+    <!-- 仓库凭据管理对话框（4c）：入口按钮只对 docker:config 渲染（不渲染 ≠ 禁用）。
+         凭据是**全局**的（不属于任何一台主机 —— 服务端按仓库地址解析注入），故
+         主机切换不需要像拉取对话框那样把它关掉。 -->
+    <RegistryCredentialsDialog v-model="registryVisible" />
   </div>
 </template>
 
@@ -131,7 +147,12 @@
   import { ElButton, ElCheckbox, ElEmpty, ElMessage, ElMessageBox } from 'element-plus'
   import { formatByUnit } from '@/modules/device/utils/display'
   import { useAuth } from '@/hooks/core/useAuth'
-  import { PermDockerDelete, PermDockerInspect, PermDockerManage } from '@/enums/permission'
+  import {
+    PermDockerConfig,
+    PermDockerDelete,
+    PermDockerInspect,
+    PermDockerManage
+  } from '@/enums/permission'
   import ArtButtonTable from '@/components/core/forms/art-button-table/index.vue'
   import ArtSearchBar from '@/components/core/forms/art-search-bar/index.vue'
   import ArtTable from '@/components/core/tables/art-table/index.vue'
@@ -139,6 +160,8 @@
   import DockerActionConfirm from '../components/action-confirm.vue'
   import DockerActionMenu from '../components/action-menu.vue'
   import DockerPage from '../components/docker-page.vue'
+  import PullProgressDialog from '../components/pull-progress-dialog.vue'
+  import RegistryCredentialsDialog from '../components/registry-credentials-dialog.vue'
   import type { ColumnOption } from '@/types/component'
   import type { DockerImageItem } from '../api'
   import {
@@ -163,21 +186,40 @@
   const searchForm = ref<{ keyword?: string; danglingOnly?: boolean; unusedOnly?: boolean }>({})
   /** 当前勾选的行：底栏「打标签 / 导出 tar」一次只作用于选中的那一行。 */
   const selected = ref<DockerImageItem[]>([])
+  /** 拉取进度对话框的开关（4b）：开在「当前主机」上，切换主机时关掉（见 onHostSwitch）。 */
+  const pullVisible = ref(false)
+  /** 仓库凭据对话框的开关（4c）：入口按钮受 canConfig 门控（模板里的 v-if）。 */
+  const registryVisible = ref(false)
 
   const canManage = computed(() => hasAuth(PermDockerManage))
   const canDelete = computed(() => hasAuth(PermDockerDelete))
-  /** 至少有一个写权限才渲染底栏操作区（没有可执行的动作就不占版面）。 */
+  /** 仓库凭据管理权限（4c）：与镜像写动作不同档 —— 服务端 /docker/registries 的静态 perm。 */
+  const canConfig = computed(() => hasAuth(PermDockerConfig))
+  /** 至少有一个写权限（或凭据权限）才渲染底栏操作区（没有可执行的动作就不占版面）。 */
   const canWrite = computed(() => canManage.value || canDelete.value)
 
   // 快照与四态收口在 composable（hosts 清单、seq 守卫、主机切换后的重拉都在它里面）。
   // 主机切换 = 换一台机器：本页既有重置纪律是「清空筛选 + 清空勾选」。
-  const { state, loading, listLoading, stale, ageSeconds, neverReported, refresh } =
-    useDockerHostState({
-      onHostSwitch: () => {
-        selected.value = []
-        searchForm.value = {}
-      }
-    })
+  const {
+    state,
+    loading,
+    listLoading,
+    stale,
+    ageSeconds,
+    neverReported,
+    loadError,
+    hasState,
+    refresh
+  } = useDockerHostState({
+    onHostSwitch: () => {
+      selected.value = []
+      searchForm.value = {}
+      // 拉取进度对话框跟着关：一场拉取属于受理它的那台主机（对话框把 hostId 在
+      // 受理时钉死），切机后让它继续跑只会让进度与结论挂在错误的主机名下；关掉
+      // 即断流，服务端随之取消那场拉取（断开 = 取消是端点契约，不是副作用）。
+      pullVisible.value = false
+    }
+  })
 
   // 写指令通道：受理 + 轮询 + 成功后重拉（重拉就是上面的 refresh）。
   const { run, pendingId, busy } = useDockerCmds({ refresh })
@@ -283,11 +325,10 @@
     }
   }
 
-  /** 拉取镜像：目标引用由用户输入（支持仓库前缀与 digest 形态）。 */
-  async function askPull() {
-    const ref = await promptText('拉取镜像', '输入要拉取的镜像引用。', '例如 nginx:latest')
-    if (!ref) return
-    await runWrite('image:pull', ref, {})
+  /** 拉取镜像（4b）：入口改开进度对话框 —— 逐层实时进度 + 取消，取代此前的
+      prompt 黑盒等待（受理/轮询/重拉都收在对话框里，不走页面的 runWrite）。 */
+  function askPull() {
+    pullVisible.value = true
   }
 
   /** 打标签：src 取目标镜像的引用，dst 由用户输入。 */

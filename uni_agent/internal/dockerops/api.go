@@ -9,6 +9,7 @@ package dockerops
 
 import (
 	"context"
+	"errors"
 	"io"
 )
 
@@ -60,6 +61,34 @@ type StatsInfo struct {
 	NetTXBytes uint64
 }
 
+// StatsSample 是 stats 流的一个采样点。
+//
+// 与 one-shot 的 StatsInfo **同口径计算**（同一套 cpuPercent/mb/sumNet 函数），
+// 差异只在网络字段是**速率**（B/s）：流内相邻样本的累计计数求差。首样本的速率为 0
+// （没有可求差的基线）—— 与 docker stats CLI 首行同口径。类型分开而不是在 StatsInfo
+// 上加字段：一次读数的累计值与流的速率是两个语义，混在一个结构里会让两者都被误解。
+type StatsSample struct {
+	CPUPercent    float64
+	MemUsageMB    float64
+	MemLimitMB    float64
+	NetRXBytesSec float64
+	NetTXBytesSec float64
+}
+
+// EventItem 是 docker events 流的一条记录（订阅范围内：container/image/volume/network）。
+//
+// 与 StatsSample 同型：它是「流里的记录」而不是 SDK 类型别名（SDK 的 Message 带
+// scope/全量 attributes，直透会牵动执行逻辑）；字段只有展示与归因需要的四样，
+// 类型/动作的过滤**在 adapter 的订阅 filter 里就做掉**（daemon 侧过滤，agent 不还载
+// swarm 与构建类的噪音）。T 不在其中 —— 与 stats 样本同纪律：时刻取会话时钟的
+// 采集时刻，不信任 daemon 的挂钟。
+type EventItem struct {
+	Type      string
+	Action    string
+	ActorName string
+	ActorID   string
+}
+
 // ImageInfo 是镜像列表项。
 type ImageInfo struct {
 	ID        string
@@ -68,12 +97,75 @@ type ImageInfo struct {
 	Created   int64
 }
 
+// ── 创建面（container:create）的本域参数 ──────────────────────────────────
+//
+// 协议 options 里的一切字符串（端口 `8080:80/tcp`、挂载 `data:/db:ro`）都由
+// **执行器**解析成这里的最终值：adapter 只见定型的字段，不必再把解析逻辑带进
+// SDK 映射面（包边界纪律：SDK 类型不出 adapter）。
+
+// ContainerCreateSpec 是创建容器的全部参数。
+type ContainerCreateSpec struct {
+	Image string
+	Name  string
+	// Env 是 KEY=VALUE 形态的环境变量（解析**不变形**：协议校验过的整条原样交出）。
+	Env []string
+	// Ports 是逐条解析好的端口绑定（协议默认 tcp）。
+	Ports []CreatePortBinding
+	// Mounts 是逐条解析好的挂载（源已定性为命名卷或宿主路径）。
+	Mounts []CreateMount
+	// RestartPolicy 是重启策略枚举值（no/on-failure/always/unless-stopped；"" = 不设）。
+	RestartPolicy string
+	// CPULimit 是核数（0 = 不限额）。
+	CPULimit float64
+	// MemLimitMB 是内存上限（MB；0 = 不限额）。
+	MemLimitMB int
+	// Network 是要接入的网络名（"" = docker 默认网桥）。
+	Network string
+}
+
+// CreatePortBinding 是一条已解析的端口映射。
+type CreatePortBinding struct {
+	Host      int // 宿主端口
+	Container int // 容器端口
+	// Proto ∈ tcp | udp。
+	Proto string
+}
+
+// CreateMount 是一条已解析的挂载。
+type CreateMount struct {
+	// Bind 为 true 时 Source 是宿主绝对路径；false 时是命名卷名
+	//（与 docker CLI 同一分辨规则：以 '/' 开头的源是 bind）。
+	Bind   bool
+	Source string
+	Dest   string
+	// ReadOnly 由协议形态里的 `:ro` 表达。
+	ReadOnly bool
+}
+
 // VolumeInfo 是卷列表项。
 type VolumeInfo struct {
 	Name   string
 	Driver string
 	// SizeBytes 为 nil 表示**用量未知**（部分驱动不提供），页面显示「—」而不是 0。
 	SizeBytes *int64
+}
+
+// DiskUsageSummary 是 system df 的磁盘占用汇总（六期 6a：磁盘治理）。
+//
+// 刻意定义成本域形态而不是透传 SDK 的 types.DiskUsage：SDK 类型不出 adapter
+// （包边界纪律），且 daemon 的 verbose 响应只有逐项明细（镜像/卷/缓存各一条记录，
+// 预聚合的 TotalSize/Reclaimable 类型已废弃）—— 汇总求和发生在 adapter，字段就是
+// 快照需要的四样。单位是字节（daemon 的原单位）；折 MB 发生在快照组装处
+// （与镜像条目 SizeBytes→SizeMB 同一条边界）。
+type DiskUsageSummary struct {
+	// ImagesTotalBytes 是全部镜像占用合计（含共享层的重复计入，docker CLI 同口径）。
+	ImagesTotalBytes int64
+	// ImagesDanglingBytes 是悬空镜像（无标签 = image:prune 默认目标）占用合计。
+	ImagesDanglingBytes int64
+	// VolumesTotalBytes 是已知体积卷的求和（非 local 驱动 -1 未知哨兵排除在外，下界）。
+	VolumesTotalBytes int64
+	// BuildCacheBytes 是构建缓存占用合计（协议没有对应的 prune 动作，纯账面事实）。
+	BuildCacheBytes int64
 }
 
 // NetworkInfo 是网络列表项。
@@ -133,6 +225,20 @@ type ImageDetail struct {
 	History []ImageLayer
 }
 
+// PullAuth 是 image:pull 的仓库认证（4c）：core 受理时按凭据库解出的**瞬时凭据**，
+// 生命周期 = 本条指令执行期 —— 用完即弃，任何路径不落盘、不进帧、不进 result。
+// nil = 无凭据（公共仓库或主机侧 docker login），与 4b 之前的拉取**逐字一致**。
+//
+// 刻意定义成本域类型而不是 SDK 的 types.AuthConfig 别名：SDK 类型不出 adapter
+// （包边界纪律），adapter 内完成到 daemon RegistryAuth 头的映射。
+type PullAuth struct {
+	// Registry 是仓库地址（ServerAddress；与凭据键 / options.registry 同一把键）。
+	Registry string
+	// Username / Password 是仓库登录三元组的另外两元。
+	Username string
+	Password string
+}
+
 // DockerAPI 是本包需要的 Docker 能力面。
 //
 // 全部方法返回的错误都可以上抛给调用方折成结果；**例外是 Ping**：它的错误必须是
@@ -143,7 +249,14 @@ type DockerAPI interface {
 	Containers(ctx context.Context) ([]ContainerInfo, error)
 	ContainerStats(ctx context.Context, id string) (StatsInfo, error)
 	Images(ctx context.Context) ([]ImageInfo, error)
-	Volumes(ctx context.Context) ([]VolumeInfo, error)
+	// VolumesAndDf 返回卷清单与 df 磁盘占用汇总 —— 两者出自**同一次** system df 调用。
+	//
+	// 为什么是一个方法而不是 Volumes + DiskUsage 两个：卷体积本来就只能取自 df 的
+	// verbose 响应（volume ls 不含体积），拆开会让每帧快照**多跑一趟** df —— 它是
+	// daemon 侧较重的调用（要扫镜像存储、逐卷统计），30s 周期下白翻倍。df 失败时
+	// 退化 volume ls（既有行为），df 汇总返回 nil —— 调用方据此如实说「数据不可用」
+	// 而不是报 0。
+	VolumesAndDf(ctx context.Context) (volumes []VolumeInfo, df *DiskUsageSummary, err error)
 	Networks(ctx context.Context) ([]NetworkInfo, error)
 	ContainerInspect(ctx context.Context, name string) (ContainerDetail, error)
 	// ContainerLogs 取尾部日志；truncated 表示因尺寸上限被截断。
@@ -162,10 +275,26 @@ type DockerAPI interface {
 	//（卷的删除是独立的 volume:remove，两段确认各自成立）。
 	ContainerRemove(ctx context.Context, id string, force bool) error
 
+	// ContainerCreate 创建容器（四支柱·创建面，4a）。spec 里的一切都已是**最终值**
+	//（端口映射/环境/挂载等协议字符串的解析在执行器完成 —— 包边界纪律仍然是
+	//「SDK 类型不出 adapter」）。返回新容器的完整 ID。
+	//
+	// 错误里可能包装两个哨兵（errors.Is 可判，执行器据此给结论句）：
+	//   - errImageNotFound        本机没有这个镜像（daemon 404 + No such image）；
+	//   - errContainerNameConflict 容器名已被占用（daemon 409）。
+	// 哨兵的 Error() 只有 daemon 原文（进 result.detail），结论句由执行器翻译。
+	ContainerCreate(ctx context.Context, spec ContainerCreateSpec) (id string, err error)
+
 	ImageRemove(ctx context.Context, ref string, force bool) error
 	// ImagePrune 清理：all=false 只清悬空（与 docker image prune 同口径）。
 	ImagePrune(ctx context.Context, all bool) (freedBytes int64, err error)
-	ImagePull(ctx context.Context, ref string) error
+	// ImagePull 拉取镜像（4b 起产出进度）：返回**拉取结束**（成功或失败）的最终错误，
+	// 拉取期间 daemon 的进度行经 emit 逐条交出（emit 为 nil = 丢弃进度 —— 老链路）。
+	//
+	// auth（4c）是 core 随指令瞬时下发的仓库认证；nil = 不带凭据 —— 与 4b 之前的
+	// 拉取逐字一致。到 daemon 的映射（RegistryAuth 头）在 adapter 内完成，
+	// SDK 类型不出 adapter。
+	ImagePull(ctx context.Context, ref string, auth *PullAuth, emit func(PullProgress)) error
 	ImageTag(ctx context.Context, src, dst string) error
 	// ImageSave 把镜像写成 tar；path 由调用方按 transferDir 拼好。
 	// 目标已存在且未要求覆盖时返回 alreadyExists=true（**不覆盖**，两段确认由上层承载）。
@@ -184,6 +313,22 @@ type DockerAPI interface {
 	ContainerLogsFollow(ctx context.Context, name string, tail int, since int64) (io.ReadCloser, error)
 	// ContainerExecAttach 建一条 TTY exec 并挂接：argv **直传** daemon，不经 shell。
 	ContainerExecAttach(ctx context.Context, name string, argv []string) (*ExecSession, error)
+
+	// ── 监控面：stats 实时流 ──────────────────────────────────────────
+
+	// ContainerStatsStream 打开容器 stats 流（stream=true）：返回的通道逐样本给
+	// 出**已算好**的读数（CPU%、内存、网络速率），首个样本在连接建立后**立刻**到来
+	//（daemon 流式 API 的第一条记录即当前读数，之后约每秒一条）；close() 关闭底层
+	// 连接，通道关闭 = 流结束（容器停止/被删或 ctx 取消）。
+	ContainerStatsStream(ctx context.Context, name string) (<-chan StatsSample, io.Closer, error)
+
+	// ── 事件流（活动流，host 级）───────────────────────────────────────────
+
+	// Events 打开 docker events 订阅（filter **固定**为 container/image/volume/network
+	// 四类）：返回的通道逐事件给出已归约的记录；close() 结束订阅（取消底层连接），
+	// 通道关闭 = 流结束（ctx 取消或 daemon 断开）。它是 host 级能力：没有容器参数，
+	// 唯一入参是会话 ctx —— 取消即停的纪律与 stats 完全相同。
+	Events(ctx context.Context) (<-chan EventItem, io.Closer, error)
 }
 
 // ExecSession 是一条已挂接的终端流（TTY 模式：daemon 侧不做 8 字节头的多路复用，
@@ -214,3 +359,11 @@ type ExecError struct {
 }
 
 func (e *ExecError) Error() string { return e.Msg }
+
+// errImageNotFound / errContainerNameConflict 是 ContainerCreate 的两个**可预期**
+// 失败哨兵（契约见 DockerAPI.ContainerCreate）：执行器按 errors.Is 判别后给出
+// 不同的结论句。它们只作判定目标 —— 用户可见的文案在执行器，detail 用 daemon 原文。
+var (
+	errImageNotFound         = errors.New("image not found")
+	errContainerNameConflict = errors.New("container name conflict")
+)

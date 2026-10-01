@@ -30,6 +30,25 @@ const (
 	// 正常路径由 sweep 终结（终结时改成 ResultTTL）；这条兜底只为「sweep 长期失效」
 	// 这种异常准备 —— 它必须大于最长指令超时（15min），故取 2 小时。
 	pendingSafetyTTL = 2 * time.Hour
+	// RecentCmdKey 是「最近受理的指令」索引（ZSET：score=受理时刻 CreatedAt 毫秒，
+	// member=ref），任务中心（GET /docker/tasks，6b）的枚举入口。
+	//
+	// 它是 6b 补进 CmdStore 数据面的**唯一新键**（任务要求「只读不新建存储，缺什么补
+	// 什么」—— 任务中心不建新表，缺的正是枚举能力：没有它只能 SCAN docker:cmd:*，
+	// 那是对共享 Redis 的全键空间遍历）。与 CmdDeadlineKey 同族：索引只是加速器，
+	// **判定以记录为准**（读面逐条 Get，索引成员对应的记录已过期则剔除 —— 与
+	// Inflight 的陈旧索引自愈同一纪律）。
+	//
+	// 键名落在 spec §4.3.2 的清单之外，与 CmdDeadlineKey 一样要写清理由；运维排障
+	// 时按 CmdKeyPrefix 族定位。
+	RecentCmdKey = "docker:cmd:recent"
+	// RecentCmdKeep 是最近索引的容量上限（保留最新的 N 条，超出者随每次 Create 裁剪）。
+	//
+	// 取 300 而不是端点的 N=100：终态记录 TTL 仅 10 分钟（pending 兜底 2 小时），
+	// 索引容量只有覆盖住「一次高吞吐窗口 + 过滤余量」才有意义 —— 任务中心按
+	// hostId/status/action 过滤后仍应拿得到 100 条；300 条的最新窗口在高吞吐
+	// 下也稳超过滤后 100 条的需求，而裁剪开销只剩一次 O(log n) 的 ZREMRANGEBYRANK。
+	RecentCmdKeep = 300
 )
 
 // CmdRecord 是一条指令在服务端的完整记录（Redis `docker:cmd:<ref>`，JSON）。
@@ -82,10 +101,34 @@ redis.call('SET', KEYS[1], cjson.encode(rec), 'EX', tonumber(ARGV[3]))
 return 1
 `)
 
-// Create 建立 pending 记录，并登记在飞索引与到期索引。
+// recentAddScriptSrc 原子地「报名 + 裁剪」最近索引：ZADD 后当场把容量压回 RecentCmdKeep。
 //
-// 三个键一次事务写完：只写一半（例如有记录但没在飞索引）会让 409 去重失效，
+// 为什么必须脚本而不是把 `ZREMRANGEBYRANK 0 -(keep+1)` 写进事务：过负的 stop 在两套
+// Redis 实现里的越界语义不一致 —— 真 Redis 对「小于集合长度的负 rank」按「从 start
+// 一直删到底」钳制（集合不足 keep+1 条时会**整锅清空**，刚 ZADD 进去的那条也活不了），
+// miniredis 则按区间取交（不动）；同一个测试在两套实现下会给两个答案，坑的是测试
+// 永远绿、生产悄悄空。脚本里用 ZCARD 的**当场读数**算正索引，两边语义一致且原子
+// （与 timeoutScript 同一纪律：判定与写入收成一个操作，事实不被并发撕裂）。
+//
+// 注意：事务内走 pipe.Eval 时传的是**脚本原文**而不是 *Script（TxPipeline 的
+// Cmdable.Eval 只收 string；*Script.Run 的 EVALSHA 缓存路径不能嵌进 MULTI/EXEC）。
+const recentAddScriptSrc = `
+redis.call('ZADD', KEYS[1], ARGV[1], ARGV[2])
+local n = redis.call('ZCARD', KEYS[1])
+local keep = tonumber(ARGV[3])
+if n > keep then
+    redis.call('ZREMRANGEBYRANK', KEYS[1], 0, n - keep - 1)
+end
+return n
+`
+
+// Create 建立 pending 记录，并登记在飞索引、到期索引与最近受理索引。
+//
+// 四个键一次事务写完：只写一半（例如有记录但没在飞索引）会让 409 去重失效，
 // 而失效的表现是「同一条指令并发执行两次」——compose 类的操作会互踩。
+// 最近索引的报名+裁剪也收在同一事务里（脚本见 recentAddScriptSrc）：写一半会让
+// 索引与记录不同步，且容量约束必须原子 —— 两个并发 Create 各做一次裁剪后仍
+// 保证 |set| ≤ RecentCmdKeep。
 func (s *CmdStore) Create(ctx context.Context, rec *CmdRecord, timeout time.Duration) error {
 	rec.Status = StatusPending
 	b, err := json.Marshal(rec)
@@ -97,6 +140,7 @@ func (s *CmdStore) Create(ctx context.Context, rec *CmdRecord, timeout time.Dura
 	pipe.Set(ctx, CmdKeyPrefix+rec.Ref, b, pendingSafetyTTL)
 	pipe.ZAdd(ctx, CmdDeadlineKey, goredis.Z{Score: deadline, Member: rec.Ref})
 	pipe.HSet(ctx, InflightKey(rec.DeviceID), inflightField(rec.Action, rec.Target), rec.Ref)
+	pipe.Eval(ctx, recentAddScriptSrc, []string{RecentCmdKey}, rec.CreatedAt, rec.Ref, RecentCmdKeep)
 	_, err = pipe.Exec(ctx)
 	return err
 }
@@ -146,6 +190,23 @@ func (s *CmdStore) Inflight(ctx context.Context, deviceID uint64, action, target
 		return "", nil
 	}
 	return ref, nil
+}
+
+// RecentRefs 返回最近受理的 ref（按受理时刻**降序**，至多 limit 条）。
+//
+// 只做枚举（索引是加速器）：成员的记录可能已过期（TTL 到而成员还在），
+// 读面必须逐条 Get 并自行剔除 ——「判定以记录为准」与 Inflight 同一句纪律。
+func (s *CmdStore) RecentRefs(ctx context.Context, limit int) ([]string, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	return s.rdb.ZRevRange(ctx, RecentCmdKey, 0, int64(limit)-1).Result()
+}
+
+// ForgetRecent 从最近索引剔除一条 ref（读面发现记录已过期时的自愈；失败只影响
+// 下一次读的效率，不遮住任何事实 —— 索引成员留着也只是被跳过）。
+func (s *CmdStore) ForgetRecent(ctx context.Context, ref string) error {
+	return s.rdb.ZRem(ctx, RecentCmdKey, ref).Err()
 }
 
 // Complete 写入 agent 上报的结果（终态）。

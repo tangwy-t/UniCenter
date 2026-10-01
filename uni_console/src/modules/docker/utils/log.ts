@@ -80,3 +80,37 @@ export function logHint(text: string, truncated: boolean, totalOverride?: number
   const base = `共 ${total} 行`
   return truncated ? `${base}（仅显示最近 ${MAX_LOG_LINES} 行）` : base
 }
+
+// ── compose 聚合日志的服务过滤（5b 项目工作台）────────────────────────────
+
+/**
+ * compose 聚合行的服务名前缀：`服务名 | 正文`（CLI 按最长服务名对齐补空格，
+ * 三种 flavor 一致；agent 侧固定带 --timestamps，正文以时间戳开头）。
+ * 服务名字符集与协议的项目/服务名白名单同形：字母数字开头 + [A-Za-z0-9_.-]*。
+ */
+const COMPOSE_LOG_PREFIX_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]*\s*\|/
+
+/** 取一行聚合日志归属的服务名；行不带该前缀（CLI 自己的结论句等）返回空串。 */
+export function composeLogLineService(line: string): string {
+  if (!COMPOSE_LOG_PREFIX_RE.test(line)) return ''
+  // 前缀正则已保证「服务名 + 空白 + |」，服务名即竖线前的去空白段。
+  return line.slice(0, line.indexOf('|')).trim()
+}
+
+/**
+ * 按服务过滤聚合日志文本（纯前端过滤：会话不分服务开流，过滤不重开会话）。
+ *
+ * 口径：选中集合为空 = 不过滤（原文返回）。选中后只保留**服务名命中**的行；
+ * 不带服务前缀的行（compose CLI 的报错/收尾句）**不保留** —— 过滤的语义是
+ * 「只听选中的网元」，CLI 的行不是任何网元说的。行尾口径与拆行一致
+ * （`\r\n`/裸 `\r` 都按行尾处理；流式期间最后一行可能是半行，照常参与匹配）。
+ */
+export function filterComposeLogLines(text: string, services: readonly string[]): string {
+  const picked = services.filter((s) => s !== '')
+  if (picked.length === 0) return text
+  const set = new Set(picked)
+  const lines = splitLogLines(text)
+  // 尾部换行产物的空行不算日志行（与 splitLogLines 同口径），保留中间空行的语义
+  // 由「命中行的原样保留」延续 —— 未命中行整行丢弃，行间换行重排。
+  return lines.filter((line) => set.has(composeLogLineService(line))).join('\n')
+}

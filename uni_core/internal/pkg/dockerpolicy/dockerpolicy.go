@@ -21,9 +21,10 @@ import (
 // 的按钮（§11.0 分期控件矩阵：不渲染 ≠ 禁用，服务端这道闸是它的兜底）。
 // 每期交付时改这一个常量。
 //
-// 当前 = 4（四期配置编辑）：compose.file:write/validate/patch 已随 agent 0.5.4 落地，
-// 全表 29 条 action 至此全部放行 —— 不存在「已登记但未交付」的段了。
-const CurrentPhase = 4
+// 当前 = 5（监控面）：container:stats 实时流已随流通道落地；container:create
+// 随四支柱审计（4a）加入；compose:logs 聚合日志（5a 后端半边）随之并入 ——
+// 全表 32 条 action 至此全部放行。
+const CurrentPhase = 5
 
 // SessionSetupTimeout 是**会话制** action 的受理记录终结时限。
 //
@@ -53,6 +54,10 @@ type Policy struct {
 
 // policies 是策略表的唯一枚举源（顺序 = spec §4.3.1 书写顺序）。
 var policies = []Policy{
+	// 创建面（四支柱之一，4a）：权限与启停同级（docker:manage —— 创建不删不停
+	// 任何现存目标）；期次归操作面（2）；30 秒本地操作档（一次 create + 一次
+	// start，不自动拉镜像 —— 拉取走独立的 image:pull 15 分钟档）。
+	{agentproto.DockerActionContainerCreate, permission.PermDockerManage, 30 * time.Second, false, 2},
 	{agentproto.DockerActionContainerStart, permission.PermDockerManage, 30 * time.Second, false, 2},
 	{agentproto.DockerActionContainerStop, permission.PermDockerManage, 30 * time.Second, false, 2},
 	{agentproto.DockerActionContainerRestart, permission.PermDockerManage, 60 * time.Second, false, 2},
@@ -61,6 +66,9 @@ var policies = []Policy{
 	{agentproto.DockerActionContainerInspect, permission.PermDockerInspect, 30 * time.Second, false, 1},
 	// exec 是会话制：它的「结果」是会话句柄，超时由流会话自己管（三期）。
 	{agentproto.DockerActionContainerExec, permission.PermDockerExec, 0, true, 3},
+	// stats 实时流（监控面，五期）：权限与 logs 同档（inspect —— 只看不碰），
+	// 会话制同 exec（「结果」是会话句柄，生命周期交给流通道）。
+	{agentproto.DockerActionContainerStats, permission.PermDockerInspect, 0, true, 5},
 	{agentproto.DockerActionImageRemove, permission.PermDockerDelete, 60 * time.Second, false, 2},
 	{agentproto.DockerActionImagePrune, permission.PermDockerDelete, 120 * time.Second, false, 2},
 	{agentproto.DockerActionImagePull, permission.PermDockerManage, 15 * time.Minute, false, 2},
@@ -83,6 +91,13 @@ var policies = []Policy{
 	{agentproto.DockerActionComposeFileWrite, permission.PermDockerConfig, 30 * time.Second, false, 4},
 	{agentproto.DockerActionComposeFileValidate, permission.PermDockerConfig, 30 * time.Second, false, 4},
 	{agentproto.DockerActionComposeFilePatch, permission.PermDockerConfig, 30 * time.Second, false, 4},
+
+	// compose:logs（5a 聚合日志）：权限与 container:logs 同档（inspect —— 只读流，
+	// 不碰任何目标；看日志与看快照同属「只看」）。会话制同 stats —— 它的「结果」
+	// 是会话句柄（follow 与非 follow 都是流：CLI 输出没有一次性取回的形态，非
+	// follow 只是读完即 eof），生命周期交给流通道；受理记录用建立窗口
+	//（SessionSetupTimeout），不参与普通写指令的 15 分钟档 sweep。
+	{agentproto.DockerActionComposeLogs, permission.PermDockerInspect, 0, true, 5},
 }
 
 // All 返回策略表的浅拷贝（顺序 = 书写顺序）。

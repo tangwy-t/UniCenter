@@ -2,21 +2,24 @@
  * 动作注册表与确认档前端镜像的核对测试。
  *
  * ── 与协议对齐的核对方式（跨语言无法 import）─────────────────────────
- * 事实源：`uni_protocol/docker.go` 的 `dockerActionSpecs`（29 条）与
- * `ExpectedDockerConfirm`；权限/期次：`uni_core/internal/pkg/dockerpolicy` 的
- * `policies`（spec §4.3.1）。
+ * 事实源：`uni_protocol/docker.go` 的 `dockerActionSpecs`（33 条，含不走六前缀的
+ * docker:events）与 `ExpectedDockerConfirm`；权限/期次：`uni_core/internal/pkg/dockerpolicy`
+ * 的 `policies`（spec §4.3.1）。
  *
- * 29 条的分解（**对计划里「22 个二期写动作」的勘误**）：协议白名单 29 =
+ * 32 条的分解：协议白名单（六前缀口径）32 =
  *   4 条一期只读（container:logs / container:inspect / image:inspect / compose.file:read）
- * + 21 条二期写动作（本注册表）
+ * + 22 条二期写动作（本注册表，4a 起 container:create 归操作面二期）
  * + 1 条三期（container:exec，交互面）
- * + 3 条四期（compose.file:write/validate/patch）。
- * 21 才是二期写的条数：dockerpolicy 里 Phase=2 的行逐条数即 21，实验证伪不了这一点
+ * + 3 条四期（compose.file:write/validate/patch）
+ * + 1 条五期（container:stats，监控面实时流 —— 会话制只读，不进本注册表）
+ * + 1 条 5a（compose:logs，项目聚合日志 —— 会话制只读，收在 utils/cmd 的
+ *   COMPOSE_LOGS_ACTIONS，同样不进本注册表）。
+ * 22 才是二期写的条数：dockerpolicy 里 Phase=2 的行逐条数即 22，实验证伪不了这一点
  * （把 container:exec 算进二期会让 phase-gate 守卫红灯 —— 它扫注册表里的后期动作）。
  * 以后协议加动作时，先改协议/策略，再改这里，最后两处测试与 phase-gate 一起对齐。
  */
 import { describe, expect, it } from 'vitest'
-import { PHASE1_ACTIONS } from '../utils/cmd'
+import { COMPOSE_LOGS_ACTIONS, PHASE1_ACTIONS } from '../utils/cmd'
 import {
   actionGuarded,
   confirmKind,
@@ -36,24 +39,39 @@ const PHASE3_ACTIONS = ['container:exec']
 /** 四期动作（与 phase-gate 的 PHASE4_ACTIONS 同源；此处只为互补条数断言）。 */
 const PHASE4_ACTIONS = ['compose.file:write', 'compose.file:validate', 'compose.file:patch']
 
-/** 协议白名单总条数（`AllDockerActions()` 的长度）。 */
-const PROTOCOL_ACTION_COUNT = 29
+/** 五期动作（监控面 · stats 实时流；与 phase-gate 的 PHASE5_ACTIONS 同源）。 */
+const PHASE5_ACTIONS = ['container:stats']
+
+/** 协议白名单总条数（六前缀口径；docker:events 走流订阅不在该口径内）。 */
+const PROTOCOL_ACTION_COUNT = 32
 
 describe('二期写动作注册表', () => {
-  it('恰好覆盖 21 条二期写动作，无重复、顺序与 PHASE2_ACTIONS 一致', () => {
-    expect(DOCKER_ACTION_REGISTRY).toHaveLength(21)
+  it('恰好覆盖 22 条二期写动作，无重复、顺序与 PHASE2_ACTIONS 一致', () => {
+    expect(DOCKER_ACTION_REGISTRY).toHaveLength(22)
     const actions = DOCKER_ACTION_REGISTRY.map((e) => e.action)
     expect(new Set(actions).size).toBe(actions.length)
     expect(actions).toEqual([...PHASE2_ACTIONS])
   })
 
-  it('与协议互补：29 = 4 条一期只读 + 21 条二期写 + 1 条三期 + 3 条四期，无交集', () => {
+  it('与协议互补：32 = 4 一期只读 + 22 二期写 + 1 三期 + 3 四期 + 1 五期 + 1 条 5a 聚合日志，无交集', () => {
     const phase2 = DOCKER_ACTION_REGISTRY.map((e) => e.action)
-    const all = [...PHASE1_ACTIONS, ...phase2, ...PHASE3_ACTIONS, ...PHASE4_ACTIONS]
+    const all = [
+      ...PHASE1_ACTIONS,
+      ...phase2,
+      ...PHASE3_ACTIONS,
+      ...PHASE4_ACTIONS,
+      ...PHASE5_ACTIONS,
+      ...COMPOSE_LOGS_ACTIONS
+    ]
     expect(new Set(all).size).toBe(all.length)
     expect(all).toHaveLength(PROTOCOL_ACTION_COUNT)
-    for (const a of [...PHASE3_ACTIONS, ...PHASE4_ACTIONS]) {
+    for (const a of [...PHASE3_ACTIONS, ...PHASE4_ACTIONS, ...PHASE5_ACTIONS]) {
       expect(isPhase2Action(a), `后期动作 ${a} 不该进二期注册表`).toBe(false)
+    }
+    for (const a of COMPOSE_LOGS_ACTIONS) {
+      // compose:logs 是只读流动作：不进注册表（无确认档/保护档语义），也不进一期清单。
+      expect(isPhase2Action(a), `只读流动作 ${a} 不该进二期注册表`).toBe(false)
+      expect([...PHASE1_ACTIONS], `${a} 不该进一期 runRead 清单`).not.toContain(a)
     }
   })
 
@@ -94,6 +112,8 @@ describe('二期写动作注册表', () => {
 describe('expectedConfirm：照抄协议 ExpectedDockerConfirm', () => {
   it.each([
     // action, options, 期望
+    // create 是标准档：无逐字值（弹窗只要用户核对镜像名/容器名，不需要照抄什么）。
+    ['container:create', { image: 'mysql:8', name: 'db' }, ''],
     ['container:start', { target: 'mysql' }, ''],
     ['container:stop', { target: 'mysql' }, ''],
     ['container:restart', { target: 'mysql' }, ''],
@@ -140,6 +160,7 @@ describe('expectedConfirm：照抄协议 ExpectedDockerConfirm', () => {
 
 describe('confirmKind：弹窗形态', () => {
   it.each([
+    ['container:create', { image: 'mysql:8' }, 'confirm'],
     ['container:start', undefined, 'none'],
     ['container:remove', { target: 'mysql' }, 'confirm'],
     ['image:remove', { target: 'mysql:8.0' }, 'confirm'],

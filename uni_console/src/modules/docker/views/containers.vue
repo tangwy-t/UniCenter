@@ -1,16 +1,84 @@
 <template>
-  <!-- ⚠ 单根包装：页面**必须只有一个根节点**（布局把页面放进 `<Transition mode="out-in">`，
-       而 Transition 只支持单根元素）。二期起本页多了确认弹窗，与 projects.vue 同一处理：
-       页面与弹窗收进一个根 div —— 双根会在切页时白屏（single-root.test.ts 扫描钉住）。 -->
-  <div class="docker-containers-page">
-    <DockerPage
-      :loading="loading"
-      :stale="stale"
-      :age-seconds="ageSeconds"
-      :never-reported="neverReported"
-      @refresh="refresh"
-    >
-      <template #search>
+  <!-- 单根（single-root 守卫在库：布局的 Transition 只支持单根，双根切页白屏）。 -->
+  <div class="docker-containers-page art-full-height overflow-y-auto">
+    <div class="wkl-page__inner p-4 pb-8 md:p-5">
+      <!-- ============ 页头：图标 + 标题 + 副标题 + 自动刷新（对齐 overview.vue）============ -->
+      <div class="wkl-hero mb-4 flex flex-wrap items-center gap-3">
+        <div class="wkl-hero__icon flex-cc">
+          <ArtSvgIcon :icon="pageIcon" />
+        </div>
+        <div class="min-w-0">
+          <h2 class="text-lg font-semibold text-[var(--el-text-color-primary)]">容器</h2>
+          <p class="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-g-600">
+            <span
+              class="live-dot inline-block h-1.5 w-1.5 rounded-full bg-success"
+              :class="{ 'is-loading': loading }"
+            />
+            <span>{{ subtitle }}</span>
+          </p>
+        </div>
+        <div class="ml-auto flex items-center gap-1">
+          <!-- 创建容器（4a 创建面）：从本地镜像到运行容器的入口；与启停同级
+               docker:manage 门控（无权限不渲染 —— 分期控件矩阵的取向）。 -->
+          <ElButton
+            v-if="canManage"
+            size="small"
+            type="primary"
+            :disabled="busy || batchBusy"
+            @click="openCreate"
+          >
+            创建容器…
+          </ElButton>
+          <!-- 自动刷新：容器表是轻量清单（不是总览的全量聚合），盯表的核心姿势仍是
+               「开着不动」；默认关、开着时每 10 秒静默重拉（对齐 overview / 设备总览）。 -->
+          <ArtButtonTable
+            :icon="'ri:timer-2-line'"
+            :iconClass="autoRefresh ? 'bg-theme text-white shadow-sm' : 'bg-theme/12 text-theme'"
+            :title="autoRefresh ? '关闭自动刷新（每 10 秒）' : '开启自动刷新（每 10 秒）'"
+            @click="autoRefresh = !autoRefresh"
+          />
+          <ArtButtonTable
+            icon="ri:refresh-line"
+            iconClass="bg-theme/12 text-theme"
+            title="刷新"
+            @click="refresh"
+          />
+        </div>
+      </div>
+
+      <!-- ============ 加载（首次，还没有任何行可给） ============ -->
+      <div v-if="pageState === 'loading'" class="wkl-card wkl-state flex-cc flex-col gap-3 py-16">
+        <div class="wkl-state__icon flex-cc">
+          <ArtSvgIcon icon="ri:loader-4-line" class="wkl-state__spin" />
+        </div>
+        <div class="text-sm font-medium text-[var(--el-text-color-regular)]">
+          正在拉取跨主机容器清单…
+        </div>
+        <div class="text-xs text-g-600">跨全部可管主机聚合，首次加载请稍候</div>
+      </div>
+
+      <!-- ============ 错误（首拉失败：结论句 + 重试，不显示旧数据） ============ -->
+      <div v-else-if="pageState === 'error'" class="wkl-card wkl-state">
+        <ElResult icon="error" title="容器清单获取失败" sub-title="统一清单接口暂时不可用">
+          <template #extra>
+            <ElButton type="primary" @click="reloadAll">重试</ElButton>
+          </template>
+        </ElResult>
+      </div>
+
+      <!-- ============ 空态（没有可管主机 —— 引导，不是一块空白） ============ -->
+      <div v-else-if="pageState === 'empty'" class="wkl-card wkl-state">
+        <ElEmpty description="尚无可管主机">
+          <div class="wkl-state__hint">
+            可管主机来自已安装 agent 并上报 Docker 能力信号的设备；设备入库并上报后，
+            这里会列出它上面的容器。
+          </div>
+          <ElButton type="primary" @click="reloadAll">刷新</ElButton>
+        </ElEmpty>
+      </div>
+
+      <!-- ============ 正常态：筛选 + 统一表 + 批量栏 ============ -->
+      <template v-else>
         <ArtSearchBar
           v-show="showSearchBar"
           v-model="searchForm"
@@ -18,82 +86,47 @@
           @search="onSearch"
           @reset="onReset"
         />
-      </template>
 
-      <template #table>
-        <ArtTableHeader v-model:showSearchBar="showSearchBar" :loading="loading" @refresh="refresh">
-          <template #left>
-            <span class="docker-count">共 {{ filtered.length }} 个容器</span>
-          </template>
-        </ArtTableHeader>
+        <ElCard class="art-table-card" shadow="never">
+          <ArtTableHeader
+            v-model:showSearchBar="showSearchBar"
+            :loading="loading"
+            @refresh="refresh"
+          >
+            <template #left>
+              <!-- total 如实报全量、items 截 500：截断必须说出口，否则用户以为
+                   「筛选完了就这么多」而漏看排在 500 名之后的行。 -->
+              <span class="docker-count">
+                共 {{ total }} 个容器<template v-if="truncated">
+                  · 列表显示前 {{ rows.length }} 条</template
+                >
+              </span>
+            </template>
+          </ArtTableHeader>
 
-        <!-- 两种空态分开：主机上没有容器 vs 筛选没命中（后者给「清除筛选」）。
-             这是 overview.vue 的既有纪律：把「没有」与「筛没了」说成一句会让人以为机器空了。
-             空态渲染在本页、不写进 ArtTable 的 `#empty` 插槽：ArtTable 不转发该插槽
-             （组件内部把 ElTable 的空态写死成「暂无数据」），写进去会被静默丢弃 ——
-             与 overview.vue 记的 ElEmpty `#extra` 陷阱同类。
-             清单还没到时也不喊「没有容器」（那时还不知道有没有主机），故 v-if 把
-             主机清单的加载态一并算进来。 -->
-        <ArtTable
-          v-if="showTable"
-          :loading="listLoading"
-          :data="filtered"
-          :columns="columns"
-          @selection-change="onSelectionChange"
-        />
-        <!-- host-context.ts 的 reload 注释承诺：清单拉不到时页面显示「没有可管理的主机」 -->
-        <ElEmpty
-          v-else-if="!ctx.hosts.length"
-          class="docker-empty"
-          description="没有可管理的主机"
-        />
-        <ElEmpty v-else-if="hasFilter" class="docker-empty" description="没有符合筛选条件的容器">
-          <ElButton size="small" @click="onReset">清除筛选</ElButton>
-        </ElEmpty>
-        <ElEmpty v-else class="docker-empty" description="该主机上还没有容器" />
-      </template>
+          <!-- 表格 + 空态 + 行菜单在子组件（列集合守卫测试照旧从 ArtTable 断言）。 -->
+          <WorkloadTable
+            :rows="rows"
+            :loading="loading"
+            :has-filter="hasFilter"
+            :pending-id="pendingId"
+            :batch-busy="batchBusy"
+            @menu-select="onMenuSelect"
+            @open-detail="(row) => openDrawer(row, 'overview')"
+            @selection-change="onSelectionChange"
+            @reset-filter="onReset"
+          />
 
-      <!-- 勾选栏（spec §11.1）：批量动作的入口。只有选中时才有意义，未选中时不占版面。 -->
-      <template #footer>
-        <div v-if="selected.length" class="docker-batch">
-          <span class="docker-batch__count">已选 {{ selected.length }} 项</span>
-          <ElButton
-            v-if="canManage"
-            size="small"
-            :disabled="batchDisabled"
-            @click="runBatch('container:start', selected)"
-          >
-            启动
-          </ElButton>
-          <ElButton
-            v-if="canManage"
-            size="small"
-            :disabled="batchDisabled"
-            @click="runBatch('container:stop', selected)"
-          >
-            停止
-          </ElButton>
-          <ElButton
-            v-if="canManage"
-            size="small"
-            :disabled="batchDisabled"
-            @click="runBatch('container:restart', selected)"
-          >
-            重启
-          </ElButton>
-          <ElButton
-            v-if="canDelete"
-            size="small"
-            type="danger"
-            plain
-            :disabled="batchDisabled"
-            @click="openBatchRemove"
-          >
-            删除…
-          </ElButton>
-        </div>
+          <!-- 批量栏（含批量删除确认弹窗与逐行派发循环）在子组件。 -->
+          <WorkloadBatchBar
+            :selected="selected"
+            :busy="busy"
+            :refresh="refreshSilent"
+            @busy-change="batchBusy = $event"
+          />
+        </ElCard>
       </template>
-    </DockerPage>
+    </div>
 
     <!-- 单个操作的确认弹窗：删除是标准档必走它；受保护目标上的写动作也走它 ——
          「强制操作」开关是它唯一的输入面（开关是否渲染由组件按 docker:exec 权限判定，
@@ -108,103 +141,99 @@
       @confirm="onConfirmSubmit"
     />
 
-    <!-- 批量删除：后端单条删除是标准档，但一次动多个目标，前端自加一道 DELETE 摩擦
-         （计划 D2 / spec §11.6 —— 纯前端确认，不往协议加字段）。
-         未复用 DockerActionConfirm：它的形态由动作注册表推导（container:remove 是标准档），
-         表达不了「同一条动作在批量场景要更强确认」；缺口与建议见 2B 执行报告。 -->
-    <ElDialog
-      v-model="batchRemove.visible"
-      title="删除确认"
-      width="460px"
-      :close-on-click-modal="false"
-    >
-      <div class="batch-del">
-        <div class="batch-del__line">将删除以下 {{ batchRemove.rows.length }} 个容器：</div>
-        <ul class="batch-del__list">
-          <li v-for="row in batchRemove.rows" :key="row.id">
-            <span>{{ row.name }}</span>
-            <span v-if="row.protected" class="batch-del__lock">🔒</span>
-          </li>
-        </ul>
-        <div class="batch-del__line">此操作不可恢复。输入 DELETE 以确认：</div>
-        <ElInput
-          v-model="batchRemove.input"
-          class="batch-del__input"
-          placeholder="DELETE"
-          @keyup.enter="confirmBatchRemove"
-        />
-      </div>
-      <template #footer>
-        <ElButton @click="batchRemove.visible = false">取消</ElButton>
-        <ElButton
-          type="danger"
-          :disabled="batchRemove.input !== 'DELETE'"
-          @click="confirmBatchRemove"
-        >
-          删除
-        </ElButton>
-      </template>
-    </ElDialog>
+    <!-- 详情抽屉：行「详情 / 日志」的原地入口（概览 + 日志 + 终端，host 取行主机）。 -->
+    <WorkloadDrawer
+      v-model="drawerVisible"
+      :row="drawerRow"
+      :initial-tab="drawerTab"
+      :refresh="refreshSilent"
+    />
+
+    <!-- 创建抽屉（4a 创建面）：跨主机表没有「当前主机」的概念 —— 主机维度交给抽屉
+         自己的下拉（打开时预选筛选里的那台主机）；成功后的表重拉走 refreshSilent
+         （useDockerCmds 内部：立即一次 + 落定一次，双次重拉纪律）。 -->
+    <CreateContainerDrawer
+      v-model="createVisible"
+      :hosts="hosts"
+      :initial-host-id="createHostId"
+      :refresh="refreshSilent"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
-  import { computed, h, ref } from 'vue'
-  import { useRouter } from 'vue-router'
-  import { ElButton, ElDialog, ElEmpty, ElInput, ElMessage } from 'element-plus'
-  import { useAuth } from '@/hooks/core/useAuth'
-  import {
-    PermDockerDelete,
-    PermDockerExec,
-    PermDockerInspect,
-    PermDockerManage
-  } from '@/enums/permission'
-  import ArtButtonMore from '@/components/core/forms/art-button-more/index.vue'
+  /**
+   * 容器列表页（切片 2 重构）：**跨主机统一工作负载表**。
+   *
+   * 数据源从「单主机快照（useDockerHostState + 本地过滤）」换成 GET /docker/containers
+   * （服务端过滤，三项 query 全部透传）—— 跨主机的表没法在单主机快照上筛。主机维度
+   * 从页面级上下文（provideDockerHost + HostSwitcher）降为**筛选下拉**的一项；
+   * `/docker/containers?host=` 深链照旧有效（进入时作为主机筛选初始值，总览主机卡片
+   * 与详情页返回的既有链路不动）。写操作按**行主机**派发：指令通道的 hostId 绑定
+   * 当前操作行（useDockerCmds 给了 hostId 就不碰 provide 上下文）。路由、菜单零变更。
+   */
+  import { computed, ref, watch } from 'vue'
+  import { useRoute } from 'vue-router'
+  import { ElButton, ElCard, ElEmpty, ElMessage, ElResult } from 'element-plus'
   import ArtButtonTable from '@/components/core/forms/art-button-table/index.vue'
   import ArtSearchBar from '@/components/core/forms/art-search-bar/index.vue'
-  import ArtTable from '@/components/core/tables/art-table/index.vue'
   import ArtTableHeader from '@/components/core/tables/art-table-header/index.vue'
+  import { usePageIcon } from '@/hooks/core/usePageIcon'
+  import { useAuth } from '@/hooks/core/useAuth'
+  import { PermDockerManage } from '@/enums/permission'
   import DockerActionConfirm from '../components/action-confirm.vue'
-  import DockerPage from '../components/docker-page.vue'
-  import type { ColumnOption } from '@/types/component'
-  import type { DockerContainerItem } from '../api'
+  import CreateContainerDrawer from '../components/create-container-drawer.vue'
+  import WorkloadBatchBar from '../components/workload-batch-bar.vue'
+  import WorkloadDrawer from '../components/workload-drawer.vue'
+  import WorkloadTable from '../components/workload-table.vue'
+  import type { DockerWorkloadItem } from '../api'
   import { runErrorMessage, useDockerCmds } from '../composables/useDockerCmds'
-  import { useDockerHostState } from '../composables/useDockerHostState'
-  import { actionGuarded, lookupDockerAction, needsConfirm, protectedGate } from '../utils/actions'
-  import { containerStateText, cpuText, memText, netText, portsText } from '../utils/display'
-  import { provideDockerHost } from '../utils/host-context'
-  import { filterContainers } from '../utils/snapshot'
+  import { useWorkloadList } from '../composables/useWorkloadList'
+  import { actionGuarded, lookupDockerAction, needsConfirm } from '../utils/actions'
+  import { hostLabel } from '../utils/host'
 
-  const router = useRouter()
-  // 主机上下文是**页面级** provide/inject：DockerPage 与 HostSwitcher 都用 useDockerHost() 取它，
-  // 而模块里没有别的 provide 调用方 —— 页面就是这一层的提供者，故在这里 provide 并直接用其返回值。
-  // 不要解构：上下文字段是 getter，解构会把 hostId 定格成进入页面时的 ''（主机清单尚未到达）。
-  const ctx = provideDockerHost()
-  const { hasAuth } = useAuth()
+  defineOptions({ name: 'DockerContainers' })
 
+  const route = useRoute()
+  // 页头图标与侧边栏/页签同源（取菜单图标，改「菜单管理」即同步；见 usePageIcon）
+  const pageIcon = usePageIcon('ri:ship-line')
+
+  // ── 筛选（ArtSearchBar；三项全部作为 query 发给端点，服务端过滤）──
   const showSearchBar = ref(false)
-  const searchForm = ref<{ keyword?: string; state?: string; runningOnly?: boolean }>({})
-  /** 当前勾选的行（批量动作的输入；行对象由表格给出）。 */
-  const selected = ref<DockerContainerItem[]>([])
+  const searchForm = ref<{ keyword?: string; state?: string; host?: string }>({})
 
-  const canManage = computed(() => hasAuth(PermDockerManage))
-  const canDelete = computed(() => hasAuth(PermDockerDelete))
-  const canExec = computed(() => hasAuth(PermDockerExec))
-  /** 至少有一个写权限才渲染勾选列：没有可执行的动作，勾选只是困惑（照设备页纪律）。 */
-  const canWrite = computed(() => canManage.value || canDelete.value)
-
-  // 快照与四态收口在 composable（hosts 清单、seq 守卫、主机切换后的重拉都在它里面）。
-  // 主机切换 = 换一台机器：本页既有重置纪律是「清空筛选 + 清空勾选」，故挂在 onHostSwitch。
-  const { state, loading, listLoading, stale, ageSeconds, neverReported, refresh } =
-    useDockerHostState({
-      onHostSwitch: () => {
-        selected.value = []
-        searchForm.value = {}
-      }
+  // 数据与四态收口在 composable（拉取/seq 守卫/截断结论/10s 自动刷新含失活停表）：
+  // 参数从筛选表单**现取**（表单字段是 host，端点参数是 hostId —— 映射收在这里，
+  // 不让 ArtSearchBar 的 key 泄漏进数据层），改筛选后由页面触发 load 即生效。
+  const {
+    rows,
+    total,
+    hosts,
+    loading,
+    truncated,
+    pageState,
+    subtitle,
+    autoRefresh,
+    load,
+    refresh,
+    refreshSilent,
+    reloadAll
+  } = useWorkloadList({
+    params: () => ({
+      hostId: searchForm.value.host,
+      state: searchForm.value.state,
+      keyword: searchForm.value.keyword
     })
+  })
 
-  // 写指令通道：受理 + 轮询 + 成功后重拉（重拉就是上面的 refresh）。
-  const { run, pendingId, busy } = useDockerCmds({ refresh })
+  const hasFilter = computed(
+    () =>
+      Boolean(searchForm.value.keyword) ||
+      Boolean(searchForm.value.state) ||
+      Boolean(searchForm.value.host)
+  )
+
+  const hostOptions = computed(() => hosts.value.map((h) => ({ label: hostLabel(h), value: h.id })))
 
   const searchItems = computed(() => [
     {
@@ -215,6 +244,8 @@
       clearable: true
     },
     {
+      // 端点只有两档（stopped = 一切非 running，与总览 KPI 同一句）；
+      // 旧的五状态 select 与「仅运行中」开关都折叠进这一项。
       key: 'state',
       label: '状态',
       type: 'select',
@@ -222,85 +253,83 @@
       clearable: true,
       options: [
         { label: '运行中', value: 'running' },
-        { label: '已停止', value: 'exited' },
-        { label: '已创建', value: 'created' },
-        { label: '重启中', value: 'restarting' },
-        { label: '已暂停', value: 'paused' }
+        { label: '已停止', value: 'stopped' }
       ]
     },
-    { key: 'runningOnly', label: '仅运行中', type: 'switch' }
+    {
+      // 主机维度从页面级上下文（HostSwitcher）降为筛选项：全部主机 + 各台。
+      key: 'host',
+      label: '主机',
+      type: 'select',
+      placeholder: '全部主机',
+      clearable: true,
+      options: hostOptions.value
+    }
   ])
 
-  const hasFilter = computed(
-    () =>
-      Boolean(searchForm.value.keyword) ||
-      Boolean(searchForm.value.state) ||
-      Boolean(searchForm.value.runningOnly)
+  function onSearch() {
+    // 服务端过滤：搜索按钮即重拉（无分页可重置）。
+    showSearchBar.value = true
+    void load()
+  }
+
+  function onReset() {
+    searchForm.value = {}
+    void load()
+  }
+
+  // `/docker/containers?host=` 深链兼容（总览主机卡片、详情页「返回列表」的既有链路）：
+  // query 里的主机作为**主机筛选初始值** —— 单向（用户改筛选不回写 query，
+  // host 从此是筛选状态而不是页面状态）。
+  watch(
+    () => route.query.host,
+    (raw, old) => {
+      const id = raw ? String(raw) : ''
+      const had = searchForm.value.host ?? ''
+      searchForm.value.host = id
+      // immediate 首跑（old 为 undefined）必拉一次；此后仅 query 真的变化时重拉 ——
+      // 没 host 深链时 id 与 had 都是 ''，靠 old 区分「首次进入」与「同值重复」。
+      if (id !== had || old === undefined) void load()
+    },
+    { immediate: true }
   )
 
-  const filtered = computed(() => filterContainers(state.value?.containers ?? [], searchForm.value))
+  // ── 单行写操作（按行主机派发）────────────────────────────
+  /**
+   * 指令通道的主机来源：菜单/确认流发起前锁定到目标行的 hostId（useDockerCmds 在
+   * run 入口处求值，换 ref 即切主机）。同表不同机的行各发各的主机，不再有「页面
+   * 当前主机」的概念。
+   */
+  const cmdHostId = ref('')
+  const { run, pendingId, busy } = useDockerCmds({
+    hostId: () => cmdHostId.value,
+    refresh: refreshSilent
+  })
 
-  /** 有命中行就渲染表格；纯加载中也用表格的 loading 遮罩，空态只在加载结束后判断。 */
-  const showTable = computed(() => listLoading.value || filtered.value.length > 0)
-
-  // ── 单个操作 ──
-
-  interface RowConfirm {
+  /** 行菜单/确认弹窗的目标行（确认提交时主机与目标都取它）。 */
+  interface RowConfirmState {
     visible: boolean
     action: string
     target: string
-    /** 目标是否受保护（快照里 agent 算好的结论，前端不重复判断）。 */
     protected: boolean
+    row: DockerWorkloadItem | null
   }
 
-  const rowConfirm = ref<RowConfirm>({ visible: false, action: '', target: '', protected: false })
+  const rowConfirm = ref<RowConfirmState>({
+    visible: false,
+    action: '',
+    target: '',
+    protected: false,
+    row: null
+  })
   const confirmLoading = ref(false)
+  /** 批量在途（批量栏 emit 上报）：行菜单据此禁用，防与批量并发提交同一目标。 */
+  const batchBusy = ref(false)
 
-  /** ⋯ 菜单条目：只读的「日志」+ 注册表里的写动作；标签/权限/危险色全部取自注册表。 */
-  interface RowMenuItem {
-    key: string
-    label: string
-    icon?: string
-    auth?: string
-    color?: string
-    disabled?: boolean
-  }
-
-  function rowMenuItems(row: DockerContainerItem): RowMenuItem[] {
-    // 受保护 + 无强制权限：受保护档约束的动作不可执行 —— 条目禁用并把结论写在条目上
-    // （禁用的条目点不动，结论只能在看得见的地方给）。
-    const blocked = !protectedGate({ protected: row.protected }, canExec.value).allowed
-    const pending = pendingId.value === row.name
-    const writeItem = (action: string): RowMenuItem | null => {
-      const entry = lookupDockerAction(action)
-      // 注册表里没有的动作不进菜单：宁可少一项，也不生成一个没权限/没确认档的裸按钮。
-      if (!entry) return null
-      return {
-        key: action,
-        label: blocked ? `🔒 ${entry.label}（需要更高权限）` : entry.label,
-        icon: entry.icon,
-        auth: entry.perm,
-        color: entry.danger === 'normal' ? undefined : 'var(--art-danger)',
-        disabled: pending || blocked || batchRunning.value
-      }
-    }
-    return [
-      { key: 'logs', label: '日志', icon: 'ri:file-list-3-line' },
-      // 启动/停止按容器状态二选一（spec §11.1）；其余状态（已停止/已创建）给「启动」。
-      writeItem(row.state === 'running' ? 'container:stop' : 'container:start'),
-      writeItem('container:restart'),
-      writeItem('container:remove')
-    ].filter((item): item is RowMenuItem => item !== null)
-  }
-
-  function onRowMenu(row: DockerContainerItem, item: { key: string | number }) {
-    const key = String(item.key)
+  function onMenuSelect(payload: { row: DockerWorkloadItem; key: string }) {
+    const { row, key } = payload
     if (key === 'logs') {
-      router.push({
-        name: 'DockerContainerDetail',
-        params: { id: row.id },
-        query: { host: ctx.hostId, tab: 'logs' }
-      })
+      openDrawer(row, 'logs')
       return
     }
     if (!lookupDockerAction(key)) return
@@ -310,30 +339,30 @@
     // （启停/重启本身没有确认档，普通容器依然点了直接发）。
     const needsForceInput = row.protected === true && actionGuarded(key)
     if (!needsConfirm(key, options) && !needsForceInput) {
-      void runWrite(key, row.name, options)
+      void runWrite(key, row, options)
       return
     }
     rowConfirm.value = {
       visible: true,
       action: key,
       target: row.name,
-      protected: row.protected === true
+      protected: row.protected === true,
+      row
     }
   }
 
   /**
-   * 发一条写指令并把结论给用户。
-   *
-   * 成功后的快照重拉在 composable 里（立即 + 落定各一次，见其注释）；这里只补一句
-   * 结果 —— detail（agent 的结论句）优先，它比「操作已完成」具体。
+   * 发一条写指令并把结论给用户。主机在入口锁定为该行的 hostId（跨主机表的写操作
+   * 就是「对那台机器上的那个容器」动手）；成功后的静默重拉在 composable 里。
    */
   async function runWrite(
     action: string,
-    target: string,
+    row: DockerWorkloadItem,
     options?: Record<string, unknown>,
     confirm?: string
   ) {
-    const res = await run({ action, target, options, confirm })
+    cmdHostId.value = row.hostId
+    const res = await run({ action, target: row.name, options, confirm })
     if (res.ok) ElMessage.success(res.detail || '操作已完成')
     else ElMessage.error(runErrorMessage(res, '操作未完成'))
     return res
@@ -341,250 +370,55 @@
 
   /** 确认弹窗提交：force 只在「强制操作」开关出现且被勾选时为 true。 */
   async function onConfirmSubmit(payload: { confirm: string; force: boolean }) {
-    const { action, target } = rowConfirm.value
-    const options: Record<string, unknown> = { target }
+    const state = rowConfirm.value
+    if (!state.row) return
+    const options: Record<string, unknown> = { target: state.target }
     if (payload.force) options.force = true
     confirmLoading.value = true
     try {
-      await runWrite(action, target, options, payload.confirm)
+      await runWrite(state.action, state.row, options, payload.confirm)
     } finally {
       confirmLoading.value = false
-      rowConfirm.value = { ...rowConfirm.value, visible: false }
+      rowConfirm.value = { ...state, visible: false }
     }
   }
 
-  // ── 勾选栏批量（spec §11.1 / §11.6）──
+  // ── 勾选与批量（栏与弹窗在 WorkloadBatchBar）────────────────
+  const selected = ref<DockerWorkloadItem[]>([])
 
-  interface BatchFailure {
-    name: string
-    message: string
-  }
-
-  const batchRunning = ref(false)
-  const batchDisabled = computed(() => batchRunning.value || busy.value)
-  const batchRemove = ref<{ visible: boolean; input: string; rows: DockerContainerItem[] }>({
-    visible: false,
-    input: '',
-    rows: []
-  })
-
-  function onSelectionChange(rows: DockerContainerItem[]) {
+  function onSelectionChange(rows: DockerWorkloadItem[]) {
     selected.value = rows
   }
 
-  function openBatchRemove() {
-    batchRemove.value = { visible: true, input: '', rows: [...selected.value] }
+  // ── 详情抽屉 ─────────────────────────────────────────────
+  const drawerVisible = ref(false)
+  const drawerRow = ref<DockerWorkloadItem | null>(null)
+  const drawerTab = ref<'overview' | 'logs' | 'pty'>('overview')
+
+  /** 打开抽屉（行「详情」按钮落概览，行菜单「日志」落日志 Tab）。 */
+  function openDrawer(row: DockerWorkloadItem, tab: 'overview' | 'logs' | 'pty') {
+    drawerRow.value = row
+    drawerTab.value = tab
+    drawerVisible.value = true
   }
 
-  function confirmBatchRemove() {
-    if (batchRemove.value.input !== 'DELETE') return
-    const rows = batchRemove.value.rows
-    batchRemove.value = { visible: false, input: '', rows: [] }
-    void runBatch('container:remove', rows)
-  }
+  // ── 创建容器（4a 创建面）────────────────────────────────────
+  // 权限与 container:start 同档（docker:manage —— 创建不删不停任何现存目标）。
+  const { hasAuth } = useAuth()
+  const canManage = computed(() => hasAuth(PermDockerManage))
 
-  /**
-   * 批量 = 循环发指令（后端没有批量动作，照计划 D2 前端循环）。
-   *
-   * 逐条 await、单条失败不中断：「3 项成功、1 项失败」是可解释的结果，中途放弃会让
-   * 剩下的项处于说不清的状态。固定行键 'batch'：批量期间 pendingId 不属于任何一行，
-   * 界面另用 batchRunning 禁用整条栏防重复提交。
-   *
-   * 受保护的目标批量不发送：批量没有「强制操作」开关可勾，发出去必被拒 ——
-   * 直接按保护档的结论句计入失败，不浪费一条指令，也让原因可读。
-   */
-  async function runBatch(action: string, rows: DockerContainerItem[]) {
-    if (batchRunning.value || rows.length === 0) return
-    // 复制一份：批量期间表格的勾选可能随重拉变化，正在执行的这一批不能跟着变。
-    const targets = [...rows]
-    // 批量跨主机是**同名不同机**的错误操作：主机一换，剩余项就不再发送。
-    const hostAtStart = ctx.hostId
-    batchRunning.value = true
-    let done = 0
-    const failures: BatchFailure[] = []
-    try {
-      for (const row of targets) {
-        if (ctx.hostId !== hostAtStart) {
-          failures.push({ name: row.name, message: '主机已切换，未执行' })
-          continue
-        }
-        const gate = protectedGate({ protected: row.protected }, canExec.value)
-        if (gate.protected) {
-          failures.push({ name: row.name, message: gate.conclusion })
-          continue
-        }
-        const res = await run({ action, target: row.name, key: 'batch' })
-        if (res.ok) done += 1
-        else failures.push({ name: row.name, message: runErrorMessage(res, '操作未完成') })
-      }
-    } finally {
-      batchRunning.value = false
-    }
-    const message = batchSummary(done, failures)
-    if (failures.length > 0) ElMessage({ type: 'warning', message, duration: 5000 })
-    else ElMessage.success(message)
-  }
+  const createVisible = ref(false)
+  /** 打开抽屉时预选的主机（= 当前筛选的那台；没筛选则抽屉自己落到第一台可用主机）。 */
+  const createHostId = ref('')
 
-  /** 结论句汇总：成功数 + 失败数 + 前三条失败原因（再多也读不完，余下只计数）。 */
-  function batchSummary(done: number, failures: BatchFailure[]): string {
-    const head = `已执行 ${done} 项`
-    if (failures.length === 0) return head
-    const shown = failures.slice(0, 3).map((f) => `${f.name}（${f.message}）`)
-    if (failures.length > shown.length) shown.push(`另有 ${failures.length - shown.length} 项`)
-    return `${head}，${failures.length} 项失败：${shown.join('；')}`
-  }
-
-  // ── 表格列 ──
-
-  const columns = computed<ColumnOption<DockerContainerItem>[]>(() => {
-    // 显式建立依赖：行内菜单的禁用态来自这些信号，而 formatter 要到表格渲染时才执行 ——
-    // 不在这里读一次，列配置就不会随它们变化而重算（表格会停在旧状态）。
-    void pendingId.value
-    void batchRunning.value
-    void canExec.value
-    // 列优先级：手机横屏（<768）只留「名称 / 状态 / 操作」与勾选列，序号让位；
-    // 平板竖屏（>=768）补上排查要看的事实（CPU、内存、镜像、端口、保护）；
-    // 网络吞吐只在桌面（>=1024）展示。数据列一律 minWidth（宽屏按比例分摊），
-    // 固定宽度只留给 selection/index/操作这类结构性列，见 responsive-columns.ts 的约定。
-    return [
-      // 勾选列只在有写权限时出现：没这个权限的人看到一个用不上的勾选框只会困惑。
-      ...(canWrite.value ? [{ type: 'selection' as const, width: 46 }] : []),
-      { type: 'index' as const, width: 60, label: '序号', hideBelow: 'tablet' },
-      { prop: 'name', label: '名称', minWidth: 200, showOverflowTooltip: true },
-      {
-        prop: 'statusText',
-        label: '状态',
-        minWidth: 190,
-        formatter: (row: DockerContainerItem) => containerStateText(row)
-      },
-      {
-        prop: 'cpuPercent',
-        label: 'CPU',
-        minWidth: 90,
-        hideBelow: 'tablet',
-        formatter: (row: DockerContainerItem) => cpuText(row)
-      },
-      {
-        prop: 'memUsageMb',
-        label: '内存',
-        minWidth: 170,
-        hideBelow: 'tablet',
-        formatter: (row: DockerContainerItem) => memText(row)
-      },
-      {
-        prop: 'netTxBytesSec',
-        label: '网络',
-        minWidth: 190,
-        // 吞吐是三类资源指标里最次要的（列也最宽），平板竖屏也隐藏，桌面起展示。
-        hideBelow: 'desktop',
-        formatter: (row: DockerContainerItem) => netText(row)
-      },
-      {
-        prop: 'image',
-        label: '镜像',
-        minWidth: 180,
-        showOverflowTooltip: true,
-        // 版本/来源是排查身份的一部分，平板竖屏保留。
-        hideBelow: 'tablet'
-      },
-      {
-        prop: 'ports',
-        label: '端口',
-        minWidth: 160,
-        // 连通性排查的第一线索（服务为什么进不去），平板竖屏保留。
-        hideBelow: 'tablet',
-        formatter: (row: DockerContainerItem) => portsText(row.ports)
-      },
-      {
-        prop: 'protected',
-        label: '保护',
-        minWidth: 96,
-        // 保护是「动手前必须看见」的事实（spec §11.1 草图的 🔒）：列表上给可见标记，
-        // 权限不足时的结论句写在被禁用的菜单条目上（那里才是用户看得到的地方）。
-        // 小屏横屏让位后，这条结论仍会出现在 ⋯ 菜单（禁用条目）与确认弹窗里。
-        hideBelow: 'tablet',
-        formatter: (row: DockerContainerItem) => (row.protected ? '🔒 受保护' : '—')
-      },
-      {
-        prop: 'operation',
-        label: '操作',
-        width: 100,
-        fixed: 'right' as const,
-        formatter: (row: DockerContainerItem) =>
-          // 主操作「详情」常驻图标按钮，次要操作收进 ⋯（spec §11.0：不把详情埋进下拉）。
-          h('div', { class: 'flex items-center' }, [
-            hasAuth(PermDockerInspect)
-              ? h(ArtButtonTable, {
-                  type: 'view',
-                  title: '详情',
-                  onClick: () =>
-                    router.push({
-                      name: 'DockerContainerDetail',
-                      params: { id: row.id },
-                      query: { host: ctx.hostId }
-                    })
-                })
-              : null,
-            h(ArtButtonMore, {
-              list: rowMenuItems(row),
-              onClick: (item: { key: string | number }) => onRowMenu(row, item)
-            })
-          ])
-      }
-    ]
-  })
-
-  function onSearch() {
-    // 搜索是**本地筛选**（快照已在手）：不打接口，故不需要分页重置。
-    showSearchBar.value = true
-  }
-  function onReset() {
-    searchForm.value = {}
+  function openCreate() {
+    createHostId.value = searchForm.value.host ?? ''
+    createVisible.value = true
   }
 </script>
 
 <style lang="scss" scoped>
-  // 空态渲染在本页（ArtTable 不转发 `#empty`）：给它接近表格空态的留白。
-  .docker-empty {
-    padding: 56px 0;
-  }
-
-  // 勾选栏：与底栏合计同一套留白，只有选中时出现。
-  .docker-batch {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    align-items: center;
-    padding: 12px 16px 0;
-
-    &__count {
-      color: var(--el-text-color-secondary);
-      font-size: 13px;
-    }
-  }
-
-  // 批量删除弹窗：目标清单一屏看完（多了内部滚动），用户才知道这一下动的是哪些。
-  .batch-del {
-    &__line {
-      font-size: 13px;
-      line-height: 1.6;
-    }
-
-    &__list {
-      margin: 8px 0;
-      padding-left: 18px;
-      max-height: 180px;
-      overflow: auto;
-      color: var(--el-text-color-secondary);
-      font-size: 13px;
-    }
-
-    &__lock {
-      margin-left: 6px;
-    }
-
-    &__input {
-      margin-top: 8px;
-    }
-  }
+  /* 页面骨架（hero/三态/动效降级）下沉在 views/wkl-shell.scss（本模块两页共用的
+   * 范式样式）；这里只留本页特有的布局。令牌出处见 overview-tokens.scss 文件头。 */
+  @use './wkl-shell';
 </style>

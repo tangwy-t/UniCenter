@@ -1,6 +1,7 @@
 package agentproto
 
 import (
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -25,6 +26,14 @@ import (
 // 而把全集放在协议里让两端对「合法 action」只有一个答案。哪些**本构建已实现**是
 // 消费端的事实（agent 的 dispatcher 自己列），不进协议 —— 否则每加一期都要动协议。
 const (
+	// DockerActionContainerCreate 是创建容器（四支柱·创建面，4a）：消灭「拉了镜像
+	// 跑不起来」的闭环断裂。与启停同级写操作（docker:manage）；它**没有 target** ——
+	// 动作对象是「将要诞生的容器」而不是已存在的目标，必填项只有 options.image。
+	// 名字冲突/镜像缺失由 agent 折成结论句（不自动拉取：拉取是独立长耗时 action）。
+	//
+	// 确认档是标准档：创建可逆（remove 即可），不需要「照抄什么」的强确认。
+	DockerActionContainerCreate = "container:create"
+
 	DockerActionContainerStart   = "container:start"
 	DockerActionContainerStop    = "container:stop"
 	DockerActionContainerRestart = "container:restart"
@@ -32,6 +41,25 @@ const (
 	DockerActionContainerLogs    = "container:logs"
 	DockerActionContainerInspect = "container:inspect"
 	DockerActionContainerExec    = "container:exec"
+	// DockerActionContainerStats 是 stats 实时流（监控面）：会话制 action，建立后
+	// 数据走 agent.docker.frame（会话内逐样本一帧），权限与 container:logs 同档。
+	DockerActionContainerStats = "container:stats"
+	// DockerActionEvents 是事件实时流（docker events 订阅，总览页「活动流」的数据源，
+	// 六期·监控面）。与 stats 一样是**会话制**（建立后数据走 agent.docker.frame，
+	// 逐事件一条 JSON 行，见 DockerEventItem），但它是 **host 级** action：
+	// 动作对象是「这台主机的 docker daemon」而不是某个容器/镜像 —— 每台主机只有一个
+	// daemon，指令本身经由哪条 agent 连接下发就作用于哪台主机，故 target 恒为空、
+	// Required 为空集（与 prune 类的「没有单一目标名」是同一形态：约束 = 显式空集）。
+	//
+	// 为什么叫 docker:events 而不是 host:events：白名单的命名文法一直是「资源前缀:
+	// 动作」（container:/image:/volume:/network:/compose:），host: 会为一个成员新开一支
+	// 资源家族；而事件流的语义恰是 `docker system events` —— daemon 本身就是这个动作
+	// 的资源对象，docker: 前缀让「资源」升到域级而不是造一个新家族。
+	//
+	// 它是 **core 的常驻订阅**（core 自己是这条流的客户端，再扇出给多个 console 会话），
+	// **不经用户的指令面**：dockerpolicy 表里没有它 —— 用户往 /docker/hosts/:id/cmds
+	// 发它会被判「未知操作」，core 的常驻管理器自己在内部建 ref 并收发（§常驻管理器）。
+	DockerActionEvents = "docker:events"
 
 	DockerActionImageRemove  = "image:remove"
 	DockerActionImagePrune   = "image:prune"
@@ -60,6 +88,24 @@ const (
 	DockerActionComposeFileWrite    = "compose.file:write"
 	DockerActionComposeFileValidate = "compose.file:validate"
 	DockerActionComposeFilePatch    = "compose.file:patch"
+
+	// DockerActionComposeLogs 是一个 compose 项目的**聚合日志**（五期 5a，后端半边）：
+	// 排障时逐容器开日志，多服务项目一条条点既慢又看不出交错时序 —— 这里把
+	// `docker compose -p <项目> logs` 的整段输出聚成**一条**带服务前缀的流。
+	//
+	// 形态对齐 container:logs 的流式分支（options.follow/tail，不发明新字段），差别
+	// 有三点，全部来自「CLI 而不是 daemon API 是数据源」这一事实：
+	//   - **天生会话制**：CLI 输出只能以流读取（follow=长流；非 follow=读完即 eof），
+	//     没有一次性取回的形态，options.follow 只是决定是否给 CLI 传 --follow；
+	//   - **since 不支持**：公共子集纪律（§6.1）—— compose v1 的 logs 没有 --since
+	//     flag，带 since 的请求在这里被拒而不是静默无视（用户要「十分钟以来」而拿到
+	//     「最近 100 行」是一个静默的错误答案，照 backup 的字段归属纪律显式拒绝）；
+	//   - 输出**原文透传**：compose 的日志行本身已是 `<时间戳> <服务>  | 正文` 的
+	//     聚合形态（CLI 侧带 --timestamps），协议不做二次解析。
+	//
+	// target 是项目名（复用 compose 项目名的白名单与校验）。确认档是标准档：读日志
+	// 不改任何状态，保护档（force）对它没有意义。
+	DockerActionComposeLogs = "compose:logs"
 )
 
 // 确认档的取值形态（§10 第 1 条）：标准档空、固定文本、照抄目标名、照抄文件名。
@@ -116,6 +162,27 @@ const (
 	// docker:exec 权限与 agent 侧的「不拼 shell」执行纪律。
 	maxDockerExecArgvItems = 32
 	maxDockerExecArgvBytes = 256
+	// maxDockerRegistrySecretBytes 是仓库凭据密码的字节上限（4c）：密码会被加密封成
+	// 短字符串存入凭据库、随消息瞬时下发到 agent，给一个与协议其它自由文本同档的
+	// 上限挡住畸形/恶意的超长值（真实仓库密码远用不到 4KB）。
+	maxDockerRegistrySecretBytes = 4096
+	// maxDockerRegistryAddrBytes 是仓库地址的字节上限（主机名+端口最长的合法形态
+	// 也远小于此，上限只为挡住畸形/恶意的超长字符串挤占凭据表索引）。
+	maxDockerRegistryAddrBytes = 255
+
+	// ── 四支柱·创建面（container:create）的 options 上限 ─────────────────
+	//
+	// maxDockerCreateListItems 是 ports/env/mounts 各自的条目上限（与 exec argv 的
+	// 32 同族：表单里一次建容器用不到几十条，上限只为挡住畸形/恶意的巨数组）。
+	maxDockerCreateListItems = 32
+	// maxDockerCPULimit 是 cpu_limit 的核数上限：现场主机多为 8-16 核，32 的
+	// 上限只为防手滑（把 1000 写进核数会让 daemon 给这台容器开一个
+	// 「配额等于整机」的口子，而用户自以为只是设了个上限）。
+	maxDockerCPULimit = 32
+	// maxDockerMemLimitMB 是 mem_limit_mb 的上限（MB）：32GB。取 32GB 与 CPU 的
+	// 32 核同档 —— 上限要的是「拦手滑」而不是「限制场景」；0 = 不限额（缺席形态，
+	// 与 logs 的 tail=0 同语义）。
+	maxDockerMemLimitMB = 32 << 10
 )
 
 // DockerActionSpec 是 action 的静态属性中**两端都必须一致**的那部分。
@@ -142,6 +209,9 @@ type DockerActionSpec struct {
 
 // dockerActionSpecs 是白名单的**唯一枚举源**（顺序 = §3.3 书写顺序）。
 var dockerActionSpecs = []DockerActionSpec{
+	// create 只有 image 必填：其余全是「给了就按白名单校验」的可选项。名字冲突
+	// 由 agent 对照 daemon 的 409 折成结论句，这里只需保证「image 是个合法的镜像引用」。
+	{Action: DockerActionContainerCreate, Required: []string{"image"}},
 	{Action: DockerActionContainerStart, Required: []string{"target"}},
 	{Action: DockerActionContainerStop, Required: []string{"target"}},
 	{Action: DockerActionContainerRestart, Required: []string{"target"}},
@@ -150,6 +220,11 @@ var dockerActionSpecs = []DockerActionSpec{
 	{Action: DockerActionContainerLogs, Required: []string{"target"}},
 	{Action: DockerActionContainerInspect, Required: []string{"target"}},
 	{Action: DockerActionContainerExec, Required: []string{"target"}},
+	{Action: DockerActionContainerStats, Required: []string{"target"}},
+	// events 是 host 级订阅（动作对象是 daemon 本身）：没有 target 也没有任何必填项 ——
+	// Required 空集 + Confirm 标准档 = 一条零参数指令，「带上 target 也只是被无视」
+	// 的宽松由校验机制的自然语义给出（validateDockerTarget 只在 target 非空时跑）。
+	{Action: DockerActionEvents},
 
 	{Action: DockerActionImageRemove, Required: []string{"target"}},
 	{Action: DockerActionImagePrune, Confirm: DockerConfirmDelete},
@@ -182,6 +257,10 @@ var dockerActionSpecs = []DockerActionSpec{
 		OneOf: [][]string{{"content", "backup"}}, Confirm: DockerConfirmTarget},
 	{Action: DockerActionComposeFileValidate, Required: []string{"target", "content"}},
 	{Action: DockerActionComposeFilePatch, Required: []string{"target", "base_hash", "patch"}, Confirm: DockerConfirmTarget},
+
+	// 聚合日志（5a）：target=项目名必填；follow/tail 与 container:logs 同名同义
+	//（follow 只是 CLI 的 --follow 开关 —— 两种形态都是流会话，见常量注释）。
+	{Action: DockerActionComposeLogs, Required: []string{"target"}},
 }
 
 // dockerOptionFields 是 DockerCmdOptions 的全部字段名（与 JSON tag 一一对应）。
@@ -189,6 +268,11 @@ var dockerOptionFields = []string{
 	"target", "tail", "since", "n", "force", "filename", "overwrite", "all",
 	"remove_orphans", "volumes", "content", "base_hash", "src", "dst", "patch",
 	"follow", "command", "backup",
+	// 四支柱·创建面（4a）。
+	"image", "name", "ports", "env", "mounts", "restart_policy", "cpu_limit",
+	"mem_limit_mb", "network", "start",
+	// 4c 仓库凭据。
+	"registry",
 }
 
 // AllDockerActions 返回全部合法 action（顺序 = 白名单书写顺序）。
@@ -233,6 +317,11 @@ var (
 	// `<配置文件>.bak-<令牌>` —— 路径分隔符/`..`/空白因此都不可能出现在这条通道上
 	// （§8 路径白名单：协议上永远不出现路径）。
 	dockerBackupTokenRe = regexp.MustCompile(`^\d{8}-\d{6}$`)
+	// 仓库地址（4c）：主机名（label 形态，含点/横线/xhy，或 IP）+ 可选 `:端口`。
+	// **不含协议头与镜像路径** —— RegistryAuth 的 ServerAddress 与凭据库的唯一键
+	// 都是这个形态；带 scheme 或 "registry/img:tag" 会被判成形态非法而不是静默截断，
+	// 否则「用户要的凭据」与「下发主机地址」可能被截成两把不同的键。
+	dockerRegistryAddrRe = regexp.MustCompile(`^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\.)*[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?::([0-9]{1,5}))?$`)
 )
 
 // IsDockerProjectName 报告 s 是否是合法的 compose 项目名。
@@ -243,6 +332,24 @@ func IsDockerTarFilename(s string) bool { return s != "" && dockerTarFilenameRe.
 
 // IsDockerImageRef 报告 s 是否是合法的镜像引用（含 digest 形态）。
 func IsDockerImageRef(s string) bool { return s != "" && dockerImageRefRe.MatchString(s) }
+
+// IsDockerRegistryAddr 报告 s 是否是合法的仓库地址（4c）：主机名/IP + 可选端口
+// （1-65535），不带协议头与镜像路径（见 dockerRegistryAddrRe 的说明）。这是
+// 「凭据能不能被安全地放进 RegistryAuth.ServerAddress」的形态闸。
+func IsDockerRegistryAddr(s string) bool {
+	if s == "" || len(s) > maxDockerRegistryAddrBytes {
+		return false
+	}
+	m := dockerRegistryAddrRe.FindStringSubmatch(s)
+	if m == nil {
+		return false
+	}
+	if m[1] != "" { // 端口是捕获组：形态对还要数值合法（1-65535）
+		p, err := strconv.Atoi(m[1])
+		return err == nil && p >= 1 && p <= 65535
+	}
+	return true
+}
 
 // IsDockerBackupToken 报告 s 是否是合法的备份令牌（yyyyMMdd-HHmmss）。
 // 它是 compose.file:write 回滚模式的**唯一**现场输入，agent 据此重建备份文件路径。
@@ -281,6 +388,21 @@ func IsDockerSessionID(s string) bool {
 	}
 	return true
 }
+
+// DockerPullSessionID 返回一条拉取指令的**进度会话句柄**：`"pull_" + ref`。
+//
+// 与普通流会话的两处刻意不同（4b，拉取进度）：
+//   - **确定性派生**而不是随机：拉取是长耗时写操作，会话必须在 core **受理指令时**
+//     就登记（agent 收到指令才可能开始拉取，届时再经 result 上报句柄就太晚了 ——
+//     result 只在拉取**结束**时回）。两端用同一个派生函数，谁都不需要等谁的句柄；
+//   - **公开不是问题**：会话 id 用于欺骗的对象价值为零 —— 它不授权任何事。帧归属
+//     由 device 匹配校验（篡改会话 id 只会让帧被丢弃），接入由「记录发起人 + 权限码」
+//     双闸（端点校验），进来的路径根本不认这个串。真正的句柄保密纪律仍由随机会话
+//     id 承担（IsDockerSessionID 的说明），本函数**只用于拉取进度这一种形态**。
+//
+// 前缀 5 字符保证总长过 IsDockerSessionID 的 16 字节下限（ref 是 ≥19 位的十进制串），
+// 即使未来 ref 生成器变短，5+11=16 仍然成立（ref 的最短合法形态也不会再短）。
+func DockerPullSessionID(ref string) string { return "pull_" + ref }
 
 // ── options 取值与校验 ──────────────────────────────────────────────────
 
@@ -348,6 +470,48 @@ func dockerOptionValue(o *DockerCmdOptions, field string) string {
 		return "set"
 	case "backup":
 		return o.Backup
+	case "image":
+		return o.Image
+	case "name":
+		return o.Name
+	case "ports":
+		if len(o.Ports) == 0 {
+			return ""
+		}
+		return "set"
+	case "env":
+		if len(o.Env) == 0 {
+			return ""
+		}
+		return "set"
+	case "mounts":
+		if len(o.Mounts) == 0 {
+			return ""
+		}
+		return "set"
+	case "restart_policy":
+		return o.RestartPolicy
+	case "cpu_limit":
+		// 0 与缺席同义（都表示「不限额」），故零值视为未填。
+		if o.CPULimit == 0 {
+			return ""
+		}
+		return strconv.FormatFloat(o.CPULimit, 'g', -1, 64)
+	case "mem_limit_mb":
+		if o.MemLimitMB == 0 {
+			return ""
+		}
+		return strconv.Itoa(o.MemLimitMB)
+	case "network":
+		return o.Network
+	case "start":
+		// 指针字段：nil = 缺席；指向 false 也算「已填」（显式 false 与缺席不同义）。
+		if o.Start == nil {
+			return ""
+		}
+		return strconv.FormatBool(*o.Start)
+	case "registry":
+		return o.Registry
 	default:
 		// 未知字段名返回空串 = 必填校验失败：字段名写错是可发现的红灯，不是静默放行。
 		return ""
@@ -419,6 +583,13 @@ func ValidateDockerCmdOptions(action string, o *DockerCmdOptions) error {
 	if o.Since < 0 {
 		return decodeErr(StagePayload, "since", ErrInvalidPayload)
 	}
+	// since 的归属（5a）：compose:logs 的 CLI 公共子集里没有 --since（v1 不支持，
+	// §6.1 纪律只用三 flavor 都认的 flag）。挂在它身上必须**显式拒绝**而不是静默无视：
+	// 用户要「T 时刻以来的日志」而拿到「最近 N 行」是一个静默的错误答案 ——
+	// 字段归属纪律与 backup / registry 同一取向（归属唯一的字段，拒绝优于无视）。
+	if o.Since > 0 && action == DockerActionComposeLogs {
+		return decodeErr(StagePayload, "since", ErrInvalidPayload)
+	}
 	if o.N != nil && (*o.N < 0 || *o.N > maxDockerScaleN) {
 		return decodeErr(StagePayload, "n", ErrInvalidPayload)
 	}
@@ -452,6 +623,24 @@ func ValidateDockerCmdOptions(action string, o *DockerCmdOptions) error {
 			return err
 		}
 	}
+	// 创建面（4a）：create 专属字段只在 create 上校验，出现在别的 action 上则是
+	// **字段归属错误**（照 backup 的先例：协议上字段归属唯一的 action，放行会让
+	// 写错的字段静默变成 payload 里的噪音）。逐字段白名单见 validateDockerContainerCreate。
+	if action == DockerActionContainerCreate {
+		if err := validateDockerContainerCreate(o); err != nil {
+			return err
+		}
+	} else if f := firstSetCreateField(o); f != "" {
+		return decodeErr(StagePayload, f, ErrInvalidPayload)
+	}
+	// 仓库凭据引用（4c）：只属于 image:pull（同 backup 的字段归属纪律），
+	// 形态必须是不带协议头与路径的仓库地址 ——「凭据键」与「RegistryAuth 的
+	// ServerAddress」是同一个值，非法的键不能让它进入凭据查找。
+	if o.Registry != "" {
+		if action != DockerActionImagePull || !IsDockerRegistryAddr(o.Registry) {
+			return decodeErr(StagePayload, "registry", ErrInvalidPayload)
+		}
+	}
 	return nil
 }
 
@@ -460,6 +649,187 @@ func ValidateDockerCmdOptions(action string, o *DockerCmdOptions) error {
 // 收在三个段落：configs/secrets/x-* 这些不进四期的表单模型 —— 它们要改就该切 YML 模式
 // 走全文 write，而不是让补丁带上一个 agent 不认识的手术面。
 var dockerPatchSections = map[string]bool{"services": true, "networks": true, "volumes": true}
+
+// ── 创建面（container:create）options 的逐字段校验 ─────────────────────────
+
+var (
+	// 端口映射条目：`宿主:容器[/协议]`。端口位**必须**是 1-65535 的数字形态 ——
+	// 0（docker 的「随机分配」语义）刻意不进白名单：随机端口让「创建后去哪连」
+	// 无从回答，与其在文档里解释例外的语义，不如直接不支持。
+	// 协议非 tcp 即 udp（sctp 的宿主面几乎没人用，且多数前端/防火墙场景不支持）。
+	// 两个端口号是捕获组（m[1]/m[2]，范围判定要用数值）。
+	dockerPortBindRe = regexp.MustCompile(`^([1-9][0-9]{0,4}):([1-9][0-9]{0,4})(/(tcp|udp))?$`)
+	// env 条目：`KEY=VALUE`。键是 POSIX 风格标识符（首字符字母/下划线）；值不含
+	// NUL（会炸协议字符串）与换行（污染结果展示、也是伪造「多条记录」的常用手法）。
+	dockerEnvRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=[^\x00\n]*$`)
+)
+
+// restartPolicySet 是 restart_policy 的枚举白名单（空 = 缺席，由 docker 默认 no 接住）。
+var restartPolicySet = map[string]bool{
+	"": true, "no": true, "on-failure": true, "always": true, "unless-stopped": true,
+}
+
+// firstSetCreateField 返回第一个被填上的 create 专属字段名（全部缺席 = ""）。
+// 只在 action != create 时被调用：挂在别的 action 上的 create 字段是归属错误，
+// 必须显式拒绝而不是无视。
+func firstSetCreateField(o *DockerCmdOptions) string {
+	switch {
+	case o.Image != "":
+		return "image"
+	case o.Name != "":
+		return "name"
+	case len(o.Ports) > 0:
+		return "ports"
+	case len(o.Env) > 0:
+		return "env"
+	case len(o.Mounts) > 0:
+		return "mounts"
+	case o.RestartPolicy != "":
+		return "restart_policy"
+	case o.CPULimit != 0:
+		return "cpu_limit"
+	case o.MemLimitMB != 0:
+		return "mem_limit_mb"
+	case o.Network != "":
+		return "network"
+	case o.Start != nil:
+		return "start"
+	}
+	return ""
+}
+
+// validateDockerContainerCreate 校验 container:create 的 options **逐字段**。
+//
+// 为什么每个字段都要独立的白名单：这些值最终直传 daemon（SDK 不经 shell ——
+// 注入面不在命令拼接，而在「把什么交给 daemon」），格式仍必须白名单化 —— daemon
+// 侧的名字/引用自由度很大（env 值可含任意字节、挂载源可以是任意路径），不收敛的
+// 后果是把「协议层的模糊非法」摊给每台主机的 daemon 去判，判法随版本漂移。
+// 逐字段校验 = 逐字段失败结论句（decodeErr 带字段名，core 的 400 与 agent 的
+// 拒绝都能指出是哪个字段）。
+//
+// create **没有 target**（动作对象是「将要诞生的容器」，语义都在 image/name）：
+// 带 target 是字段归属错误，显式拒掉 —— 与「create 专属字段不许挂在别的 action
+// 上」是同一纪律的两面，而不是 events 的「带上也放行」式宽松（events 的宽松管
+// 的是 host 级动作的零参数形态，不是字段归属）。
+func validateDockerContainerCreate(o *DockerCmdOptions) error {
+	if o.Target != "" {
+		return decodeErr(StagePayload, "target", ErrInvalidPayload)
+	}
+	if o.Image != "" && !IsDockerImageRef(o.Image) {
+		return decodeErr(StagePayload, "image", ErrInvalidPayload)
+	}
+	if o.Name != "" && !isDockerName(o.Name) {
+		return decodeErr(StagePayload, "name", ErrInvalidPayload)
+	}
+	if len(o.Ports) > maxDockerCreateListItems {
+		return decodeErr(StagePayload, "ports", ErrInvalidPayload)
+	}
+	for _, p := range o.Ports {
+		if err := validateDockerPortBind(p); err != nil {
+			return err
+		}
+	}
+	if len(o.Env) > maxDockerCreateListItems {
+		return decodeErr(StagePayload, "env", ErrInvalidPayload)
+	}
+	for _, e := range o.Env {
+		if err := validateDockerEnv(e); err != nil {
+			return err
+		}
+	}
+	if len(o.Mounts) > maxDockerCreateListItems {
+		return decodeErr(StagePayload, "mounts", ErrInvalidPayload)
+	}
+	for _, m := range o.Mounts {
+		if err := validateDockerMount(m); err != nil {
+			return err
+		}
+	}
+	if !restartPolicySet[o.RestartPolicy] {
+		return decodeErr(StagePayload, "restart_policy", ErrInvalidPayload)
+	}
+	// NaN/Inf 必须与越界同拒：JSON 字面量带不进来（encoding/json 不接受），但协议
+	// 校验是两端都要跑的纯函数 —— 防的是「程序拼出来的载荷」这一面，NaN 溜进来
+	// 会在 agent 侧转成未定义的 int64 NanoCPUs 交给 daemon。
+	if o.CPULimit != 0 && (math.IsNaN(o.CPULimit) || math.IsInf(o.CPULimit, 0) ||
+		o.CPULimit < 0 || o.CPULimit > maxDockerCPULimit) {
+		return decodeErr(StagePayload, "cpu_limit", ErrInvalidPayload)
+	}
+	if o.MemLimitMB != 0 && (o.MemLimitMB < 0 || o.MemLimitMB > maxDockerMemLimitMB) {
+		return decodeErr(StagePayload, "mem_limit_mb", ErrInvalidPayload)
+	}
+	if o.Network != "" && !isDockerName(o.Network) {
+		return decodeErr(StagePayload, "network", ErrInvalidPayload)
+	}
+	return nil
+}
+
+// validateDockerPortBind 校验一条端口映射（regex 匹配后补做范围判定：
+// 正则在位数上拦 0 与畸形，65536-99999 这档越界由数值判定收掉）。
+func validateDockerPortBind(s string) error {
+	m := dockerPortBindRe.FindStringSubmatch(s)
+	if m == nil {
+		return decodeErr(StagePayload, "ports", ErrInvalidPayload)
+	}
+	host, err1 := strconv.Atoi(m[1])
+	cont, err2 := strconv.Atoi(m[2])
+	if err1 != nil || err2 != nil || host > 65535 || cont > 65535 {
+		return decodeErr(StagePayload, "ports", ErrInvalidPayload)
+	}
+	return nil
+}
+
+// validateDockerEnv 校验一条环境变量：键是 POSIX 标识符，值不含 NUL/换行，
+// 整条 ≤ MaxDockerStringBytes（快照字符串上限同档 —— 更长的值要么是误输
+// 要么是想在协议通道里塞别的东西）。
+func validateDockerEnv(s string) error {
+	if len(s) > MaxDockerStringBytes || !dockerEnvRe.MatchString(s) {
+		return decodeErr(StagePayload, "env", ErrInvalidPayload)
+	}
+	return nil
+}
+
+// validateDockerMount 校验一条挂载：`源:目的地[:ro]`。
+//
+// 源两种形态：绝对路径（bind）或命名卷名（volume），以是否 '/' 开头分辨 ——
+// 这个分辨规则与 docker 的 CL 行为一致（含 '/' 的源在 `docker run -v` 里
+// 也被当 bind 路径处理）。目的地必须绝对路径；模式只认 ro（rw 是默认形态，
+// 不需要显式写出；z/Z 的 SELinux 标签超出本协议形态集）。
+//
+// 为什么允许 bind 源是任意绝对路径（协议上**第一次**出现路径入参）：挂载是
+// create 的固有语义（命名卷与宿主目录二选一），而「挂哪个目录」正是
+// docker:manage 权限本就覆盖的运维决定 —— 与 transferDir 的差别在于，这里的
+// 路径**不是** agent 拼出来的产物路径，形态白名单（绝对、无 NUL、无 .. 段以外的
+// 结构承诺）就是这面的护栏。
+func validateDockerMount(s string) error {
+	if len(s) > MaxDockerStringBytes {
+		return decodeErr(StagePayload, "mounts", ErrInvalidPayload)
+	}
+	parts := strings.SplitN(s, ":", 3)
+	if len(parts) < 2 {
+		return decodeErr(StagePayload, "mounts", ErrInvalidPayload)
+	}
+	src, dst := parts[0], parts[1]
+	if len(parts) == 3 && parts[2] != "ro" {
+		return decodeErr(StagePayload, "mounts", ErrInvalidPayload)
+	}
+	if dst == "" || dst[0] != '/' || strings.ContainsAny(dst, "\x00\n") {
+		return decodeErr(StagePayload, "mounts", ErrInvalidPayload)
+	}
+	if src == "" {
+		return decodeErr(StagePayload, "mounts", ErrInvalidPayload)
+	}
+	if src[0] == '/' {
+		if strings.ContainsAny(src, "\x00\n") {
+			return decodeErr(StagePayload, "mounts", ErrInvalidPayload)
+		}
+		return nil
+	}
+	if !isDockerName(src) {
+		return decodeErr(StagePayload, "mounts", ErrInvalidPayload)
+	}
+	return nil
+}
 
 // validateDockerPatchShape 校验补丁的**形状**：段落白名单 + 「名字 → 键值映射 | null」。
 //
@@ -495,6 +865,7 @@ func validateDockerTarget(action, target string) error {
 	switch action {
 	case DockerActionComposeUp, DockerActionComposeStop, DockerActionComposeStart,
 		DockerActionComposeRestart, DockerActionComposePull, DockerActionComposeDown,
+		DockerActionComposeLogs,
 		DockerActionComposeFileRead, DockerActionComposeFileWrite,
 		DockerActionComposeFileValidate, DockerActionComposeFilePatch:
 		if !IsDockerProjectName(target) {
@@ -609,6 +980,44 @@ type DockerState struct {
 	Volumes    []DockerVolume    `json:"volumes"`
 	Networks   []DockerNetwork   `json:"networks"`
 	Projects   []DockerProject   `json:"projects"`
+	// DiskUsage 是 system df 的磁盘占用汇总（六期 6a：磁盘治理）。**nil = 这帧没有
+	// df 数据**：df 调用失败（采集侧退化 volume ls 的路径）或老版本 agent 不发该字段。
+	// 页面把 nil 显示成「数据不可用」而不是 0 —— 「没有数据」与「没有占用」是两个
+	// 相反的结论（与 DockerVolume.SizeMB=nil 同一条纪律）。
+	//
+	// 纯增量（带 omitempty）：老 agent 不发、老 core 收到不认得，形状漂移守卫
+	// （TestShapeDriftAdditiveOnly）只放行省略形态。
+	DiskUsage *DockerDiskUsage `json:"disk_usage,omitempty"`
+}
+
+// DockerDiskUsage 是 system df 的磁盘占用汇总（六期 6a：磁盘治理的最小事实面）。
+//
+// **只存汇总数字，不存逐项明细**：快照是 30s 一帧的常态上报，df 明细（逐镜像/逐卷/
+// 逐条缓存的占用）已经存在于五类清单里（镜像/卷条目各自带 size_mb），这里再搬一遍
+// 只会把每帧撑大一倍；「按明细排查」是列表页的事，按需另查（image:inspect / 卷页）。
+//
+// 字段口径全部来自 daemon 的 verbose df 响应（SDK v28 的 types.DiskUsage）：
+// Images 是 []*image.Summary（Size/RepoTags），Volumes 是 []*volume.Volume
+// （UsageData.Size，-1=未知），BuildCache 是 []*build.CacheRecord（Size）；
+// daemon **不**给预聚合的 TotalSize/Reclaimable（那些类型已标记废弃）—— 汇总在
+// agent 侧求和，口径见各字段注释。
+type DockerDiskUsage struct {
+	// ImagesTotalMB 是全部镜像的占用合计（Σ image.Size，MB）。含共享层的重复计入
+	// —— 与 docker CLI 的 SIZE 列同口径（docker 自己也这么加，共享只在逐镜像视图提示）。
+	ImagesTotalMB float64 `json:"images_total_mb"`
+	// ImagesDanglingMB 是悬空镜像的占用合计（Σ 无标签镜像的 Size，MB）。悬空判据
+	// 与镜像清单的 Dangling 同源（无标签 = daemon 悬空过滤器 = image:prune 的默认
+	// 目标集合）：这个数字就是「能安全收回多少」的镜像半边，口径对不上会多报
+	// 一份并不存在的空间（见 isDanglingImage 的实测论证）。
+	ImagesDanglingMB float64 `json:"images_dangling_mb"`
+	// VolumesTotalMB 是数据卷占用合计（Σ 已知体积，MB）。**已知体积的求和**：非
+	// local 驱动不提供体积（UsageData.Size=-1），排除在求和之外 —— 该合计是下界，
+	// 与 docker CLI 的合计同口径；逐卷的未知态由卷清单的 size_mb=nil 如实保留。
+	VolumesTotalMB float64 `json:"volumes_total_mb"`
+	// BuildCacheMB 是构建缓存占用合计（Σ cache.Size，MB）。协议**没有**构建缓存的
+	// prune 动作（白名单不含 builder prune）：这个数字是「花在哪」的账面事实，
+	// 不是「能收回」的承诺 —— 面板不得把它标成可回收。
+	BuildCacheMB float64 `json:"build_cache_mb"`
 }
 
 // DockerComposeInfo 是 compose 形态与版本。
@@ -725,9 +1134,10 @@ func (s *DockerState) Validate() error {
 		if s.Error == "" {
 			return decodeErr(StagePayload, "error", ErrMissingField)
 		}
-		// 不可达时不得携带清单：否则页面会一边说不可用、一边列出上一次的容器
+		// 不可达时不得携带清单与 df：否则页面会一边说不可用、一边列出上一次的容器
 		//（「最后已知状态」要由服务端按 ReceivedAt 标注陈旧度，不能伪装成刚刚的）。
-		if len(s.Containers)+len(s.Images)+len(s.Volumes)+len(s.Networks)+len(s.Projects) != 0 {
+		if len(s.Containers)+len(s.Images)+len(s.Volumes)+len(s.Networks)+len(s.Projects) != 0 ||
+			s.DiskUsage != nil {
 			return decodeErr(StagePayload, "containers", ErrInvalidPayload)
 		}
 	}
@@ -771,7 +1181,21 @@ func (s *DockerState) Validate() error {
 		}
 	}
 	if s.Compose != nil {
-		return s.Compose.validate()
+		if err := s.Compose.validate(); err != nil {
+			return err
+		}
+	}
+	if s.DiskUsage != nil {
+		return s.DiskUsage.validate()
+	}
+	return nil
+}
+
+// validate 校验 df 汇总：负数是采集侧算错了（daemon 的 UsageData.Size=-1「未知」
+// 哨兵必须在求和前被排除，溜进来会把「未知」渲染成负数占用），协议不传输无意义的值。
+func (d *DockerDiskUsage) validate() error {
+	if d.ImagesTotalMB < 0 || d.ImagesDanglingMB < 0 || d.VolumesTotalMB < 0 || d.BuildCacheMB < 0 {
+		return decodeErr(StagePayload, "disk_usage", ErrInvalidPayload)
 	}
 	return nil
 }
@@ -838,9 +1262,10 @@ func strTooLong(s string) bool { return len(s) > MaxDockerStringBytes }
 type DockerCmdOptions struct {
 	// Target 是操作目标（容器名/镜像引用/卷名/网络名/项目名/「项目/服务」）。
 	Target string `json:"target,omitempty"`
-	// Tail 是 container:logs 的尾部行数（0 = 默认 100）。
+	// Tail 是 container:logs / compose:logs 的尾部行数（0 = 默认 100）。
 	Tail int `json:"tail,omitempty"`
-	// Since 是 container:logs 的起始时刻（unix 秒；0 = 全部）。
+	// Since 是 container:logs 的起始时刻（unix 秒；0 = 全部）。compose:logs 不支持它
+	//（CLI 公共子集没有 --since，见 ValidateDockerCmdOptions 的归属拒绝）。
 	Since int64 `json:"since,omitempty"`
 	// N 是 compose.service:scale 的目标实例数（指针：0 = 缩到零，是合法且高危的值）。
 	N *int `json:"n,omitempty"`
@@ -870,6 +1295,9 @@ type DockerCmdOptions struct {
 	//
 	// Follow 是 container:logs 的流式标志：false/缺省 = 一次性取（既有行为不变），
 	// true = 走流会话（agent 侧 ContainerLogs(Follow:true) + 帧整形）。
+	// compose:logs 复用同一字段与含义的**CLI 半边**：true = 给 compose CLI 传
+	// --follow（会话长流）；false/缺省 = 不传（CLI 打完即退出，会话读到 eof 收摊）——
+	// 两种形态都是流会话，没有一次性取回的形态。
 	Follow bool `json:"follow,omitempty"`
 	// Command 是 container:exec 的 argv；缺省 ["/bin/sh"]（空数组与缺席同义）。
 	//
@@ -885,6 +1313,52 @@ type DockerCmdOptions struct {
 	// 协议上**永远不出现路径**（§8 路径白名单）：agent 自己把令牌拼成
 	// `<配置文件>.bak-<令牌>`。与 content 互斥（都给不猜优先级，都缺无从下手）。
 	Backup string `json:"backup,omitempty"`
+
+	// ── 四支柱·创建面（container:create 专属，4a）───────────────────────
+	//
+	// 这一组字段**只属于 container:create**（照 backup 的归属纪律：字段在协议上的
+	// 归属唯一 —— 挂在别的 action 上会被校验拒绝而不是无视）。逐字段白名单校验
+	// 在 ValidateDockerCmdOptions，adapter 直传 daemon 不经 shell，但字段格式必须
+	// 收敛：把格式自由摊给每台主机的 daemon 去判，判法会随版本漂移。
+	//
+	// Image 是要创建的镜像引用（必填，见 dockerActionSpecs 的 Required）。
+	Image string `json:"image,omitempty"`
+	// Name 是容器名（不填 = docker 自动起名）。合法字符集与容器名同规（isDockerName）。
+	Name string `json:"name,omitempty"`
+	// Ports 是端口映射列表，每条形态 `宿主:容器[/tcp|udp]`（协议缺省 = tcp）。
+	// 宿主的 0/随机端口刻意不支持：随机分配会让「创建后去哪连」无从回答。
+	Ports []string `json:"ports,omitempty"`
+	// Env 是环境变量列表，每条形态 `KEY=VALUE`（键 = POSIX 标识符；值不含 NUL
+	// 与换行、整条 ≤ MaxDockerStringBytes）。
+	Env []string `json:"env,omitempty"`
+	// Mounts 是卷挂载列表，每条形态 `源:目的地[:ro]`：源是命名卷（isDockerName）或
+	// 绝对路径（bind mount），目的地必须绝对路径，模式只认 ro。
+	//
+	// 为什么叫 mounts 而不是 volumes：volumes 已被 compose:down 的布尔字段占用 ——
+	// 同一协议里一字两义是比换个名字糟得多的选择。
+	Mounts []string `json:"mounts,omitempty"`
+	// RestartPolicy 是重启策略枚举：no / on-failure / always / unless-stopped。
+	RestartPolicy string `json:"restart_policy,omitempty"`
+	// CPULimit 是 CPU 配额（核数）：0 = 不限额，上限 maxDockerCPULimit。
+	CPULimit float64 `json:"cpu_limit,omitempty"`
+	// MemLimitMB 是内存上限（MB）：0 = 不限额，上限 maxDockerMemLimitMB。
+	MemLimitMB int `json:"mem_limit_mb,omitempty"`
+	// Network 是要接入的网络名（不填 = docker 默认网桥）。
+	Network string `json:"network,omitempty"`
+	// Start 表示创建后是否立即启动：缺省 = true（创建并启动）。指针：显式 false
+	// 与缺席**不同义**（false = 只创建不启动），值类型会让它被缺省值悄悄覆盖。
+	Start *bool `json:"start,omitempty"`
+
+	// ── 4c 私有仓库凭据（image:pull 专属）─────────────────────────────────
+	//
+	// Registry 是要用凭据的仓库地址（**不含协议头与镜像路径**，见
+	// IsDockerRegistryAddr）。它只是凭据库的唯一键、**不携带任何密钥材料** ——
+	// 密码由 core 受理时解出、随指令瞬时注入 DockerCmd.Auth（选型 A）；
+	// 缺省 = 与 4b 之前的拉取逐字一致（公共仓库或主机侧 docker login）。
+	//
+	// 字段归属纪律照 backup 的先例：只属于 image:pull，挂在别的 action 上会被
+	// 校验拒绝而不是无视。
+	Registry string `json:"registry,omitempty"`
 }
 
 // DockerCmd 是一条操作指令。
@@ -895,6 +1369,46 @@ type DockerCmd struct {
 	Options DockerCmdOptions `json:"options"`
 	// Confirm 是强确认档的确认值（标准档为空）。服务端校验，agent 二次校验。
 	Confirm string `json:"confirm,omitempty"`
+	// Auth 是 core 随 image:pull 指令**瞬时注入**的仓库认证（4c，选型 A）：
+	// 凭据库的密码只在受理这一刻解出、只随这一条消息去往要拉取的那台主机，
+	// agent 执行完毕即弃 —— 任何路径不落盘、不进进度帧、不进 result。
+	//
+	// nil = 无凭据：与 4b 之前的拉取**逐字一致**（公共仓库或主机侧 docker login）。
+	// 协议只允许它出现在 image:pull 上，且 registry 必须与 options.registry
+	// 同一把键（防「用户要的凭据」与「下发的凭据」漂移，见 Validate）。
+	Auth *DockerRegistryAuth `json:"auth,omitempty"`
+}
+
+// DockerRegistryAuth 是仓库认证三元组（4c）。字段与 SDK 的 AuthConfig 一一对应，
+// 但**SDK 类型不出协议**：到 agent 后的映射在 adapter 内完成（见
+// uni_agent/internal/dockerops 的 adapter.ImagePull）。
+//
+// Password 是**瞬时秘密**：只存在于 core→agent 的这条指令消息里
+// （通道是 TLS 隧道，与 exec/写文件同一条），不进任何存储、日志、帧与结果。
+type DockerRegistryAuth struct {
+	// Registry 是仓库地址（与 options.registry 同一把键，不含协议头与路径）。
+	Registry string `json:"registry"`
+	// Username 是仓库用户名（登录名）。上限同快照字符串档。
+	Username string `json:"username"`
+	// Password 是仓库密码（明文瞬时值；上限 maxDockerRegistrySecretBytes）。
+	Password string `json:"password"`
+}
+
+// Validate 校验仓库认证三元组（DockerCmd.Validate 在 Auth 非空时调用）。
+func (a *DockerRegistryAuth) Validate() error {
+	if a == nil {
+		return nil
+	}
+	if !IsDockerRegistryAddr(a.Registry) {
+		return decodeErr(StagePayload, "auth.registry", ErrInvalidPayload)
+	}
+	if a.Username == "" || len(a.Username) > MaxDockerStringBytes {
+		return decodeErr(StagePayload, "auth.username", ErrInvalidPayload)
+	}
+	if a.Password == "" || len(a.Password) > maxDockerRegistrySecretBytes {
+		return decodeErr(StagePayload, "auth.password", ErrInvalidPayload)
+	}
+	return nil
 }
 
 // Validate 校验指令。
@@ -902,7 +1416,24 @@ func (c *DockerCmd) Validate() error {
 	if !isDecimalID(c.Ref) {
 		return decodeErr(StagePayload, "ref", ErrMissingField)
 	}
-	return ValidateDockerCmdOptions(c.Action, &c.Options)
+	if err := ValidateDockerCmdOptions(c.Action, &c.Options); err != nil {
+		return err
+	}
+	// 4c：认证三元组只许挂在 image:pull 上（与 options.registry 的归属纪律一致）；
+	// 且两个 registry 必须是同一把键 —— 漂移意味着「用户要的凭据」与「下发的凭据」
+	// 不是同一份，agent 宁可判非法执行，也不拿着错凭据去 daemon 上试一遍。
+	if c.Auth != nil {
+		if c.Action != DockerActionImagePull {
+			return decodeErr(StagePayload, "auth", ErrInvalidPayload)
+		}
+		if err := c.Auth.Validate(); err != nil {
+			return err
+		}
+		if c.Options.Registry != c.Auth.Registry {
+			return decodeErr(StagePayload, "auth.registry", ErrInvalidPayload)
+		}
+	}
+	return nil
 }
 
 // ── 上行 2：agent.docker.result ─────────────────────────────────────────
@@ -1130,6 +1661,178 @@ func (f *CoreDockerFrame) Validate() error {
 		}
 	default:
 		return decodeErr(StagePayload, "op", ErrInvalidPayload)
+	}
+	return nil
+}
+
+// ── stats 流的样本载荷（监控面）───────────────────────────────────────────
+
+// DockerStatsSample 是 stats 流会话的一个采样点：agent 把每个样本编码成一条 JSON
+// 放进帧的 Data（一条样本一行，行尾换行 —— 一帧可以装多条），core 的 stats 端点
+// 逐行解码成字段转发给前端。它**不自成一条协议消息**：样本与帧共用生命周期
+// （session_id / seq / eof），另起消息类型只会多一套会话管理。
+//
+// 字段与快照 DockerContainer 的同名字段**同一口径**（名字、单位、round2 舍入一致）：
+// 抽屉里的实时曲线与表格里的快照读数必须对得上 —— 两个口径会变成「曲线一条线、
+// 表格一个数」的永久疑问。差异只有两点：T 是采样时刻（曲线的 x 轴）；网络字段是
+// **速率**（相邻样本求差，与快照采集同一算法）而不是累计值。
+type DockerStatsSample struct {
+	// T 是采样时刻（unix 毫秒，agent 时钟）。它不参与陈旧度判定（agent 时钟可能偏），
+	// 只是曲线的 x 轴刻度，相邻样本的差才是节奏。
+	T int64 `json:"t"`
+	// CPUPercent 是 CPU 占比（%，round2）。与快照 cpu_percent 同一算法
+	//（cpu_stats/precpu_stats 差值，docker CLI 同款）。
+	CPUPercent float64 `json:"cpu_percent"`
+	// MemUsageMB / MemLimitMB 是内存用量与上限（MB，round2）；不设上限时 Limit 为 0。
+	MemUsageMB float64 `json:"mem_usage_mb"`
+	MemLimitMB float64 `json:"mem_limit_mb"`
+	// NetRXBytesSec / NetTXBytesSec 是网络速率（B/s）：相邻样本的累计计数求差。
+	// **首样本为 0**（没有可求差的基线）—— 与 docker stats CLI 首行同口径。
+	NetRXBytesSec float64 `json:"net_rx_bytes_sec"`
+	NetTXBytesSec float64 `json:"net_tx_bytes_sec"`
+}
+
+// Validate 校验样本。
+//
+// 全部读数都不允许为负：负数是采集侧算错了（计数回绕、负间隔都必须被钳成 0），
+// 放行它会让前端画出一条「负数流量/负内存」的曲线 —— 协议上不传输无意义的值。
+func (s *DockerStatsSample) Validate() error {
+	if s.T <= 0 {
+		return decodeErr(StagePayload, "t", ErrInvalidPayload)
+	}
+	if s.CPUPercent < 0 || s.MemUsageMB < 0 || s.MemLimitMB < 0 ||
+		s.NetRXBytesSec < 0 || s.NetTXBytesSec < 0 {
+		return decodeErr(StagePayload, "stats", ErrInvalidPayload)
+	}
+	return nil
+}
+
+// ── 拉取进度的记录载荷（image:pull，4b 进度面）─────────────────────────────
+
+// DockerPullProgressItem 是 image:pull 进度流会话的一个记录点：agent 把 daemon 的
+// JSON 进度行折成本域字段、按窗口折叠后编码成一条 JSON 行放进帧 data（一行一条，
+// 行尾换行）—— 与 DockerStatsSample 同一形态纪律：**不自成一条协议消息**，样本与
+// 帧共用生命周期（session_id / seq / eof）。
+//
+// 字段口径照 daemon 的 jsonmessage 子集（仅进度面）：ID 是层 id（仓库层 digest）或
+// 阶段标识；Status 是原文状态文案（"Pulling fs layer"/"Downloading"/"Extracting"…）；
+// Current/Total 是该层的已传输/总字节（progressDetail，未知时两者为 0）；
+// Done=true 是**终态项**（拉取成功，流的最后一条）；Error 是终态项的失败结论
+// （daemon 的 errorDetail.message 原文）。终态项恰一条、恰在最后。
+type DockerPullProgressItem struct {
+	// T 是该记录点的挂钟（unix 毫秒，agent 时钟）。与 stats 样本同口径：只作时间轴
+	// 刻度，不参与陈旧度判定。
+	T int64 `json:"t"`
+	// ID 是层 id / 阶段标识；消息类记录（"Pulling from …" 等没有层的行）留空。
+	ID string `json:"id,omitempty"`
+	// Status 是原文状态文案（页面直接显示）。
+	Status string `json:"status,omitempty"`
+	// Current / Total 是该层已传输与总字节；未知时为 0（daemon 的 progressDetail 缺席）。
+	Current int64 `json:"current,omitempty"`
+	Total   int64 `json:"total,omitempty"`
+	// Done 是成功的终态项（恰在流末一条）。
+	Done bool `json:"done,omitempty"`
+	// Error 是失败的终态项（恰在流末一条；内容为 daemon 的原始错误消息）。
+	Error string `json:"error,omitempty"`
+}
+
+// Validate 校验一条拉取进度记录。
+func (p *DockerPullProgressItem) Validate() error {
+	if p.T <= 0 {
+		return decodeErr(StagePayload, "t", ErrInvalidPayload)
+	}
+	if p.Done && p.Error != "" {
+		// 同时带两个终态标记：采集侧状态机算错了，放行会让前端弹一对相反的结论。
+		return decodeErr(StagePayload, "pull", ErrInvalidPayload)
+	}
+	if p.Current < 0 || p.Total < 0 || (p.Total > 0 && p.Current > p.Total) {
+		return decodeErr(StagePayload, "pull", ErrInvalidPayload)
+	}
+	if strTooLong(p.ID) || strTooLong(p.Status) || strTooLong(p.Error) {
+		return decodeErr(StagePayload, "pull", ErrInvalidPayload)
+	}
+	return nil
+}
+
+// ── events 流的记录载荷（活动流，六期·监控面）─────────────────────────────
+
+// DockerEventType* 是事件订阅范围的四类资源。agent 把 daemon 的 Events API filter 到
+// 这四个值 —— builder/plugin/service/secret 等 swarm 与构建类噪音**根本不下发**，
+// core 与前端就不必各自写一份「哪些类型算数」的过滤。
+const (
+	DockerEventTypeContainer = "container"
+	DockerEventTypeImage     = "image"
+	DockerEventTypeVolume    = "volume"
+	DockerEventTypeNetwork   = "network"
+)
+
+// IsDockerEventType 报告 t 是否在订阅范围内。
+func IsDockerEventType(t string) bool {
+	switch t {
+	case DockerEventTypeContainer, DockerEventTypeImage, DockerEventTypeVolume, DockerEventTypeNetwork:
+		return true
+	}
+	return false
+}
+
+// dockerEventActions 是事件动作的**前缀**白名单。
+//
+// 为什么按前缀而不是全串枚举：daemon 的 exec 系动作在线上形态带命令后缀
+// （"exec_create: /bin/sh -c ls"），全串枚举会把每一个合法动作拆成无穷多份；
+// 校验取「首个 ": " 之前的词元」∈ 集合 —— 「谁在说话」是协议的判断，说话的内容
+// 是数据。集合照 `docker system events` 文档的动作全集收敛到本订阅范围会用到的子集。
+var dockerEventActions = map[string]bool{
+	"attach": true, "commit": true, "copy": true, "create": true, "destroy": true,
+	"detach": true, "die": true, "exec_create": true, "exec_detach": true,
+	"exec_die": true, "exec_start": true, "enable": true, "disable": true,
+	"export": true, "health_status": true, "import": true, "kill": true,
+	"load": true, "mount": true, "oom": true, "pause": true, "pull": true,
+	"push": true, "reload": true, "remove": true, "rename": true, "resize": true,
+	"restart": true, "save": true, "start": true, "stop": true, "tag": true,
+	"top": true, "unmount": true, "unpause": true, "update": true,
+}
+
+// DockerEventItem 是事件流的一条记录（活动流的最小单元）。
+//
+// 与 DockerStatsSample 同一形态纪律：**不自成一条协议消息**，agent 把它编码成 JSON
+// 放进帧的 data（一条一行，行尾换行），core 逐行解码、校验后注入 hostId/hostname
+// 再转发。字段只取展示与归因需要的四样 —— daemon 事件里的 scope、全量 attributes
+// 直接透传会被各版本的字段漂移带进前端，也会让载荷被无关内容撑大。
+type DockerEventItem struct {
+	// T 是 agent 采到该时刻的挂钟（unix 毫秒）。口径同 stats 样本的 T：
+	// 参与陈旧度判定的是 core 的**接收时刻**（agent 时钟可能偏），T 只是时间轴刻度。
+	T int64 `json:"t"`
+	// Type ∈ container|image|volume|network（订阅范围，见 IsDockerEventType）。
+	Type string `json:"type"`
+	// Action 是事件动作（start/die/destroy/…；带后缀的 exec 系按前缀判定，
+	// 见 dockerEventActions 的说明）。
+	Action string `json:"action"`
+	// ActorName 是动作主体名：容器/卷/网络名或镜像引用（daemon Actor.Attributes["name"]）。
+	ActorName string `json:"actor_name,omitempty"`
+	// ActorID 是主体短 id（daemon Actor.ID；镜像为 sha256:<hex> 形态）。
+	ActorID string `json:"actor_id,omitempty"`
+}
+
+// Validate 校验一条事件记录。
+//
+// 上限复用 MaxDockerStringBytes（快照字符串上限）：主体名最长的是镜像引用，
+// 与快照条目的名字字段同档即可 —— 更大的值要么是字段漂移要么是异常数据。
+func (e *DockerEventItem) Validate() error {
+	if e.T <= 0 {
+		return decodeErr(StagePayload, "t", ErrInvalidPayload)
+	}
+	if !IsDockerEventType(e.Type) {
+		return decodeErr(StagePayload, "type", ErrInvalidPayload)
+	}
+	token := e.Action
+	if i := strings.Index(e.Action, ": "); i >= 0 {
+		token = e.Action[:i]
+	}
+	if token == "" || !dockerEventActions[token] {
+		return decodeErr(StagePayload, "action", ErrInvalidPayload)
+	}
+	if strTooLong(e.ActorName) || strTooLong(e.ActorID) {
+		return decodeErr(StagePayload, "actor_name", ErrInvalidPayload)
 	}
 	return nil
 }

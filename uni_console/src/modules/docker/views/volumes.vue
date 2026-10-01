@@ -8,6 +8,8 @@
       :stale="stale"
       :age-seconds="ageSeconds"
       :never-reported="neverReported"
+      :load-error="loadError"
+      :has-state="hasState"
       @refresh="refresh"
     >
       <template #search>
@@ -115,12 +117,21 @@
 
   // 快照与四态收口在 composable（hosts 清单、seq 守卫、主机切换后的重拉都在它里面）。
   // 主机切换 = 换一台机器：本页既有重置纪律是「清空筛选」。
-  const { state, loading, listLoading, stale, ageSeconds, neverReported, refresh } =
-    useDockerHostState({
-      onHostSwitch: () => {
-        searchForm.value = {}
-      }
-    })
+  const {
+    state,
+    loading,
+    listLoading,
+    stale,
+    ageSeconds,
+    neverReported,
+    loadError,
+    hasState,
+    refresh
+  } = useDockerHostState({
+    onHostSwitch: () => {
+      searchForm.value = {}
+    }
+  })
 
   // 写指令通道：受理 + 轮询 + 成功后重拉（重拉就是上面的 refresh）。
   const { run, pendingId, busy } = useDockerCmds({ refresh })

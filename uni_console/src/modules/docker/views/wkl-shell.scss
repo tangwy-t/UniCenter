@@ -1,0 +1,76 @@
+/**
+ * 列表页骨架样式（hero + 三态卡片）——从 containers.vue（切片 2 统一表）抽出。
+ *
+ * 为什么不再抄一遍进页面：这套 hero/加载/错误/空态的视觉与 overview.vue 的
+ * dov-* 完全同构（都源自 monitor-tokens 的成熟范式），页面 style 块只该留
+ * **本页特有**的布局差异；骨架下沉后页面文件回到「编排 ≤400 行」的纪律内。
+ * 令牌本体在 overview-tokens.scss（那里有数值出处注释）。
+ *
+ * 注意：本文件被 SFC `@use` 进 scoped style 时，规则同样带 scoped 属性 ——
+ * 类名一律走 wkl- 前缀，不与总览页的 dov-* 混用。
+ */
+@use './overview-tokens' as t;
+
+@include t.rise-keyframes;
+
+/* ---------- 页面内层：竖排分区 + 统一间距 ---------- */
+.wkl-page__inner {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* ---------- 页头（hero：对齐 overview.vue 的 dov-hero） ---------- */
+.wkl-hero__icon {
+  @include t.hero-icon;
+}
+
+.live-dot {
+  @include t.live-dot;
+}
+
+/* 加载中的圆点转琥珀、节奏加快（对齐 .sv-hero 的 is-loading 口径） */
+.live-dot.is-loading {
+  background: var(--el-color-warning);
+  animation-duration: 0.9s;
+}
+
+/* ---------- 三态卡片（加载 / 错误 / 空） ---------- */
+.wkl-card {
+  @include t.card;
+  @include t.rise;
+}
+
+.dark .wkl-card {
+  @include t.card-dark;
+}
+
+.wkl-state__icon {
+  width: 64px;
+  height: 64px;
+  border-radius: 20px;
+  font-size: 30px;
+  color: var(--el-color-primary);
+  background: color-mix(in srgb, var(--el-color-primary) 12%, transparent);
+}
+
+.wkl-state__spin {
+  animation: wkl-spin 1.1s linear infinite;
+}
+
+@keyframes wkl-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.wkl-state__hint {
+  margin-bottom: 12px;
+  max-width: 480px;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+/* ---------- 动效降级（与总览页同一口径） ---------- */
+@include t.reduced-motion('.wkl-card', '.live-dot', '.wkl-state__spin');

@@ -35,13 +35,25 @@ type DockerCmdSender interface {
 	SendToDevice(deviceID uint64, msg *agentproto.Message) error
 }
 
-// DockerSessionCounter 是「该设备当前有几条流会话」的能力面（由 dockerstream.Registry 满足）。
+// DockerSessionCounter 是「该设备当前有几条流会话」与「受理拉取时预登记进度会话」
+// 的能力面（由 dockerstream.Registry 满足）。
 //
-// 上限与 agent 侧同值（3）；core 在受理处先拒是为了给出**更好的结论句** ——
-// agent 的 errStreamLimit 要等一条 result 回来才可见，而用户在点下「终端」时
-// 就该知道「先关掉其它日志或终端」。
+// 两个方法两件事：上限预检只看**用户流**（拉取进度会话已被注册表排除在账目外）；
+// Register 预登记的正是拉取进度会话 —— core 在**受理时**登记、agent 在开始拉取时
+// 用协议派生的同一句柄开会话（DockerPullSessionID），帧才能在指令 pending 期间
+// 找到主人（4b 的关键时序，选型论证见 pull_progress 侧与协议注释）。
 type DockerSessionCounter interface {
 	CountByDevice(deviceID uint64) int
+	Register(meta dockerstream.Meta) error
+}
+
+// RegistryAuthResolver 解出仓库凭据的认证三元组（由 service.DockerRegistryService 满足）。
+//
+// 这是**唯一**的解密读口（4c，选型 A）：password 只被本条指令的消息持有，
+// 调用方拿到后不得落日志、不得存入任何结构。found=false 且 err=nil = 凭据不存在；
+// err!=nil = 主密钥缺失/密文损坏（由调用方折成「凭据不可用」的 500 结论句）。
+type RegistryAuthResolver interface {
+	ResolveAuth(ctx context.Context, registry string) (username, password string, found bool, err error)
 }
 
 // DockerCmdService 是 docker 域的下发面。
@@ -60,11 +72,22 @@ type DockerCmdService struct {
 	// sessions 是流会话计数面（三期）。nil = 未装配：跳过上限预检
 	//（agent 侧仍有 3 条上限兜底），不影响其余受理路径。
 	sessions DockerSessionCounter
+	// auth 是仓库凭据解析面（4c）。nil = 未装配：带 registry 的拉取被 500 拒
+	//（「配了选项却没有解析能力」是装配错误，早暴露好过 agent 在 daemon 上吃 401）。
+	auth RegistryAuthResolver
 }
 
-// WithStreamSessions 注入流会话计数面（三期日志 Follow / 终端的上限预检）。
+// WithStreamSessions 注入流会话计数/登记面（三期日志 Follow / 终端的上限预检；
+// 4b 拉取进度会话的受理时预登记）。
 func (s *DockerCmdService) WithStreamSessions(c DockerSessionCounter) *DockerCmdService {
 	s.sessions = c
+	return s
+}
+
+// WithRegistryAuth 注入仓库凭据解析面（4c）：只有 image:pull 且 options.registry
+// 非空时才被调用 —— 其余 action 连解析器都不经过。
+func (s *DockerCmdService) WithRegistryAuth(r RegistryAuthResolver) *DockerCmdService {
+	s.auth = r
 	return s
 }
 
@@ -127,6 +150,29 @@ func (s *DockerCmdService) Send(ctx context.Context, userID, deviceID uint64, re
 	if err := agentproto.CheckDockerConfirm(req.Action, opts, req.Confirm); err != nil {
 		return "", apperror.BadRequest("缺少确认信息")
 	}
+
+	// 仓库凭据注入（4c，选型 A）：image:pull 带 registry 时，受理处解出凭据、
+	// 随指令消息瞬时下发 —— 凭据读取**只发生在这里**（鉴权/审计链路上的任何
+	// 其它环节都接触不到密码）。三个结论：
+	//   - 未装配解析器 → 500：配了选项却没有解析能力是装配错误，早暴露好过
+	//     agent 在 daemon 上吃一个没法解释的 401；
+	//   - 凭据不存在 → 400 结论句「没有这个仓库的凭据」（删除即失效就在这里兑现）；
+	//   - 解密失败/主密钥缺失 → 500 结论句（服务端问题，不是请求写错了）。
+	// 解出的明文只进 pullAuth 局部变量，绝不进记录/日志/审计。
+	var pullAuth *agentproto.DockerRegistryAuth
+	if req.Action == agentproto.DockerActionImagePull && opts.Registry != "" {
+		if s.auth == nil {
+			return "", apperror.Internal("仓库凭据服务未装配，指令未下发")
+		}
+		username, password, found, err := s.auth.ResolveAuth(ctx, opts.Registry)
+		if err != nil {
+			return "", apperror.Internal("仓库凭据不可用，请通知管理员检查主密钥配置")
+		}
+		if !found {
+			return "", apperror.BadRequest("没有这个仓库的凭据")
+		}
+		pullAuth = &agentproto.DockerRegistryAuth{Registry: opts.Registry, Username: username, Password: password}
+	}
 	if s.store != nil {
 		// 能力闸：agent 已自报 docker 不可用（快照 docker_ok=false）时不受理。
 		// 它与「前端在 dockerOk=false 时不渲染任何操作按钮」是同一件事的两道防线
@@ -165,8 +211,32 @@ func (s *DockerCmdService) Send(ctx context.Context, userID, deviceID uint64, re
 		return "", apperror.Internal("内部错误", err)
 	}
 
+	// 拉取进度会话的**预登记**（4b）：必须在消息下发之前 —— agent 收到指令即可开始
+	// 拉取，帧可能先于任何 result 到达，届时注册表里必须已经有主人。句柄两端同源
+	//（协议 DockerPullSessionID(ref)），result 不上句柄（它只在拉取结束时回）。
+	//
+	// 登记失败只记日志不判死指令：进度不可用是可见性的损失，拉取本身照常（旧流程
+	// 最坏就是退回「黑盒等待」，与 4b 之前的形态一致）。
+	if s.sessions != nil && req.Action == agentproto.DockerActionImagePull {
+		if err := s.sessions.Register(dockerstream.Meta{
+			SessionID: agentproto.DockerPullSessionID(rec.Ref),
+			DeviceID:  rec.DeviceID,
+			UserID:    rec.UserID,
+			Action:    rec.Action,
+			Ref:       rec.Ref,
+			Kind:      dockerstream.KindPull,
+			CreatedAt: s.now(),
+		}); err != nil && s.log != nil {
+			s.log.Warn("docker pull progress session 预登记失败（进度流不可用，指令照常）",
+				zap.String("ref", rec.Ref), zap.Error(err))
+		}
+	}
+
 	msg, err := agentproto.NewMessage(rec.Ref, agentproto.TypeCoreDockerCmd, &agentproto.DockerCmd{
 		Ref: rec.Ref, Action: rec.Action, Options: *opts, Confirm: rec.Confirm,
+		// 4c：凭据随指令瞬时注入（无凭据的拉取 auth 为 nil —— 与 4b 之前的
+		// 消息逐字一致，agent 侧行为不变）。
+		Auth: pullAuth,
 	})
 	if err != nil {
 		s.discard(ctx, rec)
@@ -305,5 +375,24 @@ func toProtocolOptions(req *request.DockerCmdReq) *agentproto.DockerCmdOptions {
 	// 回滚令牌（四期）：形态校验在协议层（严格 `YYYYMMDD-HHMMSS`），core 只负责透传 ——
 	// 这里不解析、不拼路径（路径由 agent 从自己的解析结果重建）。
 	opts.Backup = o.Backup
+	// 创建面（4a）：全部照抄（校验在协议层）。切片复制而不持有请求体引用
+	//（与 Command 同纪律：载荷会编码进消息，请求体的生命周期没人保证）。
+	opts.Image = o.Image
+	opts.Name = o.Name
+	opts.Ports = slices.Clone(o.Ports)
+	opts.Env = slices.Clone(o.Env)
+	opts.Mounts = slices.Clone(o.Mounts)
+	opts.RestartPolicy = o.RestartPolicy
+	opts.CPULimit = o.CPULimit
+	opts.MemLimitMB = o.MemLimitMB
+	opts.Network = o.Network
+	if o.Start != nil {
+		// 复制值：协议载荷不该继续持有请求体里的指针（同 N 的纪律）。
+		s := *o.Start
+		opts.Start = &s
+	}
+	// 4c：registry 是凭据键（不含秘密），原样进协议载荷 —— 密码在 Send 的
+	// 受理段才解出注入（auth 不进 options，见协议 DockerCmd.Auth 的说明）。
+	opts.Registry = o.Registry
 	return opts
 }

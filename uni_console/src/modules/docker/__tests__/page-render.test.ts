@@ -25,8 +25,15 @@ import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 const api = vi.hoisted(() => ({
   fetchDockerHosts: vi.fn(),
   fetchDockerState: vi.fn(),
+  fetchDockerContainers: vi.fn(),
   sendDockerCmd: vi.fn(),
-  fetchDockerCmdResult: vi.fn()
+  fetchDockerCmdResult: vi.fn(),
+  // 4b 拉取进度对话框（images 页挂载）不会真开流，但 import 面必须齐全。
+  openDockerPullStream: vi.fn(),
+  // 4c 凭据面（pull 对话框的下拉与凭据管理对话框；页面冒烟里不会真调）。
+  fetchDockerRegistries: vi.fn(),
+  // 6b 任务中心抽屉（docker-page 主机条入口）挂载但不开 —— import 面必须齐全。
+  fetchDockerTasks: vi.fn()
 }))
 vi.mock('../api', () => ({
   ...api,
@@ -169,6 +176,43 @@ async function makeRouter(query: Record<string, string> = {}): Promise<Router> {
   return router
 }
 
+/** 统一工作负载表（切片 2 起容器页的数据源）：两台主机的条目。 */
+const WORKLOADS = {
+  items: [
+    {
+      id: 'c1',
+      name: 'uni-center-core',
+      image: 'uni-center-core:latest',
+      state: 'running',
+      statusText: 'Up 16 hours',
+      cpuPercent: 0.6,
+      memUsageMb: 91,
+      memLimitMb: 1024,
+      netRxBytesSec: 0,
+      netTxBytesSec: 0,
+      protected: true,
+      hostId: 'h1',
+      hostname: 'bogon'
+    },
+    {
+      id: 'c2',
+      name: 'mysql',
+      image: 'mysql:8',
+      state: 'exited',
+      statusText: 'Exited (0) 8 months ago',
+      cpuPercent: 0,
+      memUsageMb: 0,
+      memLimitMb: 0,
+      netRxBytesSec: 0,
+      netTxBytesSec: 0,
+      protected: false,
+      hostId: 'h2',
+      hostname: 'nas'
+    }
+  ],
+  total: 2
+}
+
 /** jsdom 里 Element Plus 的部分组件需要它。 */
 beforeEach(() => {
   vi.stubGlobal(
@@ -181,6 +225,7 @@ beforeEach(() => {
   )
   api.fetchDockerHosts.mockResolvedValue(HOSTS)
   api.fetchDockerState.mockResolvedValue(STATE)
+  api.fetchDockerContainers.mockResolvedValue(WORKLOADS)
   api.sendDockerCmd.mockResolvedValue({ ref: 'r1' })
   api.fetchDockerCmdResult.mockResolvedValue({ status: 'succeeded' })
 })
@@ -207,7 +252,7 @@ async function mountPage(component: Component, query: Record<string, string> = {
 }
 
 describe('页面渲染冒烟（挂载即验证，白屏类故障的守卫）', () => {
-  it('容器页：挂载成功并渲染出页面与表头', async () => {
+  it('容器页：挂载成功并渲染出页面与表头（切片 2：统一表数据源）', async () => {
     const w = await mountPage(Containers)
     expect(w.find('.docker-containers-page').exists()).toBe(true)
     expect(w.html()).toContain('个容器') // 计数文案在，说明模板渲染到了表格上方
@@ -243,6 +288,50 @@ describe('页面渲染冒烟（挂载即验证，白屏类故障的守卫）', (
     const w = await mountPage(ImageDetail, { host: 'h1', id: 'i1' })
     expect(w.html().length).toBeGreaterThan(0)
     expect(w.find('.imd').exists()).toBe(true)
+  })
+})
+
+/* ── 快照拉取失败的页头口径（D-1）─────────────────────────────────
+ * 修复前：loadState 失败把 state 清成 null，页头回落到「刚刚同步」——网络失败
+ * 被渲染成最新鲜状态。这里从**真正挂起来的页面**上断言两条：
+ *   ① 首拉失败 → 页头是「数据获取失败」，且不再是「刚刚同步」；
+ *   ② 刷新失败（已握有快照）→ 页头保留「同步于 N 前」并标注本次刷新失败，
+ *      表格数据不清空（最后已知数据仍可见）。
+ *
+ * 切片 2 起容器页的数据源换成统一表（fetchDockerContainers），快照链路
+ * （fetchDockerState + DockerPage 页头）不再由它承载 —— 守卫落到镜像页：
+ * 它与另外三个列表页走同一份 useDockerHostState + DockerPage，行为同源。
+ * 统一表自己的失败口径（首拉整页错误态 / 刷新失败保留数据）在 workloads.test.ts。
+ */
+describe('快照拉取失败时的页头同步文案（D-1 守卫）', () => {
+  it('① 首拉失败：页头给失败结论句，不显示「刚刚同步」', async () => {
+    api.fetchDockerState.mockRejectedValue(new Error('network down'))
+    const w = await mountPage(Images)
+
+    const text = w.find('.docker-page__sync').text()
+    expect(text).toBe('数据获取失败')
+    expect(text).not.toContain('刚刚同步')
+  })
+
+  it('② 刷新失败：页头标注本次刷新失败，表格保留最后已知数据', async () => {
+    const w = await mountPage(Images) // 首拉成功（beforeEach 的 STATE，ageSeconds=3）
+    expect(w.find('.docker-page__sync').text()).toBe('同步于 3 秒前')
+
+    api.fetchDockerState.mockRejectedValueOnce(new Error('network down'))
+    const refreshBtn = w.findAll('button').find((b) => b.text().includes('刷新'))
+    expect(refreshBtn).toBeTruthy()
+    await refreshBtn!.trigger('click')
+    await new Promise((r) => setTimeout(r, 0))
+    await nextTick()
+
+    expect(w.find('.docker-page__sync').text()).toBe('同步于 3 秒前，本次刷新失败')
+    // state 未被清空：喂给表格的仍是上一批数据（最后已知数据）。jsdom 里 ElTable
+    // 不渲染行单元格，故从页面传给 ArtTable 的 data 断言（labelsAt 同款口径）。
+    const table = w.findComponent({ name: 'ArtTable' })
+    const rows = ((table.vm as unknown as { $attrs: Record<string, unknown> }).$attrs.data ??
+      []) as { id?: string }[]
+    expect(rows.length).toBe(1)
+    expect(rows[0]?.id).toBe('i1')
   })
 })
 
@@ -294,10 +383,15 @@ describe('列集合随视口分档（hideBelow 的不变量守卫）', () => {
     }
   }
 
-  it('容器页：名称/状态/操作恒在，网络吞吐只在桌面档出现', async () => {
+  it('容器页：名称/状态/操作恒在，主机列平板档起出现，网络吞吐只在桌面档', async () => {
     const w = (await mountPage(Containers)) as VueWrapper
+    // 切片 2 的基线变更：统一表新增「主机」列（hideBelow tablet）——跨主机表的
+    // 行归属是排查第一线索，与镜像/端口同档（平板竖屏起可见）。守卫本身不删，
+    // 列集合断言逐字对齐新集合。
     assertInvariants(w, ['名称', '状态', '操作'])
     expect(labelsAt(w, 640)).not.toContain('网络')
+    expect(labelsAt(w, 640)).not.toContain('主机')
+    expect(labelsAt(w, 768)).toContain('主机')
     expect(labelsAt(w, 1024)).toContain('网络')
   })
 

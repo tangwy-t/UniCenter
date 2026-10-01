@@ -1,4 +1,4 @@
-// Package dockerstream 是 core 侧的**流会话注册表**（三期日志 Follow / 终端）。
+// Package dockerstream 是 core 侧的**流会话注册表**（日志 Follow / 终端 / stats 实时流）。
 //
 // 它管三件事，全都是「进程内、会话级」的：
 //  1. 登记：agent 回 result{session_id} 时建一条会话（谁发起的、哪台设备、哪条 ref）；
@@ -38,11 +38,27 @@ const (
 	KindLog Kind = iota
 	// KindPTY 是终端（container:exec）。
 	KindPTY
+	// KindStats 是 stats 实时流（container:stats，监控面）：帧里装 JSON 样本行，
+	// 由 stats 端点解码转发。
+	KindStats
+	// KindPull 是拉取进度流（image:pull，4b）：帧里装一条条进度记录
+	//（DockerPullProgressItem），由 pull 端点解码转发。
+	//
+	// 与前三者的关键差别：**登记时点**。用户流的会话在 agent 回 result{session_id}
+	// 时登记（指令已终态），而拉取是长耗时写指令 —— 它的 result 只在拉取**结束**时
+	// 回，届时进度也发完了。故本类会话在**受理指令时**就预登记（句柄 = 协议派生的
+	// pull_<ref>，见 docker_cmd.go），帧通道因此在指令 pending 期间就能被接入。
+	KindPull
 )
 
 func (k Kind) String() string {
-	if k == KindPTY {
+	switch k {
+	case KindPTY:
 		return "pty"
+	case KindStats:
+		return "stats"
+	case KindPull:
+		return "pull"
 	}
 	return "log"
 }
@@ -50,8 +66,11 @@ func (k Kind) String() string {
 // KindForAction 按 action 判定会话种类（日志之外的会话按日志处理：多一条流不致命，
 // 少登记一条会让用户对着「会话不存在」发呆）。
 func KindForAction(action string) Kind {
-	if action == agentproto.DockerActionContainerExec {
+	switch action {
+	case agentproto.DockerActionContainerExec:
 		return KindPTY
+	case agentproto.DockerActionContainerStats:
+		return KindStats
 	}
 	return KindLog
 }
@@ -158,17 +177,21 @@ func (r *Registry) Register(meta Meta) error {
 	if _, exists := r.sessions[meta.SessionID]; exists {
 		return ErrDuplicate
 	}
-	for len(r.deviceSessionsLocked(meta.DeviceID)) >= r.opts.MaxSessionsPerDevice {
-		oldest := oldestOf(r.deviceSessionsLocked(meta.DeviceID))
-		if oldest == nil {
-			break
+	// 淘汰闸只对**用户流**生效：拉取进度会话不占用户槽位（它是一场已受理写指令的
+	// 进度透出），反过来用户流开满也不该挤掉它 —— 两个方向的粘连都要切断。
+	if meta.Kind != KindPull {
+		for len(r.deviceSessionsLocked(meta.DeviceID)) >= r.opts.MaxSessionsPerDevice {
+			oldest := oldestOf(r.deviceSessionsLocked(meta.DeviceID))
+			if oldest == nil {
+				break
+			}
+			delete(r.sessions, oldest.meta.SessionID)
+			oldest.markClosed()
+			r.warn("docker stream session evicted (per-device limit)",
+				zap.String("session", oldest.meta.SessionID),
+				zap.Uint64("deviceId", meta.DeviceID),
+				zap.String("ref", oldest.meta.Ref))
 		}
-		delete(r.sessions, oldest.meta.SessionID)
-		oldest.markClosed()
-		r.warn("docker stream session evicted (per-device limit)",
-			zap.String("session", oldest.meta.SessionID),
-			zap.Uint64("deviceId", meta.DeviceID),
-			zap.String("ref", oldest.meta.Ref))
 	}
 	s := &Session{
 		meta:         meta,
@@ -193,10 +216,15 @@ func oldestOf(list []*Session) *Session {
 }
 
 // deviceSessionsLocked 返回该设备当前**未收尾**的会话（调用方必须持 r.mu）。
+//
+// 拉取进度会话（KindPull）**不进这份账**：它是「每设备至多 3 条**用户流**」上限的
+// 计数基础（受理预检与淘汰都走它）—— 把一场已经受理的拉取算成用户开的流，会让
+// 开满日志/终端的用户被 409 挡住、或让终端挤掉一场正在跑的拉取的进度。用户流的
+// 槽位语义（user 主动开的、会忘关的）与拉取（指令的一部分、寿命=指令）不同。
 func (r *Registry) deviceSessionsLocked(deviceID uint64) []*Session {
 	out := make([]*Session, 0, len(r.sessions))
 	for _, s := range r.sessions {
-		if s.meta.DeviceID == deviceID && !s.isClosed() {
+		if s.meta.DeviceID == deviceID && !s.isClosed() && s.meta.Kind != KindPull {
 			out = append(out, s)
 		}
 	}
@@ -236,11 +264,19 @@ func (r *Registry) All() []*Session {
 }
 
 // Expired 返回空闲超过 IdleTimeout 的会话（lastActivity 由投递与控制帧刷新）。
+//
+// 拉取进度会话**豁免**：排队中的拉取几十分钟没有一帧是常态（dispatcher 串行，
+// 它前面的 15 分钟指令还没跑完 ——「无数据」正是它此刻的事实，不是被遗忘的会话）；
+// 它的寿命与指令同长，由 docker_stream 服务的**终态对账**回收（见 Sweep），
+// 空闲清退对它的语义是错的 —— 清退会下发 cancel，把一场合法的拉取腰斩。
 func (r *Registry) Expired(now time.Time) []*Session {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var out []*Session
 	for _, s := range r.sessions {
+		if s.meta.Kind == KindPull {
+			continue
+		}
 		if now.Sub(s.lastActivityTime()) >= r.opts.IdleTimeout {
 			out = append(out, s)
 		}

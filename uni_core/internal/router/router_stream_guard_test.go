@@ -42,3 +42,81 @@ func TestExecStreamRouteIsRegisteredOutsideAuthGroup(t *testing.T) {
 		t.Fatalf("日志流应留在 auth 组上（%s）", logStreamOnAuth)
 	}
 }
+
+// 事件聚合流的**挂载位置 + 权限**守卫。
+//
+// 事件流走 fetch + ReadableStream（浏览器能带 Authorization），必须像日志/stats
+// 一样挂在 auth 组；且它是总览页活动流的数据源（读面），权限必须是**静态的**
+// docker:list（与 /docker/overview 同档）—— 处理器内没有「按指令校验归属」这一步
+// （聚合流没有发起人），路由丢了 perm 就等于把全部主机的活动流向任何登录用户敞开。
+// 形态与 TestExecStreamRouteIsRegisteredOutsideAuthGroup 相同：源码级断言，
+// 因为 handler 层的测试挂裸引擎、路径权限照旧全绿。
+func TestEventsStreamRouteMountedWithPerm(t *testing.T) {
+	src, err := os.ReadFile("router.go")
+	if err != nil {
+		t.Fatalf("读取 router.go 失败: %v", err)
+	}
+	text := string(src)
+
+	const want = `docker.GET("/events", perm(permission.PermDockerList), deps.Docker.Hdl.EventsStream)`
+	if !strings.Contains(text, want) {
+		t.Fatalf("事件聚合流必须以 %s 挂在 auth 组并带静态 perm(docker:list)（当前缺失）", want)
+	}
+	const offAuth = `api.GET("/docker/events"`
+	if strings.Contains(text, offAuth) {
+		t.Fatalf("事件聚合流不得挂进 api 组（%s）—— 它走 fetch + ReadableStream，凭据是 JWT", offAuth)
+	}
+}
+
+// 凭据管理路由的**静态权限**守卫（4c）。
+//
+// 凭据是「分发」支柱的密钥材料（能解出私有镜像），CRUD 的权限码必须是
+// docker:config —— 六档里的最高管理档（与配置编辑/回滚同档，见
+// pkg/permission 的 PermDockerConfig 注释）。漏挂 perm 等于把「往任意主机
+// 下发任意仓库凭据」的能力向 docker:list 的只读用户敞开：source 级断言，
+// 与 TestEventsStreamRouteMountedWithPerm 同款理由（handler 层测试挂裸引擎）。
+func TestRegistryRoutesMountedWithConfigPerm(t *testing.T) {
+	src, err := os.ReadFile("router.go")
+	if err != nil {
+		t.Fatalf("读取 router.go 失败: %v", err)
+	}
+	text := string(src)
+
+	wants := []string{
+		`docker.GET("/registries", perm(permission.PermDockerConfig), deps.Docker.RegistryHdl.List)`,
+		`docker.POST("/registries", perm(permission.PermDockerConfig), deps.Docker.RegistryHdl.Create)`,
+		`docker.PUT("/registries", perm(permission.PermDockerConfig), deps.Docker.RegistryHdl.Update)`,
+		`docker.DELETE("/registries/:registry", perm(permission.PermDockerConfig), deps.Docker.RegistryHdl.Delete)`,
+	}
+	for _, want := range wants {
+		if !strings.Contains(text, want) {
+			t.Fatalf("凭据路由必须以 %s 挂在 auth 组并带静态 perm(docker:config)（当前缺失）", want)
+		}
+	}
+}
+
+// 任务中心路由的**挂载位置 + 权限**守卫（6b）。
+//
+// 任务中心是读面（跨主机最近指令），权限必须是**静态的** docker:list（与
+// /docker/overview、/docker/containers 同档）—— 处理器内没有「按指令校验归属」
+// 这一步（任务是跨主机的治理视图，不是发起人自己的轮询视图）。漏挂 perm 等于
+// 把「谁在哪台主机上执行过什么」向任何登录用户敞开。
+// 形态与 TestEventsStreamRouteMountedWithPerm 相同：源码级断言，因为 handler 层
+// 的测试挂裸引擎、路径权限照旧全绿（真实的 403 判定由
+// handler.TestTasksRoutePermGuard 用真守卫钉住 —— 两条测试各钉一半）。
+func TestTasksRouteMountedWithListPerm(t *testing.T) {
+	src, err := os.ReadFile("router.go")
+	if err != nil {
+		t.Fatalf("读取 router.go 失败: %v", err)
+	}
+	text := string(src)
+
+	const want = `docker.GET("/tasks", perm(permission.PermDockerList), deps.Docker.Hdl.Tasks)`
+	if !strings.Contains(text, want) {
+		t.Fatalf("任务中心必须以 %s 挂在 auth 组并带静态 perm(docker:list)（当前缺失）", want)
+	}
+	const offAuth = `api.GET("/docker/tasks"`
+	if strings.Contains(text, offAuth) {
+		t.Fatalf("任务中心不得挂进 api 组（%s）—— JWT 登录态是它的身份边界", offAuth)
+	}
+}

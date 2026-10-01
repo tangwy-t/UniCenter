@@ -19,7 +19,7 @@ const dispatchQueueCap = 8
 const dispatchTimeoutCap = 5 * time.Minute
 
 // implementedActions 是本构建**已实现**的 action（一期只读 + 二期写操作 + 三期流会话
-// + 四期配置编辑）。
+// + 四期配置编辑 + 五期监控面与聚合日志）。
 //
 // 与协议白名单分开：白名单是「合法 action 全集」（含二/三/四期），这里是
 // 「这一版 agent 能做的」。差集里的 action 收到时回「该操作尚未开放」——
@@ -32,6 +32,7 @@ var implementedActions = map[string]bool{
 	agentproto.DockerActionComposeFileRead:  true,
 
 	// 二期 B1：容器 / 镜像 / 卷 / 网络的写操作
+	agentproto.DockerActionContainerCreate:  true, // 四支柱·创建面（4a）
 	agentproto.DockerActionContainerStart:   true,
 	agentproto.DockerActionContainerStop:    true,
 	agentproto.DockerActionContainerRestart: true,
@@ -61,6 +62,20 @@ var implementedActions = map[string]bool{
 	// 注意 container:logs 的一次性路径（follow=false）仍走一期只读执行器，行为不变。
 	agentproto.DockerActionContainerExec: true,
 
+	// 监控面：stats 实时流。会话制同 exec（执行器立刻回 session_id，样本在会话里
+	// 持续上行）；数据帧里装的是一条条 JSON 样本行（协议 DockerStatsSample）。
+	agentproto.DockerActionContainerStats: true,
+
+	// 六期·监控面：事件流（docker events 订阅）。会话制同 stats —— 执行器立刻回
+	// session_id，事件在会话里持续上行（帧里一条 JSON 记录一行，协议 DockerEventItem）。
+	// 它是 core 的常驻订阅，host 级（无 target），由 core 的常驻管理器建立/取消。
+	agentproto.DockerActionEvents: true,
+
+	// 五期 5a：compose 项目聚合日志（compose_log_stream.go）。会话制（follow 与
+	// 非 follow 都是流 —— CLI 输出没有一次性取回的形态），权限与 container:logs
+	// 同档（docker:inspect）。
+	agentproto.DockerActionComposeLogs: true,
+
 	// 四期：配置编辑三条路径（validate/write/patch）。共用收尾链见
 	// compose_file_write.go：乐观锁 → 预检 → 备份 → 原子写 → 回读。
 	agentproto.DockerActionComposeFileValidate: true,
@@ -79,6 +94,7 @@ var implementedActions = map[string]bool{
 // 不覆盖不会判死（30s < 5 分钟兜底），但两端的超时口径会不一致（core 先 sweep 成
 // timeout 而 agent 还在跑），镜像的意义就是消除这种「同一个词两个答案」。
 var writeTimeouts = map[string]time.Duration{
+	agentproto.DockerActionContainerCreate:  30 * time.Second, // 创建面（4a）：本地一次 create +（按需）一次 start
 	agentproto.DockerActionContainerStart:   30 * time.Second,
 	agentproto.DockerActionContainerStop:    30 * time.Second,
 	agentproto.DockerActionContainerRestart: 60 * time.Second,

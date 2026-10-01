@@ -23,22 +23,29 @@ import (
 //     --scale / --remove-orphans 在 v2 插件、v2 独立与 v1 上都存在；
 //     `--wait` 之类不许出现（§6.1 矩阵）。
 
-// composeConfigFileOf 解析一个 compose 项目的配置文件绝对路径。
+// composeConfigFilesOf 解析一个 compose 项目的配置文件绝对路径（**全部**，不止主文件）。
 //
 // 路径**只能**来自本机事实（容器标签 / agent 自己落盘的索引），协议上从不接受
 // 路径入参 —— 路径白名单纪律（§8）：UI 只传项目名，路径逃逸面因此不存在。
 // read.go 的 compose.file:read 与本文件的 compose 写路径共用这一份解析。
 //
+// 多文件项目（`-f a.yml -f b.yml`）：标签里的全部文件**按原序**返回 —— compose 的
+// merge 语义（后一个覆盖前一个）正是 override 机制本身，只保留主文件会让 override
+// 定义静默失效；更何况 `up` 默认带 `--remove-orphans`，会把 override 独有服务的容器
+// 当孤儿删掉（破坏性）。列表里每一项都过同款路径校验，任何一项失败即拒绝
+// （结论句指明是哪个文件）。
+//
 // 解析顺序：
 //  1. **容器标签**（com.docker.compose.project.config_files）——最新真相，优先；
 //  2. **项目索引**（project_index.go）——没有容器的项目（down 之后）没有标签可看，
-//     靠它解析出上次快照学到的位置；这是「down → up」能走通的关键；
+//     靠它解析出上次快照学到的位置；这是「down → up」能走通的关键；索引只学主文件，
+//     兜底因此天然是单元素列表；
 //  3. 两者都没有 → **可操作的结论句**（请在主机上先把项目起一次），而不是笼统的
 //     「没有找到这个项目」——后者把「路径未知」误报成「项目不存在」，用户无从下手。
-func composeConfigFileOf(ctx context.Context, api DockerAPI, project string) (string, error) {
+func composeConfigFilesOf(ctx context.Context, api DockerAPI, project string) ([]string, error) {
 	cs, err := api.Containers(ctx)
 	if err != nil {
-		return "", &ExecError{Msg: "读取项目信息失败", Detail: err.Error()}
+		return nil, &ExecError{Msg: "读取项目信息失败", Detail: err.Error()}
 	}
 	hasContainer := false
 	for _, c := range cs {
@@ -51,29 +58,59 @@ func composeConfigFileOf(ctx context.Context, api DockerAPI, project string) (st
 			// 旧版 compose 不写这个标签：这个容器给不出路径；也许索引里存着上一次学到的。
 			continue
 		}
-		// 可能是多个文件（-f a.yml -f b.yml）：取第一个（主文件）。
-		path := strings.TrimSpace(strings.Split(raw, ",")[0])
-		if !filepath.IsAbs(path) {
-			return "", &ExecError{Msg: "配置文件位置异常（不是绝对路径）"}
-		}
-		fi, err := os.Stat(path)
+		files, err := validatedLabelConfigFiles(raw)
 		if err != nil {
-			return "", &ExecError{Msg: "读取配置文件失败", Detail: err.Error()}
+			return nil, err
 		}
-		if fi.IsDir() {
-			return "", &ExecError{Msg: "配置文件位置异常（它是一个目录）"}
+		if len(files) == 0 {
+			// 标签存在但拆不出任何非空项：同样按「给不出路径」处理，希望索引里有历史。
+			continue
 		}
-		return path, nil
+		return files, nil
 	}
 	// 标签给不出路径：回落到持久化索引（最近一次快照学到的位置）。
 	if path, ok := projectIndexOfAPI(api).Lookup(project); ok {
-		return validatedIndexedConfigFile(project, path)
+		p, err := validatedIndexedConfigFile(project, path)
+		if err != nil {
+			return nil, err
+		}
+		return []string{p}, nil
 	}
 	if hasContainer {
 		// 容器在、但路径无从得知（旧版 compose 不记标签，索引里也没有历史）：如实标注。
-		return "", &ExecError{Msg: "这个项目的配置文件位置未知（旧版 compose 未记录）"}
+		return nil, &ExecError{Msg: "这个项目的配置文件位置未知（旧版 compose 未记录）"}
 	}
-	return "", &ExecError{Msg: "这个项目的配置文件位置未知：本机还没有它的容器。请先在主机上执行一次 `docker compose up -d`，之后控制台就能管理它"}
+	return nil, &ExecError{Msg: "这个项目的配置文件位置未知：本机还没有它的容器。请先在主机上执行一次 `docker compose up -d`，之后控制台就能管理它"}
+}
+
+// validatedLabelConfigFiles 把 config_files 标签拆成文件清单并逐项校验。
+//
+// 拆分纪律：逗号切分、逐项 Trim、丢弃空项（标签系 compose 拼的机器串，常带空格或
+// 尾随逗号，那不构成「项目坏了」）。返回的列表**保持标签原序**——compose 的 merge
+// 语义依赖先后（后者覆盖前者），换序等于换了配置。
+//
+// 校验纪律与 validatedIndexedConfigFile **完全一致**（绝对路径 + 存在 + 普通文件），
+// 只是逐项执行；结论句**指明是哪个文件**——多文件项目里只说「某个文件坏了」无从定位。
+func validatedLabelConfigFiles(raw string) ([]string, error) {
+	files := make([]string, 0, 2)
+	for _, item := range strings.Split(raw, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			files = append(files, item)
+		}
+	}
+	for _, f := range files {
+		if !filepath.IsAbs(f) {
+			return nil, &ExecError{Msg: "配置文件位置异常（不是绝对路径）：" + f}
+		}
+		fi, err := os.Stat(f)
+		if err != nil {
+			return nil, &ExecError{Msg: "读取配置文件失败：" + f, Detail: err.Error()}
+		}
+		if fi.IsDir() {
+			return nil, &ExecError{Msg: "配置文件位置异常（它是一个目录）：" + f}
+		}
+	}
+	return files, nil
 }
 
 // validatedIndexedConfigFile 校验索引给出的路径，纪律与标签路径**完全一致**
@@ -143,27 +180,38 @@ func composeBinary(flavor string) (string, error) {
 
 // composeArgv 把 action+options 折成 compose CLI 的固定 argv。
 //
+// configFiles 是全部配置文件（标签原序），**逐个**拼 `-f`：三种 flavor 都支持重复
+// -f——plugin 的 `docker compose`、独立二进制的 docker-compose v2 与 v1 自最早版本起
+// 就是「后一个覆盖前一个」的 merge 语义（override 正是靠 `-f a -f b` 起家）。只带
+// 主文件会让 override 定义静默失效，且 `up --remove-orphans` 会把 override 独有的
+// 服务当孤儿删掉。
+//
 // 返回值不含二进制名；plugin 形态的首元素是 "compose"（`docker compose …` 的子命令），
 // 独立二进制/v1 形态没有这个前缀（`docker-compose …`）。
-func (e *WriteExecutor) composeArgv(action string, o *agentproto.DockerCmdOptions, configFile string) ([]string, error) {
+func (e *WriteExecutor) composeArgv(action string, o *agentproto.DockerCmdOptions, configFiles []string) ([]string, error) {
 	project, service, err := composeNames(action, o.Target)
 	if err != nil {
 		return nil, err
 	}
 	// 配置文件路径同样只接受绝对路径：它来自容器标签，这里是「所有进入 argv 的可变片段
 	// 都过一遍检查」的收口；相对路径会让 CLI 按 agent 的工作目录去猜，结果不可预期。
-	if !filepath.IsAbs(configFile) {
-		return nil, &ExecError{Msg: "配置文件位置异常（不是绝对路径）"}
+	for _, f := range configFiles {
+		if !filepath.IsAbs(f) {
+			return nil, &ExecError{Msg: "配置文件位置异常（不是绝对路径）：" + f}
+		}
 	}
 	flavor := e.flavorValue()
 	if _, err := composeBinary(flavor); err != nil {
 		return nil, err
 	}
-	argv := make([]string, 0, 9)
+	argv := make([]string, 0, 4+2*len(configFiles))
 	if flavor == agentproto.DockerComposeFlavorPlugin {
 		argv = append(argv, "compose")
 	}
-	argv = append(argv, "-p", project, "-f", configFile)
+	argv = append(argv, "-p", project)
+	for _, f := range configFiles {
+		argv = append(argv, "-f", f)
+	}
 	switch action {
 	case agentproto.DockerActionComposeUp:
 		// --remove-orphans **默认带**（§6.3：被移除的定义不回收就会留下孤儿容器，
@@ -241,19 +289,19 @@ func (e *WriteExecutor) doCompose(ctx context.Context, cmd *agentproto.DockerCmd
 	if _, err := composeBinary(e.flavorValue()); err != nil {
 		return err
 	}
-	configFile, err := composeConfigFileOf(ctx, e.api, project)
+	configFiles, err := composeConfigFilesOf(ctx, e.api, project)
 	if err != nil {
 		return err
 	}
-	return e.composeRun(ctx, cmd.Action, o, configFile)
+	return e.composeRun(ctx, cmd.Action, o, configFiles)
 }
 
 // composeRun 执行一条 compose 写操作：固定 argv、零 shell。
 //
 // 失败时取 CLI 的合并输出（stderr 是 compose 的错误出口）折进 detail；成功不产生
 // 载荷 —— 项目类操作的结论在快照里（下一帧即反映），不需要数据面。
-func (e *WriteExecutor) composeRun(ctx context.Context, action string, o *agentproto.DockerCmdOptions, configFile string) error {
-	argv, err := e.composeArgv(action, o, configFile)
+func (e *WriteExecutor) composeRun(ctx context.Context, action string, o *agentproto.DockerCmdOptions, configFiles []string) error {
+	argv, err := e.composeArgv(action, o, configFiles)
 	if err != nil {
 		return err
 	}

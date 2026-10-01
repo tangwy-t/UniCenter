@@ -74,7 +74,7 @@ func TestDispatcherRejectsUnknownAndUnimplemented(t *testing.T) {
 	d := NewDispatcher(exec, sink.send, testLogger())
 	d.Handle(context.Background(), &agentproto.DockerCmd{Ref: "1", Action: "container:destroy",
 		Options: agentproto.DockerCmdOptions{Target: "x"}})
-	// 四期落地后白名单 29 条在本版全部实现：要验证「未实现档」这一分支，只能临时
+	// 监控面落地后白名单 30 条在本版全部实现：要验证「未实现档」这一分支，只能临时
 	// 摘掉一条（模拟旧版 agent 收到新 core 发来的 action）—— 拿真实缺口当样例会随
 	// 功能落地而失真，这正是这条用例的历史教训（三次）。
 	const missing = agentproto.DockerActionComposeFilePatch

@@ -43,6 +43,11 @@ type WriteExecutor struct {
 	transferDir string
 	flavor      string
 	note        string
+	// sessions 是流会话管理器（4b 拉取进度用）：nil = 未装配 —— image:pull 退回到
+	// 一期黑盒形态（进度透出是**最上层设施的增强**，通道没接好时拉取本身必须照旧
+	// 可用）。由 Runtime.New 装配后经 SetSessions 注入（与 Set* 同一模式：执行器由
+	// 测试直接构造时不强制流通道依赖）。
+	sessions *SessionManager
 	// now 是挂钟注入（四期备份令牌取它）：测试要能确定性地产生「同秒连续保存」这类
 	// 时序，而 Runtime 的 Deps.Now 已经是全模块统一的时钟入口。
 	now func() time.Time
@@ -76,6 +81,22 @@ func (e *WriteExecutor) SetNow(now func() time.Time) {
 	e.mu.Lock()
 	e.now = now
 	e.mu.Unlock()
+}
+
+// SetSessions 注入流会话管理器（4b 拉取进度）。nil = 回到一期黑盒形态：
+// image:pull 仍然完整可执行，只是没有进度可见性 —— 装配缺失不得成为拉取的故障
+// 点（旧流程的另一半守卫）。由 Runtime.New 调用（构造晚于执行器，见 runtime.go）。
+func (e *WriteExecutor) SetSessions(m *SessionManager) {
+	e.mu.Lock()
+	e.sessions = m
+	e.mu.Unlock()
+}
+
+// sessionsValue 返回当前的会话管理器（nil = 未装配）。
+func (e *WriteExecutor) sessionsValue() *SessionManager {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.sessions
 }
 
 // nowValue 返回当前挂钟（未注入时用 time.Now）。
@@ -162,6 +183,11 @@ func (e *WriteExecutor) Do(ctx context.Context, cmd *agentproto.DockerCmd) ([]by
 	e.setNote("")
 	o := &cmd.Options
 	switch cmd.Action {
+	case agentproto.DockerActionContainerCreate:
+		// 创建面（4a）：新容器没有可 guard 的目标（保护清单管的是**现存**容器等
+		// 的停删重建，create 的对象还不存在）——守卫不适用，说明见 container_create.go。
+		return e.createContainer(ctx, o)
+
 	case agentproto.DockerActionContainerStart:
 		if err := e.guard(ctx, e.guardContainer(ctx, o.Target), o.Force); err != nil {
 			return nil, err
@@ -214,10 +240,12 @@ func (e *WriteExecutor) Do(ctx context.Context, cmd *agentproto.DockerCmd) ([]by
 		return marshalWritePayload(&writeSpacePayload{SpaceReclaimedBytes: freed})
 
 	case agentproto.DockerActionImagePull:
-		if err := e.api.ImagePull(ctx, o.Target); err != nil {
-			return nil, wrapDocker("拉取镜像失败", err)
-		}
-		return nil, nil
+		// 4b：拉取照旧是**同步写指令**（受理 → 轮询 → 终态结论句的语义不动），
+		// 差别只在执行期间经流会话透出进度（pullImage 里做完会话接线、终态项与
+		// eof 对齐 —— 见 pull_progress.go 的选型说明）。cmd.Ref 进方法：进度会话的
+		// 句柄由 ref 派生（core 受理时预登记的就是它）。
+		// 4c：core 随指令注入的仓库认证一并透传（无凭据 = nil，与 4b 逐字一致）。
+		return nil, e.pullImage(ctx, cmd.Ref, o.Target, pullAuthOf(cmd))
 
 	case agentproto.DockerActionImageTag:
 		if err := e.api.ImageTag(ctx, o.Src, defaultImageTag(o.Dst)); err != nil {

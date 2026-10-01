@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -17,14 +18,22 @@ import (
 	agentproto "github.com/tangwy-t/UniCenter/uni_protocol"
 )
 
-// Docker 流通道的两个对外端点（三期，spec §4.1）：
+// Docker 流通道的对外端点：
 //
 //	GET /docker/hosts/:id/cmds/:ref/stream  —— 日志 Follow：NDJSON，Bearer + 归属校验
+//	                                          （container:logs{follow} 与 compose:logs
+//	                                          聚合日志共用 —— 5a 零新端点）
+//	GET /docker/hosts/:id/cmds/:ref/stats   —— stats 实时流：NDJSON（样本行），Bearer + 归属校验
+//	GET /docker/hosts/:id/cmds/:ref/pull    —— 拉取进度流：NDJSON（进度行），Bearer + 归属校验
 //	GET /docker/hosts/:id/stream/exec       —— 终端：WebSocket 升级，一次性 ticket
 //
-// 为什么两条端点的认证模型不同：日志用 fetch + ReadableStream（前端 HTTP 层能带
-// Authorization），终端必须用浏览器 WebSocket（带不了头），故走一次性 ticket。
-// 这不是两套安全策略，而是同一条纪律（凭证不落 URL 长驻）在不同浏览器 API 下的形态。
+// 为什么两类端点的认证模型不同：日志 / stats / 拉取进度用 fetch + ReadableStream
+// （前端 HTTP 层能带 Authorization），终端必须用浏览器 WebSocket（带不了头），故走
+// 一次性 ticket。这不是两套安全策略，而是同一条纪律（凭证不落 URL 长驻）在不同
+// 浏览器 API 下的形态。拉取进度走 fetch 形态（与日志/stats 同族），且它是唯一一条
+// 「指令还在 pending 就可接入」的流 —— 会话由受理指令时预登记（见
+// service/docker_cmd.go 与协议 DockerPullSessionID），断开这条连接的 cancel
+// 终止的是拉取本身。
 
 const (
 	// execWriteTimeout 是单条 WS 消息的写超时：对端 TCP 卡死时写侧不能永久挂住
@@ -68,8 +77,13 @@ type ndjsonLine struct {
 // 认证与归属：JWT（auth 组）+ 按记录权限码再校验一次 + **发起人归属**（spec §10.5）。
 // 三条缺一不可 —— 记录里带的是会话句柄，接入即读该会话的全部输出。
 //
-// @Summary      容器日志流(NDJSON Follow)
-// @Description  按指令号接入已建立的日志流会话；每行 {"seq","data"(base64),"eof"}；客户端断开即下发 cancel
+// 端点承载 container:logs{follow:true} 与 compose:logs 两种 action（5a 聚合日志
+// 复用同一端点、零新路由）：两者的数据形态都是「原始文本行 + eof」—— compose 聚合
+// 输出本身就是 `<时间戳> <服务>  | 正文` 的行，NDJSON 的 {seq,data,eof} 原样承载，
+// 行形状不需要也不应该分叉（分叉只会让 5b 的工作台多接一种解析）。
+//
+// @Summary      容器/项目聚合日志流(NDJSON Follow)
+// @Description  按指令号接入已建立的日志流会话（container:logs follow 或 compose:logs 项目聚合日志）；每行 {"seq","data"(base64),"eof"}；客户端断开即下发 cancel
 // @Tags         Docker 管理
 // @Produce      application/x-ndjson
 // @Param        id   path      uint64  true  "设备ID"
@@ -114,8 +128,9 @@ func (h *DockerHandler) LogStream(c *gin.Context) {
 		app.Error(c, apperror.Forbidden("无权接入该指令的流会话"))
 		return
 	}
-	if rec.Action != agentproto.DockerActionContainerLogs {
-		// 这条端点只承载日志流：PTY 走专用 WebSocket（两条通道的消息形状不同，
+	if rec.Action != agentproto.DockerActionContainerLogs && rec.Action != agentproto.DockerActionComposeLogs {
+		// 这条端点只承载**文本日志流**（container:logs follow / compose:logs 聚合）：
+		// stats/pull 走各自的打平字段端点、PTY 走专用 WebSocket（通道的消息形状不同，
 		// 交叉使用只会让 console 收到它解析不了的行）。
 		app.Error(c, apperror.BadRequest("该指令不支持日志流"))
 		return
@@ -177,6 +192,330 @@ func (h *DockerHandler) serveLogNDJSON(c *gin.Context, sess *dockerstream.Sessio
 	h.streams.CancelSession(context.Background(), sess, "客户端断开或写失败")
 }
 
+// statsNDJSONLine 是 stats 流的一行（Content-Type: application/x-ndjson）。
+//
+// 样本字段**直接打平**（帧 data 里的 JSON 样本行被解码成字段转发）：曲线数据要能被
+// 前端直接用来画点，而不是先解 base64 再解一层 JSON。字段名与快照 DockerContainer 的
+// 同名字段一致 —— 抽屉里的曲线与表格读数是同一套数据约定。
+type statsNDJSONLine struct {
+	Seq uint64 `json:"seq"`
+	// T 是 agent 采样时刻（unix 毫秒），曲线的 x 轴刻度。
+	T             int64   `json:"t"`
+	CPUPercent    float64 `json:"cpu_percent"`
+	MemUsageMB    float64 `json:"mem_usage_mb"`
+	MemLimitMB    float64 `json:"mem_limit_mb"`
+	NetRXBytesSec float64 `json:"net_rx_bytes_sec"`
+	NetTXBytesSec float64 `json:"net_tx_bytes_sec"`
+	EOF           bool    `json:"eof"`
+}
+
+// StatsStream 容器 stats 实时流：把会话帧里的样本以 NDJSON 持续写给客户端。
+//
+// 认证与归属与日志流**逐条相同**（JWT + 按记录权限码再校验 + 发起人归属）：
+// 它同样是「接入即读该会话全部输出」的通道，纪律不许因为数据类型不同而有差别。
+// 与日志流的差别只有行形状（样本字段 vs data/base64）。
+//
+// @Summary      容器 stats 实时流(NDJSON)
+// @Description  按指令号接入已建立的 stats 会话；每行一个样本 {"seq","t","cpu_percent","mem_usage_mb","mem_limit_mb","net_rx_bytes_sec","net_tx_bytes_sec","eof"}；客户端断开即下发 cancel
+// @Tags         Docker 管理
+// @Produce      application/x-ndjson
+// @Param        id   path      uint64  true  "设备ID"
+// @Param        ref  path      string  true  "指令号"
+// @Security     BearerAuth
+// @Success      200  "流已建立(逐行 NDJSON)"
+// @Failure      400  "请求参数不合法 / 该指令不支持 stats 流"
+// @Failure      401  "未登录"
+// @Failure      403  "无权限 / 非发起人"
+// @Failure      404  "指令不存在或已过期"
+// @Failure      409  "该指令没有可接入的流会话 / 会话已有连接"
+// @Router       /docker/hosts/{id}/cmds/{ref}/stats [get]
+func (h *DockerHandler) StatsStream(c *gin.Context) {
+	id, ok := app.Uint64Param(c, "id")
+	if !ok {
+		return
+	}
+	ref := c.Param("ref")
+	if ref == "" {
+		app.Error(c, apperror.BadRequest("请求参数不合法"))
+		return
+	}
+	if h.streams == nil {
+		app.Error(c, apperror.Internal("流通道未装配"))
+		return
+	}
+	rec, err := h.cmds.Lookup(c.Request.Context(), id, ref)
+	if err != nil {
+		app.Error(c, err)
+		return
+	}
+	if !h.guard.Ensure(c, rec.Perm) {
+		return // Ensure 已写好 403
+	}
+	uid, ok := currentUserID(c)
+	if !ok {
+		app.Error(c, apperror.Unauthorized("未登录或 token 已过期"))
+		return
+	}
+	if rec.UserID != uid {
+		app.Error(c, apperror.Forbidden("无权接入该指令的流会话"))
+		return
+	}
+	if rec.Action != agentproto.DockerActionContainerStats {
+		// 这条端点只承载 stats 流：日志走 NDJSON 日志端点、PTY 走专用 WebSocket
+		// （三条通道的行形状不同，交叉使用只会让 console 收到它解析不了的行）。
+		app.Error(c, apperror.BadRequest("该指令不支持 stats 流"))
+		return
+	}
+	if rec.SessionID == "" {
+		app.Error(c, apperror.Conflict("该指令没有可接入的流会话"))
+		return
+	}
+	sess, err := h.streams.AttachSession(rec.SessionID, uid, id)
+	if err != nil {
+		app.Error(c, err)
+		return
+	}
+	h.serveStatsNDJSON(c, sess)
+}
+
+// serveStatsNDJSON 是 stats 流的转发循环：帧 data 是一条或多条 JSON 样本行，
+// 逐行解码成字段写成 NDJSON 行；eof 挂在最后一个样本行上（与日志流同理）；
+// 一行解码失败时**跳过该行**并留痕 —— 丢一个样本点只让曲线缺一格（seq 让消费端
+// 知道），把整条流转成错误状态则是杀了全部数据。
+//
+// 收尾纪律与 serveLogNDJSON 相同：收到 eof 转发完 → 幂等清理；其余（客户端断开、
+// 写失败、会话被取消）→ 向 agent 发 cancel。
+func (h *DockerHandler) serveStatsNDJSON(c *gin.Context, sess *dockerstream.Session) {
+	ctx := c.Request.Context()
+	// 流式响应的三个头与日志流同一来源（no-store 防缓存、X-Accel-Buffering
+	// 让 nginx 不缓冲 —— 样本行堵在代理缓冲里就会变成「几十秒后一次性出现」）。
+	c.Header("Content-Type", "application/x-ndjson")
+	c.Header("Cache-Control", "no-store")
+	c.Header("X-Accel-Buffering", "no")
+	c.Status(http.StatusOK)
+	flusher, _ := c.Writer.(http.Flusher)
+	if flusher != nil {
+		flusher.Flush()
+	}
+
+	enc := json.NewEncoder(c.Writer)
+	ended := false
+	for {
+		f, err := sess.Next(ctx)
+		if err != nil {
+			break
+		}
+		lines := 0
+		for _, raw := range bytes.Split(f.Data, []byte{'\n'}) {
+			if len(raw) == 0 {
+				continue
+			}
+			var s agentproto.DockerStatsSample
+			if err := json.Unmarshal(raw, &s); err != nil || s.Validate() != nil {
+				// 解不开的样本行：跳过并留痕（与注册表「非法帧丢弃并告警」同一纪律）。
+				if h.log != nil {
+					h.log.Warn("docker stats sample dropped (invalid)",
+						zap.String("session", sess.ID()), zap.Uint64("seq", f.Seq), zap.Error(err))
+				}
+				continue
+			}
+			line := statsNDJSONLine{Seq: f.Seq, T: s.T, CPUPercent: s.CPUPercent,
+				MemUsageMB: s.MemUsageMB, MemLimitMB: s.MemLimitMB,
+				NetRXBytesSec: s.NetRXBytesSec, NetTXBytesSec: s.NetTXBytesSec}
+			if f.EOF {
+				line.EOF = true // eof 挂在最后一个样本行（与日志「末帧数据+eof 同帧」同理）
+			}
+			if err := enc.Encode(line); err != nil {
+				h.streams.CancelSession(context.Background(), sess, "客户端断开或写失败")
+				return
+			}
+			lines++
+		}
+		if f.EOF && lines == 0 {
+			// eof 帧不带样本：单独发一行 eof（消费端不能永远等不到收尾信号）。
+			if err := enc.Encode(statsNDJSONLine{Seq: f.Seq, EOF: true}); err != nil {
+				h.streams.CancelSession(context.Background(), sess, "客户端断开或写失败")
+				return
+			}
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+		if f.EOF {
+			ended = true
+			break
+		}
+	}
+	if ended {
+		h.streams.FinishSession(sess.ID())
+		return
+	}
+	h.streams.CancelSession(context.Background(), sess, "客户端断开或写失败")
+}
+
+// PullStream 镜像拉取进度流：把会话帧里的进度记录以 NDJSON 持续写给客户端。
+//
+// 认证与归属与 stats/日志流**逐条相同**（JWT + 按记录权限码再校验 + 发起人归属）：
+// 权限码就是 image:pull 的受理权限码（docker:manage）—— 看进度与发起拉取同档，
+// 因为进度如实露出「在拉什么」（镜像名/层/体积都是仓库面的事实）。
+// 与 stats 流的差别：会话句柄不取记录的 session_id（result 只在拉取结束时回），
+// 而是与 core 受理时的预登记同源的**派生句柄**（协议 DockerPullSessionID）。
+//
+// @Summary      镜像拉取进度流(NDJSON)
+// @Description  按指令号接入拉取进度会话；每行一个进度记录 {"seq","t","id","status","current","total","done","error","eof"}；客户端断开即下发 cancel（终止拉取）
+// @Tags         Docker 管理
+// @Produce      application/x-ndjson
+// @Param        id   path      uint64  true  "设备ID"
+// @Param        ref  path      string  true  "指令号"
+// @Security     BearerAuth
+// @Success      200  "流已建立(逐行 NDJSON)"
+// @Failure      400  "请求参数不合法 / 该指令不支持拉取进度流"
+// @Failure      401  "未登录"
+// @Failure      403  "无权限 / 非发起人"
+// @Failure      404  "指令不存在或已过期"
+// @Failure      409  "该指令没有可接入的流会话 / 会话已有连接"
+// @Router       /docker/hosts/{id}/cmds/{ref}/pull [get]
+func (h *DockerHandler) PullStream(c *gin.Context) {
+	id, ok := app.Uint64Param(c, "id")
+	if !ok {
+		return
+	}
+	ref := c.Param("ref")
+	if ref == "" {
+		app.Error(c, apperror.BadRequest("请求参数不合法"))
+		return
+	}
+	if h.streams == nil {
+		app.Error(c, apperror.Internal("流通道未装配"))
+		return
+	}
+	rec, err := h.cmds.Lookup(c.Request.Context(), id, ref)
+	if err != nil {
+		app.Error(c, err)
+		return
+	}
+	if !h.guard.Ensure(c, rec.Perm) {
+		return // Ensure 已写好 403
+	}
+	uid, ok := currentUserID(c)
+	if !ok {
+		app.Error(c, apperror.Unauthorized("未登录或 token 已过期"))
+		return
+	}
+	if rec.UserID != uid {
+		app.Error(c, apperror.Forbidden("无权接入该指令的流会话"))
+		return
+	}
+	if rec.Action != agentproto.DockerActionImagePull {
+		// 这条端点只承载拉取进度：日志/stats 走各自端点（三个通道的行形状不同，
+		// 交叉使用只会让 console 收到它解析不了的行）。
+		app.Error(c, apperror.BadRequest("该指令不支持拉取进度流"))
+		return
+	}
+	sess, err := h.streams.AttachSession(agentproto.DockerPullSessionID(rec.Ref), uid, id)
+	if err != nil {
+		app.Error(c, err)
+		return
+	}
+	h.servePullNDJSON(c, sess)
+}
+
+// pullNDJSONLine 是拉取进度流的一行（Content-Type: application/x-ndjson）。
+//
+// 记录字段**直接打平**（与 stats 同一取向）：进度对话框要能直接拿字段渲染
+// 进度条/文案，而不是先解 base64 再解一层 JSON。字段名与协议
+// DockerPullProgressItem 同名字段一一对应。
+type pullNDJSONLine struct {
+	Seq uint64 `json:"seq"`
+	T   int64  `json:"t"`
+	ID  string `json:"id,omitempty"`
+	// Status 是 daemon 原文状态文案。
+	Status  string `json:"status,omitempty"`
+	Current int64  `json:"current,omitempty"`
+	Total   int64  `json:"total,omitempty"`
+	// Done / Error 是终态标记（恰在流末一条），与 eof 同帧到最后一行。
+	Done  bool   `json:"done,omitempty"`
+	Error string `json:"error,omitempty"`
+	EOF   bool   `json:"eof"`
+}
+
+// servePullNDJSON 是拉取进度的转发循环：帧 data 是一条或多条进度记录行，
+// 逐行解码成字段写成 NDJSON 行；eof 挂在最后一个记录行上（与 stats 流同理）；
+// 一行解码失败时**跳过该行**并留痕（丢一眼进度不致命，把整条流转成错误才是）。
+//
+// 收尾纪律与 serveStatsNDJSON 相同：收到 eof 转发完 → 幂等清理；其余（客户端断开、
+// 写失败、会话被取消）→ 向 agent 发 cancel—— 对拉取，cancel 有真实的语义重量：
+// 它会**终止这场拉取**（agent 侧关闭拉取用的 ctx），故「进度对话框断开 = 放弃这场
+// 拉取」是本端点给消费端的契约（与 stats/logs「断开即停流」同一条纪律）。
+func (h *DockerHandler) servePullNDJSON(c *gin.Context, sess *dockerstream.Session) {
+	ctx := c.Request.Context()
+	// 流式响应的三个头与日志/stats 流同一来源（no-store 防缓存、X-Accel-Buffering
+	// 让 nginx 不缓冲 —— 进度行堵在代理缓冲里就会变成「几十秒后一次性出现」）。
+	c.Header("Content-Type", "application/x-ndjson")
+	c.Header("Cache-Control", "no-store")
+	c.Header("X-Accel-Buffering", "no")
+	c.Status(http.StatusOK)
+	flusher, _ := c.Writer.(http.Flusher)
+	if flusher != nil {
+		flusher.Flush()
+	}
+
+	enc := json.NewEncoder(c.Writer)
+	ended := false
+	for {
+		f, err := sess.Next(ctx)
+		if err != nil {
+			break
+		}
+		lines := 0
+		for _, raw := range bytes.Split(f.Data, []byte{'\n'}) {
+			if len(raw) == 0 {
+				continue
+			}
+			var p agentproto.DockerPullProgressItem
+			if err := json.Unmarshal(raw, &p); err != nil || p.Validate() != nil {
+				// 解不开的进度行：跳过并留痕（与 stats 样本行同一纪律）。
+				if h.log != nil {
+					h.log.Warn("docker pull progress item dropped (invalid)",
+						zap.String("session", sess.ID()), zap.Uint64("seq", f.Seq), zap.Error(err))
+				}
+				continue
+			}
+			line := pullNDJSONLine{Seq: f.Seq, T: p.T, ID: p.ID, Status: p.Status,
+				Current: p.Current, Total: p.Total, Done: p.Done, Error: p.Error}
+			if f.EOF {
+				line.EOF = true // eof 挂在最后一个进度行（与日志「末帧数据+eof 同帧」同理）
+			}
+			if err := enc.Encode(line); err != nil {
+				h.streams.CancelSession(context.Background(), sess, "客户端断开或写失败")
+				return
+			}
+			lines++
+		}
+		if f.EOF && lines == 0 {
+			// eof 帧不带进度行（终态项与 eof 分了帧）：单独发一行 eof。
+			if err := enc.Encode(pullNDJSONLine{Seq: f.Seq, EOF: true}); err != nil {
+				h.streams.CancelSession(context.Background(), sess, "客户端断开或写失败")
+				return
+			}
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+		if f.EOF {
+			ended = true
+			break
+		}
+	}
+	if ended {
+		h.streams.FinishSession(sess.ID())
+		return
+	}
+	h.streams.CancelSession(context.Background(), sess, "客户端断开或写失败")
+}
+
+// ── 终端（WebSocket）────────────────────────────────────────────────────
+//
 // execClientMsg 是终端 WS 的**客户端 → 服务端**消息。
 //
 // input.data 是**明文 UTF-8**（键盘输入是文本，且 xterm 的 onData 本就是字符串）——

@@ -325,6 +325,363 @@ func TestLogStreamDisconnectCancelsAgent(t *testing.T) {
 	_ = w
 }
 
+// ── compose 聚合日志（5a）：复用日志流端点，零新路由 ──────────────────────────
+
+// composeAggLine 是聚合日志帧的线上形态（agent 原文透传 compose CLI 输出）：
+// `<RFC3339 时间戳> <服务>  | 正文` —— 行内自带服务前缀与时间轴，NDJSON 的
+// data 字段承载的正是这一整行。
+const composeAggLine = "2026-09-30T08:00:00.000000000Z uni_core  | boot ok\n" +
+	"2026-09-30T08:00:01.000000000Z web-1    | GET /health 200\n"
+
+// TestLogStreamServesComposeLogs：compose:logs 的会话走**同一条** /cmds/:ref/stream
+// 端点 —— 行形状同为 {seq,data,eof} 的文本透传，鉴权（docker:inspect 档）、发起人
+// 归属、eof 清理、断开发 cancel 的纪律与容器日志逐条相同；数据形态不分叉是 5b
+// 工作台只接一种解析的前提。
+func TestLogStreamServesComposeLogs(t *testing.T) {
+	ctx := context.Background()
+	env := newTestDockerHandler(t, []string{"docker:inspect"})
+	rec := seedStreamRecord(t, env, 7, 1, agentproto.DockerActionComposeLogs)
+	sess := seedStreamSession(t, env, 7, 1, agentproto.DockerActionComposeLogs)
+	if sess.Kind() != dockerstream.KindLog {
+		t.Fatalf("compose:logs 的会话应按日志流登记（KindForAction 缺省档），实际 %v", sess.Kind())
+	}
+
+	for _, f := range []*agentproto.DockerFrame{
+		{SessionID: streamSessionID, Seq: 1, Data: []byte(composeAggLine)},
+		{SessionID: streamSessionID, Seq: 2, Data: []byte("2026-09-30T08:00:02.000000000Z uni_core  | listening\n"), EOF: true},
+	} {
+		if err := env.sessions.DeliverDockerFrame(ctx, 7, f); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	w, c, cancel := logStreamContext(rec, 1)
+	defer cancel()
+	env.handler.LogStream(c)
+
+	if ct := w.Header().Get("Content-Type"); ct != "application/x-ndjson" {
+		t.Fatalf("Content-Type 必须是 application/x-ndjson，实际 %q", ct)
+	}
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d (%s)", w.Code, w.Body.String())
+	}
+	lines := strings.Split(strings.TrimSpace(w.Body.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("应有 2 行 NDJSON（合帧的两块数据），实际 %d: %q", len(lines), lines)
+	}
+	// data 是 base64 的原文行：解开后逐字对照（原文透传契约）。
+	for i, want := range []string{composeAggLine, "2026-09-30T08:00:02.000000000Z uni_core  | listening\n"} {
+		var l struct {
+			Seq  uint64 `json:"seq"`
+			Data []byte `json:"data"`
+			EOF  bool   `json:"eof"`
+		}
+		if err := json.Unmarshal([]byte(lines[i]), &l); err != nil {
+			t.Fatalf("第 %d 行不是合法 JSON: %v (%q)", i, err, lines[i])
+		}
+		if l.Seq != uint64(i+1) {
+			t.Fatalf("第 %d 行 seq 应为 %d，实际 %d", i, i+1, l.Seq)
+		}
+		if string(l.Data) != want {
+			t.Fatalf("第 %d 行 data 必须原文透传:\n got %q\nwant %q", i, string(l.Data), want)
+		}
+		if l.EOF != (i == 1) {
+			t.Fatalf("eof 必须挂在最后一行，第 %d 行 eof=%v", i, l.EOF)
+		}
+	}
+	if env.sessions.Get(streamSessionID) != nil {
+		t.Fatal("eof 转发完必须清理会话")
+	}
+	// 自然结束**不得**下发 cancel（agent 侧 CLI 已退出）。
+	for _, fr := range env.sender.frameOps() {
+		if fr.Op == agentproto.DockerFrameOpCancel {
+			t.Fatalf("正常 eof 收尾不得下发 cancel: %+v", fr)
+		}
+	}
+}
+
+// TestLogStreamComposeLogsRejects：聚合日志走日志端点的几条拒绝路径 —— 非日志
+// action（stats）仍 400（分叉守卫不能因为多了 compose:logs 而松开）；compose:logs
+// 记录没有会话（理论上不该发生 —— 两种形态都建会话）时 409 而不是空流。
+func TestLogStreamComposeLogsRejects(t *testing.T) {
+	t.Run("stats 指令仍不能接日志端点 400", func(t *testing.T) {
+		env := newTestDockerHandler(t, []string{"docker:inspect"})
+		rec := seedStreamRecord(t, env, 7, 1, agentproto.DockerActionContainerStats)
+		w, c, cancel := logStreamContext(rec, 1)
+		defer cancel()
+		env.handler.LogStream(c)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("stats 指令必须 400: %d %s", w.Code, w.Body.String())
+		}
+	})
+	t.Run("非发起人 403", func(t *testing.T) {
+		env := newTestDockerHandler(t, []string{"docker:inspect"})
+		rec := seedStreamRecord(t, env, 7, 1, agentproto.DockerActionComposeLogs)
+		w, c, cancel := logStreamContext(rec, 2)
+		defer cancel()
+		env.handler.LogStream(c)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("非发起人必须 403: %d %s", w.Code, w.Body.String())
+		}
+	})
+	t.Run("无会话 409（给结论句而不是空流）", func(t *testing.T) {
+		env := newTestDockerHandler(t, []string{"docker:inspect"})
+		ctx := context.Background()
+		rec := &dockerstate.CmdRecord{Ref: "1790000000004", DeviceID: 7, Action: agentproto.DockerActionComposeLogs,
+			Target: "uni-center", UserID: 1, Perm: "docker:inspect"}
+		if err := env.cmds.Create(ctx, rec, time.Minute); err != nil {
+			t.Fatal(err)
+		}
+		w, c, cancel := logStreamContext(rec, 1)
+		defer cancel()
+		env.handler.LogStream(c)
+		if w.Code != http.StatusConflict {
+			t.Fatalf("没有会话必须 409: %d %s", w.Code, w.Body.String())
+		}
+	})
+}
+
+// ── stats 实时流（NDJSON）─────────────────────────────────────────────────
+
+// statsStreamContext 造一个 stats 流请求上下文（可取消，模拟客户端断开）。
+func statsStreamContext(rec *dockerstate.CmdRecord, uid uint64) (*httptest.ResponseRecorder, *gin.Context, context.CancelFunc) {
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	ctx, cancel := context.WithCancel(context.Background())
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/docker/hosts/7/cmds/"+rec.Ref+"/stats", nil).WithContext(ctx)
+	c.Params = gin.Params{{Key: "id", Value: "7"}, {Key: "ref", Value: rec.Ref}}
+	c.Set(middleware.CtxClaims, testClaims(uid))
+	return w, c, cancel
+}
+
+// statsLineOf 编一条样本 JSON 行（帧 data 的线上形态）。
+func statsLineOf(t *testing.T, cpu float64) []byte {
+	t.Helper()
+	raw, err := json.Marshal(agentproto.DockerStatsSample{
+		T: 1790000000000, CPUPercent: cpu, MemUsageMB: 512.5, MemLimitMB: 1024,
+		NetRXBytesSec: 3000, NetTXBytesSec: 1500,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return append(raw, '\n')
+}
+
+// TestStatsStreamRejects: 权限、归属、无会话、非 stats action、会话不存在五条拒绝路径
+// （与日志端点同一套纪律 —— 流通道的鉴权不允许因数据类型不同而有差别）。
+func TestStatsStreamRejects(t *testing.T) {
+	t.Run("无权限 403", func(t *testing.T) {
+		env := newTestDockerHandler(t, []string{"docker:list"}) // 缺 docker:inspect
+		rec := seedStreamRecord(t, env, 7, 1, agentproto.DockerActionContainerStats)
+		w, c, cancel := statsStreamContext(rec, 1)
+		defer cancel()
+		env.handler.StatsStream(c)
+		if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "无操作权限") {
+			t.Fatalf("无权限必须 403: %d %s", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("非发起人 403", func(t *testing.T) {
+		env := newTestDockerHandler(t, []string{"docker:inspect"})
+		rec := seedStreamRecord(t, env, 7, 1, agentproto.DockerActionContainerStats)
+		w, c, cancel := statsStreamContext(rec, 2)
+		defer cancel()
+		env.handler.StatsStream(c)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("非发起人必须 403: %d %s", w.Code, w.Body.String())
+		}
+		if env.sessions.Len() != 0 {
+			t.Fatal("被拒的请求不得登记任何会话")
+		}
+	})
+
+	t.Run("无会话 409", func(t *testing.T) {
+		env := newTestDockerHandler(t, []string{"docker:inspect"})
+		ctx := context.Background()
+		rec := &dockerstate.CmdRecord{Ref: "1790000000003", DeviceID: 7,
+			Action: agentproto.DockerActionContainerStats, Target: "mysql",
+			UserID: 1, Perm: recordPerm(agentproto.DockerActionContainerStats)}
+		if err := env.cmds.Create(ctx, rec, time.Minute); err != nil {
+			t.Fatal(err)
+		}
+		w, c, cancel := statsStreamContext(rec, 1)
+		defer cancel()
+		env.handler.StatsStream(c)
+		if w.Code != http.StatusConflict {
+			t.Fatalf("没有会话必须 409: %d %s", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("日志指令不能接 stats 端点 400", func(t *testing.T) {
+		env := newTestDockerHandler(t, []string{"docker:inspect"})
+		rec := seedStreamRecord(t, env, 7, 1, agentproto.DockerActionContainerLogs)
+		w, c, cancel := statsStreamContext(rec, 1)
+		defer cancel()
+		env.handler.StatsStream(c)
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "stats") {
+			t.Fatalf("非 stats 指令必须 400: %d %s", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("会话不存在 404", func(t *testing.T) {
+		env := newTestDockerHandler(t, []string{"docker:inspect"})
+		rec := seedStreamRecord(t, env, 7, 1, agentproto.DockerActionContainerStats) // 注册表未登记
+		w, c, cancel := statsStreamContext(rec, 1)
+		defer cancel()
+		env.handler.StatsStream(c)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("会话不存在必须 404: %d %s", w.Code, w.Body.String())
+		}
+	})
+}
+
+// TestStatsStreamForwardsNDJSON：帧里的样本行按序转成**打平字段**的 NDJSON 行
+// （一帧多行也逐行转发、seq 与帧一致），eof 挂在最后一个样本行，收尾后会话被清理。
+func TestStatsStreamForwardsNDJSON(t *testing.T) {
+	ctx := context.Background()
+	env := newTestDockerHandler(t, []string{"docker:inspect"})
+	rec := seedStreamRecord(t, env, 7, 1, agentproto.DockerActionContainerStats)
+	seedStreamSession(t, env, 7, 1, agentproto.DockerActionContainerStats)
+
+	row := statsLineOf(t, 12.34)
+	// 一帧两条样本行（agent 侧合帧的边界形态：逐行转发，不能把它当一条 JSON）。
+	double := append(statsLineOf(t, 1.5), statsLineOf(t, 2.5)...)
+	for _, f := range []*agentproto.DockerFrame{
+		{SessionID: streamSessionID, Seq: 1, Data: row},
+		{SessionID: streamSessionID, Seq: 2, Data: double},
+		{SessionID: streamSessionID, Seq: 3, Data: statsLineOf(t, 99), EOF: true},
+	} {
+		if err := env.sessions.DeliverDockerFrame(ctx, 7, f); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	w, c, cancel := statsStreamContext(rec, 1)
+	defer cancel()
+	env.handler.StatsStream(c)
+
+	if ct := w.Header().Get("Content-Type"); ct != "application/x-ndjson" {
+		t.Fatalf("Content-Type 必须是 application/x-ndjson，实际 %q", ct)
+	}
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d (%s)", w.Code, w.Body.String())
+	}
+	lines := strings.Split(strings.TrimSpace(w.Body.String()), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("应有 4 行 NDJSON（1+2+1），实际 %d: %q", len(lines), lines)
+	}
+	type line struct {
+		Seq           uint64  `json:"seq"`
+		T             int64   `json:"t"`
+		CPUPercent    float64 `json:"cpu_percent"`
+		MemUsageMB    float64 `json:"mem_usage_mb"`
+		NetRXBytesSec float64 `json:"net_rx_bytes_sec"`
+		EOF           bool    `json:"eof"`
+	}
+	var got []line
+	for i, raw := range lines {
+		var l line
+		if err := json.Unmarshal([]byte(raw), &l); err != nil {
+			t.Fatalf("第 %d 行不是合法 JSON: %v (%q)", i, err, raw)
+		}
+		got = append(got, l)
+	}
+	if got[0].CPUPercent != 12.34 || got[0].Seq != 1 || got[0].EOF {
+		t.Fatalf("首行不符: %+v", got[0])
+	}
+	if got[1].CPUPercent != 1.5 || got[2].CPUPercent != 2.5 ||
+		got[1].Seq != 2 || got[2].Seq != 2 {
+		t.Fatalf("合帧的两行必须各自成行、seq 同帧: %+v %+v", got[1], got[2])
+	}
+	if got[3].CPUPercent != 99 || got[3].MemUsageMB != 512.5 ||
+		got[3].NetRXBytesSec != 3000 || got[3].T != 1790000000000 || !got[3].EOF {
+		t.Fatalf("末行必须带样本与 eof: %+v", got[3])
+	}
+	if env.sessions.Get(streamSessionID) != nil {
+		t.Fatal("eof 转发完必须清理会话")
+	}
+	for _, fr := range env.sender.frameOps() {
+		if fr.Op == agentproto.DockerFrameOpCancel {
+			t.Fatalf("正常 eof 收尾不得下发 cancel: %+v", fr)
+		}
+	}
+}
+
+// TestStatsStreamSkipsInvalidSampleLine：解不开的样本行跳过并留痕（丢一个点而不是
+// 整条流），合法行照常转发 —— 与注册表「非法帧丢弃」同一纪律。
+func TestStatsStreamSkipsInvalidSampleLine(t *testing.T) {
+	ctx := context.Background()
+	env := newTestDockerHandler(t, []string{"docker:inspect"})
+	rec := seedStreamRecord(t, env, 7, 1, agentproto.DockerActionContainerStats)
+	seedStreamSession(t, env, 7, 1, agentproto.DockerActionContainerStats)
+
+	bad := []byte("not-a-sample\n")
+	good := statsLineOf(t, 42)
+	if err := env.sessions.DeliverDockerFrame(ctx, 7, &agentproto.DockerFrame{
+		SessionID: streamSessionID, Seq: 1, Data: append(bad, good...)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.sessions.DeliverDockerFrame(ctx, 7, &agentproto.DockerFrame{
+		SessionID: streamSessionID, Seq: 2, EOF: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	w, c, cancel := statsStreamContext(rec, 1)
+	defer cancel()
+	env.handler.StatsStream(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d (%s)", w.Code, w.Body.String())
+	}
+	lines := strings.Split(strings.TrimSpace(w.Body.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("坏行应被跳过：应有 2 行（好样本 + eof），实际 %d: %q", len(lines), lines)
+	}
+	var l struct {
+		CPUPercent float64 `json:"cpu_percent"`
+		EOF        bool    `json:"eof"`
+	}
+	if err := json.Unmarshal([]byte(lines[0]), &l); err != nil || l.CPUPercent != 42 {
+		t.Fatalf("好样本必须照常转发: %v %+v", err, l)
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &l); err != nil || !l.EOF {
+		t.Fatalf("收尾行必须是 eof: %v %+v", err, l)
+	}
+}
+
+// TestStatsStreamDisconnectCancelsAgent：客户端断开（请求 ctx 取消）→ 向 agent 下发
+// cancel 并清理会话 —— 否则 agent 侧的 stats 采集会一直挂到空闲超时。
+func TestStatsStreamDisconnectCancelsAgent(t *testing.T) {
+	env := newTestDockerHandler(t, []string{"docker:inspect"})
+	rec := seedStreamRecord(t, env, 7, 1, agentproto.DockerActionContainerStats)
+	sess := seedStreamSession(t, env, 7, 1, agentproto.DockerActionContainerStats)
+
+	w, c, cancel := statsStreamContext(rec, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		env.handler.StatsStream(c)
+	}()
+	waitStream(t, "接入完成", func() bool { return sess.Attached() })
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("客户端断开后处理器必须返回")
+	}
+	if env.sessions.Get(streamSessionID) != nil {
+		t.Fatal("断开后必须清理会话")
+	}
+	frames := env.sender.frameOps()
+	if len(frames) != 1 || frames[0].Op != agentproto.DockerFrameOpCancel ||
+		frames[0].SessionID != streamSessionID {
+		t.Fatalf("断开必须下发 cancel: %+v", frames)
+	}
+	if len(env.sender.deviceIDs()) != 1 || env.sender.deviceIDs()[0] != 7 {
+		t.Fatalf("cancel 必须发往会话设备: %v", env.sender.deviceIDs())
+	}
+	_ = w
+}
+
 // ── 终端流（WebSocket）────────────────────────────────────────────────────
 
 // newStreamHTTPServer 起一个真实 HTTP 服务器（WS 需要真实握手），并注入登录身份。
@@ -535,4 +892,252 @@ func TestExecWSDisconnectCancelsAgent(t *testing.T) {
 		}
 		return false
 	})
+}
+
+// ── 拉取进度流（image:pull，4b）───────────────────────────────────────────
+
+const pullRecRef = "1790000000000000999"
+
+// seedPullRecord 建一条 **pending** 的 image:pull 指令记录（拉取的 record 直到拉取
+// 结束才终态 —— 进度流是唯一「指令未终态即可接入」的流，夹具要与线上语义同形）。
+func seedPullRecord(t *testing.T, env *dockerTestEnv, device, user uint64) *dockerstate.CmdRecord {
+	t.Helper()
+	rec := &dockerstate.CmdRecord{Ref: pullRecRef, DeviceID: device, Action: agentproto.DockerActionImagePull,
+		Target: "nginx:latest", UserID: user, Perm: "docker:manage"}
+	if err := env.cmds.Create(context.Background(), rec, 15*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	return rec
+}
+
+// seedPullProgressSession 在注册表里预登记拉取进度会话（模拟受理指令时的登记；
+// 句柄 = 协议派生的 pull_<ref>，不是随机会话 id）。
+func seedPullProgressSession(t *testing.T, env *dockerTestEnv, device, user uint64) *dockerstream.Session {
+	t.Helper()
+	if err := env.sessions.Register(dockerstream.Meta{
+		SessionID: agentproto.DockerPullSessionID(pullRecRef), DeviceID: device, UserID: user,
+		Action: agentproto.DockerActionImagePull, Ref: pullRecRef, Kind: dockerstream.KindPull,
+		CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return env.sessions.Get(agentproto.DockerPullSessionID(pullRecRef))
+}
+
+// pullStreamContext 造一个拉取进度流请求上下文（可取消，模拟客户端断开）。
+func pullStreamContext(rec *dockerstate.CmdRecord, uid uint64) (*httptest.ResponseRecorder, *gin.Context, context.CancelFunc) {
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	ctx, cancel := context.WithCancel(context.Background())
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/docker/hosts/7/cmds/"+rec.Ref+"/pull", nil).WithContext(ctx)
+	c.Params = gin.Params{{Key: "id", Value: "7"}, {Key: "ref", Value: rec.Ref}}
+	c.Set(middleware.CtxClaims, testClaims(uid))
+	return w, c, cancel
+}
+
+// pullLineOf 编一条进度记录 JSON 行（帧 data 的线上形态）。
+func pullLineOf(t *testing.T, p agentproto.DockerPullProgressItem) []byte {
+	t.Helper()
+	raw, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return append(raw, '\n')
+}
+
+// TestPullStreamRejects: 权限、归属、非 pull action、会话不存在四条拒绝路径。
+// 与日志/stats 端点同一套纪律 —— 流通道的鉴权不允许因数据类型不同而有差别；
+// 差别只在权限码：看进度与发起拉取同档（docker:manage），进度如实露出在拉什么。
+func TestPullStreamRejects(t *testing.T) {
+	t.Run("无权限 403", func(t *testing.T) {
+		env := newTestDockerHandler(t, []string{"docker:list"}) // 缺 docker:manage
+		rec := seedPullRecord(t, env, 7, 1)
+		w, c, cancel := pullStreamContext(rec, 1)
+		defer cancel()
+		env.handler.PullStream(c)
+		if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "无操作权限") {
+			t.Fatalf("无权限必须 403: %d %s", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("非发起人 403", func(t *testing.T) {
+		env := newTestDockerHandler(t, []string{"docker:manage"})
+		rec := seedPullRecord(t, env, 7, 1)
+		w, c, cancel := pullStreamContext(rec, 2)
+		defer cancel()
+		env.handler.PullStream(c)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("非发起人必须 403: %d %s", w.Code, w.Body.String())
+		}
+		if env.sessions.Len() != 0 {
+			t.Fatal("被拒的请求不得登记任何会话")
+		}
+	})
+
+	t.Run("非拉取指令 400", func(t *testing.T) {
+		env := newTestDockerHandler(t, []string{"docker:inspect"})
+		rec := seedStreamRecord(t, env, 7, 1, agentproto.DockerActionContainerStats)
+		w, c, cancel := pullStreamContext(rec, 1)
+		defer cancel()
+		env.handler.PullStream(c)
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "不支持") {
+			t.Fatalf("非拉取指令必须 400: %d %s", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("会话不存在 404", func(t *testing.T) {
+		env := newTestDockerHandler(t, []string{"docker:manage"})
+		rec := seedPullRecord(t, env, 7, 1) // 注册表未预登记
+		w, c, cancel := pullStreamContext(rec, 1)
+		defer cancel()
+		env.handler.PullStream(c)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("会话不存在必须 404: %d %s", w.Code, w.Body.String())
+		}
+	})
+}
+
+// TestPullStreamForwardsNDJSON：帧里的进度记录逐行转成**打平字段**的 NDJSON 行
+// （一帧多行也逐行转发、seq 与帧一致），终态 done 项与 eof 挂在最后一行，
+// 收尾后会话被清理 —— 与 stats 端点同一条管线纪律。
+func TestPullStreamForwardsNDJSON(t *testing.T) {
+	ctx := context.Background()
+	env := newTestDockerHandler(t, []string{"docker:manage"})
+	rec := seedPullRecord(t, env, 7, 1)
+	seedPullProgressSession(t, env, 7, 1)
+
+	sid := agentproto.DockerPullSessionID(pullRecRef)
+	double := append(
+		pullLineOf(t, agentproto.DockerPullProgressItem{T: 1790000000000, ID: "aaa", Status: "Downloading", Current: 4096, Total: 8192}),
+		pullLineOf(t, agentproto.DockerPullProgressItem{T: 1790000000000, ID: "bbb", Status: "Extracting", Current: 100, Total: 100})...)
+	for _, f := range []*agentproto.DockerFrame{
+		{SessionID: sid, Seq: 1, Data: double},
+		{SessionID: sid, Seq: 2, Data: pullLineOf(t, agentproto.DockerPullProgressItem{T: 1790000000100, Done: true}), EOF: true},
+	} {
+		if err := env.sessions.DeliverDockerFrame(ctx, 7, f); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	w, c, cancel := pullStreamContext(rec, 1)
+	defer cancel()
+	env.handler.PullStream(c)
+
+	if ct := w.Header().Get("Content-Type"); ct != "application/x-ndjson" {
+		t.Fatalf("Content-Type 必须是 application/x-ndjson，实际 %q", ct)
+	}
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d (%s)", w.Code, w.Body.String())
+	}
+	lines := strings.Split(strings.TrimSpace(w.Body.String()), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("应有 3 行 NDJSON（2 进度行 + 终态行），实际 %d: %q", len(lines), lines)
+	}
+	type line struct {
+		Seq     uint64 `json:"seq"`
+		T       int64  `json:"t"`
+		ID      string `json:"id"`
+		Status  string `json:"status"`
+		Current int64  `json:"current"`
+		Total   int64  `json:"total"`
+		Done    bool   `json:"done"`
+		Error   string `json:"error"`
+		EOF     bool   `json:"eof"`
+	}
+	var got []line
+	for i, raw := range lines {
+		var l line
+		if err := json.Unmarshal([]byte(raw), &l); err != nil {
+			t.Fatalf("第 %d 行不是合法 JSON: %v (%q)", i, err, raw)
+		}
+		got = append(got, l)
+	}
+	if got[0].Seq != 1 || got[0].ID != "aaa" || got[0].Status != "Downloading" ||
+		got[0].Current != 4096 || got[0].Total != 8192 || got[0].EOF {
+		t.Fatalf("首行不符: %+v", got[0])
+	}
+	if got[1].Seq != 1 || got[1].ID != "bbb" || got[1].Status != "Extracting" {
+		t.Fatalf("合帧的两行必须各自成行、seq 同帧: %+v", got[1])
+	}
+	if got[2].Seq != 2 || !got[2].Done || got[2].Error != "" || !got[2].EOF {
+		t.Fatalf("终态行必须带 done 与 eof: %+v", got[2])
+	}
+	if env.sessions.Get(sid) != nil {
+		t.Fatal("eof 转发完必须清理会话")
+	}
+	for _, fr := range env.sender.frameOps() {
+		if fr.Op == agentproto.DockerFrameOpCancel {
+			t.Fatalf("正常 eof 收尾不得下发 cancel: %+v", fr)
+		}
+	}
+}
+
+// TestPullStreamSkipsInvalidLine：解不开的进度行跳过并留痕（丢一眼进度而不是整条
+// 流），合法行照常转发 —— 与 stats 样本行同一纪律。
+func TestPullStreamSkipsInvalidLine(t *testing.T) {
+	ctx := context.Background()
+	env := newTestDockerHandler(t, []string{"docker:manage"})
+	rec := seedPullRecord(t, env, 7, 1)
+	seedPullProgressSession(t, env, 7, 1)
+
+	sid := agentproto.DockerPullSessionID(pullRecRef)
+	if err := env.sessions.DeliverDockerFrame(ctx, 7, &agentproto.DockerFrame{
+		SessionID: sid, Seq: 1,
+		Data: append([]byte("not-a-line\n"), pullLineOf(t, agentproto.DockerPullProgressItem{
+			T: 1790000000000, ID: "aaa", Status: "Waiting"})...)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.sessions.DeliverDockerFrame(ctx, 7, &agentproto.DockerFrame{
+		SessionID: sid, Seq: 2, EOF: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	w, c, cancel := pullStreamContext(rec, 1)
+	defer cancel()
+	env.handler.PullStream(c)
+	lines := strings.Split(strings.TrimSpace(w.Body.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("坏行应被跳过：应有 2 行（好记录 + eof），实际 %d: %q", len(lines), lines)
+	}
+	var l struct {
+		ID  string `json:"id"`
+		EOF bool   `json:"eof"`
+	}
+	if err := json.Unmarshal([]byte(lines[0]), &l); err != nil || l.ID != "aaa" {
+		t.Fatalf("好记录必须照常转发: %v %+v", err, l)
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &l); err != nil || !l.EOF {
+		t.Fatalf("收尾行必须是 eof: %v %+v", err, l)
+	}
+}
+
+// TestPullStreamDisconnectCancelsAgent：客户端断开（请求 ctx 取消）→ 向 agent 下发
+// cancel 并清理会话。对拉取，这条 cancel 的语义是「放弃这场拉取」—— agent 侧据此
+// 终止拉取用的 ctx（与 stats/logs 的「断开即停」同一条纪律，重量不同）。
+func TestPullStreamDisconnectCancelsAgent(t *testing.T) {
+	env := newTestDockerHandler(t, []string{"docker:manage"})
+	rec := seedPullRecord(t, env, 7, 1)
+	sess := seedPullProgressSession(t, env, 7, 1)
+
+	_, c, cancel := pullStreamContext(rec, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		env.handler.PullStream(c)
+	}()
+	waitStream(t, "接入完成", func() bool { return sess.Attached() })
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("客户端断开后处理器必须返回")
+	}
+	if env.sessions.Get(agentproto.DockerPullSessionID(pullRecRef)) != nil {
+		t.Fatal("断开后必须清理会话")
+	}
+	frames := env.sender.frameOps()
+	if len(frames) != 1 || frames[0].Op != agentproto.DockerFrameOpCancel ||
+		frames[0].SessionID != agentproto.DockerPullSessionID(pullRecRef) {
+		t.Fatalf("断开必须下发 cancel（语义 = 放弃拉取）: %+v", frames)
+	}
 }

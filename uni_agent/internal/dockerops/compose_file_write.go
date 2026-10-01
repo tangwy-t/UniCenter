@@ -24,7 +24,7 @@ import (
 //	→ 原子写（同目录临时文件 + fsync + rename）→ 回读校验（sha256 与期望一致）
 //
 // 四条防护在这条链上各自落在哪（§8）：
-//   - 路径白名单：路径**只**由 composeConfigFileOf 解析（协议上从不出现路径）；
+//   - 路径白名单：路径**只**由 composeConfigFilesOf 解析（协议上从不出现路径）；
 //   - 乐观锁：base_hash 不一致 →「文件已被他人修改，请刷新」；
 //   - 备份+回滚：写前落一份 <file>.bak-<令牌>，回滚只是换一个正文来源；
 //   - 尺寸限制：正文/备份/合并结果都 ≤ MaxDockerComposeFileBytes（1MB）。
@@ -63,14 +63,21 @@ func (e *WriteExecutor) doComposeFile(ctx context.Context, cmd *agentproto.Docke
 	}
 }
 
-// composeConfigPath 解析项目配置文件的绝对路径：**只能**由 composeConfigFileOf 产出
+// composeConfigPath 解析项目配置文件的绝对路径：**只能**由 composeConfigFilesOf 产出
 // （容器标签 → 项目索引），协议上从不接受路径入参（§8 路径白名单）。
+//
+// 它返回项目的全部文件（主文件 + override），而编辑路径与 read 同语义：编辑器只编辑
+// **主文件**，取列表首元素（标签原序的第一项）。
 func (e *WriteExecutor) composeConfigPath(ctx context.Context, project string) (string, error) {
 	if !agentproto.IsDockerProjectName(project) {
 		// 协议层已校验；这里是纵深防御（路径这条链上每个可变片段都再过一遍）。
 		return "", &ExecError{Msg: "项目名不合法"}
 	}
-	return composeConfigFileOf(ctx, e.api, project)
+	files, err := composeConfigFilesOf(ctx, e.api, project)
+	if err != nil {
+		return "", err
+	}
+	return files[0], nil
 }
 
 // composeFileValidate 只做预检：把 content 写到与配置文件同目录的临时文件里跑

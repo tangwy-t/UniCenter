@@ -60,6 +60,41 @@ const (
 	// 60KB + 4KB = 64KB = 协议单帧上限（MaxDockerFrameDataBytes）—— 缓冲上限与
 	// 协议上限对齐后，正常路径永远不需要切帧。
 	ptyPendingBytes = 60 << 10
+	// statsFrameInterval / statsFrameBytes 是 stats 样本的整形参数。
+	//
+	// 间隔为 0 = **一个样本一帧、随到随发**：样本率 ≤1/s（daemon 的采样周期），
+	// 合帧窗口只会把曲线人为拖慢 100ms，没有任何合帧收益；0 让泵在有数据时立刻
+	// 冲刷。框架的 defence（会话在 800 帧/分护栏下会把间隔按倍率拉长）对 0 也成立
+	// —— 0×N 仍是 0，样本节奏天然远低于任何预算。
+	// 字节阈值给一个大数：样本永远撞不到它，也就不会被「超阈值切帧」把一个
+	// JSON 行从半路截断（core 按行解析样本）。
+	statsFrameInterval = 0
+	statsFrameBytes    = 1 << 20
+	// pullFrameInterval 是**拉取进度**的折叠窗口（4b）：生产者按这个宽度把 daemon 的
+	// 高频进度行（每层每秒可达几十条 current 抖动）合并成一批再写会话，会话泵保持
+	// 间隔 0 随到随发。
+	//
+	// 为什么是 200ms：折叠后帧率 ≤5/s —— 乘上 15 分钟的拉取上限也只占全局
+	// 800 帧/分预算的一半（5×60×15 = 4500 < 12000），进度条 200ms 的刷新节奏对
+	// 视觉足够顺滑；再宽（如 1s）看不出收益而体感变钝。节流放在生产者而不是泵：
+	// 泵只管「有数据就发」，生产者才知道「哪几行是同一个状态的连续抖动，可以只留
+	// 最后一行」（合并是**语义**，不是整形）。
+	pullFrameInterval = 200 * time.Millisecond
+	// pullFrameBytes 是折叠缓冲的**顺手冲刷**阈值：折叠批 ≤32KB 时即使窗口没到也
+	// 立即发走 —— 保证单帧远低于协议 64KB 上限，一行 JSON 永远不会被 pump 的
+	// 防御性切帧拦腰截断（core 按行解析，半行 = 丢一行）。
+	//
+	// 正常路径到不了它：一个窗口里的层数 × 一行 JSON（约 100 层 × 120B ≈ 12KB）；
+	// 它兜的是「一台主机数百层 + 消息行」的极端镜像 —— 那种情况下半行 JSON 才是
+	// 真正的损失。
+	pullFrameBytes = 32 << 10
+	// eventsFrameInterval / eventsFrameBytes 是事件记录的整形参数，**与 stats 同值**：
+	// 事件也是「一条 JSON 行一条记录、随到随发」—— 间隔 0 拿去合帧只会人为拖慢
+	// 活动流；字节阈值大数保证一行 JSON 永远不会被切帧拦腰截断（core 按行解析）。
+	// 事件是突发型数据（compose up 一秒钟可能几十条），超预算时与 stats 同策略
+	// —— 等待而不是丢帧：事件是「刚才发生了什么」的事实，晚到比缺一行好。
+	eventsFrameInterval = 0
+	eventsFrameBytes    = 1 << 20
 	// logPendingCapBytes 是日志待发送缓冲上限：超过即丢最旧。
 	// 合帧阈值之上再留 4 倍余量；再大就说明生产端快过网络几个数量级，攒着只会吃内存。
 	logPendingCapBytes = 4 * logFrameBytes
@@ -71,6 +106,11 @@ const (
 // errStreamLimit 是并发会话达到上限时的**结论句**（页面直接显示它）。
 var errStreamLimit = errors.New("同时进行的流会话已达上限（最多 3 个），请先关闭其它日志或终端")
 
+// errEventsLimit 是事件订阅已存在时的结论（core 常驻管理器的退避重试据此收敛：
+// 事件槽位每台设备至多一条，重复订阅只出现在「上一段连接的旧会话还没被收掉」的
+// 竞态里 —— 拒绝 + 重试是对这个竞态的正确代价）。
+var errEventsLimit = errors.New("事件流订阅已存在")
+
 // streamKind 区分两类流：整形参数与「超预算怎么办」都按它分派。
 type streamKind int
 
@@ -79,19 +119,44 @@ const (
 	streamLog streamKind = iota
 	// streamPTY 是终端：合帧阈值小，超预算反压（不丢）。
 	streamPTY
+	// streamStats 是 stats 实时流：样本即帧（间隔 0），超预算等待（样本是
+	//「曲线上的点」，晚到比缺一格好）。
+	streamStats
+	// streamEvents 是事件订阅（docker events，core 的常驻流）：与 stats 同一整形
+	//（记录即帧、超预算等待），但**豁免空闲超时**且**不占用户流槽位** —— 平静主机
+	// 几小时没有事件是常态，不是「被遗忘的终端」；它的寿命由 core 的退订 cancel
+	// 与连接更替（OnReconnected 收摊）决定。
+	streamEvents
+	// streamPull 是拉取进度流（write 指令 image:pull 的进度透出，4b）：与 stats
+	// 同一整形（生产者折叠成批、泵随到随发、超预算等待 —— 进度是「刚发生的事实」，
+	// 晚到比丢一行好），且与 events 一样**豁免空闲超时、不占用户流槽位**：拉取
+	// 停滞几分钟（registry 限速/排队）是常态不是泄漏；每台主机同一时刻至多一条
+	//（派发器单 worker 串行执行），寿命由指令自身的 15 分钟时限 + cancel 决定，
+	// 不需要「用户忘了关」的空闲清退。
+	streamPull
 )
 
 func (k streamKind) String() string {
-	if k == streamPTY {
+	switch k {
+	case streamPTY:
 		return "pty"
+	case streamStats:
+		return "stats"
+	case streamEvents:
+		return "events"
+	case streamPull:
+		return "pull"
 	}
 	return "log"
 }
 
 // interval / maxBytes 返回该种类的合帧窗口与合帧字节阈值（冻结值）。
 func (k streamKind) interval() time.Duration {
-	if k == streamPTY {
+	switch k {
+	case streamPTY:
 		return ptyFrameInterval
+	case streamStats, streamEvents, streamPull:
+		return statsFrameInterval
 	}
 	return logFrameInterval
 }
@@ -99,6 +164,9 @@ func (k streamKind) interval() time.Duration {
 func (k streamKind) maxBytes() int {
 	if k == streamPTY {
 		return ptyFrameBytes
+	}
+	if k == streamStats || k == streamEvents || k == streamPull {
+		return statsFrameBytes
 	}
 	return logFrameBytes
 }
@@ -165,13 +233,52 @@ func (m *SessionManager) open(kind streamKind) (*streamSession, error) {
 	return m.openWith(context.Background(), kind)
 }
 
+// openNamed 以**指定句柄**建会话（拉取进度专用）；普通流会话用 open（随机句柄）。
+//
+// 为什么拉取进度的句柄必须是指定而不是随机：core 在**受理指令时**就用协议派生的
+// DockerPullSessionID(ref) 预登记了会话（那时 agent 还没收到指令，更没回 result ——
+// 随机句柄只经 result 上行，对拉取这种「句柄先于执行存在」的形态不合用）。两端用
+// 同一派生函数，帧才能落在登记好的会话上。随机句柄的保密理由（可枚举 = 可劫持，
+// 见 newStreamSessionID）对派生句柄不成立：它的授权在**接入端**（记录发起人 + 权限
+// 码双闸，且帧的 device 归属校验不认句柄本身），详见协议 DockerPullSessionID 的说明。
+func (m *SessionManager) openNamed(kind streamKind, id string) (*streamSession, error) {
+	if id == "" {
+		return m.open(kind)
+	}
+	// 防御性校验：句柄要进会话路由 map，非法形态（对派生函数而言不该出现）在这里
+	// 现形，而不是变成「帧永远送不到」的线上悬案。
+	if !agentproto.IsDockerSessionID(id) {
+		return nil, errors.New("非法的流会话句柄")
+	}
+	return m.openWithID(context.Background(), kind, id)
+}
+
 func (m *SessionManager) openWith(parent context.Context, kind streamKind) (*streamSession, error) {
 	id, err := newStreamSessionID()
 	if err != nil {
 		return nil, err
 	}
+	return m.openWithID(parent, kind, id)
+}
+
+func (m *SessionManager) openWithID(parent context.Context, kind streamKind, id string) (*streamSession, error) {
 	m.mu.Lock()
-	if len(m.sessions) >= m.cfg.maxSessions {
+	if kind == streamEvents {
+		// 事件订阅是 core 的**常驻流**：独立槽位（每台设备至多一条），不进 3 条用户
+		// 槽位的账。混在同一个上限里会有两种粘连：用户开满 3 条流会把总览页的活动流
+		// 挤出（静默断供），反过来常驻订阅占着槽位会把用户的终端挡在「已达上限」外
+		// —— 两类资源的生命周期不同（用户流有惰性、常驻流有主人），上限也就该不同。
+		for _, s := range m.sessions {
+			if s.kind == streamEvents {
+				m.mu.Unlock()
+				return nil, errEventsLimit
+			}
+		}
+	} else if kind != streamPull && len(m.sessions) >= m.cfg.maxSessions {
+		// streamPull（拉取进度）也**不进用户槽位的账**：它是一场已经受理的写操作的
+		// 进度透出（用户没做「又开一条流」这个动作），开满日志/终端不该挡掉拉取；
+		// 且派发器单 worker 串行保证同一时刻至多一条 pull 在跑（队列里的还没开会话），
+		// 上限天然成立 = 1，不需要另设账目 —— 让它撞 3 条用户流的上限才是错的。
 		m.mu.Unlock()
 		return nil, errStreamLimit
 	}
@@ -212,6 +319,27 @@ func (m *SessionManager) OnFrame(f *agentproto.CoreDockerFrame) {
 		return
 	}
 	s.onControl(f)
+}
+
+// OnReconnected 收掉上一段连接的**常驻**会话（events）：常驻订阅与**连接**同寿 ——
+// 连接更换后，旧订阅的帧已经送不出去（也会被泵按发送失败判死），而它占着的 events
+// 专属槽位会挡住 core 重连后的重订（"事件流订阅已存在"）。用户会话不动：它们的
+// 生命周期自有 cancel / 空闲超时 / 发送失败三条路径，与连接更换无关。
+//
+// 由 Runtime.OnConnected 调用（握手完成时），**必须非阻塞**：teardown 不碰 socket
+// 读循环（cancel 关闭的是本地资源与 ctx）。
+func (m *SessionManager) OnReconnected() {
+	m.mu.Lock()
+	list := make([]*streamSession, 0, 2)
+	for _, s := range m.sessions {
+		if s.kind == streamEvents {
+			list = append(list, s)
+		}
+	}
+	m.mu.Unlock()
+	for _, s := range list {
+		s.cancelBy("connection replaced")
+	}
 }
 
 // newStreamSessionID 生成会话 id：crypto/rand ≥16B，URL 安全字符。
@@ -530,6 +658,19 @@ func (s *streamSession) pump() {
 
 		// 没有可发的东西：等生产者，或到点判空闲。
 		if pending == 0 && !eof {
+			if s.kind == streamEvents || s.kind == streamPull {
+				// 常驻订阅与拉取进度**豁免空闲超时**：「无事件」是平静主机的常态、
+				//「拉取停滞」（registry 限速/排队/大层静默下载）是长耗时写操作的常态，
+				// 都不是「被遗忘的终端」—— 用户流 10 分钟清退的理由（卡死的日志源、
+				// 忘了关的终端）对它们不成立。寿命走另外两条路：core 的 cancel（拉取
+				// 还有它最后一条路：指令自身的 15 分钟时限）、以及发送失败被判死。
+				select {
+				case <-s.ctx.Done():
+					return
+				case <-s.wake:
+				}
+				continue
+			}
 			d := s.idleIn()
 			if d <= 0 {
 				// 空闲超时：发一帧 eof 收尾（消费端据此收流），随后循环自然退出。

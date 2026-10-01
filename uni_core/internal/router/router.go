@@ -116,8 +116,12 @@ type DeviceDeps struct {
 // 指令面的权限码按 action 变化，故这两条路由**没有静态 perm**：由 handler 在解析出
 // action/记录后调用 PermissionGuard.Ensure 强制（与路由级同一套缓存与 admin 通配语义）。
 // JWT 鉴权仍由 auth 组提供；守卫见 handler/docker_test.go 的「每个 action 类别无权限即 403」。
+// 凭据面（RegistryHdl，4c）是静态 perm docker:config —— 凭据管理没有「随 action 变化」
+// 的问题，权限挂在路由上。
 type DockerDeps struct {
 	Hdl *handler.DockerHandler
+	// RegistryHdl 是私有仓库凭据 CRUD（/docker/registries，docker:config）。
+	RegistryHdl *handler.DockerRegistryHandler
 }
 
 // AgentDeps holds agent channel handler dependencies.
@@ -529,15 +533,45 @@ func Setup(deps Dependencies) *gin.Engine {
 		docker := auth.Group("/docker")
 		docker.Use(middleware.SetModuleName("Docker 管理"))
 		{
-			// 读面：主机清单与快照用 docker:list（与菜单一致）。
+			// 读面：控制塔总览、主机清单与快照用 docker:list（与菜单一致）。
+			docker.GET("/overview", perm(permission.PermDockerList), deps.Docker.Hdl.Overview)
+			// 事件聚合流（六期·监控面）：权限与读面其余端点同档 docker:list（它是
+			// 总览页活动流的数据源，不是按指令接入的会话流）。形态同日志/stats ——
+			// auth 组 + fetch + ReadableStream（浏览器能带 Authorization）；服务端
+			// 常驻订阅由 core 自己维护（首个客户端建立、末个客户端取消），处理器
+			// 不做按指令的归属校验。
+			docker.GET("/events", perm(permission.PermDockerList), deps.Docker.Hdl.EventsStream)
+			// 跨主机统一工作负载表：API 路径与前端 /docker/containers 页面同形
+			//（复用既有菜单与路由 path，本切片只换页面背后的数据源 —— 从
+			// 单主机快照换成跨主机聚合），权限与读面其余端点同档 docker:list。
+			docker.GET("/containers", perm(permission.PermDockerList), deps.Docker.Hdl.Workloads)
 			docker.GET("/hosts", perm(permission.PermDockerList), deps.Docker.Hdl.Hosts)
 			docker.GET("/hosts/:id/state", perm(permission.PermDockerList), deps.Docker.Hdl.State)
+			// 任务中心（6b）：最近指令的任务化列表 —— pull/up 等长任务不再靠弹窗
+			// 转圈，收口成跨主机的可见性。数据全是既有数据面（指令记录 + 6b 补的
+			// 最近枚举索引），权限与读面其余端点同档 docker:list；取消动作 =
+			// 前端复用拉取进度流的 Abort（非流任务本切片不提供取消，见注释）。
+			docker.GET("/tasks", perm(permission.PermDockerList), deps.Docker.Hdl.Tasks)
 			// 指令面：**无静态 perm**（权限按 action 决定，见 DockerDeps 的说明）。
 			docker.POST("/hosts/:id/cmds", deps.Docker.Hdl.SendCmd)
 			docker.GET("/hosts/:id/cmds/:ref", deps.Docker.Hdl.CmdResult)
 			// 日志流（三期）：**留在 auth 组**——日志走 fetch + ReadableStream，
 			// 浏览器能给这条请求带 Authorization 头；权限码与归属在处理器内判定。
 			docker.GET("/hosts/:id/cmds/:ref/stream", deps.Docker.Hdl.LogStream)
+			// stats 实时流（监控面）：与日志流同款形态 —— fetch + ReadableStream
+			// 走 auth 组带 Authorization；权限（docker:inspect）与归属在处理器内判定。
+			docker.GET("/hosts/:id/cmds/:ref/stats", deps.Docker.Hdl.StatsStream)
+			// 拉取进度流（4b）：同款 fetch 形态，权限（docker:manage，与 image:pull
+			// 受理同档）与归属在处理器内判定；唯一「指令 pending 期间即可接入」的流
+			//（会话由受理时预登记，句柄取协议派生的 pull_<ref>）。
+			docker.GET("/hosts/:id/cmds/:ref/pull", deps.Docker.Hdl.PullStream)
+			// 私有仓库凭据（4c）：静态 docker:config —— 凭据是「分发」支柱的密钥
+			// 材料，读（列表）与写（增/改/删）同档；密码任何读路径只回掩码，
+			// 解密只发生在 image:pull 的受理注入（service 侧唯一读口）。
+			docker.GET("/registries", perm(permission.PermDockerConfig), deps.Docker.RegistryHdl.List)
+			docker.POST("/registries", perm(permission.PermDockerConfig), deps.Docker.RegistryHdl.Create)
+			docker.PUT("/registries", perm(permission.PermDockerConfig), deps.Docker.RegistryHdl.Update)
+			docker.DELETE("/registries/:registry", perm(permission.PermDockerConfig), deps.Docker.RegistryHdl.Delete)
 		}
 	}
 

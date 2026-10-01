@@ -11,6 +11,7 @@ import (
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/response"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/app"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/apperror"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockerevents"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/jwt"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/permission"
@@ -42,13 +43,31 @@ type DockerHandler struct {
 	// nil = 未装配：流端点整体不可用（路由仍在，处理器给出 500 语义），
 	// 结果轮询不带 streamTicket —— 与「三期未交付」表现一致。
 	streams *service.DockerStreamService
-	log     logger.LoggerInterface
+	// events 是事件流常驻管理器（六期）：聚合端点直接向它订阅/退订（引用计数）。
+	// nil = 未装配：/docker/events 整体不可用（路由仍在，处理器给出 500 语义）。
+	events *dockerevents.Manager
+	// tasks 是任务面（6b）：任务中心的最近指令列表。
+	// nil = 未装配：/docker/tasks 整体不可用（路由仍在，处理器给出 500 语义）。
+	tasks *service.DockerTaskService
+	log   logger.LoggerInterface
 }
 
 // NewDockerHandler 构造 handler。
 func NewDockerHandler(svc *service.DockerService, cmds *service.DockerCmdService,
 	streams *service.DockerStreamService, guard PermChecker, log logger.LoggerInterface) *DockerHandler {
 	return &DockerHandler{svc: svc, cmds: cmds, streams: streams, guard: guard, log: log}
+}
+
+// WithEvents 注入事件流常驻管理器（六期；装配在 wireup 一处完成，测试装配替身）。
+func (h *DockerHandler) WithEvents(m *dockerevents.Manager) *DockerHandler {
+	h.events = m
+	return h
+}
+
+// WithTasks 注入任务面（6b；装配在 wireup 一处完成，测试装配替身）。
+func (h *DockerHandler) WithTasks(t *service.DockerTaskService) *DockerHandler {
+	h.tasks = t
+	return h
 }
 
 // Hosts 返回可管主机清单（docker:list）。
@@ -64,6 +83,55 @@ func NewDockerHandler(svc *service.DockerService, cmds *service.DockerCmdService
 // @Router       /docker/hosts [get]
 func (h *DockerHandler) Hosts(c *gin.Context) {
 	resp, err := h.svc.Hosts(c.Request.Context())
+	if err != nil {
+		app.Error(c, err)
+		return
+	}
+	app.Success(c, resp)
+}
+
+// Overview 返回控制塔总览（跨主机聚合 KPI + 主机清单 + 异常清单）（docker:list）。
+//
+// @Summary      控制塔总览
+// @Description  聚合全部可管主机的容器/镜像/卷/网络/项目计数与异常容器清单（条目与 docker/hosts 同形态；单台快照读失败只降级该主机并如实标注 error）
+// @Tags         Docker 管理
+// @Produce      json
+// @Security     BearerAuth
+// @Success      200  {object}  app.Response{data=response.DockerOverviewResp}  "查询成功"
+// @Failure      401  {object}  app.Response  "未登录"
+// @Failure      403  {object}  app.Response  "无权限"
+// @Router       /docker/overview [get]
+func (h *DockerHandler) Overview(c *gin.Context) {
+	resp, err := h.svc.Overview(c.Request.Context())
+	if err != nil {
+		app.Error(c, err)
+		return
+	}
+	app.Success(c, resp)
+}
+
+// Workloads 返回跨主机统一工作负载表（docker:list）。
+//
+// @Summary      跨主机容器统一表
+// @Description  全部可管主机的容器并成一张表（每行带 hostId/hostname 归属）；hostId 限定单主机、state 过滤运行态（stopped=一切非 running，与总览 KPI 同口径）、keyword 按容器名或镜像名子串匹配；上限 500 条、total 如实报截断前全量；单台快照读失败跳过该主机（其故障在总览页如实呈现）
+// @Tags         Docker 管理
+// @Produce      json
+// @Param        hostId   query  uint64  false  "限定单主机(缺省=全部可管主机)"
+// @Param        state    query  string  false  "运行态过滤(running/stopped)"
+// @Param        keyword  query  string  false  "容器名或镜像名子串(大小写不敏感)"
+// @Security     BearerAuth
+// @Success      200  {object}  app.Response{data=response.DockerWorkloadListResp}  "查询成功"
+// @Failure      400  {object}  app.Response  "参数错误(state 非 running/stopped)"
+// @Failure      401  {object}  app.Response  "未登录"
+// @Failure      403  {object}  app.Response  "无权限"
+// @Router       /docker/containers [get]
+func (h *DockerHandler) Workloads(c *gin.Context) {
+	var q request.DockerWorkloadQuery
+	if err := c.ShouldBindQuery(&q); err != nil {
+		app.Error(c, apperror.BadRequest("请求参数不合法"))
+		return
+	}
+	resp, err := h.svc.Workloads(c.Request.Context(), &q)
 	if err != nil {
 		app.Error(c, err)
 		return
@@ -91,6 +159,44 @@ func (h *DockerHandler) State(c *gin.Context) {
 		return
 	}
 	resp, err := h.svc.State(c.Request.Context(), id)
+	if err != nil {
+		app.Error(c, err)
+		return
+	}
+	app.Success(c, resp)
+}
+
+// Tasks 返回任务中心的最近任务（docker:list，路由静态 perm）。
+//
+// 本切片不做取消动作（见 service/docker_tasks.go 的取消纪律）：前端对拉取类任务
+// 复用既有进度流 Abort（断开 /cmds/:ref/pull 即下发 cancel）；非流任务无取消入口。
+//
+// @Summary      最近任务
+// @Description  最近受理的 docker 指令（≤100 条、受理时刻降序、跨主机聚合）；hostId 限定单主机、status 过滤 pending/done、action 过滤动作码；条目含 ref/主机/动作/目标/发起人用户名/受理时刻/终态（pending/succeeded/failed/timeout）/终态结论句；拉取类任务前端凭 action 复用 /cmds/:ref/pull 打开进度流（取消=断开进度流）
+// @Tags         Docker 管理
+// @Produce      json
+// @Param        hostId   query  uint64  false  "限定单主机(缺省=跨主机)"
+// @Param        status   query  string  false  "阶段过滤(pending/done)"
+// @Param        action   query  string  false  "动作码过滤(如 image:pull)"
+// @Security     BearerAuth
+// @Success      200  {object}  app.Response{data=response.DockerTaskListResp}  "查询成功"
+// @Failure      400  {object}  app.Response  "参数错误(status 非 pending/done) / 未知操作"
+// @Failure      401  {object}  app.Response  "未登录"
+// @Failure      403  {object}  app.Response  "无权限(docker:list)"
+// @Router       /docker/tasks [get]
+func (h *DockerHandler) Tasks(c *gin.Context) {
+	if h.tasks == nil {
+		// 与 WithEvents 同款「未装配」语义：路由仍在，处理器给出 500（装配错误
+		// 早暴露，好过假装收口一张空表）。
+		app.Error(c, apperror.Internal("任务服务未装配"))
+		return
+	}
+	var q request.DockerTasksQuery
+	if err := c.ShouldBindQuery(&q); err != nil {
+		app.Error(c, apperror.BadRequest("请求参数不合法"))
+		return
+	}
+	resp, err := h.tasks.Tasks(c.Request.Context(), &q)
 	if err != nil {
 		app.Error(c, err)
 		return

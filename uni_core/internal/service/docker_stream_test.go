@@ -303,3 +303,116 @@ func TestAgentIngestRegistersStreamSession(t *testing.T) {
 		t.Fatal("失败结果不得登记会话")
 	}
 }
+
+// eventsSinkStub 记录常驻管理器收到的 result 认领。
+type eventsSinkStub struct {
+	calls  int
+	device uint64
+	res    *agentproto.DockerCmdResult
+}
+
+func (s *eventsSinkStub) OnEventsResult(deviceID uint64, res *agentproto.DockerCmdResult) {
+	s.calls++
+	s.device = deviceID
+	s.res = res
+}
+
+// TestAgentIngestRoutesEventsResultToManager：docker:events 的 result **不进用户流
+// 注册表**（用户态为零、不是用户的会话，进了会把用户槽位/空闲扫除的账目搅浑），
+// 而是原样交还给常驻管理器按 ref 认领 —— 成败都照单送达（退避由管理器自己算）。
+func TestAgentIngestRoutesEventsResultToManager(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rdb := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	ctx := context.Background()
+
+	cmdStore := dockerstate.NewCmdStore(rdb)
+	reg := dockerstream.NewRegistry(nil)
+	sink := &eventsSinkStub{}
+	svc := NewAgentIngestService(nil, nil, nil, nil, cmdStore, nil, logger.NewNop()).
+		WithDockerSessions(reg).WithDockerEvents(sink)
+
+	rec := &dockerstate.CmdRecord{Ref: "1790000000007", DeviceID: 7,
+		Action: agentproto.DockerActionEvents, UserID: 0, Perm: ""}
+	if err := cmdStore.Create(ctx, rec, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+
+	// 成功结果：管理器收到认领，注册表不被动过。
+	if err := svc.CompleteDockerCmd(ctx, 7, &agentproto.DockerCmdResult{
+		Ref: rec.Ref, OK: true, SessionID: "sess-events-00000007"}); err != nil {
+		t.Fatal(err)
+	}
+	if reg.Len() != 0 {
+		t.Fatal("events 结果不得登记进用户流注册表")
+	}
+	if sink.calls != 1 || sink.device != 7 || sink.res == nil || sink.res.SessionID != "sess-events-00000007" {
+		t.Fatalf("events 结果必须交给常驻管理器认领: %+v", sink)
+	}
+
+	// 失败结果同样送达（agent 结论句转成管理器的退避理由）。
+	if err := svc.CompleteDockerCmd(ctx, 7, &agentproto.DockerCmdResult{
+		Ref: rec.Ref, Error: "订阅 Docker 事件失败"}); err != nil {
+		t.Fatal(err)
+	}
+	if sink.calls != 2 || sink.res.Error != "订阅 Docker 事件失败" {
+		t.Fatalf("失败结果也必须送达: %+v", sink)
+	}
+	if reg.Len() != 0 {
+		t.Fatal("失败路径同样不得污染用户注册表")
+	}
+}
+
+// ── 拉取进度会话的对账（4b）───────────────────────────────────────────────
+
+// TestStreamSweepPullReconciliation：拉取会话的寿命 = 指令寿命 —— 指令 pending 时
+// **任何**清理都不该发生（空闲超时不适用、也不发 cancel）；指令一旦终态（或被
+// sweep 成 timeout）即从注册表移除，**不发 cancel**（agent 侧的同名会话要么已随
+// eof 收摊、要么从未打开；cancel 只会腰斩排队中的后续拉取）。
+func TestStreamSweepPullReconciliation(t *testing.T) {
+	f := newStreamFixture(t, 10*time.Minute)
+	pullRef := "1790000000000000001"
+	f.reg.Register(dockerstream.Meta{
+		SessionID: agentproto.DockerPullSessionID(pullRef), DeviceID: 7, UserID: 42,
+		Action: agentproto.DockerActionImagePull, Ref: pullRef, Kind: dockerstream.KindPull,
+		CreatedAt: *f.now,
+	})
+	pending := true
+	f.svc.WithPullPending(func(_ context.Context, ref string) (bool, error) {
+		if ref != pullRef {
+			t.Fatalf("对账只该问拉取会话的 ref: %s", ref)
+		}
+		return pending, nil
+	})
+	ctx := context.Background()
+
+	// 指令还在 pending：空闲远超 10 分钟也不清理（排队中的拉取一帧没有是常态），
+	// 一条 cancel 都不许发。
+	*f.now = f.now.Add(30 * time.Hour)
+	if n, err := f.svc.Sweep(ctx); err != nil || n != 0 {
+		t.Fatalf("pending 的拉取会话不该被任何清理路径触碰: n=%d err=%v", n, err)
+	}
+	if f.reg.Get(agentproto.DockerPullSessionID(pullRef)) == nil {
+		t.Fatal("pending 的拉取会话必须留在注册表里")
+	}
+	if len(f.sender.snapshot()) != 0 {
+		t.Fatalf("pending 的拉取会话不得收到 cancel: %+v", f.sender.snapshot())
+	}
+
+	// 指令终态（result 已落库 / timeout）：对账移除，且仍不发 cancel。
+	pending = false
+	if n, err := f.svc.Sweep(ctx); err != nil || n != 1 {
+		t.Fatalf("终态指令的拉取会话必须被回收: n=%d err=%v", n, err)
+	}
+	if f.reg.Get(agentproto.DockerPullSessionID(pullRef)) != nil {
+		t.Fatal("终态指令的拉取会话必须从注册表移除")
+	}
+	if len(f.sender.snapshot()) != 0 {
+		t.Fatalf("回收不得发 cancel（会对排队中的后续拉取判死刑）: %+v", f.sender.snapshot())
+	}
+
+	// 幂等：再对账一轮无事发生。
+	if n, err := f.svc.Sweep(ctx); err != nil || n != 0 {
+		t.Fatalf("回收后的对账必须无事发生: n=%d err=%v", n, err)
+	}
+}

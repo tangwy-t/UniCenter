@@ -444,6 +444,13 @@ func newRequestID() string {
 		strconv.FormatUint(requestIDSeq.Add(1), 10)
 }
 
+// NewRequestID 是 newRequestID 的导出形态（docker 事件常驻管理器等**跨包**调用方用）。
+//
+// 导出而不复制的原因：ref 与用户指令共用 docker:cmd:<ref> 键空间，两个包各写一份
+// 「纳秒 + 自增」会重新打开「同一纳秒、两个计数器等值」的撞号窗口 —— 共享同一个
+// 计数器，进程内的唯一性才是由实现保证的，而不是由运气保证。
+func NewRequestID() string { return newRequestID() }
+
 var requestIDSeq atomic.Uint64
 
 func abs(v int) int {

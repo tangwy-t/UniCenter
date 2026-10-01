@@ -21,6 +21,17 @@
           <!-- 二期写操作（spec §11.4）：打标签/导出 tar 无确认档，删除是标准档（经弹窗）。
                使用中的镜像不能删除：按钮禁用并把结论句放在旁边（服务端也会拒绝，不该发出去）。
                指令在途时一并禁用。 -->
+          <!-- 用此镜像创建（4a 创建面）：消灭「拉了镜像跑不起来」的镜像侧入口 ——
+               预填本镜像与本页主机（抽屉里主机可换），权限与启停同级。 -->
+          <ElButton
+            v-if="canManage"
+            size="small"
+            type="primary"
+            :disabled="busy"
+            @click="openCreate"
+          >
+            用此镜像创建…
+          </ElButton>
           <ElButton v-if="canManage" size="small" :disabled="busy" @click="onTag">
             打标签…
           </ElButton>
@@ -154,6 +165,17 @@
       :loading="confirmLoading"
       @confirm="onConfirmSubmit"
     />
+
+    <!-- 创建抽屉（4a）：预填本页主机与本镜像（actionTarget 的口径：仓库标签优先，
+         无标签退回镜像 id —— 抽屉会拿它在快照里核对本地存在性）。成功后重读本页
+         两份事实（inspect 与快照：新容器会改变「使用」与关联容器）。 -->
+    <CreateContainerDrawer
+      v-model="createVisible"
+      :hosts="ctx.hosts"
+      :initial-host-id="ctx.hostId"
+      :initial-image="actionTarget"
+      :refresh="reloadDetail"
+    />
   </div>
 </template>
 
@@ -179,6 +201,7 @@
   import ArtTable from '@/components/core/tables/art-table/index.vue'
   import { formatByUnit, formatUnixSeconds } from '@/modules/device/utils/display'
   import DockerActionConfirm from '../components/action-confirm.vue'
+  import CreateContainerDrawer from '../components/create-container-drawer.vue'
   import {
     fetchDockerCmdResult,
     fetchDockerState,
@@ -514,6 +537,19 @@
   const actionTarget = computed(
     () => snapshotImage.value?.repoTags?.[0] || view.value?.repoTags?.[0] || imageId.value
   )
+
+  // ── 创建容器（4a 创建面）──────────────────────────────────────────
+  const createVisible = ref(false)
+
+  function openCreate() {
+    createVisible.value = true
+  }
+
+  /** 创建成功后的重读本页两份事实（抽屉经 useDockerCmds 双次调用它）。 */
+  function reloadDetail() {
+    void loadInspect()
+    void loadSnapshot()
+  }
 
   const inUseBlocked = computed(() => snapshotImage.value?.inUse === true)
 

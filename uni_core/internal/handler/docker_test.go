@@ -207,7 +207,16 @@ func TestSendCmdRequiresActionPermission(t *testing.T) {
 		{"有 docker:inspect 且 action 一致 → 进入受理", `{"action":"container:logs","target":"mysql"}`,
 			[]string{"docker:inspect"}, http.StatusAccepted},
 		{"admin 通配 → 放行", `{"action":"container:logs","target":"mysql"}`, []string{"admin"}, http.StatusAccepted},
+		// 创建面（4a）：权限与启停同级 —— docker:manage；有只读权限不够，无权限必 403。
+		{"create 无权限 → 403", `{"action":"container:create","options":{"image":"nginx:1.27"}}`, nil, http.StatusForbidden},
+		{"有 docker:list 但 create 要 manage → 403", `{"action":"container:create","options":{"image":"nginx:1.27"}}`,
+			[]string{"docker:list"}, http.StatusForbidden},
+		{"有 docker:manage → create 受理", `{"action":"container:create","options":{"image":"nginx:1.27"}}`,
+			[]string{"docker:manage"}, http.StatusAccepted},
 	}
+	// create 没有 target（动作对象是「将要诞生的容器」，语义都在 options.image）：
+	// 它不需要给这张按 action 变化的表加任何特判 —— 权限码仍由策略表的一行给出，
+	// 这里的用例只是钉住「docker:manage 才放行」。
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			env := newTestDockerHandler(t, tc.havePerm)
@@ -235,7 +244,30 @@ func TestSendCmdRequiresActionPermission(t *testing.T) {
 	}
 }
 
-// TestSendCmdForceRequiresExecPermission：force 是「对受保护目标动手」的开关，风险
+// TestSendCmdCreateOptionsPassThrough：create 专属 options 必须原样进入协议载荷
+// （HTTP 驼峰 → 协议蛇形的一次性映射入口是 toProtocolOptions；start=false 的
+// 「显式不启动」与缺席不同义，指针必须保住）。
+func TestSendCmdCreateOptionsPassThrough(t *testing.T) {
+	env := newTestDockerHandler(t, []string{"docker:manage"})
+	w, c := newCmdContext(`{"action":"container:create","options":{"image":"nginx:1.27","name":"web-1",` +
+		`"ports":["8080:80"],"env":["MODE=prod"],"mounts":["data:/d:ro"],"restartPolicy":"always",` +
+		`"cpuLimit":1.5,"memLimitMb":512,"network":"app-net","start":false}}`)
+	env.handler.SendCmd(c)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body=%s)", w.Code, w.Body.String())
+	}
+	if len(env.sender.sent) != 1 {
+		t.Fatalf("受理后必须下发，实际 %+v", env.sender.sent)
+	}
+	o := env.sender.sent[0].Options
+	if o.Image != "nginx:1.27" || o.Name != "web-1" || len(o.Ports) != 1 || o.Ports[0] != "8080:80" ||
+		len(o.Env) != 1 || o.Env[0] != "MODE=prod" || len(o.Mounts) != 1 || o.Mounts[0] != "data:/d:ro" ||
+		o.RestartPolicy != "always" || o.CPULimit != 1.5 || o.MemLimitMB != 512 ||
+		o.Network != "app-net" || o.Start == nil || *o.Start {
+		t.Fatalf("create options 未原样进入协议载荷: %+v", o)
+	}
+}
+
 // 等价于 root shell（spec §10 保护档）—— 它能越过保护清单的默认拒绝去停/删/重建
 // 底座。因此它要求 docker:exec 级（或 admin），与「能不能删东西」（docker:delete）
 // 分开授予：只有 docker:delete 的人**不能** force，这正是「先停再删」两步绕过
@@ -503,6 +535,35 @@ func TestDockerReadPathsEnvelope(t *testing.T) {
 		}
 		if !strings.Contains(w.Body.String(), `"msg":"success"`) {
 			t.Fatalf("读面必须走 app.Success 的信封, body=%s", w.Body.String())
+		}
+	})
+
+	t.Run("统一表空舰队 → 200 + data.items 为数组（不是 null）", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/docker/containers", nil)
+		env.handler.Workloads(c)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (%s)", w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), `"items":[]`) {
+			t.Fatalf("空表必须是空数组（前端少一层判空）, body=%s", w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), `"msg":"success"`) {
+			t.Fatalf("读面必须走 app.Success 的信封, body=%s", w.Body.String())
+		}
+	})
+
+	t.Run("统一表 state 非法 → 400 结论句", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/docker/containers?state=paused", nil)
+		env.handler.Workloads(c)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 (%s)", w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), "state 仅支持 running 或 stopped") {
+			t.Fatalf("400 必须给结论句（不得静默当成不过滤）, body=%s", w.Body.String())
 		}
 	})
 

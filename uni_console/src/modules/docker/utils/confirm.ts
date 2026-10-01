@@ -83,11 +83,15 @@ export function confirmInputValid(
   return input === form.expected
 }
 
-/** 主按钮文案：按形态给动词，避免用户在「删除」二字上误以为所有动作都一样。 */
+/**
+ * 主按钮文案：按形态给动词，避免用户在「删除」二字上误以为所有动作都一样。
+ * 标准档（confirm）沿用动作标签 —— 此前四条标准档恰好全是删除（label 即「删除」），
+ * 4a 起 container:create 也是标准档，硬编码「删除」会让创建弹窗长出一个删除按钮。
+ */
 function buttonTextOf(kind: ConfirmKind, label: string): string {
   if (kind === 'delete-word') return '清理'
   if (kind === 'filename-word') return '覆盖导出'
-  if (kind === 'confirm') return '删除'
+  if (kind === 'confirm') return label
   return label
 }
 

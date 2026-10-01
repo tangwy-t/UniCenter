@@ -258,6 +258,9 @@ func TestIsStreamActionSplitsLogsByFollow(t *testing.T) {
 	if !IsStreamAction(&agentproto.DockerCmd{Action: agentproto.DockerActionContainerExec}) {
 		t.Fatal("exec 必须走流会话")
 	}
+	if !IsStreamAction(&agentproto.DockerCmd{Action: agentproto.DockerActionContainerStats}) {
+		t.Fatal("stats 必须走流会话（它是会话制，没有一次性形态）")
+	}
 	if IsStreamAction(&agentproto.DockerCmd{Action: agentproto.DockerActionContainerInspect}) {
 		t.Fatal("只读 action 不得走流会话")
 	}

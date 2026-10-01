@@ -72,11 +72,35 @@ type AgentIngestService struct {
 	// nil = 未装配：result 里的 session_id 被忽略（流端点会因此找不到会话），
 	// 不影响指令结果回写本身。
 	streams DockerSessionRegisterer
+	// events 是事件流常驻订阅的结果出口（六期；由 dockerevents.Manager 实现）。
+	// nil = 未装配：docker:events 的 result 照常回写完记录即止（不会进用户流注册表，
+	// 常驻管理器不在，这条指令也就没有别的去向）。
+	events DockerEventsSinker
+	// audit 是终态审计挂钩（6c；由 DockerCmdAuditor 实现）。
+	// nil = 未装配：结果照常回写，审计关闭 —— 挂钩是**观察者不是参与者**，
+	// 它的缺失只关治理可视性，不关指令功能。
+	audit DockerTerminalAuditor
 }
 
 // DockerSessionRegisterer 是登记一条流会话的能力面（由 dockerstream.Registry 满足）。
 type DockerSessionRegisterer interface {
 	Register(meta dockerstream.Meta) error
+}
+
+// DockerEventsSinker 是常驻订阅指令的结果出口（由 dockerevents.Manager 满足）。
+//
+// 为什么 dockerevents 不进 DockerSessionRegisterer：常驻订阅的用户态（UserID）为零、
+// 且不属于用户流注册表的账（槽位/sweep/接入语义全部不同）—— 结果必须原样交还给
+// **发起它的**管理器认领（按 ref），而不是登记成一条用户会话。
+type DockerEventsSinker interface {
+	OnEventsResult(deviceID uint64, res *agentproto.DockerCmdResult)
+}
+
+// DockerTerminalAuditor 是终态审计的入口（由 DockerCmdAuditor 满足）：ingest 在
+// 完成一次真实的终态转换后调它，异步入账一条执行结果（见 docker_audit.go 的
+// 「观察者不是参与者」纪律）。
+type DockerTerminalAuditor interface {
+	RecordTerminal(rec *dockerstate.CmdRecord)
 }
 
 func NewAgentIngestService(repo AgentDeviceRepository, raw AgentRawStore, latest AgentLatestStore,
@@ -89,6 +113,18 @@ func NewAgentIngestService(repo AgentDeviceRepository, raw AgentRawStore, latest
 // WithDockerSessions 注入流会话登记面（三期）。装配在 wireup 一处完成。
 func (s *AgentIngestService) WithDockerSessions(r DockerSessionRegisterer) *AgentIngestService {
 	s.streams = r
+	return s
+}
+
+// WithDockerEvents 注入事件流常驻订阅的结果出口（六期）。装配在 wireup 一处完成。
+func (s *AgentIngestService) WithDockerEvents(e DockerEventsSinker) *AgentIngestService {
+	s.events = e
+	return s
+}
+
+// WithDockerAudit 注入终态审计挂钩（6c）。装配在 wireup 一处完成。
+func (s *AgentIngestService) WithDockerAudit(a DockerTerminalAuditor) *AgentIngestService {
+	s.audit = a
 	return s
 }
 
@@ -348,8 +384,31 @@ func (s *AgentIngestService) CompleteDockerCmd(ctx context.Context, deviceID uin
 			zap.Uint64("fromDevice", deviceID), zap.Uint64("expectDevice", rec.DeviceID), zap.String("ref", res.Ref))
 		return nil
 	}
+	// 终态转换的唯一性保证（审计的幂等键）：一条 ref 只有一次「非终态 → 终态」的
+	// 真实转换。回写**前**把旧状态摘下 —— 重复 result（agent 重发/网络重放）到达时
+	// 记录已是 succeeded/failed，本次回写不再是转换，审计不会入第二条。
+	// sweep 的 timeout 是服务端推断、不经过本挂钩（不入审计 —— 审计记录的是
+	// 被执行的事实，不是推断）；迟到的 result 覆盖 timeout（事实优先于推断）时，
+	// 入账的正是**事实**那条。
+	prev := rec.Status
 	if err := s.cmd.Complete(ctx, rec, res); err != nil {
 		return err
+	}
+	if s.audit != nil && prev != dockerstate.StatusSucceeded && prev != dockerstate.StatusFailed {
+		// 审计挂钩（观察者不是参与者）：只记账、绝不改判 —— 异步与失败豁免都在
+		// DockerCmdAuditor 内部（warn 不阻塞），指令的轮询/流路径零影响。
+		// docker:events 常驻订阅（UserID=0）由挂钩自行豁免。
+		s.audit.RecordTerminal(rec)
+	}
+	if rec.Action == agentproto.DockerActionEvents {
+		// docker:events 是 core 的**常驻订阅**：不进用户流注册表（无发起人、不占用户
+		// 槽位、不参与用户 sweep），result 原样交还管理器认领。带内调用（本帧处理
+		// 返回之前）保证认领先于该连接后续的帧 —— 与 registerStreamSession 的
+		// 「帧一定晚于 result」是同一时序纪律。
+		if s.events != nil {
+			s.events.OnEventsResult(deviceID, res)
+		}
+		return nil
 	}
 	s.registerStreamSession(rec, res)
 	return nil

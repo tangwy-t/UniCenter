@@ -119,7 +119,7 @@ func (s *Snapshotter) Collect(ctx context.Context) *agentproto.DockerState {
 		st.Error = listErrorConclusion(err)
 		return st
 	}
-	volumes, err := s.api.Volumes(ctx)
+	volumes, df, err := s.api.VolumesAndDf(ctx)
 	if err != nil {
 		st.Error = listErrorConclusion(err)
 		return st
@@ -184,6 +184,18 @@ func (s *Snapshotter) Collect(ctx context.Context) *agentproto.DockerState {
 		st.Networks = append(st.Networks, agentproto.DockerNetwork{
 			Name: n.Name, Driver: n.Driver, Scope: n.Scope, Internal: n.Internal, ContainersCount: n.ContainersCount,
 		})
+	}
+	// df 汇总（6a 磁盘治理）：adapter 在卷采集的**同一趟** system df 里已经算好字节数，
+	// 这里只做字节 → MB 的折算（mb/round2 与镜像条目的 SizeMB 同一精度口径 —— 两个
+	// 精度会变成「面板一个数、列表一个数」的永久疑问）。df 缺席（失败退化 volume ls
+	// 的那帧）保持 nil：调用方拿 nil 说「数据不可用」，0 与「没采到」不混同。
+	if df != nil {
+		st.DiskUsage = &agentproto.DockerDiskUsage{
+			ImagesTotalMB:    mb(float64(df.ImagesTotalBytes)),
+			ImagesDanglingMB: mb(float64(df.ImagesDanglingBytes)),
+			VolumesTotalMB:   mb(float64(df.VolumesTotalBytes)),
+			BuildCacheMB:     mb(float64(df.BuildCacheBytes)),
+		}
 	}
 	// 项目归纳读的是**本域**类型而不是 st.Containers：config_files 只存在于容器标签里，
 	// 而 proto 的 DockerContainer 不带 Labels（把它塞进协议会让每帧多背一份标签）。

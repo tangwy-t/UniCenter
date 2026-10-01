@@ -63,13 +63,16 @@ func (e *ReadExecutor) Do(ctx context.Context, cmd *agentproto.DockerCmd) ([]byt
 
 // composeFile 读一个 compose 项目的配置文件。
 //
-// 路径解析（**只能**来自容器标签）与 compose 写路径共用 composeConfigFileOf
+// 路径解析（**只能**来自容器标签）与 compose 写路径共用 composeConfigFilesOf
 // （见 compose_exec.go）—— 复制两份会让「路径白名单」有两个实现，而它只需要一个。
+// 它返回项目的全部文件（主文件 + override），而编辑器只编辑**主文件**：取列表
+// 首元素（标签原序的第一项），对外行为与修复前一致。
 func (e *ReadExecutor) composeFile(ctx context.Context, project string) (*agentproto.DockerComposeFilePayload, error) {
-	path, err := composeConfigFileOf(ctx, e.api, project)
+	files, err := composeConfigFilesOf(ctx, e.api, project)
 	if err != nil {
 		return nil, err
 	}
+	path := files[0]
 	// 先看大小再读：超限的文件不该被读进内存（上限见 §13）。
 	fi, err := os.Stat(path)
 	if err != nil {

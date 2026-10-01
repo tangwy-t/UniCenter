@@ -102,7 +102,7 @@ func composeOpts(target string) agentproto.DockerCmdOptions {
 	return agentproto.DockerCmdOptions{Target: target}
 }
 
-// writeComposeFixture 落一个真实存在的 compose 文件（composeConfigFileOf 要求标签路径
+// writeComposeFixture 落一个真实存在的 compose 文件（composeConfigFilesOf 要求标签路径
 // 指向的文件必须存在）。
 func writeComposeFixture(t *testing.T) string {
 	t.Helper()
@@ -178,7 +178,7 @@ func TestComposeArgv(t *testing.T) {
 			e := NewWriteExecutor(&stubAPI{}, ParseProtected(""), t.TempDir(), fc.flavor, nil)
 			for _, c := range cases {
 				t.Run(c.name, func(t *testing.T) {
-					argv, err := e.composeArgv(c.action, &c.opts, testComposeConfig)
+					argv, err := e.composeArgv(c.action, &c.opts, []string{testComposeConfig})
 					if err != nil {
 						t.Fatalf("argv 构建失败: %v", err)
 					}
@@ -270,7 +270,7 @@ func TestComposeExecutorRejectsInvalidTargetsBeforeExec(t *testing.T) {
 func TestComposeArgvScaleRequiresN(t *testing.T) {
 	e := NewWriteExecutor(&stubAPI{}, ParseProtected(""), t.TempDir(), agentproto.DockerComposeFlavorPlugin, nil)
 	_, err := e.composeArgv(agentproto.DockerActionComposeServiceScale,
-		&agentproto.DockerCmdOptions{Target: "uni-center/uni_core"}, testComposeConfig)
+		&agentproto.DockerCmdOptions{Target: "uni-center/uni_core"}, []string{testComposeConfig})
 	var ee *ExecError
 	if !errors.As(err, &ee) || ee.Msg == "" {
 		t.Fatalf("缺 n 必须被拒绝，实际 %v", err)
@@ -376,6 +376,134 @@ func TestComposeExecutorFallsBackToIndexWhenLabelMissing(t *testing.T) {
 	}
 	if call := stub.last(t); !slices.Contains(call.args, configFile) {
 		t.Fatalf("argv 必须用索引路径: %q", call.args)
+	}
+}
+
+// ── 多文件项目（override）：argv 必须保留全部 -f ─────────────────────────
+
+// `-f a.yml -f b.yml` 起的项目，写路径必须带着**全部** -f：compose 的 merge 语义
+// （后者覆盖前者）正是 override 本身，只带主文件会让 override 定义静默失效——更何况
+// up 默认带 --remove-orphans，override 独有的服务会被当孤儿删掉。三种 flavor 都支持
+// 重复 -f（自 v1 时代起），逐字钉死。
+func TestComposeExecutorKeepsOverrideFiles(t *testing.T) {
+	main := writeComposeFixture(t)
+	override := writeComposeFixture(t)
+	// 标签里带空格与空项：拆分必须去空白、丢空项，仍然只有这两个文件。
+	api := composeProjectFixture(main)
+	api.containers[0].Labels[composeConfigFilesLabel] = " " + main + " , ," + override + " "
+	for _, fc := range composeFlavorCases {
+		t.Run(fc.flavor, func(t *testing.T) {
+			stub := &composeExecStub{}
+			e := NewWriteExecutor(api, ParseProtected(""), t.TempDir(), fc.flavor, stub.command)
+			if _, err := e.Do(context.Background(), &agentproto.DockerCmd{
+				Action: agentproto.DockerActionComposeUp, Options: composeOpts("uni-center"),
+			}); err != nil {
+				t.Fatalf("up 应放行: %v", err)
+			}
+			call := stub.last(t)
+			want := append(append([]string(nil), fc.prefix...),
+				"-p", "uni-center", "-f", main, "-f", override, "up", "-d", "--remove-orphans")
+			if !slices.Equal(call.args, want) {
+				t.Fatalf("override 的 -f 必须按标签原序全部保留:\n got %q\nwant %q", call.args, want)
+			}
+		})
+	}
+}
+
+// 清单里有文件缺失（override 被移走）：结论句**指明是哪个文件**，且绝不执行 CLI
+// —— 带着残缺清单执行等于执行一个与快照不符的项目。
+func TestComposeExecutorRejectsMissingOverrideFile(t *testing.T) {
+	main := writeComposeFixture(t)
+	missing := filepath.Join(t.TempDir(), "override.yml") // 故意不存在
+	api := composeProjectFixture(main)
+	api.containers[0].Labels[composeConfigFilesLabel] = main + "," + missing
+	stub := &composeExecStub{}
+	e := NewWriteExecutor(api, ParseProtected(""), t.TempDir(), agentproto.DockerComposeFlavorPlugin, stub.command)
+
+	_, err := e.Do(context.Background(), &agentproto.DockerCmd{
+		Action: agentproto.DockerActionComposeUp, Options: composeOpts("uni-center"),
+	})
+	var ee *ExecError
+	if !errors.As(err, &ee) || !strings.Contains(ee.Msg, missing) {
+		t.Fatalf("缺失的 override 必须被结论句拒绝并指明文件，实际 %v", err)
+	}
+	if stub.count() != 0 {
+		t.Fatal("清单残缺时绝不能执行 CLI")
+	}
+}
+
+// ── 解析层：标签清单的拆分与逐项校验 ────────────────────────────────────
+
+// 标签拆出全部文件（原序、Trim、丢空项）；任何一项不是绝对路径/不存在/是目录都
+// 拒绝，结论句指明是哪个文件 —— 多文件项目里只说「有个文件坏了」无从定位。
+func TestComposeConfigFilesLabelValidation(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "base.yml")
+	b := filepath.Join(dir, "override.yml")
+	for _, f := range []string{a, b} {
+		if err := os.WriteFile(f, []byte("services: {}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Run("全部文件按原序返回（去空白、丢空项）", func(t *testing.T) {
+		files, err := validatedLabelConfigFiles(" " + a + " , ," + b + " , ")
+		if err != nil {
+			t.Fatalf("标签应解析成功: %v", err)
+		}
+		if want := []string{a, b}; !slices.Equal(files, want) {
+			t.Fatalf("必须按标签原序返回全部文件:\n got %q\nwant %q", files, want)
+		}
+	})
+	t.Run("单文件标签回归护栏", func(t *testing.T) {
+		files, err := validatedLabelConfigFiles(a)
+		if err != nil {
+			t.Fatalf("单文件标签应解析成功: %v", err)
+		}
+		if !slices.Equal(files, []string{a}) {
+			t.Fatalf("单文件标签必须原样返回单元素列表: %q", files)
+		}
+	})
+	t.Run("不是绝对路径：结论句指明文件", func(t *testing.T) {
+		_, err := validatedLabelConfigFiles(a + ",relative.yml")
+		var ee *ExecError
+		if !errors.As(err, &ee) || !strings.Contains(ee.Msg, "不是绝对路径") ||
+			!strings.Contains(ee.Msg, "relative.yml") {
+			t.Fatalf("相对路径必须被拒并指明是哪个文件: %v", err)
+		}
+	})
+	t.Run("文件不存在：结论句指明文件", func(t *testing.T) {
+		missing := filepath.Join(dir, "no-such.yml")
+		_, err := validatedLabelConfigFiles(a + "," + missing)
+		var ee *ExecError
+		if !errors.As(err, &ee) || !strings.Contains(ee.Msg, missing) {
+			t.Fatalf("缺失文件必须被拒并指明是哪个: %v", err)
+		}
+	})
+	t.Run("是目录：结论句指明文件", func(t *testing.T) {
+		_, err := validatedLabelConfigFiles(a + "," + dir)
+		var ee *ExecError
+		if !errors.As(err, &ee) || !strings.Contains(ee.Msg, "目录") ||
+			!strings.Contains(ee.Msg, dir) {
+			t.Fatalf("目录必须被拒并指明是哪个: %v", err)
+		}
+	})
+}
+
+// 索引兜底是单元素列表：索引只学主文件（快照学到的单一路径），多文件知识只在标签里
+// —— 有容器的项目走标签（全部文件），down 之后走索引（只剩主文件，如实）。
+func TestComposeConfigFilesIndexFallbackSingleFile(t *testing.T) {
+	configFile := writeComposeFixture(t)
+	idx := newProjectIndex(t.TempDir(), testLogger())
+	idx.Learn("uni-center", configFile)
+	api := &stubAPI{containers: []ContainerInfo{{ID: "c1", Name: "x",
+		Labels: map[string]string{composeProjectLabel: "uni-center"}}}}
+
+	files, err := composeConfigFilesOf(context.Background(), withProjectIndex(api, idx), "uni-center")
+	if err != nil {
+		t.Fatalf("索引兜底应解析成功: %v", err)
+	}
+	if !slices.Equal(files, []string{configFile}) {
+		t.Fatalf("索引兜底必须是单元素列表: %q", files)
 	}
 }
 

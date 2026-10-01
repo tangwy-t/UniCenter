@@ -26,8 +26,11 @@ type DockerStreamService struct {
 	// online 报告设备当前是否在线（由 agenthub.Hub.Get 包装）。
 	// nil = 跳过离线判定（测试/未装配）：仅少一层「设备掉线后会话尽快收摊」的自愈。
 	online func(deviceID uint64) bool
-	log    logger.LoggerInterface
-	now    func() time.Time
+	// pullPending 报告一条 ref 的指令是否仍在 pending（拉取进度会话的回收依据）。
+	// nil = 跳过拉取会话对账（测试未装配）：会话留在注册表直到 eof/接入方收尾。
+	pullPending func(ctx context.Context, ref string) (bool, error)
+	log         logger.LoggerInterface
+	now         func() time.Time
 }
 
 // NewDockerStreamService 构造流通道面。
@@ -39,6 +42,13 @@ func NewDockerStreamService(sessions *dockerstream.Registry, tickets *dockerstat
 // WithDeviceOnline 注入设备在线判定（sweep 用）。返回自身便于装配链式书写。
 func (s *DockerStreamService) WithDeviceOnline(online func(deviceID uint64) bool) *DockerStreamService {
 	s.online = online
+	return s
+}
+
+// WithPullPending 注入拉取指令的 pending 判定（sweep 的拉取会话对账用；
+// 装配在 wireup 一次完成 —— 只有它同时拿得到注册表与指令存储）。
+func (s *DockerStreamService) WithPullPending(fn func(ctx context.Context, ref string) (bool, error)) *DockerStreamService {
+	s.pullPending = fn
 	return s
 }
 
@@ -177,12 +187,36 @@ func (s *DockerStreamService) sendControl(_ context.Context, sess *dockerstream.
 }
 
 // Sweep 清理流会话（由 wireup 的 docker sweep 周期调用）：
-//   - 空闲超时（10 分钟无数据）：下发 cancel + 移除；
+//   - 拉取进度会话对账：指令已终态/已消失即移除（**不发 cancel**）—— 指令终态时
+//     agent 侧的拉取会话要么已随 eof 收摊、要么根本没开（排队中/设备已死），
+//     cancel 对排队中的后续拉取是「腰斩」，对已死的会话是噪音，两者都不该发；
+//     指令还在 pending 就留着 —— 排队几十分钟一帧没有是常态，会话的寿命 = 指令寿命；
+//   - 空闲超时（10 分钟无数据）：下发 cancel + 移除（拉取会话被注册表豁免，见
+//     Registry.Expired —— 停滞的拉取是「进行中的事实」，不是被遗忘的流）；
 //   - 设备离线：会话已无数据来源，移除（不必发 cancel，发也送不到）。
 //
 // 返回清理条数（供调用方判定「这一轮有没有事发生」，口径与 cmd sweep 一致）。
 func (s *DockerStreamService) Sweep(ctx context.Context) (int, error) {
 	n := 0
+	if s.pullPending != nil {
+		for _, sess := range s.sessions.All() {
+			if sess.Kind() != dockerstream.KindPull {
+				continue
+			}
+			pending, err := s.pullPending(ctx, sess.Ref())
+			if err != nil {
+				// 存储抖动：这一轮不判这条（会话不因读不到记录而死 —— 命脉是
+				// 指令的事实而不是存储的可用性），下一轮（5s 后）再对。
+				continue
+			}
+			if !pending {
+				// 终态对账抓到它（正常收尾：eof 已到、result 已落库）。移除之外
+				// 不动作：agent 侧的同名会话没有第二条命。
+				s.sessions.Remove(sess.ID())
+				n++
+			}
+		}
+	}
 	for _, sess := range s.sessions.Expired(s.now()) {
 		s.CancelSession(ctx, sess, "idle timeout")
 		n++

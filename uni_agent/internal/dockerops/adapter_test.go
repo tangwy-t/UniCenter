@@ -167,3 +167,28 @@ func TestMBAndRound2(t *testing.T) {
 		t.Errorf("round2(-0.4) = %v, want 0", got)
 	}
 }
+
+// rateDelta 是 stats 流的速率口径（与快照 collectStats 的公式逐项一致）：
+// 正常求差、计数回绕给 0、间隔不正给 0、round2 舍入 —— 四个形态各有一条。
+func TestRateDelta(t *testing.T) {
+	cases := []struct {
+		name      string
+		prev, cur uint64
+		dt        float64
+		want      float64
+	}{
+		{"正常 1s 间隔", 1000, 4000, 1, 3000},
+		{"1s 间隔舍入", 0, 10, 3, 3.33},
+		{"计数回绕（容器重启归零）", 4000, 100, 1, 0},
+		{"零间隔", 1000, 2000, 0, 0},
+		{"负间隔（时钟回拨）", 1000, 2000, -0.5, 0},
+		{"持平", 1000, 1000, 1, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := rateDelta(c.prev, c.cur, c.dt); got != c.want {
+				t.Errorf("rateDelta(%d, %d, %v) = %v, want %v", c.prev, c.cur, c.dt, got, c.want)
+			}
+		})
+	}
+}

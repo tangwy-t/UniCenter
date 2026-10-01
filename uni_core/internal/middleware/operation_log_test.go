@@ -258,3 +258,77 @@ func TestOperationLogMiddlewarePreservesScopeContext(t *testing.T) {
 		t.Errorf("异步落库 ctx 丢失了 traceId, got %q", tid)
 	}
 }
+
+// TestOperationLogPasswordDesensitized：敏感字段必须在**进审计之前**被掩码 ——
+// 凭据写请求（/docker/registries 的 password）落到 sys_operation_log 的是 "***"，
+// 不是明文；嵌套 JSON 同样递归掩码。
+func TestOperationLogPasswordDesensitized(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := &captureHookSvc{logs: make(chan *entity.SysOperationLog, 1)}
+	r := gin.New()
+	r.Use(OperationLogMiddleware(svc, logger.NewNop()))
+	r.POST("/docker/registries", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"code": 0})
+	})
+
+	body := `{"registry":"harbor.example.com","username":"u","password":"sup3r-s3cret","nested":{"password":"inner-secret"}}`
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/docker/registries", strings.NewReader(body))
+	r.ServeHTTP(w, req)
+
+	entry := waitLog(t, &captureOpLogService{logs: svc.logs})
+	got := ""
+	if entry.RequestParams != nil {
+		got = *entry.RequestParams
+	}
+	if strings.Contains(got, "sup3r-s3cret") || strings.Contains(got, "inner-secret") {
+		t.Fatalf("审计里的密码必须已被掩码,实际 %s", got)
+	}
+	if !strings.Contains(got, `"password":"***"`) {
+		t.Fatalf("password 字段必须是 *** 掩码形态,实际 %s", got)
+	}
+	if !strings.Contains(got, "harbor.example.com") || !strings.Contains(got, `"username":"u"`) {
+		t.Fatalf("非敏感字段（registry/用户名）必须原样入审计,实际 %s", got)
+	}
+}
+
+// TestOperationLogRegistryOptionIsNotMasked：image:pull 受理审计的 body 里
+// registry 是**凭据键而不是秘密** —— 不含密码、可安全入审计（4c 选型 A 的
+// 「受理审计不碰密码」前提：密码在审计之后才解出注入,body 里只有 registry 名）。
+func TestOperationLogRegistryOptionIsNotMasked(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := &captureHookSvc{logs: make(chan *entity.SysOperationLog, 1)}
+	r := gin.New()
+	r.Use(OperationLogMiddleware(svc, logger.NewNop()))
+	r.POST("/docker/hosts/7/cmds", func(c *gin.Context) {
+		c.JSON(http.StatusAccepted, gin.H{"code": 0})
+	})
+
+	body := `{"action":"image:pull","target":"harbor.example.com/app:1","options":{"registry":"harbor.example.com"}}`
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/docker/hosts/7/cmds", strings.NewReader(body))
+	r.ServeHTTP(w, req)
+
+	entry := waitLog(t, &captureOpLogService{logs: svc.logs})
+	got := ""
+	if entry.RequestParams != nil {
+		got = *entry.RequestParams
+	}
+	if !strings.Contains(got, `"registry":"harbor.example.com"`) {
+		t.Fatalf("registry 凭据键必须原样入审计（它不含秘密）: %s", got)
+	}
+	if !strings.Contains(got, "image:pull") {
+		t.Fatalf("action 必须入审计: %s", got)
+	}
+}
+
+// captureHookSvc 是 OperationLogServiceInterface 的最小钩子替身
+//（只关心 RequestParams 就到了,与 captureOpLogService 同形态但用通道)。
+type captureHookSvc struct {
+	logs chan *entity.SysOperationLog
+}
+
+func (s *captureHookSvc) Create(_ context.Context, log *entity.SysOperationLog) error {
+	s.logs <- log
+	return nil
+}

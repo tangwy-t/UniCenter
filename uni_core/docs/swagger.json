@@ -3106,6 +3106,110 @@
                 }
             }
         },
+        "/docker/containers": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "全部可管主机的容器并成一张表（每行带 hostId/hostname 归属）；hostId 限定单主机、state 过滤运行态（stopped=一切非 running，与总览 KPI 同口径）、keyword 按容器名或镜像名子串匹配；上限 500 条、total 如实报截断前全量；单台快照读失败跳过该主机（其故障在总览页如实呈现）",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Docker 管理"
+                ],
+                "summary": "跨主机容器统一表",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "format": "int64",
+                        "description": "限定单主机(缺省=全部可管主机)",
+                        "name": "hostId",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "运行态过滤(running/stopped)",
+                        "name": "state",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "容器名或镜像名子串(大小写不敏感)",
+                        "name": "keyword",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "查询成功",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/app.Response"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/response.DockerWorkloadListResp"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "参数错误(state 非 running/stopped)",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "401": {
+                        "description": "未登录",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "403": {
+                        "description": "无权限",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    }
+                }
+            }
+        },
+        "/docker/events": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "跨主机聚合的容器/镜像/卷/网络事件流；连接后先回放各主机最近 50 条，再实时推送；每行 {\"host_id\",\"hostname\",\"t\",\"type\",\"action\",\"actor_name\",\"actor_id\"}",
+                "produces": [
+                    "application/x-ndjson"
+                ],
+                "tags": [
+                    "Docker 管理"
+                ],
+                "summary": "Docker 事件聚合流(NDJSON)",
+                "responses": {
+                    "200": {
+                        "description": "流已建立(逐行 NDJSON)"
+                    },
+                    "401": {
+                        "description": "未登录"
+                    },
+                    "403": {
+                        "description": "无权限(docker:list)"
+                    }
+                }
+            }
+        },
         "/docker/hosts": {
             "get": {
                 "security": [
@@ -3224,7 +3328,7 @@
                         }
                     },
                     "403": {
-                        "description": "无操作权限",
+                        "description": "无操作权限（force=true 时还要求 docker:exec 级）",
                         "schema": {
                             "$ref": "#/definitions/app.Response"
                         }
@@ -3251,7 +3355,7 @@
                         "BearerAuth": []
                     }
                 ],
-                "description": "按指令号查询状态与载荷（pending/running/succeeded/failed/timeout）",
+                "description": "按指令号查询状态与载荷（pending/running/succeeded/failed/timeout）；建立了流会话时附带一次性 streamTicket",
                 "produces": [
                     "application/json"
                 ],
@@ -3302,7 +3406,7 @@
                         }
                     },
                     "403": {
-                        "description": "无操作权限",
+                        "description": "无操作权限 / 非发起人",
                         "schema": {
                             "$ref": "#/definitions/app.Response"
                         }
@@ -3312,6 +3416,168 @@
                         "schema": {
                             "$ref": "#/definitions/app.Response"
                         }
+                    }
+                }
+            }
+        },
+        "/docker/hosts/{id}/cmds/{ref}/pull": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "按指令号接入拉取进度会话；每行一个进度记录 {\"seq\",\"t\",\"id\",\"status\",\"current\",\"total\",\"done\",\"error\",\"eof\"}；客户端断开即下发 cancel（终止拉取）",
+                "produces": [
+                    "application/x-ndjson"
+                ],
+                "tags": [
+                    "Docker 管理"
+                ],
+                "summary": "镜像拉取进度流(NDJSON)",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "format": "int64",
+                        "description": "设备ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "指令号",
+                        "name": "ref",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "流已建立(逐行 NDJSON)"
+                    },
+                    "400": {
+                        "description": "请求参数不合法 / 该指令不支持拉取进度流"
+                    },
+                    "401": {
+                        "description": "未登录"
+                    },
+                    "403": {
+                        "description": "无权限 / 非发起人"
+                    },
+                    "404": {
+                        "description": "指令不存在或已过期"
+                    },
+                    "409": {
+                        "description": "该指令没有可接入的流会话 / 会话已有连接"
+                    }
+                }
+            }
+        },
+        "/docker/hosts/{id}/cmds/{ref}/stats": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "按指令号接入已建立的 stats 会话；每行一个样本 {\"seq\",\"t\",\"cpu_percent\",\"mem_usage_mb\",\"mem_limit_mb\",\"net_rx_bytes_sec\",\"net_tx_bytes_sec\",\"eof\"}；客户端断开即下发 cancel",
+                "produces": [
+                    "application/x-ndjson"
+                ],
+                "tags": [
+                    "Docker 管理"
+                ],
+                "summary": "容器 stats 实时流(NDJSON)",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "format": "int64",
+                        "description": "设备ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "指令号",
+                        "name": "ref",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "流已建立(逐行 NDJSON)"
+                    },
+                    "400": {
+                        "description": "请求参数不合法 / 该指令不支持 stats 流"
+                    },
+                    "401": {
+                        "description": "未登录"
+                    },
+                    "403": {
+                        "description": "无权限 / 非发起人"
+                    },
+                    "404": {
+                        "description": "指令不存在或已过期"
+                    },
+                    "409": {
+                        "description": "该指令没有可接入的流会话 / 会话已有连接"
+                    }
+                }
+            }
+        },
+        "/docker/hosts/{id}/cmds/{ref}/stream": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "按指令号接入已建立的日志流会话（container:logs follow 或 compose:logs 项目聚合日志）；每行 {\"seq\",\"data\"(base64),\"eof\"}；客户端断开即下发 cancel",
+                "produces": [
+                    "application/x-ndjson"
+                ],
+                "tags": [
+                    "Docker 管理"
+                ],
+                "summary": "容器/项目聚合日志流(NDJSON Follow)",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "format": "int64",
+                        "description": "设备ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "指令号",
+                        "name": "ref",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "流已建立(逐行 NDJSON)"
+                    },
+                    "400": {
+                        "description": "请求参数不合法 / 该指令不支持日志流"
+                    },
+                    "401": {
+                        "description": "未登录"
+                    },
+                    "403": {
+                        "description": "无权限 / 非发起人"
+                    },
+                    "404": {
+                        "description": "指令不存在或已过期"
+                    },
+                    "409": {
+                        "description": "该指令没有可接入的流会话 / 会话已有连接"
                     }
                 }
             }
@@ -3380,6 +3646,427 @@
                     },
                     "404": {
                         "description": "设备不存在",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    }
+                }
+            }
+        },
+        "/docker/hosts/{id}/stream/exec": {
+            "get": {
+                "description": "用 streamTicket 升级；服务端发 {\"type\":\"data\",\"data\":base64} / {\"type\":\"eof\"}，客户端发 input/resize/cancel",
+                "tags": [
+                    "Docker 管理"
+                ],
+                "summary": "容器终端(WebSocket)",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "format": "int64",
+                        "description": "设备ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "一次性票据(来自 cmds/:ref 结果)",
+                        "name": "ticket",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "101": {
+                        "description": "握手成功，协议切换到 WebSocket"
+                    },
+                    "400": {
+                        "description": "参数不合法"
+                    },
+                    "401": {
+                        "description": "票据无效或已过期"
+                    },
+                    "403": {
+                        "description": "票据与主机不符"
+                    },
+                    "409": {
+                        "description": "该流会话已有连接"
+                    }
+                }
+            }
+        },
+        "/docker/overview": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "聚合全部可管主机的容器/镜像/卷/网络/项目计数与异常容器清单（条目与 docker/hosts 同形态；单台快照读失败只降级该主机并如实标注 error）",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Docker 管理"
+                ],
+                "summary": "控制塔总览",
+                "responses": {
+                    "200": {
+                        "description": "查询成功",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/app.Response"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/response.DockerOverviewResp"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "401": {
+                        "description": "未登录",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "403": {
+                        "description": "无权限",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    }
+                }
+            }
+        },
+        "/docker/registries": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "枚举全部私有仓库凭据（registry/用户名/备注/掩码密码/创建时间；密码任何读路径都不回明文）",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Docker 管理"
+                ],
+                "summary": "仓库凭据列表",
+                "responses": {
+                    "200": {
+                        "description": "查询成功",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/app.Response"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/response.DockerRegistryListResp"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "401": {
+                        "description": "未登录",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "403": {
+                        "description": "无权限",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    }
+                }
+            },
+            "put": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "按 registry 更新凭据的用户名/密码/备注（密码必须重输，凭据管理没有读回旧密码的路径）",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Docker 管理"
+                ],
+                "summary": "更新仓库凭据",
+                "parameters": [
+                    {
+                        "description": "凭据请求",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/request.DockerRegistrySaveReq"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "更新成功",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/app.Response"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/response.DockerRegistryItem"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "参数错误",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "401": {
+                        "description": "未登录",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "403": {
+                        "description": "无权限",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "404": {
+                        "description": "该仓库没有凭据记录",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "新建私有仓库凭据（registry 唯一键；密码 AES-256-GCM 加密落库，一切读路径掩码）",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Docker 管理"
+                ],
+                "summary": "新建仓库凭据",
+                "parameters": [
+                    {
+                        "description": "凭据请求",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/request.DockerRegistrySaveReq"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "创建成功",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/app.Response"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/response.DockerRegistryItem"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "参数错误",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "401": {
+                        "description": "未登录",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "403": {
+                        "description": "无权限",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "409": {
+                        "description": "该仓库地址已有凭据",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    }
+                }
+            }
+        },
+        "/docker/registries/{registry}": {
+            "delete": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "按仓库地址删除凭据（删除即失效，不带任何对账周期）",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Docker 管理"
+                ],
+                "summary": "删除仓库凭据",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "仓库地址",
+                        "name": "registry",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "删除成功",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "400": {
+                        "description": "参数错误",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "401": {
+                        "description": "未登录",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "403": {
+                        "description": "无权限",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "404": {
+                        "description": "该仓库没有凭据记录",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    }
+                }
+            }
+        },
+        "/docker/tasks": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "最近受理的 docker 指令（≤100 条、受理时刻降序、跨主机聚合）；hostId 限定单主机、status 过滤 pending/done、action 过滤动作码；条目含 ref/主机/动作/目标/发起人用户名/受理时刻/终态（pending/succeeded/failed/timeout）/终态结论句；拉取类任务前端凭 action 复用 /cmds/:ref/pull 打开进度流（取消=断开进度流）",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Docker 管理"
+                ],
+                "summary": "最近任务",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "format": "int64",
+                        "description": "限定单主机(缺省=跨主机)",
+                        "name": "hostId",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "阶段过滤(pending/done)",
+                        "name": "status",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "动作码过滤(如 image:pull)",
+                        "name": "action",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "查询成功",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/app.Response"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/response.DockerTaskListResp"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "参数错误(status 非 pending/done) / 未知操作",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "401": {
+                        "description": "未登录",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "403": {
+                        "description": "无权限(docker:list)",
                         "schema": {
                             "$ref": "#/definitions/app.Response"
                         }
@@ -9260,6 +9947,32 @@
         "request.DockerCmdReq": {
             "type": "object"
         },
+        "request.DockerRegistrySaveReq": {
+            "type": "object",
+            "required": [
+                "password",
+                "registry",
+                "username"
+            ],
+            "properties": {
+                "password": {
+                    "description": "Password 是仓库密码（明文仅在本次请求内瞬时存在；**每次创建/更新都重输**）。",
+                    "type": "string"
+                },
+                "registry": {
+                    "description": "Registry 是仓库地址（唯一键：主机名/IP + 可选端口，不含协议头与镜像路径；\n形态校验在 service 复用协议 IsDockerRegistryAddr）。",
+                    "type": "string"
+                },
+                "remark": {
+                    "description": "Remark 是备注（可选）。",
+                    "type": "string"
+                },
+                "username": {
+                    "description": "Username 是仓库登录名。",
+                    "type": "string"
+                }
+            }
+        },
         "request.KickSessionReq": {
             "type": "object",
             "required": [
@@ -10973,6 +11686,10 @@
                 "status": {
                     "description": "Status ∈ pending | succeeded | failed | timeout。",
                     "type": "string"
+                },
+                "streamTicket": {
+                    "description": "StreamTicket 是一次性流票据（三期）：指令建立了流会话时，**每次**轮询响应\n都新签一张（TTL 30s、单次使用，绑定 userId+sessionId+deviceId）。前端接流\n时用**最新**的那张；票据不进日志、不上报，只在该响应里出现。",
+                    "type": "string"
                 }
             }
         },
@@ -11043,6 +11760,131 @@
                 }
             }
         },
+        "response.DockerFleetContainers": {
+            "type": "object",
+            "properties": {
+                "protected": {
+                    "description": "Protected 是受保护容器的数量（不论运行态；结论由 agent 按保护清单算好）。",
+                    "type": "integer"
+                },
+                "running": {
+                    "description": "Running 是 state=running 的容器数。",
+                    "type": "integer"
+                },
+                "stopped": {
+                    "description": "Stopped = Total - Running：泛指一切非 running（exited/created/paused/dead…），\n与异常清单的收录口径同一句话（两边各写一套就又出现一次口径分裂）。",
+                    "type": "integer"
+                },
+                "total": {
+                    "type": "integer"
+                }
+            }
+        },
+        "response.DockerFleetDisk": {
+            "type": "object",
+            "properties": {
+                "buildCacheMb": {
+                    "type": "number"
+                },
+                "hosts": {
+                    "description": "Hosts 是**有 df 数据**的主机数（快照 disk_usage 非 nil 的主机数）。与\nfleet.hosts.total 并排读就是「4 台里 3 台报了磁盘账」—— 没报的那台不是\n0 占用，是不知道；计数如实标注而不是把缺报主机折算成零。",
+                    "type": "integer"
+                },
+                "imagesDanglingMb": {
+                    "description": "ImagesDanglingMB 是悬空镜像占用合计（image:prune 默认目标的体积：\n「能安全收回多少」的镜像半边）。卷的可回收数不在此列 —— volume:prune 只回收\n匿名未用卷，合计口径在协议上拿不到（df 不区分匿名），入口在卷页的清理流。",
+                    "type": "number"
+                },
+                "imagesTotalMb": {
+                    "description": "ImagesTotalMB / VolumesTotalMB / BuildCacheMB 是三类占用合计（MB）。",
+                    "type": "number"
+                },
+                "volumesTotalMb": {
+                    "type": "number"
+                }
+            }
+        },
+        "response.DockerFleetHosts": {
+            "type": "object",
+            "properties": {
+                "dockerOk": {
+                    "description": "DockerOK 是 dockerOk=true 的主机数（agent 自报的能力信号）。",
+                    "type": "integer"
+                },
+                "total": {
+                    "description": "Total 是本响应 hosts 列表的行数（读失败的主机也算一台 —— 行还在，err 如实）。",
+                    "type": "integer"
+                }
+            }
+        },
+        "response.DockerFleetImages": {
+            "type": "object",
+            "properties": {
+                "total": {
+                    "type": "integer"
+                },
+                "unused": {
+                    "type": "integer"
+                }
+            }
+        },
+        "response.DockerFleetNetworks": {
+            "type": "object",
+            "properties": {
+                "total": {
+                    "type": "integer"
+                }
+            }
+        },
+        "response.DockerFleetProjects": {
+            "type": "object",
+            "properties": {
+                "running": {
+                    "description": "Running 是 state=running 的项目数（项目态 ∈ running|partial|stopped，\n由 agent 按成员容器归纳 —— 非 running 项目不上异常清单，那是容器粒度的清单）。",
+                    "type": "integer"
+                },
+                "total": {
+                    "type": "integer"
+                }
+            }
+        },
+        "response.DockerFleetVolumes": {
+            "type": "object",
+            "properties": {
+                "total": {
+                    "type": "integer"
+                },
+                "unused": {
+                    "type": "integer"
+                }
+            }
+        },
+        "response.DockerHostDiskItem": {
+            "type": "object",
+            "properties": {
+                "buildCacheMb": {
+                    "type": "number"
+                },
+                "danglingImages": {
+                    "description": "DanglingImages 是悬空镜像计数（与镜像页「可回收」计数同一判据：agent 的\nDangling 结论，前端不重算）。",
+                    "type": "integer"
+                },
+                "imagesDanglingMb": {
+                    "description": "ImagesDanglingMB 是悬空镜像占用（image:prune 默认目标的体积）。",
+                    "type": "number"
+                },
+                "imagesMb": {
+                    "description": "ImagesMB / VolumesMB / BuildCacheMB 是三类占用（MB；system df 的同帧口径）。",
+                    "type": "number"
+                },
+                "unusedVolumes": {
+                    "description": "UnusedVolumes 是未被任何容器挂载的卷计数。注意它**不是** volume:prune 的\n回收数：prune 只收匿名未用卷，命名卷走卷页的独立删除流 —— 面板只给计数\n与入口，清理动作在列表页的确认档流里发生。",
+                    "type": "integer"
+                },
+                "volumesMb": {
+                    "type": "number"
+                }
+            }
+        },
         "response.DockerHostItem": {
             "type": "object",
             "properties": {
@@ -11054,6 +11896,14 @@
                 },
                 "containers": {
                     "type": "integer"
+                },
+                "disk": {
+                    "description": "Disk 是该主机的磁盘占用账目（system df 汇总 + 可回收计数）。**nil = 无 df 数据**\n（那帧 df 失败、或旧版 agent 不发 disk_usage）—— 页面显示「数据不可用」而不是 0\n（与卷条目 SizeMB=nil 同一纪律：不知道 ≠ 零）。只在总览响应填充（磁盘面板的\n专供数据面）；主机清单页不消费它，omitempty 让字段在那边缺席。",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/response.DockerHostDiskItem"
+                        }
+                    ]
                 },
                 "dockerOk": {
                     "description": "DockerOK 是 agent 自报的能力信号；false 时前端不渲染任何操作按钮。",
@@ -11157,6 +12007,108 @@
                 }
             }
         },
+        "response.DockerOverviewAnomalies": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "description": "Items 按主机 id 升序（同机按容器名）排序。",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/response.DockerOverviewAnomalyItem"
+                    }
+                },
+                "total": {
+                    "description": "Total 是**截断前**的非 running 容器全量数；Items 至多 50 条。\n两者并存：控制塔要一眼知道「舰队里有几个不正常的容器」，详情只给前 50 ——\n超限时 Total 与 Items 长度不等，即「截断了」的显式口径（不靠前端猜）。",
+                    "type": "integer"
+                }
+            }
+        },
+        "response.DockerOverviewAnomalyItem": {
+            "type": "object",
+            "properties": {
+                "hostId": {
+                    "type": "string",
+                    "example": "0"
+                },
+                "hostname": {
+                    "type": "string"
+                },
+                "id": {
+                    "description": "ID 是容器的完整 ID（同 DockerContainerItem.ID）：异常行点进去要能深链到\n容器详情页（/docker/container-detail/:id），没有它前端只能干列名字。",
+                    "type": "string"
+                },
+                "image": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "protected": {
+                    "description": "Protected 是 agent 按保护清单算好的结论：控制塔**不**据此拦截操作（拦在\n指令受理面），只用来让运维一眼看出「这是个动不得的容器」。",
+                    "type": "boolean"
+                },
+                "state": {
+                    "type": "string"
+                },
+                "statusText": {
+                    "description": "StatusText 是 docker ps 的原生状态句（\"Exited (137) 3 days ago\"），展示层直接显示。",
+                    "type": "string"
+                }
+            }
+        },
+        "response.DockerOverviewFleet": {
+            "type": "object",
+            "properties": {
+                "containers": {
+                    "$ref": "#/definitions/response.DockerFleetContainers"
+                },
+                "disk": {
+                    "description": "Disk 是磁盘占用的航队汇总（6a 磁盘治理）。值形态而非指针：fleet 恒在\n（零 df 主机时报 Hosts=0 与零合计 —— 「全部主机都没有 df 数据」本身就是一个\n如实的舰队结论，页面上磁贴显示「数据不可用」）。",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/response.DockerFleetDisk"
+                        }
+                    ]
+                },
+                "hosts": {
+                    "$ref": "#/definitions/response.DockerFleetHosts"
+                },
+                "images": {
+                    "$ref": "#/definitions/response.DockerFleetImages"
+                },
+                "networks": {
+                    "$ref": "#/definitions/response.DockerFleetNetworks"
+                },
+                "projects": {
+                    "$ref": "#/definitions/response.DockerFleetProjects"
+                },
+                "volumes": {
+                    "$ref": "#/definitions/response.DockerFleetVolumes"
+                }
+            }
+        },
+        "response.DockerOverviewResp": {
+            "type": "object",
+            "properties": {
+                "anomalies": {
+                    "description": "Anomalies 是非 running 容器清单；Total 是截断前的全量数。",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/response.DockerOverviewAnomalies"
+                        }
+                    ]
+                },
+                "fleet": {
+                    "$ref": "#/definitions/response.DockerOverviewFleet"
+                },
+                "hosts": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/response.DockerHostItem"
+                    }
+                }
+            }
+        },
         "response.DockerPortItem": {
             "type": "object",
             "properties": {
@@ -11189,11 +12141,51 @@
                 "name": {
                     "type": "string"
                 },
+                "protected": {
+                    "description": "Protected 来自 agent 的结论（project:\u003c名\u003e）；服务粒度由容器条目承载。",
+                    "type": "boolean"
+                },
                 "services": {
                     "type": "integer"
                 },
                 "state": {
                     "type": "string"
+                }
+            }
+        },
+        "response.DockerRegistryItem": {
+            "type": "object",
+            "properties": {
+                "createdAt": {
+                    "description": "CreatedAt 是创建时刻（unix 秒）。",
+                    "type": "integer"
+                },
+                "password": {
+                    "description": "Password 恒为掩码「****」。",
+                    "type": "string"
+                },
+                "registry": {
+                    "description": "Registry 是仓库地址（唯一键；不含协议头与镜像路径）。",
+                    "type": "string"
+                },
+                "remark": {
+                    "description": "Remark 是备注。",
+                    "type": "string"
+                },
+                "username": {
+                    "description": "Username 是仓库登录名。",
+                    "type": "string"
+                }
+            }
+        },
+        "response.DockerRegistryListResp": {
+            "type": "object",
+            "properties": {
+                "list": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/response.DockerRegistryItem"
+                    }
                 }
             }
         },
@@ -11255,6 +12247,59 @@
                 }
             }
         },
+        "response.DockerTaskItem": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "description": "Action 是动作码（前端凭它判断「可流」：image:pull/compose:pull 可开进度流，\n不需要额外的 streamable 字段 —— action 就是判定依据）。",
+                    "type": "string"
+                },
+                "createdAt": {
+                    "description": "CreatedAt 是受理时刻（unix 毫秒，与指令记录同单位）。",
+                    "type": "integer"
+                },
+                "hostId": {
+                    "description": "HostID 是目标主机的设备 ID（雪花值，string 编码与全站同纪律）。",
+                    "type": "string",
+                    "example": "0"
+                },
+                "hostname": {
+                    "description": "Hostname 是目标主机名（联查设备表；设备已删时为空 —— hostId 仍是可导航主键）。",
+                    "type": "string"
+                },
+                "ref": {
+                    "description": "Ref 是指令号（轮询 /cmds/:ref 与拉取进度流 /cmds/:ref/pull 的钥匙）。",
+                    "type": "string"
+                },
+                "status": {
+                    "description": "Status 终态照实投影：pending 在执行、succeeded 成功、failed 失败、timeout 超时。",
+                    "type": "string"
+                },
+                "summary": {
+                    "description": "Summary 是终态结论句原文（pending 时为空；成功兜底「执行成功」——与审计\n入账的结论句同一句话，见 service/docker_audit.go 的 terminalSummary）。",
+                    "type": "string"
+                },
+                "target": {
+                    "description": "Target 是操作目标（镜像名/容器名/项目名…）。",
+                    "type": "string"
+                },
+                "username": {
+                    "description": "Username 是发起人用户名（联查用户表；用户已删时为空，审计仍按 UserID 记账）。",
+                    "type": "string"
+                }
+            }
+        },
+        "response.DockerTaskListResp": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/response.DockerTaskItem"
+                    }
+                }
+            }
+        },
         "response.DockerVolumeItem": {
             "type": "object",
             "properties": {
@@ -11273,8 +12318,92 @@
                 "name": {
                     "type": "string"
                 },
+                "protected": {
+                    "description": "Protected 来自 agent 的结论（volume:\u003c名\u003e），前端不重复实现判断。\n不带 omitempty：与 DockerContainerItem.Protected 同一形态（0 是真实值）。",
+                    "type": "boolean"
+                },
                 "sizeMb": {
                     "type": "number"
+                }
+            }
+        },
+        "response.DockerWorkloadItem": {
+            "type": "object",
+            "properties": {
+                "composeProject": {
+                    "type": "string"
+                },
+                "composeService": {
+                    "type": "string"
+                },
+                "cpuPercent": {
+                    "type": "number"
+                },
+                "created": {
+                    "type": "integer"
+                },
+                "hostId": {
+                    "description": "HostID 是容器所在主机的设备 ID：统一表的核心新增（容器在哪台机的归属）。",
+                    "type": "string",
+                    "example": "0"
+                },
+                "hostname": {
+                    "description": "Hostname 是容器所在主机的主机名（与主机清单/总览的 hostname 同源）。",
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "image": {
+                    "type": "string"
+                },
+                "memLimitMb": {
+                    "type": "number"
+                },
+                "memUsageMb": {
+                    "type": "number"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "netRxBytesSec": {
+                    "type": "number"
+                },
+                "netTxBytesSec": {
+                    "type": "number"
+                },
+                "ports": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/response.DockerPortItem"
+                    }
+                },
+                "protected": {
+                    "type": "boolean"
+                },
+                "startedAt": {
+                    "type": "integer"
+                },
+                "state": {
+                    "type": "string"
+                },
+                "statusText": {
+                    "type": "string"
+                }
+            }
+        },
+        "response.DockerWorkloadListResp": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/response.DockerWorkloadItem"
+                    }
+                },
+                "total": {
+                    "description": "Total 是**截断前**的全量数（过滤后）；Items 至多 500 条。两者并存的口径\n与总览 anomalies 同一句话：Total 与 Items 长度不等即「截断了」的显式信号\n（不靠前端猜「还有多少」）。",
+                    "type": "integer"
                 }
             }
         },

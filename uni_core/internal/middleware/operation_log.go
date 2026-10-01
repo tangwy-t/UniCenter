@@ -20,9 +20,12 @@ import (
 	"go.uber.org/zap"
 )
 
-// maxLogBodyBytes is the maximum number of bytes of request/response body to store in the operation log.
+// MaxLogBodyBytes is the maximum number of bytes of request/response body to store in the operation log.
 // Bodies exceeding this limit are truncated to prevent storage bloat from large payloads.
-const maxLogBodyBytes = 4096
+//
+// 导出（原名 maxLogBodyBytes）：服务侧的任务审计挂钩（service/docker_audit.go，6b）
+// 与中间件共用同一截断口径 —— 两处各写一个 4096 会在一边调口径时静默漂移。
+const MaxLogBodyBytes = 4096
 
 // maxBodyReadSize is the maximum number of bytes to buffer from the request body for logging.
 // Requests exceeding this limit are still passed through to downstream handlers in full,
@@ -182,7 +185,7 @@ func buildLogEntry(c *gin.Context, writer *bodyCaptureWriter, startTime time.Tim
 	responseBody := writer.body.String()
 	var responseResult *string
 	if responseBody != "" {
-		truncated := truncateString(responseBody, maxLogBodyBytes)
+		truncated := truncateString(responseBody, MaxLogBodyBytes)
 		responseResult = &truncated
 	}
 
@@ -196,21 +199,21 @@ func buildLogEntry(c *gin.Context, writer *bodyCaptureWriter, startTime time.Tim
 			if envMsg != "" {
 				errorMsg = &envMsg
 			} else if responseBody != "" {
-				truncated := truncateString(responseBody, maxLogBodyBytes)
+				truncated := truncateString(responseBody, MaxLogBodyBytes)
 				errorMsg = &truncated
 			}
 		}
 	} else if writer.statusCode >= http.StatusBadRequest {
 		code = apperror.CodeInternal
 		if responseBody != "" {
-			truncated := truncateString(responseBody, maxLogBodyBytes)
+			truncated := truncateString(responseBody, MaxLogBodyBytes)
 			errorMsg = &truncated
 		}
 	}
 
 	var requestParamsPtr *string
 	if requestParams != "" {
-		truncated := truncateString(requestParams, maxLogBodyBytes)
+		truncated := truncateString(requestParams, MaxLogBodyBytes)
 		requestParamsPtr = &truncated
 	}
 
@@ -299,6 +302,17 @@ func truncateString(s string, maxLen int) string {
 	}
 	return s[:maxLen] + "...(truncated)"
 }
+
+// DesensitizeJSON 是脱敏入口的导出包装（原名 desensitizeJSON，服务侧任务审计挂钩
+// 6b 复用）：中间件与审计共享同一份 sensitiveFieldSet —— 敏感字段集合是治理口径的
+// 单一事实源，复制一份就会在中间件加新字段名时让审计侧静默落伍。非 JSON 文本原样
+// 返回（结论句是普通句子时脱敏是空操作，但「照样过一遍」这条纪律保证：结论句若
+// 恰为 JSON/含敏感键，也走同一套遮蔽）。
+func DesensitizeJSON(raw string) string { return desensitizeJSON(raw) }
+
+// TruncateString 是截断的导出包装（服务侧审计挂钩与中间件共用同一截断形态：
+// 尾部 "...(truncated)" 标记是读者识别「被截断」的显式信号）。
+func TruncateString(s string, maxLen int) string { return truncateString(s, maxLen) }
 
 // methodToOpType maps an HTTP method to a Chinese operation type label.
 func methodToOpType(method string) string {

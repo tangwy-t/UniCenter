@@ -149,6 +149,75 @@ func TestDockerCmdServiceStreamActions(t *testing.T) {
 	}
 }
 
+// TestDockerCmdServiceComposeLogs（5a 聚合日志）：受理纪律 —— 会话制记录用
+// **建立窗口**（Session=true 让 createsStreamSession 与 pre-check 不必认识这个
+// action）；follow/tail 原样透传；since 在受理处就拒（协议层的字段归属校验先于
+// 一切 —— 静默无视会让用户拿到「最近 100 行」却以为要的是「T 时刻以来」）；
+// 流会话满 3 条时 core 先拒（聚合日志占的就是用户流槽位）。
+func TestDockerCmdServiceComposeLogs(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rdb := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	sessions := dockerstream.NewRegistry(nil)
+	sender := &fakeCmdSender{}
+	svc := NewDockerCmdService(dockerstate.NewCmdStore(rdb), sender, dockerstate.NewStore(rdb), nil).
+		WithStreamSessions(sessions)
+	ctx := context.Background()
+
+	follow, tail, since := true, 50, int64(1790000000)
+
+	// since 被拒（400 语义：请求写错了，而不是发下去被无视）。
+	if _, err := svc.Send(ctx, 42, 7, &request.DockerCmdReq{
+		Action: agentproto.DockerActionComposeLogs, Target: "uni-center",
+		Options: &request.DockerCmdOptionsReq{Since: &since},
+	}); err == nil || !strings.Contains(err.Error(), "指令参数不合法") {
+		t.Fatalf("聚合日志带 since 必须被拒（CLI 公共子集没有 --since）: %v", err)
+	}
+	if len(sender.sent) != 0 {
+		t.Fatal("被拒的聚合日志不得下发")
+	}
+
+	// follow/tail 原样到达 agent；记录用建立窗口（会话制）。
+	ref, err := svc.Send(ctx, 42, 7, &request.DockerCmdReq{
+		Action: agentproto.DockerActionComposeLogs, Target: "uni-center",
+		Options: &request.DockerCmdOptionsReq{Follow: &follow, Tail: &tail},
+	})
+	if err != nil {
+		t.Fatalf("聚合日志必须被受理: %v", err)
+	}
+	got := sender.sent[0]
+	if !got.Options.Follow || got.Options.Tail != 50 || got.Options.Target != "uni-center" {
+		t.Fatalf("follow/tail/target 必须原样到达 agent: %+v", got.Options)
+	}
+	score, err := mr.ZScore(dockerstate.CmdDeadlineKey, ref)
+	if err != nil {
+		t.Fatalf("会话制受理必须登记到期索引: %v", err)
+	}
+	deadline := time.UnixMilli(int64(score))
+	if d := time.Until(deadline); d < dockerpolicy.SessionSetupTimeout-time.Minute || d > dockerpolicy.SessionSetupTimeout+time.Minute {
+		t.Fatalf("聚合日志的受理时限应约为建立窗口 %v，实际 %v", dockerpolicy.SessionSetupTimeout, d)
+	}
+
+	// 上限预检：聚合日志占用户流槽位 —— 满 3 条后先拒（结论句，不下发）。
+	for i := 0; i < dockerstream.MaxSessionsPerDevice; i++ {
+		if err := sessions.Register(dockerstream.Meta{
+			SessionID: fmt.Sprintf("clog-%016d", i), DeviceID: 7, UserID: 42,
+			Action: agentproto.DockerActionComposeLogs, Ref: ref,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := len(sender.sent)
+	if _, err := svc.Send(ctx, 42, 7, &request.DockerCmdReq{
+		Action: agentproto.DockerActionComposeLogs, Target: "other",
+	}); err == nil || !strings.Contains(err.Error(), "上限") {
+		t.Fatalf("流会话满 3 条必须被 core 先拒: %v", err)
+	}
+	if len(sender.sent) != before {
+		t.Fatal("被上限拒绝的聚合日志不得下发")
+	}
+}
+
 // TestDockerCmdServiceConfirmNotBypassedByForce：二期放行后补测确认档 —— 复核的正是
 // 这个缺口：confirm 校验在 Send 的受理序里对**所有**请求无条件执行，force 只是保护档
 // 的开关，不能把它变成「无需确认」。否则带 force 的请求就能跳过「照抄一遍」这一层，
@@ -376,5 +445,55 @@ func TestDockerToProtocolOptions(t *testing.T) {
 	}
 	if err := agentproto.ValidateDockerCmdOptions(agentproto.DockerActionComposeFilePatch, bad); err == nil {
 		t.Fatal("非法 patch 必须被协议校验拒掉（400），而不是静默丢弃后照发")
+	}
+}
+
+// ── 拉取进度会话的预登记（4b）─────────────────────────────────────────────
+
+// TestDockerCmdServiceRegistersPullProgressSession：受理 image:pull 时**同步**预登记
+// 进度会话（句柄 = 协议派生的 pull_<ref>、Kind=Pull、发起人/设备/ref 齐全）——
+// agent 收到指令即可开始拉取，它的帧先于任何 result 到达，届时注册表里必须有主人。
+// 非拉取 action 不登记任何会话。
+func TestDockerCmdServiceRegistersPullProgressSession(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rdb := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	sessions := dockerstream.NewRegistry(nil)
+	sender := &fakeCmdSender{}
+	svc := NewDockerCmdService(dockerstate.NewCmdStore(rdb), sender, dockerstate.NewStore(rdb), nil).
+		WithStreamSessions(sessions)
+	ctx := context.Background()
+
+	ref, err := svc.Send(ctx, 42, 7, &request.DockerCmdReq{
+		Action: agentproto.DockerActionImagePull, Target: "nginx:latest",
+	})
+	if err != nil {
+		t.Fatalf("拉取必须被受理: %v", err)
+	}
+	sess := sessions.Get(agentproto.DockerPullSessionID(ref))
+	if sess == nil {
+		t.Fatalf("受理拉取必须预登记进度会话（句柄 = %s）", agentproto.DockerPullSessionID(ref))
+	}
+	if sess.Kind() != dockerstream.KindPull || sess.UserID() != 42 || sess.DeviceID() != 7 ||
+		sess.Action() != agentproto.DockerActionImagePull || sess.Ref() != ref {
+		t.Fatalf("进度会话元数据不符: kind=%v user=%d dev=%d action=%s ref=%s",
+			sess.Kind(), sess.UserID(), sess.DeviceID(), sess.Action(), sess.Ref())
+	}
+
+	// 非拉取动作不预登记（句柄空间只属于拉取）。
+	if _, err := svc.Send(ctx, 42, 7, &request.DockerCmdReq{
+		Action: agentproto.DockerActionContainerStart, Target: "mysql",
+	}); err != nil {
+		t.Fatalf("启动必须被受理: %v", err)
+	}
+	if sessions.Len() != 1 {
+		t.Fatalf("非拉取动作不得登记会话，注册表里应只有拉取会话: %d", sessions.Len())
+	}
+
+	// 在飞去重不受影响：同目标二次拉取还是 409（老语义）。
+	if _, err := svc.Send(ctx, 42, 7, &request.DockerCmdReq{
+		Action: agentproto.DockerActionImagePull, Target: "nginx:latest",
+	}); err == nil {
+		t.Fatal("同目标二次拉取必须 409")
 	}
 }

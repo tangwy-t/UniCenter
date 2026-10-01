@@ -19,6 +19,7 @@ import (
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/config"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/database"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/datascope"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockerevents"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockerstate"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockerstream"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/lifecycle"
@@ -340,7 +341,11 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 	// 这就是 Plan 2B 留下的那条「2C 交接说明」的落点：这个服务至此有了真实
 	// 消费者，不再需要「构造出来只能赋给 `_`」的将就写法。
 	agentIngestSvc := service.NewAgentIngestService(deviceRepo, rawStore, latestStore,
-		dockerStore, dockerCmdStore, configSvc, log).WithDockerSessions(dockerSessions)
+		dockerStore, dockerCmdStore, configSvc, log).WithDockerSessions(dockerSessions).
+		// 终态审计挂钩（6c）：agent result ingest 的终态转换点入账执行结果（复用
+		// OperationLogService —— 与 HTTP 中间件同一条写路径/用户名反查口径）。
+		// 挂钩是观察者：装配失败只影响审计可视性，不影响结果回写主链。
+		WithDockerAudit(service.NewDockerCmdAuditor(opLogSvc, deviceRepo, log))
 	// agentPolicy 是 sys.agent.* 节奏配置（reportInterval / heartbeatInterval）的
 	// 适配器（定义见文末 agentIntervalPolicy），**一个实例喂两处**：
 	//   - 查询服务：Redis 档的原生栅格 = reportInterval（上方的 rawStore Step 也取自
@@ -369,9 +374,18 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 	// 合成一个类型会让「只想看主机清单」的调用方被迫依赖整条下行链路。
 	// dockerCmdSvc 的 sender 就是上面这个 agentHub：本域不碰 socket，也不缓存连接。
 	dockerSvc := service.NewDockerService(dockerStore, deviceRepo, configSvc, log)
+	// 任务面（6b）：任务中心的最近指令读面 —— 复用同一个 CmdStore 与设备/用户表，
+	// 不建新存储（枚举索引在 CmdStore 数据面内）。设备表与上面读到的是同一个 repo。
+	dockerTasksSvc := service.NewDockerTaskService(dockerCmdStore, deviceRepo, userRepo, log)
 	// 上限预检注入同一个注册表：CountByDevice 与流端点的会话是同一份账目。
 	dockerCmdSvc := service.NewDockerCmdService(dockerCmdStore, agentHub, dockerStore, log).
 		WithStreamSessions(dockerSessions)
+	// 私有仓库凭据面（4c）：管理 CRUD + image:pull 受理注入的**唯一**解密读口。
+	// 主密钥走 sys 配置键（sys.docker.registry.secret，配置 API 自动掩码）——
+	// 与 jwt 密钥同一通道先例；密码绝不明文落库（AES-256-GCM，见 pkg/seccrypt）。
+	dockerRegistrySvc := service.NewDockerRegistryService(
+		repository.NewDockerRegistryRepo(db), configSvc, log)
+	dockerCmdSvc = dockerCmdSvc.WithRegistryAuth(dockerRegistrySvc)
 	// 流通道面（三期）：ticket 签发/兑换、会话接入、下行 input/resize/cancel 与
 	// 两种清理（空闲超时、设备离线）。在线判定包装 hub.Get —— 设备掉线后它的会话
 	// 已无数据来源，尽快收摊好过让用户对着一个已经死掉的终端等到超时。
@@ -379,7 +393,42 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 		WithDeviceOnline(func(deviceID uint64) bool {
 			_, ok := agentHub.Get(deviceID)
 			return ok
+		}).
+		// 拉取进度会话的终态对账（4b）：会话寿命 = 指令寿命 —— 指令还在 pending 就留着
+		//（排队中的拉取一帧没有是常态），终态/消失即移除（不发 cancel：agent 侧的同名
+		// 会话要么已随 eof 收摊、要么从未打开，cancel 只会腰斩排队中的后续拉取）。
+		WithPullPending(func(ctx context.Context, ref string) (bool, error) {
+			rec, err := dockerCmdStore.Get(ctx, ref)
+			if err != nil {
+				return false, err
+			}
+			return rec != nil && rec.Status == dockerstate.StatusPending, nil
 		})
+
+	// ── 事件流常驻订阅管理器（六期·监控面）────────────────────────────────
+	// core 自己是 docker:events 的**常驻客户端**：首个 console 连上 /docker/events 时
+	// 向全部 dockerOk 主机发起订阅、末个断开时全量退订；单台断连/失败退避重试；
+	// 每主机环形缓冲 50 条（打开活动流即回放）。它复用指令通道的受理模型
+	//（dockerCmdStore 建记录 + agentHub 下发），帧的归属路由见下方 agentDeps 的
+	// FrameRouter：用户注册表先认领，ErrNotFound 才落到常驻管理器。
+	// ref 与用户指令共用同一生成器（service.NewRequestID）：docker:cmd:<ref> 是同一
+	// 个键空间，两个计数器会重开撞号窗口。hostname 解析包装 deviceRepo.FindByID
+	//（读不到降级为空名，不毁掉订阅 —— 设备已删由 docker:hosts 集合清理兜底收敛）。
+	dockerEventsMgr := dockerevents.NewManager(dockerevents.Options{}, agentHub,
+		dockerCmdStore, dockerStore,
+		func(ctx context.Context, deviceID uint64) string {
+			if d, err := deviceRepo.FindByID(ctx, deviceID); err == nil && d != nil {
+				return d.Hostname
+			}
+			return ""
+		}, log).
+		WithOnline(func(deviceID uint64) bool {
+			_, ok := agentHub.Get(deviceID)
+			return ok
+		}).
+		WithIDGen(service.NewRequestID)
+	// 结果出口装回入站面（agent_ingest 的 docker:events 分支把 result 交还给管理器认领）。
+	agentIngestSvc.WithDockerEvents(dockerEventsMgr)
 
 	// ── Agent 升级（编排 + 发布物）─────────────────────────────────────
 	// 编排服务是升级域的**唯一写入口**：agent 通道（对账/上报）与控制台 HTTP
@@ -454,12 +503,13 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 		Limiter: newAgentFrameLimiter(cacheStore, configSvc),
 		// docker 域的四个依赖：快照落库、结果回写（都由 agentIngestSvc 承接，
 		// 它们的方法集逐字满足 agenthub 的两个窄接口）、hello_ack 的配置块来源
-		// 与流数据帧的投递面（dockerSessions，三期）。
+		// 与流数据帧的投递面。投递面是**二段路由**（六期）：用户流会话注册表先认领
+		//（dockerSessions），ErrNotFound 才落到事件流常驻管理器（属主不同、账目不相混）。
 		// nil 容忍在连接侧（未装配 = 丢弃并记日志），这里全部接上。
 		DockerState:  agentIngestSvc,
 		DockerResult: agentIngestSvc,
 		DockerConfig: dockerCfgProvider,
-		DockerFrames: dockerSessions,
+		DockerFrames: dockerevents.FrameRouter{Primary: dockerSessions, Fallback: dockerEventsMgr},
 	}
 
 	// ── 启动期分区 reconcile（**必须**在 scheduler.NewScheduler 之前）─────
@@ -594,7 +644,10 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 	// handler 必须拿到 permGuard：指令面的权限码按 action 变化，路由上挂不了静态 perm，
 	// 由 handler 在解析出 action / 指令记录后调用 PermissionGuard.Ensure（同一套
 	// 缓存与 admin 通配语义，见 middleware/permission.go 与 router 的 /docker 组）。
-	dockerHdl := handler.NewDockerHandler(dockerSvc, dockerCmdSvc, dockerStreamSvc, permGuard, log)
+	dockerHdl := handler.NewDockerHandler(dockerSvc, dockerCmdSvc, dockerStreamSvc, permGuard, log).
+		WithEvents(dockerEventsMgr).WithTasks(dockerTasksSvc)
+	// 凭据 handler（4c）：静态 perm docker:config 挂在 router，处理器不做权限判定。
+	dockerRegistryHdl := handler.NewDockerRegistryHandler(dockerRegistrySvc)
 
 	// 指令 sweep：终结到期未回结果的指令（§4.1 的 timeout 状态）。
 	//
@@ -638,6 +691,32 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 			close(dockerSweepStop)
 		}
 		<-dockerSweepDone
+		return nil
+	})
+
+	// ── 事件流常驻管理器：对账循环（六期）──────────────────────────────
+	// 与 cmd sweep 同一形状（worker 自己的 goroutine + stop 通道 + 有界收尾）：
+	// 管理器的 Run 内部用「下一次该做什么」的最近时刻自定时（周期对账、退避到点、
+	// 结果窗口到期三个节拍合用一个计时器），stop 只是取消 ctx —— 循环立即收手。
+	dockerEventsStop := make(chan struct{})
+	dockerEventsDone := make(chan struct{})
+	go func() {
+		defer close(dockerEventsDone)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go func() {
+			<-dockerEventsStop
+			cancel()
+		}()
+		dockerEventsMgr.Run(ctx)
+	}()
+	lc.RegisterTo("cleanup", "docker-events", func(context.Context) error {
+		select {
+		case <-dockerEventsStop:
+		default:
+			close(dockerEventsStop)
+		}
+		<-dockerEventsDone
 		return nil
 	})
 
@@ -730,7 +809,8 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 		// Docker 管理：读面两条路由挂 docker:list，指令面两条在处理器内按 action 判定
 		//（见 router.DockerDeps 与 handler/docker.go）。
 		Docker: router.DockerDeps{
-			Hdl: dockerHdl,
+			Hdl:         dockerHdl,
+			RegistryHdl: dockerRegistryHdl,
 		},
 		// agent WS 入口：hub 与依赖束都是**完整装配**（enroll / 鉴权 / 入湖 /
 		// touch / 策略六个能力面全部接上，且 hub 与 4 个后台任务共享同一批

@@ -145,7 +145,7 @@ func learnProjects(idx *projectIndex, cs []ContainerInfo) {
 // projectIndexCarrier 是「API 句柄携带项目索引」的标记接口。
 //
 // 为什么挂在 API 句柄上而不是给每个执行器加字段：读（compose.file:read）与写
-// （compose 写操作）两条路径共用同一个 composeConfigFileOf，而它们唯一共同的依赖
+// （compose 写操作）两条路径共用同一个 composeConfigFilesOf，而它们唯一共同的依赖
 // 就是 DockerAPI —— 索引挂在同一个句柄上，两条解析自动都拿到它，不存在「某个执行器
 // 忘了注入」的暗角。生产上由 Runtime 在 New 里包一层（见 runtime.go）。
 type projectIndexCarrier interface {

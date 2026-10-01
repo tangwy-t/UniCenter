@@ -23,11 +23,13 @@ type stubAPI struct {
 	containers []ContainerInfo
 	images     []ImageInfo
 	volumes    []VolumeInfo
-	networks   []NetworkInfo
-	stats      map[string]StatsInfo
-	statsErr   map[string]error
-	flavor     string
-	flavorVer  string
+	// df 是卷采集同趟 system df 算出的占用汇总（6a）；nil = 这帧没有 df 数据。
+	df        *DiskUsageSummary
+	networks  []NetworkInfo
+	stats     map[string]StatsInfo
+	statsErr  map[string]error
+	flavor    string
+	flavorVer string
 
 	// 列表读取的失败注入（B3 的 TestSnapshotFailsClosedOnListError 用）。
 	imagesErr error
@@ -41,14 +43,21 @@ type stubAPI struct {
 	// ── 二期写操作的记录型实现（Task B1）────────────────────────────────────
 	// 每个写方法只把收到的参数记进下面的切片（不碰 docker.sock、不真跑 docker 命令、
 	// 不改变状态），供断言「执行器到底调了什么、带没带 force/overwrite/拼出的路径」。
-	started          []string
-	stopped          []string
-	restarted        []string
-	removed          []containerRemoveCall
-	imagesRemoved    []imageRemoveCall
-	imagePrunedAll   []bool
-	imagePruneFreed  int64
-	pulled           []string
+	started         []string
+	stopped         []string
+	restarted       []string
+	removed         []containerRemoveCall
+	imagesRemoved   []imageRemoveCall
+	imagePrunedAll  []bool
+	imagePruneFreed int64
+	pulled          []string
+	// pullAuths 记录每次 ImagePull 收到的认证（4c）：nil 槽 = 无凭据拉取。
+	pullAuths []*PullAuth
+	// pullCh / pullErr 是 image:pull 的**进度流替身**（4b）：pullCh 非 nil 时逐条把
+	// 进度记录交给 emit（关闭 = 拉取结束、返回 pullErr），ctx 取消即时返回；nil =
+	// 一次性成功/失败（老用例的一期语义）。
+	pullCh           chan PullProgress
+	pullErr          error
 	tagged           []tagCall
 	saved            []saveCall
 	loaded           []string
@@ -58,6 +67,14 @@ type stubAPI struct {
 	networksRemoved  []string
 	// saveAlreadyExists：目标已存在且调用方未要求覆盖时，ImageSave 返回 already_exists。
 	saveAlreadyExists bool
+
+	// ── 四支柱·创建面（4a）──────────────────────────────────────────────────
+	// created 记录每次 ContainerCreate 收到的定型参数（断言执行器的解析与映射）；
+	// createReply 是替身回给执行器的容器 ID；createErr / startErr 注入失败。
+	created     []containerCreateCall
+	createReply string
+	createErr   error
+	startErr    error
 
 	// ── 三期流会话（S1）────────────────────────────────────────────────────
 	// 记录与读取都可能发生在会话 goroutine 里，故这一组统一走 streamMu。
@@ -70,6 +87,18 @@ type stubAPI struct {
 	execErr        error
 	execCalls      []execCall
 	resized        []termSize
+
+	// ── 监控面 stats 流 ────────────────────────────────────────────────────
+	statsStream      chan StatsSample
+	statsCloser      *fakeCloser
+	statsStreamErr   error
+	statsStreamCalls []string
+
+	// ── 事件流（docker:events，常驻订阅）────────────────────────────────────
+	eventsStream chan EventItem
+	eventsCloser io.Closer
+	eventsErr    error
+	eventsCalls  int
 }
 
 // 记录型替身用的参数快照（字段名与被记的方法参数一一对应）。
@@ -95,7 +124,26 @@ type volumeRemoveCall struct {
 	force bool
 }
 
+// containerCreateCall 是 ContainerCreate 替身记录的一次调用参数。
+type containerCreateCall struct {
+	spec ContainerCreateSpec
+}
+
+func (s *stubAPI) ContainerCreate(_ context.Context, spec ContainerCreateSpec) (string, error) {
+	if s.createErr != nil {
+		return "", s.createErr
+	}
+	s.created = append(s.created, containerCreateCall{spec})
+	if s.createReply == "" {
+		return "a1b2c3d4e5f6a7b8c9d0e1f", nil
+	}
+	return s.createReply, nil
+}
+
 func (s *stubAPI) ContainerStart(_ context.Context, id string) error {
+	if s.startErr != nil {
+		return s.startErr
+	}
 	s.started = append(s.started, id)
 	return nil
 }
@@ -125,9 +173,25 @@ func (s *stubAPI) ImagePrune(_ context.Context, all bool) (int64, error) {
 	return s.imagePruneFreed, nil
 }
 
-func (s *stubAPI) ImagePull(_ context.Context, ref string) error {
+func (s *stubAPI) ImagePull(ctx context.Context, ref string, auth *PullAuth, emit func(PullProgress)) error {
 	s.pulled = append(s.pulled, ref)
-	return nil
+	s.pullAuths = append(s.pullAuths, auth)
+	if s.pullCh == nil {
+		return s.pullErr
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case p, ok := <-s.pullCh:
+			if !ok {
+				return s.pullErr
+			}
+			if emit != nil {
+				emit(p)
+			}
+		}
+	}
 }
 
 func (s *stubAPI) ImageTag(_ context.Context, src, dst string) error {
@@ -179,7 +243,11 @@ func (s *stubAPI) Images(context.Context) ([]ImageInfo, error) {
 	}
 	return s.images, nil
 }
-func (s *stubAPI) Volumes(context.Context) ([]VolumeInfo, error)   { return s.volumes, nil }
+func (s *stubAPI) VolumesAndDf(context.Context) ([]VolumeInfo, *DiskUsageSummary, error) {
+	// df 汇总由用例显式注入（nil = 「这一帧没有 df 数据」的缺席形态，模拟 df 失败
+	// 退化 volume ls 的路径 —— SDK 分支在 CI 没有 daemon，测不到，契约由这里钉住）。
+	return s.volumes, s.df, nil
+}
 func (s *stubAPI) Networks(context.Context) ([]NetworkInfo, error) { return s.networks, nil }
 func (s *stubAPI) ContainerInspect(context.Context, string) (ContainerDetail, error) {
 	return s.containerDetail, nil
@@ -228,6 +296,78 @@ func (s *stubAPI) ContainerExecAttach(_ context.Context, name string, argv []str
 		return es, nil
 	}
 	return &ExecSession{Reader: strings.NewReader(""), Writer: io.Discard, Close: func() error { return nil }}, nil
+}
+
+// ContainerStatsStream 的替身：默认起一个**只随 ctx 结束**的流（不产样本、不关闭 ——
+// 供「会话一直活着」的场景，与 exec 的「不结束管道」同一目的）；要产样本的用例直接
+// 设 statsStream。
+func (s *stubAPI) ContainerStatsStream(ctx context.Context, name string) (<-chan StatsSample, io.Closer, error) {
+	s.streamMu.Lock()
+	s.statsStreamCalls = append(s.statsStreamCalls, name)
+	ch, closer, err := s.statsStream, s.statsCloser, s.statsStreamErr
+	s.streamMu.Unlock()
+	if err != nil {
+		return nil, nil, err
+	}
+	if closer == nil {
+		closer = &fakeCloser{}
+	}
+	if ch == nil {
+		ch = make(chan StatsSample)
+		go func() { <-ctx.Done(); close(ch) }()
+	}
+	return ch, closer, nil
+}
+
+func (s *stubAPI) statsCalls() []string {
+	s.streamMu.Lock()
+	defer s.streamMu.Unlock()
+	return append([]string(nil), s.statsStreamCalls...)
+}
+
+// Events 的替身：与 ContainerStatsStream 同型 —— 默认起一个只随 ctx 结束的流
+// （不产事件、不关闭），要产事件的用例直接设 eventsStream。
+func (s *stubAPI) Events(ctx context.Context) (<-chan EventItem, io.Closer, error) {
+	s.streamMu.Lock()
+	s.eventsCalls++
+	ch, closer, err := s.eventsStream, s.eventsCloser, s.eventsErr
+	s.streamMu.Unlock()
+	if err != nil {
+		return nil, nil, err
+	}
+	if closer == nil {
+		closer = &fakeCloser{}
+	}
+	if ch == nil {
+		ch = make(chan EventItem)
+		go func() { <-ctx.Done(); close(ch) }()
+	}
+	return ch, closer, nil
+}
+
+func (s *stubAPI) eventsCallCount() int {
+	s.streamMu.Lock()
+	defer s.streamMu.Unlock()
+	return s.eventsCalls
+}
+
+// fakeCloser 记录关闭动作（流的 close 由会话 teardown 调用）。
+type fakeCloser struct {
+	mu     sync.Mutex
+	closed bool
+}
+
+func (c *fakeCloser) Close() error {
+	c.mu.Lock()
+	c.closed = true
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *fakeCloser) isClosed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
 }
 
 // logsFollowCall / execCall 是流接口的调用快照。
@@ -667,3 +807,62 @@ func TestSnapshotSizeStaysUnderMessageLimit(t *testing.T) {
 }
 
 func ptrInt64(v int64) *int64 { return &v }
+
+// ── df 磁盘占用汇总（6a 磁盘治理）─────────────────────────────────────────
+
+// df 有数据的那帧：字节 → MB 的折算（round2，与镜像条目 SizeMB 同一精度），
+// 且折好的帧必须能过协议校验（负数/携带时机都在协议层有守卫）。
+func TestSnapshotCarriesDiskUsage(t *testing.T) {
+	api := &stubAPI{
+		containers: []ContainerInfo{{ID: "c1", Name: "c1", Image: "i", State: "running"}},
+		volumes:    []VolumeInfo{{Name: "data", Driver: "local", SizeBytes: ptrInt64(13 << 20)}},
+		df: &DiskUsageSummary{
+			ImagesTotalBytes:    96<<20 + 512<<10, // 96.5 MB：半 MB 余数验证 round2 保留两位
+			ImagesDanglingBytes: 367 << 20,        // 367 MB：悬空镜像的「可收回」半边
+			VolumesTotalBytes:   13 << 20,         // 与卷条目的 SizeBytes 同源（同一次 df）
+			BuildCacheBytes:     1 << 30,          // 1024 MB：构建缓存
+		},
+	}
+	st := newTestSnapshotter(api, "", testLogger()).Collect(context.Background())
+	if st.DiskUsage == nil {
+		t.Fatal("df 有数据时快照必须带 disk_usage（nil 会被页面读成「数据不可用」）")
+	}
+	if st.DiskUsage.ImagesTotalMB != 96.5 {
+		t.Fatalf("镜像合计应为 96.5 MB，实际 %v", st.DiskUsage.ImagesTotalMB)
+	}
+	if st.DiskUsage.ImagesDanglingMB != 367 {
+		t.Fatalf("悬空合计应为 367 MB，实际 %v", st.DiskUsage.ImagesDanglingMB)
+	}
+	if st.DiskUsage.VolumesTotalMB != 13 {
+		t.Fatalf("卷合计应为 13 MB，实际 %v", st.DiskUsage.VolumesTotalMB)
+	}
+	if st.DiskUsage.BuildCacheMB != 1024 {
+		t.Fatalf("构建缓存应为 1024 MB，实际 %v", st.DiskUsage.BuildCacheMB)
+	}
+	if err := st.Validate(); err != nil {
+		t.Fatalf("带 df 的帧必须能过协议校验: %v", err)
+	}
+}
+
+// df 没有数据的那帧（df 失败、采集退化 volume ls 的路径）：disk_usage 整块缺席
+// 而不是零值 —— 「没有数据」与「没有占用」是两个相反的结论，帧本身照常有效。
+func TestSnapshotWithoutDiskUsageStaysAbsent(t *testing.T) {
+	api := &stubAPI{
+		containers: []ContainerInfo{{ID: "c1", Name: "c1", Image: "i", State: "running"}},
+		volumes:    []VolumeInfo{{Name: "data", Driver: "local"}},
+	}
+	st := newTestSnapshotter(api, "", testLogger()).Collect(context.Background())
+	if !st.DockerOK || st.DiskUsage != nil {
+		t.Fatalf("df 缺席必须保持 nil（不是零值结构），帧照常可用: %+v", st.DiskUsage)
+	}
+	if err := st.Validate(); err != nil {
+		t.Fatalf("缺席形态必须能过协议校验: %v", err)
+	}
+	// 不可达帧同样不得携带 df（协议层拒，采集侧的早退路径自己先守住）。
+	api2 := &stubAPI{pingErr: errors.New("无法连接 docker.sock（Docker 服务未运行？）"),
+		df: &DiskUsageSummary{ImagesTotalBytes: 1}}
+	st2 := newTestSnapshotter(api2, "", testLogger()).Collect(context.Background())
+	if st2.DockerOK || st2.DiskUsage != nil {
+		t.Fatalf("不可达帧不得携带 df: %+v", st2)
+	}
+}

@@ -21,6 +21,17 @@ export function isPhase1Action(action: string): action is Phase1Action {
 }
 
 /**
+ * 5a 的聚合日志动作（compose:logs）：只读，但**不并入** PHASE1_ACTIONS ——
+ * 那份清单服务「一期 runRead 的受理 + 轮询到终态」闭环，而 compose:logs 是会话制
+ * 流（受理后结果只给会话句柄，行数据走 `/cmds/:ref/stream` 的 NDJSON；形态与
+ * container:stats 同一档），轮询闭环对它没有意义。单列一份清单：动作字面量仍收在
+ * 本文件（只读动作的家），phase-gate / actions 的互补条数断言从它 import ——
+ * 协议加第五期动作时，这里是唯一要动的源码侧清单。
+ */
+export const COMPOSE_LOGS_ACTIONS = ['compose:logs'] as const
+export type ComposeLogsAction = (typeof COMPOSE_LOGS_ACTIONS)[number]
+
+/**
  * 轮询间隔（毫秒）：1 秒起指数退避，5 秒封顶（spec §4.1 的轮询节奏）。
  *
  * 退避的意义：轻量指令（30s 超时）通常 1 秒内就有结果 —— 固定 1 秒轮询把一个

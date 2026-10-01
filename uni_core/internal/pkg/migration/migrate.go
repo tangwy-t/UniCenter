@@ -97,6 +97,10 @@ var autoMigrateEntities = []any{
 	&entity.AgentRelease{},
 	&entity.AgentUpgradeTask{},
 	&entity.AgentUpgradeAttempt{},
+	// ── Docker 私有仓库凭据（4c）───────────────────────────────
+	// 普通表：量级是「每个私有仓库一行」；密码列存 AES-GCM 密文盒（seccrypt），
+	// 绝不明文落库 —— 表由 AutoMigrate 按实体建，无版本化 DDL（见文件顶注释）。
+	&entity.DockerRegistryCredential{},
 	// 指标 6 表**刻意缺席**，见上方说明。
 }
 
