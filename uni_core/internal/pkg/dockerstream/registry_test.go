@@ -330,3 +330,54 @@ func TestRegistryPullExemptFromDeviceLimitAndIdle(t *testing.T) {
 		t.Fatalf("异设备的同句柄帧必须被拒（归属不因 kind 放宽）: %v", err)
 	}
 }
+
+// TestRegistryBuildPushExemptFromDeviceLimitAndIdle：构建/推送进度会话与拉取
+// **同一组豁免**（P2）：不占用户流槽位、不被淘汰、豁免空闲判定 —— 静默的构建
+// 步骤与停滞的推送是长耗时指令的常态，「无数据」不是被遗忘。与拉取同一条
+// 生命线：寿命 = 指令寿命，终态对账回收。
+func TestRegistryBuildPushExemptFromDeviceLimitAndIdle(t *testing.T) {
+	r, now := newClockedRegistry(t, Options{MaxSessionsPerDevice: 2, IdleTimeout: 10 * time.Minute})
+	base := *now
+	for i, id := range []string{"sess-0000000000000001", "sess-0000000000000002"} {
+		m := testMeta(id, 7, 42)
+		m.CreatedAt = base.Add(time.Duration(i) * time.Second)
+		if err := r.Register(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range []struct {
+		sid    string
+		action string
+		kind   Kind
+	}{
+		{"build_1790000000000000002", agentproto.DockerActionImageBuild, KindBuild},
+		{"push_1790000000000000003", agentproto.DockerActionImagePush, KindPush},
+	} {
+		if err := r.Register(Meta{
+			SessionID: c.sid, DeviceID: 7, UserID: 42,
+			Action: c.action, Ref: "123", Kind: c.kind, CreatedAt: *now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if r.Get(c.sid) == nil {
+			t.Fatalf("%s 必须照常登记（不占用户槽位）", c.kind)
+		}
+	}
+	if r.Get("sess-0000000000000001") == nil || r.Get("sess-0000000000000002") == nil {
+		t.Fatal("构建/推送会话不得挤掉任何一条用户流")
+	}
+	if got := r.CountByDevice(7); got != 2 {
+		t.Fatalf("用户流账目不得计入构建/推送会话: %d", got)
+	}
+
+	*now = now.Add(24 * time.Hour)
+	got := r.Expired(*now)
+	if len(got) != 2 {
+		t.Fatalf("用户流照常按空闲过期，实际 %d 条", len(got))
+	}
+	for _, s := range got {
+		if s.Kind() == KindBuild || s.Kind() == KindPush {
+			t.Fatalf("构建/推送会话豁免空闲判定期，不得出现在过期名单里: %s", s.ID())
+		}
+	}
+}

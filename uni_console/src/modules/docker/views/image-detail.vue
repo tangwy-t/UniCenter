@@ -38,6 +38,11 @@
           <ElButton v-if="canManage" size="small" :disabled="busy" @click="onSave">
             导出 tar…
           </ElButton>
+          <!-- 推送到仓库（P2 分发闭环）：预填本镜像引用，对话框内可选同主机其它
+               镜像/凭据，逐层进度与取消。与创建/导出同档（docker:manage）。 -->
+          <ElButton v-if="canManage" size="small" :disabled="busy" @click="openPush">
+            推送到仓库…
+          </ElButton>
           <ElButton
             v-if="canDelete"
             size="small"
@@ -176,6 +181,17 @@
       :initial-image="actionTarget"
       :refresh="reloadDetail"
     />
+
+    <!-- 推送进度对话框（P2 分发闭环）：预填 actionTarget、镜像清单来自本页快照
+        （选择项的数据源已在手，对话框不另拉一份）。**不传 refresh**：推送不改变
+         本地任何事实（镜像/使用/关联容器都不动 —— 推的是副本），重拉无物可读；
+         与拉取/构建（成功后世界变了）的差别就在这一点。 -->
+    <PushProgressDialog
+      v-model="pushVisible"
+      :host-id="ctx.hostId"
+      :images="state?.images ?? []"
+      :initial-target="actionTarget"
+    />
   </div>
 </template>
 
@@ -202,6 +218,7 @@
   import { formatByUnit, formatUnixSeconds } from '@/modules/device/utils/display'
   import DockerActionConfirm from '../components/action-confirm.vue'
   import CreateContainerDrawer from '../components/create-container-drawer.vue'
+  import PushProgressDialog from '../components/push-progress-dialog.vue'
   import {
     fetchDockerCmdResult,
     fetchDockerState,
@@ -502,17 +519,18 @@
     }
   }
 
-  /** 返回镜像列表：带上当前主机，列表页据此还原到同一台机器。 */
+  /** 返回镜像表（7a：三个旧列表页收敛为 /docker/resources 的 tab）：带上当前
+   *  主机与镜像 tab，资源页据此还原到「同一台机器的那张表」。 */
   function back() {
-    router.push({ name: 'DockerImages', query: { host: ctx.hostId } })
+    router.push({ name: 'DockerResources', query: { host: ctx.hostId, tab: 'images' } })
   }
 
-  /** 跳关联容器的详情：容器 id 与列表同一口径（同样是路由参数，同样带主机）。 */
+  /** 跳关联容器的详情抽屉（7b：深链指 /docker/containers?host=&id=，统一表页用行桩
+   *  打开抽屉；容器 id 与列表同一口径，host 同样随行）。 */
   function openContainer(id: string) {
     void router.push({
-      name: 'DockerContainerDetail',
-      params: { id },
-      query: { host: ctx.hostId }
+      path: '/docker/containers',
+      query: { host: ctx.hostId, id }
     })
   }
 
@@ -549,6 +567,15 @@
   function reloadDetail() {
     void loadInspect()
     void loadSnapshot()
+  }
+
+  // ── 推送到仓库（P2 分发闭环）──────────────────────────────────────────
+  // 入口在头部按钮区（canManage 门控）；对话框自带表单/进度/收尾生命周期，
+  // 页面只出入口与两份事实（主机 + 镜像清单 + 预填引用）。
+  const pushVisible = ref(false)
+
+  function openPush() {
+    pushVisible.value = true
   }
 
   const inUseBlocked = computed(() => snapshotImage.value?.inUse === true)

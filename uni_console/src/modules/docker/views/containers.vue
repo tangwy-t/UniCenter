@@ -141,7 +141,9 @@
       @confirm="onConfirmSubmit"
     />
 
-    <!-- 详情抽屉：行「详情 / 日志」的原地入口（概览 + 日志 + 终端，host 取行主机）。 -->
+    <!-- 详情抽屉：行「详情 / 日志」的原地入口（概览 + 日志 + 终端 + 环境，host 取行
+         主机）。7b 起它也是容器详情深链（?host=&id=）的落点 —— 目标行不必在当前
+         过滤视图里，用行桩打开、inspect 兜底填充（见脚本尾的深链 watch）。 -->
     <WorkloadDrawer
       v-model="drawerVisible"
       :row="drawerRow"
@@ -169,18 +171,21 @@
    * （服务端过滤，三项 query 全部透传）—— 跨主机的表没法在单主机快照上筛。主机维度
    * 从页面级上下文（provideDockerHost + HostSwitcher）降为**筛选下拉**的一项；
    * `/docker/containers?host=` 深链照旧有效（进入时作为主机筛选初始值，总览主机卡片
-   * 与详情页返回的既有链路不动）。写操作按**行主机**派发：指令通道的 hostId 绑定
+   * 的既有链路不动）。写操作按**行主机**派发：指令通道的 hostId 绑定
    * 当前操作行（useDockerCmds 给了 hostId 就不碰 provide 上下文）。路由、菜单零变更。
+   *
+   * 7b 新增：`?id=<容器 id>` 深链在**本页**打开详情抽屉（container-detail 页删除后，
+   * 总览异常表 / 项目工作台容器行 / 镜像详情关联容器的深链统一改指这里）。
    */
   import { computed, ref, watch } from 'vue'
-  import { useRoute } from 'vue-router'
+  import { useRoute, useRouter } from 'vue-router'
   import { ElButton, ElCard, ElEmpty, ElMessage, ElResult } from 'element-plus'
   import ArtButtonTable from '@/components/core/forms/art-button-table/index.vue'
   import ArtSearchBar from '@/components/core/forms/art-search-bar/index.vue'
   import ArtTableHeader from '@/components/core/tables/art-table-header/index.vue'
   import { usePageIcon } from '@/hooks/core/usePageIcon'
   import { useAuth } from '@/hooks/core/useAuth'
-  import { PermDockerManage } from '@/enums/permission'
+  import { PermDockerInspect, PermDockerManage } from '@/enums/permission'
   import DockerActionConfirm from '../components/action-confirm.vue'
   import CreateContainerDrawer from '../components/create-container-drawer.vue'
   import WorkloadBatchBar from '../components/workload-batch-bar.vue'
@@ -278,9 +283,9 @@
     void load()
   }
 
-  // `/docker/containers?host=` 深链兼容（总览主机卡片、详情页「返回列表」的既有链路）：
-  // query 里的主机作为**主机筛选初始值** —— 单向（用户改筛选不回写 query，
-  // host 从此是筛选状态而不是页面状态）。
+  // `/docker/containers?host=` 深链兼容（总览主机卡片的既有链路）：query 里的主机
+  // 作为**主机筛选初始值** —— 单向（用户改筛选不回写 query，host 从此是筛选状态
+  // 而不是页面状态）。7b 起 ?host 常与 ?id 结伴出现（详情深链形态），host 语义不变。
   watch(
     () => route.query.host,
     (raw, old) => {
@@ -393,10 +398,10 @@
   // ── 详情抽屉 ─────────────────────────────────────────────
   const drawerVisible = ref(false)
   const drawerRow = ref<DockerWorkloadItem | null>(null)
-  const drawerTab = ref<'overview' | 'logs' | 'pty'>('overview')
+  const drawerTab = ref<'overview' | 'logs' | 'pty' | 'env'>('overview')
 
-  /** 打开抽屉（行「详情」按钮落概览，行菜单「日志」落日志 Tab）。 */
-  function openDrawer(row: DockerWorkloadItem, tab: 'overview' | 'logs' | 'pty') {
+  /** 打开抽屉（行「详情」按钮落概览，行菜单「日志」落日志 Tab；四个 Tab 见抽屉本体）。 */
+  function openDrawer(row: DockerWorkloadItem, tab: 'overview' | 'logs' | 'pty' | 'env') {
     drawerRow.value = row
     drawerTab.value = tab
     drawerVisible.value = true
@@ -406,6 +411,83 @@
   // 权限与 container:start 同档（docker:manage —— 创建不删不停任何现存目标）。
   const { hasAuth } = useAuth()
   const canManage = computed(() => hasAuth(PermDockerManage))
+  /** 详情深链的权限门（与被删 container-detail 路由的 authMark 同档）。 */
+  const canInspect = computed(() => hasAuth(PermDockerInspect))
+
+  // ── ?id= 深链 → 抽屉外部打开（7b：container-detail 页删除后的详情深链形态）──
+  const router = useRouter()
+
+  /**
+   * 行桩（外部深链的目标行不在当前过滤视图里时用）：只有 id/hostId/hostname
+   * 三个硬事实 —— hostname 从主机清单还原（清单是筛选下拉的数据源，页面本就持有）。
+   * 名称/状态/镜像等由抽屉里的 container:inspect 兜底填充，保护标记行桩上不可知
+   * （快照才有这个事实；受保护目标的写指令会被 agent 保护档拒回结论句，不静默丢能力）。
+   */
+  function stubRow(id: string, hostId: string): DockerWorkloadItem {
+    return {
+      id,
+      name: '',
+      image: '',
+      state: '',
+      cpuPercent: 0,
+      memUsageMb: 0,
+      memLimitMb: 0,
+      netRxBytesSec: 0,
+      netTxBytesSec: 0,
+      protected: false,
+      hostId,
+      hostname: hosts.value.find((h) => h.id === hostId)?.hostname ?? ''
+    }
+  }
+
+  /** 深链打开时记下的容器 id：关抽屉时据此清 query（只清自己那一条，见下方 watch）。 */
+  let deepLinkId = ''
+
+  // 等首个「就绪」再开：rows 属于带 host 过滤的首拉结果 —— 目标行在视图里就给全行
+  // （含保护标记与原生状态句），不在（被筛掉/截断之外）才退化到行桩（行桩的
+  // hostname 归属要等主机清单到，故 hosts 未到也不开）。没有 inspect 权限时不开
+  // 抽屉（开了也只剩一句 403 结论）而把原因说出口。
+  watch(
+    () => [String(route.query.id ?? ''), pageState.value, hosts.value.length > 0] as const,
+    ([id, st, hostsReady]) => {
+      if (!id || st !== 'ready' || !hostsReady) return
+      if (drawerVisible.value && drawerRow.value?.id === id) return // 已打开同一行
+      if (!canInspect.value) {
+        ElMessage.warning('缺少容器详情的查看权限，无法打开深链')
+        return
+      }
+      deepLinkId = id
+      const hostId = String(route.query.host ?? '')
+      const found = rows.value.find((r) => r.id === id && (hostId ? r.hostId === hostId : true))
+      if (found) {
+        openDrawer(found, 'overview')
+        return
+      }
+      if (!hostId) {
+        ElMessage.warning('该深链缺少主机参数，无法定位容器')
+        deepLinkId = ''
+        return
+      }
+      openDrawer(stubRow(id, hostId), 'overview')
+    },
+    { immediate: true }
+  )
+
+  // 关抽屉时清掉深链 id（host 留着 —— 它同时是主机筛选初始值）：不清的话刷新会
+  // 把抽屉再开一次，与「用户已经关掉它」的意图相反。replace 不留历史记录。
+  watch(drawerVisible, (visible) => {
+    if (visible || !deepLinkId) return
+    const currentId = String(route.query.id ?? '')
+    if (currentId !== deepLinkId) {
+      // 新深链已接管 query，不动它
+      deepLinkId = currentId
+      return
+    }
+    deepLinkId = ''
+    const rest = { ...route.query }
+    delete rest.id
+    void router.replace({ query: rest })
+  })
 
   const createVisible = ref(false)
   /** 打开抽屉时预选的主机（= 当前筛选的那台；没筛选则抽屉自己落到第一台可用主机）。 */

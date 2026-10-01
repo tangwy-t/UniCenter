@@ -134,6 +134,13 @@ const (
 	//（派发器单 worker 串行执行），寿命由指令自身的 15 分钟时限 + cancel 决定，
 	// 不需要「用户忘了关」的空闲清退。
 	streamPull
+	// streamBuild / streamPush 是构建/推送进度流（P2·分发面）：与 pull 同一整形
+	//（生产者折叠成批、泵随到随发）、同一豁免（构建的 RUN 步骤静默几分钟是常态、
+	// 推送停滞是传输事实）、同一槽位纪律（不占用户流槽位、派发器串行保证至多一条）。
+	// 三个进度族各建各的 kind：日志口径与 String() 按 kind 区分，若共用会出现
+	//「哪一场操作结束」查无实据的模糊。
+	streamBuild
+	streamPush
 )
 
 func (k streamKind) String() string {
@@ -146,8 +153,19 @@ func (k streamKind) String() string {
 		return "events"
 	case streamPull:
 		return "pull"
+	case streamBuild:
+		return "build"
+	case streamPush:
+		return "push"
 	}
 	return "log"
+}
+
+// progressLike 报告该 kind 是否属于进度三族（pull/build/push）：三族共用同一整形
+// 与豁免（interval 0、豁免空闲、不占用户槽位），用单一谓词表达而不是把条件
+// 越写越长。
+func (k streamKind) progressLike() bool {
+	return k == streamPull || k == streamBuild || k == streamPush
 }
 
 // interval / maxBytes 返回该种类的合帧窗口与合帧字节阈值（冻结值）。
@@ -155,7 +173,7 @@ func (k streamKind) interval() time.Duration {
 	switch k {
 	case streamPTY:
 		return ptyFrameInterval
-	case streamStats, streamEvents, streamPull:
+	case streamStats, streamEvents, streamPull, streamBuild, streamPush:
 		return statsFrameInterval
 	}
 	return logFrameInterval
@@ -165,7 +183,7 @@ func (k streamKind) maxBytes() int {
 	if k == streamPTY {
 		return ptyFrameBytes
 	}
-	if k == streamStats || k == streamEvents || k == streamPull {
+	if k == streamStats || k == streamEvents || k == streamPull || k == streamBuild || k == streamPush {
 		return statsFrameBytes
 	}
 	return logFrameBytes
@@ -274,11 +292,12 @@ func (m *SessionManager) openWithID(parent context.Context, kind streamKind, id 
 				return nil, errEventsLimit
 			}
 		}
-	} else if kind != streamPull && len(m.sessions) >= m.cfg.maxSessions {
-		// streamPull（拉取进度）也**不进用户槽位的账**：它是一场已经受理的写操作的
-		// 进度透出（用户没做「又开一条流」这个动作），开满日志/终端不该挡掉拉取；
-		// 且派发器单 worker 串行保证同一时刻至多一条 pull 在跑（队列里的还没开会话），
-		// 上限天然成立 = 1，不需要另设账目 —— 让它撞 3 条用户流的上限才是错的。
+	} else if !kind.progressLike() && len(m.sessions) >= m.cfg.maxSessions {
+		// 进度三族（pull/build/push）也**不进用户槽位的账**：它们是一场已经受理的
+		// 写操作的进度透出（用户没做「又开一条流」这个动作），开满日志/终端不该
+		// 挡掉拉取/构建/推送；且派发器单 worker 串行保证同一时刻至多一条进度会话
+		// 在跑（队列里的还没开会话），上限天然成立 = 1，不需要另设账目 ——
+		// 让它们撞 3 条用户流的上限才是错的。
 		m.mu.Unlock()
 		return nil, errStreamLimit
 	}
@@ -658,12 +677,13 @@ func (s *streamSession) pump() {
 
 		// 没有可发的东西：等生产者，或到点判空闲。
 		if pending == 0 && !eof {
-			if s.kind == streamEvents || s.kind == streamPull {
-				// 常驻订阅与拉取进度**豁免空闲超时**：「无事件」是平静主机的常态、
-				//「拉取停滞」（registry 限速/排队/大层静默下载）是长耗时写操作的常态，
-				// 都不是「被遗忘的终端」—— 用户流 10 分钟清退的理由（卡死的日志源、
-				// 忘了关的终端）对它们不成立。寿命走另外两条路：core 的 cancel（拉取
-				// 还有它最后一条路：指令自身的 15 分钟时限）、以及发送失败被判死。
+			if s.kind == streamEvents || s.kind.progressLike() {
+				// 常驻订阅与进度三族**豁免空闲超时**：「无事件」是平静主机的常态、
+				//「拉取停滞」（registry 限速/排队/大层静默下载）与「构建的 RUN 步骤
+				// 静默几分钟」是长耗时写操作的常态、推送停滞是传输事实 —— 都不是
+				//「被遗忘的终端」—— 用户流 10 分钟清退的理由（卡死的日志源、
+				// 忘了关的终端）对它们不成立。寿命走另外两条路：core 的 cancel（三族
+				// 各自还有最后一条路：指令自身的 15/30 分钟时限）、以及发送失败被判死。
 				select {
 				case <-s.ctx.Done():
 					return

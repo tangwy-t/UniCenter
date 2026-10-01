@@ -325,22 +325,29 @@
     void router.push({ path: '/docker/containers', query: { host: String(host.id) } })
   }
 
-  /** 磁盘面板行 → 该主机的镜像列表（清理悬空镜像的确认档流在镜像页底栏）。 */
+  /** 磁盘面板行 → 该主机的镜像表（7a：三个旧列表页收敛为 /docker/resources 的
+   *  tab；清理悬空镜像的确认档流在镜像 tab 底栏）。tab 进 query：深链/刷新还原。 */
   function goHostImages(host: DockerHostItem) {
-    void router.push({ path: '/docker/images', query: { host: String(host.id) } })
+    void router.push({
+      path: '/docker/resources',
+      query: { host: String(host.id), tab: 'images' }
+    })
   }
 
-  /** 磁盘面板行 → 该主机的卷列表（volume:prune 的确认档流在卷页底栏）。 */
+  /** 磁盘面板行 → 该主机的卷表（volume:prune 的确认档流在数据卷 tab 底栏）。 */
   function goHostVolumes(host: DockerHostItem) {
-    void router.push({ path: '/docker/volumes', query: { host: String(host.id) } })
+    void router.push({
+      path: '/docker/resources',
+      query: { host: String(host.id), tab: 'volumes' }
+    })
   }
 
-  /** 异常行 → 容器详情（跳法与容器列表页逐字同源：路由名 + params + query.host）。 */
+  /** 异常行 → 容器详情抽屉（7b：深链统一指 /docker/containers?host=&id=，统一表页
+   *  用行桩打开抽屉 —— 目标容器不必在该页当前过滤视图里；host 同时还原主机筛选）。 */
   function goContainerDetail(row: Api.Docker.DockerOverviewAnomalyItem) {
     void router.push({
-      name: 'DockerContainerDetail',
-      params: { id: row.id },
-      query: { host: row.hostId }
+      path: '/docker/containers',
+      query: { host: row.hostId, id: row.id }
     })
   }
 </script>

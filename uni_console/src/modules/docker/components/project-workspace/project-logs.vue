@@ -48,10 +48,10 @@
   /**
    * 聚合日志区（5b 工作台）：消费 compose:logs（5a）。
    *
-   * ── 与 container-detail 日志 Tab 的同与不同 ─────────────────────────
+   * ── 与 workload-drawer 日志 Tab 的同与不同 ──────────────────────────
    * 同一条流端点（`/cmds/:ref/stream`）与同一 NDJSON 行形（`{seq,data,eof}`），
-   * 建会话的两步（受理 + 轮询到会话句柄）也逐字照抄 —— 契约注释见
-   * container-detail.vue 的 startLogFollow，此处不重复论证。
+   * 建会话的两步（受理 + 轮询到会话句柄）也逐字同款（该契约的完整论证在被删的
+   * container-detail 时代即已定型，workload-drawer 的 startLogFollow 现持有同一份）。
    * 不同的一点：compose:logs **没有一次性取回的形态**（agent 起的是 compose CLI
    * 进程，不传 --follow 时打完历史即退出、读到 eof 收摊）—— 故「拉取」也走
    * 建会话 + 读流的路径，区别只在 options 里带不带 follow。

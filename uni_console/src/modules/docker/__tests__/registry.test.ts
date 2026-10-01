@@ -135,9 +135,13 @@ describe('仓库凭据 CRUD 封装（api.ts）', () => {
   })
 })
 
-describe('images 页入口的门控（源码守卫）', () => {
+describe('镜像 tab 入口的门控（源码守卫）', () => {
   it('「仓库凭据…」按钮只对 docker:config 渲染（不渲染 ≠ 禁用）', () => {
-    const src = readFileSync(new URL('../views/images.vue', import.meta.url).pathname, 'utf8')
+    // 7a：镜像页收敛为 resources 页的镜像 tab，门控逻辑平移零改动，扫描目标随迁。
+    const src = readFileSync(
+      new URL('../components/resources/images-tab.vue', import.meta.url).pathname,
+      'utf8'
+    )
     expect(src).toContain('仓库凭据…')
     expect(
       /canConfig\s*=\s*computed\(\s*\(\)\s*=>\s*hasAuth\(PermDockerConfig\)\s*\)/.test(src)

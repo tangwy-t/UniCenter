@@ -160,7 +160,10 @@ func newTestDockerHandler(t *testing.T, perms []string) *dockerTestEnv {
 	guard := middleware.NewPermissionGuard(&permAuthSvc{perms: perms}, permStore{}, permCfg{}, logger.NewNop())
 
 	cmdsSvc := service.NewDockerCmdService(cmds, sender, store, logger.NewNop()).WithStreamSessions(sessions)
-	readSvc := service.NewDockerService(store, dockerDeviceReader{}, dockerCfg{}, logger.NewNop())
+	readSvc := service.NewDockerService(store, dockerDeviceReader{}, dockerCfg{}, logger.NewNop()).
+		// stats 留存读面（P2）：与 store/cmds 共用同一个 miniredis —— 同一实例上的
+		// 写入可直接被 stats-history 端点读回（见 docker_stats_history_test.go）。
+		WithStatsHistory(dockerstate.NewStatsHistoryStore(rdb))
 	streamSvc := service.NewDockerStreamService(sessions, tickets, sender, logger.NewNop())
 	return &dockerTestEnv{
 		handler:  NewDockerHandler(readSvc, cmdsSvc, streamSvc, guard, logger.NewNop()),
@@ -378,11 +381,11 @@ func TestSendCmdRejectsBadRequests(t *testing.T) {
 		}
 	})
 
-	t.Run("四期 action 已过期次闸（缺参数仍 400）", func(t *testing.T) {
+	t.Run("compose.file 写操作缺参数仍 400", func(t *testing.T) {
 		env := newTestDockerHandler(t, []string{"admin"})
-		// 四期（配置编辑）已交付：期次闸不再拦这两条 —— 它们会走到参数校验，缺
-		// content/base_hash 时以「指令参数不合法」400 收场（与「尚未开放」是两回事：
-		// 前者要补参数，后者要升级 agent）。
+		// 期次闸已随 7c 删除（CurrentPhase=5 全表放行，永不触发）；这两条现在走到
+		// 参数校验，缺 content/base_hash 时以「指令参数不合法」400 收场 —— 断言
+		// 保留：它钉住的是「写路径的参数闸不能被绕过」，与发布节奏无关。
 		for _, body := range []string{
 			`{"action":"compose.file:patch","target":"uni-center"}`,
 			`{"action":"compose.file:write","target":"uni-center"}`,
@@ -390,7 +393,7 @@ func TestSendCmdRejectsBadRequests(t *testing.T) {
 			w, c := newCmdContext(body)
 			env.handler.SendCmd(c)
 			if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "参数不合法") {
-				t.Fatalf("四期 action 缺参数必须 400「参数不合法」, body=%s got %d (%s)",
+				t.Fatalf("compose.file 写操作缺参数必须 400「参数不合法」, body=%s got %d (%s)",
 					body, w.Code, w.Body.String())
 			}
 		}

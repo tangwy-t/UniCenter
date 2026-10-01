@@ -1,11 +1,14 @@
 // @vitest-environment jsdom
 /**
- * 工作负载抽屉（切片 2）：三个 Tab 的懒挂载与断流纪律，以及「host 取行主机」。
+ * 工作负载抽屉（切片 2）：四个 Tab 的懒挂载与断流纪律，以及「host 取行主机」。
  *
  * 为什么这些用例要存在：抽屉把详情页的三块能力（inspect / 日志 / 终端）搬进列表页，
  * 生命周期纪律（首切才拉、切走断流、关抽屉断流）靠复制粘贴最容易走样 ——
  * 这里把「什么时候发指令 / 什么时候断流」钉住。行主机是统一表的新事实：
  * 抽屉没有 provide 主机上下文，所有指令都必须带行自己的 hostId。
+ *
+ * 7b 两个新面：环境 Tab（被删详情页「环境变量与配置」的平移，复用同一次 inspect）
+ * 与行桩（?id 深链的外部打开：名称/状态/镜像由 inspect 兜底填充）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent, h, nextTick } from 'vue'
@@ -15,6 +18,7 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 const api = vi.hoisted(() => ({
   sendDockerCmd: vi.fn(),
   fetchDockerCmdResult: vi.fn(),
+  fetchDockerStatsHistory: vi.fn(),
   openDockerLogStream: vi.fn(),
   openDockerStatsStream: vi.fn()
 }))
@@ -71,7 +75,11 @@ const INSPECT_PAYLOAD = {
   started_at: 1790000100,
   restart_policy: 'always',
   networks: ['bridge'],
-  mounts: [{ type: 'volume', source: 'dbdata', destination: '/var/lib/mysql', rw: true }]
+  mounts: [{ type: 'volume', source: 'dbdata', destination: '/var/lib/mysql', rw: true }],
+  env: ['MYSQL_ROOT_PASSWORD=secret', 'PATH=/usr/sbin:/usr/bin:/sbin'],
+  labels: { 'com.docker.compose.project': 'uni-center' },
+  entrypoint: ['docker-entrypoint.sh'],
+  cmd: ['mysqld']
 }
 
 /** 流端点的假 Response：reader 永不落定（流保持在飞）—— 断流断言的前提。 */
@@ -148,12 +156,14 @@ beforeEach(() => {
   pty.mounted = 0
   api.sendDockerCmd.mockResolvedValue({ ref: 'r1' })
   api.fetchDockerCmdResult.mockResolvedValue({ status: 'succeeded', payload: INSPECT_PAYLOAD })
+  // stats 历史默认空（= 纯实时，现状行为）；要历史的用例用 mockResolvedValueOnce。
+  api.fetchDockerStatsHistory.mockResolvedValue({ samples: [] })
   api.openDockerLogStream.mockResolvedValue(fakeStreamResponse())
   api.openDockerStatsStream.mockResolvedValue(fakeStreamResponse())
 })
 
 async function mountDrawer(
-  initialTab: 'overview' | 'logs' | 'pty' = 'overview',
+  initialTab: 'overview' | 'logs' | 'pty' | 'env' = 'overview',
   row: DockerWorkloadItem = ROW
 ) {
   const router = createRouter({
@@ -165,7 +175,21 @@ async function mountDrawer(
   await router.isReady()
   const w = mount(WorkloadDrawer, {
     props: { modelValue: true, row, initialTab },
-    global: { plugins: [router] }
+    global: {
+      plugins: [router],
+      // ArtTable（环境 Tab 的 env/labels 两张表）依赖 Pinia 的表格 store —— 单组件
+      // 挂载没有应用实例给 store，用透传替身（data/columns 落 $attrs，用例从那里断言）。
+      stubs: {
+        ArtTable: defineComponent({
+          name: 'ArtTable',
+          inheritAttrs: false,
+          setup:
+            (_, { slots }) =>
+            () =>
+              h('div', { 'data-stub': 'ArtTable' }, [slots.default?.()])
+        })
+      }
+    }
   })
   mounted.push(w)
   await new Promise((r) => setTimeout(r, 0))
@@ -355,8 +379,87 @@ describe('概览 Tab · 实时统计（container:stats 流，切片 3a）', () =
       'h2',
       expect.objectContaining({ action: 'container:stats' })
     )
+    // 历史 GET 同一道门：不运行的容器没有可回看的曲线，空请求只会换回错误。
+    expect(api.fetchDockerStatsHistory).not.toHaveBeenCalled()
     expect(api.openDockerStatsStream).not.toHaveBeenCalled()
     expect(bodyHTML()).toContain('容器未运行，暂无实时统计')
+  })
+})
+
+describe('概览 Tab · 实时统计 · 历史预填（P2 · stats-history 半边）', () => {
+  /** 按 y 轴量纲取一张曲线（CPU=% / 内存=MB / 网络=B/s；网络组折叠时也在 DOM）。 */
+  function chartByUnit(w: VueWrapper, unit: string) {
+    const chart = w
+      .findAllComponents({ name: 'DockerStatsChart' })
+      .find((c) => c.props('unit') === unit)
+    expect(chart, `应渲染 unit=${unit} 的 stats 曲线`).toBeTruthy()
+    return chart!
+  }
+
+  it('打开即先拉历史（行主机 + 容器 id）再受理 container:stats —— 顺序不许倒', async () => {
+    await mountDrawer()
+    // 先有形状（历史预填），再接当下（实时流受理）：倒过来用户就要对着空白
+    // 曲线干等建流。invocationCallOrder 钉的是先后，不是各自调没调。
+    expect(api.fetchDockerStatsHistory).toHaveBeenCalledWith('h2', 'abcdef1234567890')
+    const statsIdx = api.sendDockerCmd.mock.calls.findIndex(
+      (c) => (c[1] as { action: string }).action === 'container:stats'
+    )
+    expect(statsIdx).toBeGreaterThanOrEqual(0)
+    expect(api.fetchDockerStatsHistory.mock.invocationCallOrder[0]!).toBeLessThan(
+      api.sendDockerCmd.mock.invocationCallOrder[statsIdx]!
+    )
+  })
+
+  it('历史预填曲线；首帧同 t 去重衔接，网络曲线只画流样本', async () => {
+    api.fetchDockerStatsHistory.mockResolvedValueOnce({
+      samples: [
+        { t: 1789999970000, cpuPercent: 10, memUsageMb: 300, memLimitMb: 1024 },
+        { t: 1789999980000, cpuPercent: 12, memUsageMb: 320, memLimitMb: 1024 }
+      ]
+    })
+    // 流首帧与历史末样本同 t（1789999980000）：去重丢历史留流帧；再一帧推进。
+    api.openDockerStatsStream.mockResolvedValueOnce(
+      statsStreamResponse([statsLine(1789999980000), statsLine(1789999990000)])
+    )
+    const w = await mountDrawer()
+    await flushStream()
+
+    // CPU 曲线的时刻序列 = 两枚历史 + 去重后的两枚流帧，t 严格递增 —— 用户
+    // 看到的是一条连续序列，感知不到拼接缝。
+    expect(chartByUnit(w, '%').props('times')).toEqual([
+      1789999970000, 1789999980000, 1789999990000
+    ])
+    // 同 t 处留的是流帧（网络字段在场）—— 网络曲线不吃历史、也不丢这一帧。
+    expect(chartByUnit(w, 'B/s').props('times')).toEqual([1789999980000, 1789999990000])
+    // 摘要句如实交代两段口径；折叠组里的说明句交代网络无历史。
+    expect(bodyHTML()).toContain('历史约 30 分钟')
+    expect(bodyHTML()).toContain('网络速率仅实时段')
+  })
+
+  it('历史拉取失败静默降级为纯实时：流照常建立，不给错误态', async () => {
+    api.fetchDockerStatsHistory.mockRejectedValueOnce(new Error('history down'))
+    api.openDockerStatsStream.mockResolvedValueOnce(statsStreamResponse([statsLine(1790000000000)]))
+    const w = await mountDrawer()
+    await flushStream()
+    // 实时流没被历史拖下水：照常受理、照常接流、读数照常落地。
+    expect(api.openDockerStatsStream).toHaveBeenCalledTimes(1)
+    expect(bodyHTML()).toContain('3.5%')
+    expect(chartByUnit(w, '%').props('times')).toEqual([1790000000000])
+    // 错误态属于流的生命周期；回看失败只降级 —— 曲线回到纯实时口径。
+    expect(bodyHTML()).not.toContain('实时统计连接失败')
+    expect(bodyHTML()).toContain('最近约 2 分钟')
+  })
+
+  it('流端点打不开时历史仍在屏上（30 分钟回看不跟着流陪葬）', async () => {
+    api.fetchDockerStatsHistory.mockResolvedValueOnce({
+      samples: [{ t: 1789999970000, cpuPercent: 10, memUsageMb: 300, memLimitMb: 1024 }]
+    })
+    api.openDockerStatsStream.mockResolvedValueOnce({ ok: false, status: 404 })
+    const w = await mountDrawer()
+    await flushStream()
+    // 404 = 会话过期的结论句；但曲线已经不是空白 —— 历史段先落了屏。
+    expect(bodyHTML()).toContain('该统计会话已过期')
+    expect(chartByUnit(w, '%').props('times')).toEqual([1789999970000])
   })
 })
 
@@ -421,6 +524,126 @@ describe('头部写操作（与行菜单同一套注册表与确认档）', () =
     expect(api.sendDockerCmd).toHaveBeenCalledWith(
       'h2',
       expect.objectContaining({ action: 'container:remove', target: 'mysql' })
+    )
+  })
+})
+
+describe('环境 Tab（7b：被删详情页「环境变量与配置」的平移面）', () => {
+  it('复用概览的同一次 inspect：切过去不再发指令，env/labels/入口点/命令都在', async () => {
+    const w = await mountDrawer()
+    api.sendDockerCmd.mockClear()
+
+    await switchTab(w, 'env')
+
+    // 数据源纪律：环境 Tab 不重新拉 —— 概览打开时的那一次 inspect 就是全部事实。
+    expect(api.sendDockerCmd).not.toHaveBeenCalledWith(
+      'h2',
+      expect.objectContaining({ action: 'container:inspect' })
+    )
+    const html = bodyHTML()
+    // 风险提示行（明文口径的告示牌）。
+    expect(html).toContain('环境变量常含口令类变量')
+    // 三个块标题 + 计数（jsdom 里 ElTable 不渲染行单元格：行数据从 ArtTable 的入参断言）。
+    expect(html).toContain('环境变量（2 项）')
+    expect(html).toContain('标签（1 项）')
+    expect(html).toContain('入口点与命令')
+    // 入口点/命令是等宽 code 块（不经过表格），正文直接可见。
+    expect(html).toContain('docker-entrypoint.sh')
+    expect(html).toContain('mysqld')
+  })
+
+  it('env/labels 行进了 ArtTable（值里的 = 只按第一个切：口令值完整保留）', async () => {
+    const w = await mountDrawer()
+    await switchTab(w, 'env')
+
+    // 抽屉里两张 ArtTable（env / labels）；jsdom 不渲染行单元格，取传给表格的数据。
+    const tables = w.findAllComponents({ name: 'ArtTable' })
+    const datas = tables.map((t) => {
+      const vm = t.vm as unknown as {
+        $attrs: Record<string, unknown>
+        $props: Record<string, unknown>
+      }
+      return (vm.$props.data ?? vm.$attrs.data ?? []) as { name: string; value: string }[]
+    })
+    expect(datas[0]).toEqual([
+      { name: 'MYSQL_ROOT_PASSWORD', value: 'secret' },
+      { name: 'PATH', value: '/usr/sbin:/usr/bin:/sbin' }
+    ])
+    expect(datas[1]).toEqual([{ name: 'com.docker.compose.project', value: 'uni-center' }])
+  })
+
+  it('inspect 失败：环境 Tab 给结论句 + 重试，不弹空表', async () => {
+    api.fetchDockerCmdResult.mockResolvedValue({ status: 'failed', error: '没有找到这个容器' })
+    await mountDrawer('env')
+    await new Promise((r) => setTimeout(r, 0))
+    await nextTick()
+
+    expect(bodyHTML()).toContain('没有找到这个容器')
+    expect(bodyHTML()).not.toContain('环境变量（')
+  })
+})
+
+describe('行桩（7b：?id 深链的外部打开形态）', () => {
+  /** 行桩：只有 id/hostId/hostname 三个事实（目标行不在统一表当前过滤视图里）。 */
+  const STUB: DockerWorkloadItem = {
+    ...ROW,
+    id: 'c9f8e7d6c5b4a3',
+    name: '',
+    image: '',
+    state: '',
+    statusText: undefined
+  }
+
+  it('名称/状态/镜像由 inspect 兜底；写操作 target 也落到 inspect 的名字', async () => {
+    api.fetchDockerCmdResult.mockResolvedValue({
+      status: 'succeeded',
+      payload: { ...INSPECT_PAYLOAD, name: 'redis', image: 'redis:7', state: 'running' }
+    })
+    await mountDrawer('overview', STUB)
+    await new Promise((r) => setTimeout(r, 0))
+    await nextTick()
+
+    // inspect 按行桩的 id/host 发出（名字此时还不知道，target 只能是 id）。
+    expect(api.sendDockerCmd).toHaveBeenCalledWith('h2', {
+      action: 'container:inspect',
+      target: 'c9f8e7d6c5b4a3',
+      options: {}
+    })
+    const html = bodyHTML()
+    expect(html).toContain('redis') // 头部标题（view.name）
+    expect(html).toContain('运行中') // 状态结论（view.state）
+    expect(html).toContain('redis:7') // 概览镜像（view.image）
+
+    // inspect 到位后写按钮可用，且 target 用的是 inspect 回来的名字。
+    api.sendDockerCmd.mockClear()
+    const stop = bodyButtons().find((b) => b.text === '停止')
+    expect(stop, 'inspect 已给名字，停止按钮应可用').toBeTruthy()
+    await stop!.el.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await new Promise((r) => setTimeout(r, 0))
+    expect(api.sendDockerCmd).toHaveBeenCalledWith('h2', {
+      action: 'container:stop',
+      target: 'redis',
+      options: { target: 'redis' }
+    })
+  })
+
+  it('inspect 没回来前头部不显示空标题（退化到短 id），写按钮禁用', async () => {
+    // 悬挂的结果：轮询永不返回终态 → view 永远是 null。
+    api.fetchDockerCmdResult.mockImplementation(
+      () => new Promise(() => {}) as Promise<{ status: string }>
+    )
+    await mountDrawer('overview', STUB)
+    await new Promise((r) => setTimeout(r, 0))
+    await nextTick()
+
+    // 标题退化到短 id（不显示空串），行归属主机照旧显示。
+    expect(bodyHTML()).toContain('c9f8e7d6c5b4')
+    expect(bodyHTML()).toContain('@ nas')
+    // 状态未知（行桩 state 为空）→ 启停二选一落在「启动」。
+    const start = bodyButtons().find((b) => b.text === '启动')
+    expect(start).toBeTruthy()
+    expect((start!.el as HTMLButtonElement).disabled, '没有名字前发指令只会拿到空目标结论').toBe(
+      true
     )
   })
 })

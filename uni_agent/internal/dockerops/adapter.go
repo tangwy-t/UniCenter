@@ -1,7 +1,9 @@
 package dockerops
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -592,10 +594,10 @@ func (a *sdkAdapter) ImagePrune(ctx context.Context, all bool) (int64, error) {
 // docker login 自行解决）；非 nil 时折成 SDK 的 RegistryAuth 头（base64 的
 // {username,password,serveraddress}）：明文密码只出现在发给 daemon 的这一个编码头里，
 // 不回写任何日志/进度帧/结果。SDK 类型不出 adapter 的边界在这里收口。
-func (a *sdkAdapter) ImagePull(ctx context.Context, ref string, auth *PullAuth, emit func(PullProgress)) error {
+func (a *sdkAdapter) ImagePull(ctx context.Context, ref string, auth *ImageAuth, emit func(PullProgress)) error {
 	opts := image.PullOptions{}
 	if auth != nil {
-		encoded, err := encodePullAuth(auth)
+		encoded, err := encodeImageAuth(auth)
 		if err != nil {
 			return err
 		}
@@ -613,14 +615,15 @@ func (a *sdkAdapter) ImagePull(ctx context.Context, ref string, auth *PullAuth, 
 	return consumePullStream(rc, emit)
 }
 
-// encodePullAuth 把本域 PullAuth 折成 daemon 认识的 X-Registry-Auth 头值
+// encodeImageAuth 把本域 ImageAuth 折成 daemon 认识的 X-Registry-Auth 头值
 // （base64 的 {username,password,serveraddress}）。
 //
-// 提取成纯函数而不是内联在 ImagePull 里：包边界纪律说「只有 adapter 碰 SDK」，
-// 而这段映射正是 4c 的关键路径 —— 必须让它在没有 docker daemon 的 CI 里
+// 提取成纯函数而不是内联在 ImagePull/ImagePush 里：包边界纪律说「只有 adapter 碰
+// SDK」，而这段映射正是 4c 的关键路径 —— 必须让它在没有 docker daemon 的 CI 里
 // 直接可测（adapter_test.go 用 DecodeAuthConfig 做往返断言），否则
-// 「认证有没有真的按 SDK 口径折成头」就成了 CI 盲区。
-func encodePullAuth(a *PullAuth) (string, error) {
+// 「认证有没有真的按 SDK 口径折成头」就成了 CI 盲区。拉取与推送共用这一个编码器
+// （4c 的凭据面是分发闭环的公共设施）。
+func encodeImageAuth(a *ImageAuth) (string, error) {
 	return registry.EncodeAuthConfig(registry.AuthConfig{
 		Username:      a.Username,
 		Password:      a.Password,
@@ -752,6 +755,285 @@ func (a *sdkAdapter) ImageLoad(ctx context.Context, path string) error {
 		return err
 	}
 	return nil
+}
+
+// ── P2·分发面：构建与推送（SDK 实现）────────────────────────────────────
+
+// ImagePush 推送镜像（4b 同款进度产出）：响应体读到 EOF（推送的实际工作在
+// 响应体流上完成，提前关闭 = 推送半途而废）、进度行经 emit 逐条交出。auth（4c）
+// 与 ImagePull 共用同一凭据面与同一编码器；nil = 无凭据（与 4b 之前 pull 的
+// 自由度一致）。
+func (a *sdkAdapter) ImagePush(ctx context.Context, ref string, auth *ImageAuth, emit func(PullProgress)) error {
+	opts := image.PushOptions{}
+	if auth != nil {
+		encoded, err := encodeImageAuth(auth)
+		if err != nil {
+			return err
+		}
+		opts.RegistryAuth = encoded
+	}
+	rc, err := a.cli.ImagePush(ctx, ref, opts)
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+	if emit == nil {
+		_, err = io.Copy(io.Discard, rc)
+		return err
+	}
+	// 推送与拉取是 daemon 的**同一个** JSON 进度流（同字段同终态行），消费器共用。
+	return consumePullStream(rc, emit)
+}
+
+// ImageBuild 构建镜像：**先校验后送出**。校验（scanBuildContext）把穿越 tar、
+// 缺失 Dockerfile、超尺寸/超条目全部挡在 daemon 之外（这正是「上下文是新输入面」
+// 的代理侧护栏）；通过后才打开文件、按 gzip 魔数解包成 tar 流交给 daemon ——
+// 送出的字节与校验过的字节是**同一个解包结果**（看什么发什么）。
+//
+// BuildArgs 折成 SDK 的 map[string]*string（值忠实拷贝：SDK 不需要我们替它
+// 决定引用语义）；Remove=true 对应 docker build --rm（中间容器不留尸）。
+func (a *sdkAdapter) ImageBuild(ctx context.Context, spec BuildSpec, emit func(BuildProgress)) error {
+	if err := scanBuildContext(spec.ContextPath, spec.Dockerfile); err != nil {
+		return err
+	}
+	f, err := os.Open(spec.ContextPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	r, err := buildContextTarReader(f)
+	if err != nil {
+		return err
+	}
+	resp, err := a.cli.ImageBuild(ctx, r, types.ImageBuildOptions{
+		Dockerfile: spec.Dockerfile,
+		Tags:       []string{spec.Tag},
+		BuildArgs:  buildArgPtrs(spec.BuildArgs),
+		Remove:     true,
+	})
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if emit == nil {
+		_, err = io.Copy(io.Discard, resp.Body)
+		return err
+	}
+	return consumeBuildStream(resp.Body, emit)
+}
+
+// buildArgPtrs 把 build-args 折成 SDK 的指针映射（逐值拷贝：map 会活到请求
+// 编码之后，值语义比借用语义少一类时序猜想）。
+func buildArgPtrs(args map[string]string) map[string]*string {
+	if len(args) == 0 {
+		return nil
+	}
+	out := make(map[string]*string, len(args))
+	for k, v := range args {
+		val := v
+		out[k] = valPtr(val)
+	}
+	return out
+}
+
+func valPtr(s string) *string { return &s }
+
+// ── 构建上下文校验（P2 的安全面：tar 路径穿越检查）───────────────────────
+
+const (
+	// maxBuildStreamBytes 是单条构建文本行的字节上限（协议 item 上限 64KB 的内侧
+	// 余量）：超长的 RUN 输出行截断**保留尾部** —— 排障时「最后发生了什么」
+	// 才是关键；截断不会把一行 JSON 撑过泵的防御性切帧。
+	maxBuildStreamBytes = 60 << 10
+)
+
+// maxBuildContextEntries 是上下文 tar 的条目上限：十万条已远超真实项目
+// （node_modules 级的项目 ~ 数万条），留给「巨型平铺 node_modules 也能构建」
+// 的余量；上限挡住的是「解压炸弹」形态的恶意 tar —— 512MB 的零填充 gzip
+// 可以含数百万条 512B 头，不设上限时扫描与 daemon 的提取都是无界劳动。
+// var 而非 const：测试下调它以驱动条目闸（照会话超时等可注入参数的纪律）。
+var maxBuildContextEntries = 100_000
+
+// gzipMagic 是 gzip 文件头的魔数（上下文 tar 的两种合法形态之一）。
+var gzipMagic = []byte{0x1f, 0x8b}
+
+// buildContextTarReader 按魔数嗅探上下文文件的压缩形态并返回 tar 流：
+// gzip 魔数开头且能建 gzip.Reader 时返回解压流；否则返回文件自身（含「魔数
+// 撞车但解不开」的罕见形态 —— 按未压缩送出，daemon 报格式错误，比我们
+// 抢先判错多一次澄清机会）。gzip.NewReader 失败时它的探测读过文件头几个字节，
+// 回退前必须**回卷到 0** —— 不然 tar 扫描会从半路开始读。
+func buildContextTarReader(f *os.File) (io.Reader, error) {
+	var hdr [2]byte
+	if n, err := f.ReadAt(hdr[:], 0); err != nil && !(errors.Is(err, io.EOF) && n > 0) {
+		return nil, err
+	}
+	if hdr[0] == gzipMagic[0] && hdr[1] == gzipMagic[1] {
+		gz, err := gzip.NewReader(f)
+		if err == nil {
+			return gz, nil
+		}
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return nil, err
+		}
+	}
+	return f, nil
+}
+
+// scanBuildContext 扫描上下文 tar 并做四件校验（**不提取到磁盘**，只读头）：
+//  1. 尺寸闸（≤ 协议 maxDockerBuildContextBytes —— 512MB，对齐发布物档）；
+//  2. 条目闸（≤ maxBuildContextEntries）；
+//  3. **穿越检查**：条目名与符号链接/硬链接的目标名一律拒绝绝对路径、`..` 段、
+//     反斜杠与 NUL —— 这是本切片最大的安全面：恶意 tar 逃出上下文写宿主文件的
+//     全部形态都在这里出不去（daemon 提取时看到的正是同一份经过检查的名字）；
+//  4. Dockerfile 存在性：按「同归一化」后的名字比对上下文内相对路径（"a//b" 与
+//     "./a/b" 归一化成同一形态再比 —— tar -C dir . 的打法必须不被误判）。
+//
+// 为什么在 adapter 而不是执行器：这份校验是「SDK 输入的直接前置」，且它是
+// 纯函数（无 SDK、无进程），CI 里没有 daemon 也能全覆盖 —— 与 encodeImageAuth
+// 同一条可测性纪律。
+func scanBuildContext(path, dockerfile string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if fi, err := f.Stat(); err == nil && fi.Size() > agentproto.MaxDockerBuildContextBytes {
+		return errors.New("构建上下文超过 512MB 上限")
+	}
+	r, err := buildContextTarReader(f)
+	if err != nil {
+		return err
+	}
+	tr := tar.NewReader(r)
+	foundDockerfile := false
+	entries := 0
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return err // 拆不开的 tar：不是我们识别的形态，宁可拒绝（坏输入）
+		}
+		if hdr.Name == "" {
+			// 无名字目（PAX 元数据等）不参与校验也不计入条目账。
+			continue
+		}
+		entries++
+		if entries > maxBuildContextEntries {
+			return errors.New("构建上下文条目过多")
+		}
+		if leak := tarEntryLeak(hdr.Name); leak != "" {
+			return errors.New("构建上下文包含非法路径条目: " + leak)
+		}
+		if tarCanonicalName(hdr.Name) == dockerfile {
+			foundDockerfile = true
+		}
+		// 符号链接/硬链接的目标是提取时的另一条写路径：同样过穿越检查。
+		if hdr.Linkname != "" {
+			if leak := tarEntryLeak(hdr.Linkname); leak != "" {
+				return errors.New("构建上下文包含非法链接目标: " + leak)
+			}
+		}
+	}
+	if !foundDockerfile {
+		return errors.New("构建上下文中找不到 Dockerfile: " + dockerfile)
+	}
+	return nil
+}
+
+// tarEntryLeak 返回条目名里的非法形态（空串 = 合法）。拦四类：绝对路径、`..` 段、
+// 反斜杠、NUL。`.` 段与空段放行（`tar -C dir .` 与 `a//b` 这类打法提取语义
+// 归一，任何正规提取器都按同一规则处理 —— 收紧会把合法打包方式误伤）。
+func tarEntryLeak(name string) string {
+	if name == "" || name[0] == '/' {
+		return name
+	}
+	for _, seg := range strings.Split(name, "/") {
+		if seg == ".." {
+			return name
+		}
+	}
+	if strings.ContainsAny(name, "\\\x00") {
+		return name
+	}
+	return ""
+}
+
+// tarCanonicalName 把条目名归一化（去空段与 `.` 段），供 Dockerfile 存在性比对。
+// 注意它**不替代** tarEntryLeak：先查漏、再归一 —— 归一化只处理无害的空/点段。
+func tarCanonicalName(name string) string {
+	parts := make([]string, 0, 4)
+	for _, seg := range strings.Split(name, "/") {
+		if seg == "" || seg == "." {
+			continue
+		}
+		parts = append(parts, seg)
+	}
+	return strings.Join(parts, "/")
+}
+
+// buildJSONLine 是 daemon 构建输出流的一行（照 pullJSONLine 的取向：最小自定义
+// 结构，JSONMessage 已废弃且字段随版本漂移）。BuildKit 的步骤行走 stream；
+// legacy builder 的 "Step 1/4 : …" 也走 stream；构建期间拉基础镜像的层进度
+// 走 id/status/progressDetail（与 pull 同款）；aux.ID 是最终镜像 id（absorbed
+// 成功的终态项已覆盖「构建完成」这个事实，aux 不产记录 —— 镜像 id 半分钟内
+// 就会出现在镜像清单里）。
+type buildJSONLine struct {
+	ID          string `json:"id,omitempty"`
+	Status      string `json:"status,omitempty"`
+	Stream      string `json:"stream,omitempty"`
+	ErrorDetail *struct {
+		Message string `json:"message,omitempty"`
+	} `json:"errorDetail,omitempty"`
+	Error string `json:"error,omitempty"`
+}
+
+// consumeBuildStream 把构建输出的 JSON 流逐行折成 BuildProgress 交给 emit
+// 直到 EOF。错误行列于 pull：记下、读满、EOF 时返回 —— 构建的实际工作要到
+// 流结束才落定（与 ImagePull 同一条纪律）。stream 行截断保留尾部。
+func consumeBuildStream(r io.Reader, emit func(BuildProgress)) error {
+	dec := json.NewDecoder(r)
+	var buildErr error
+	for {
+		var line buildJSONLine
+		if err := dec.Decode(&line); err != nil {
+			if errors.Is(err, io.EOF) {
+				return buildErr
+			}
+			if buildErr != nil {
+				return buildErr
+			}
+			return err
+		}
+		if line.ErrorDetail != nil && line.ErrorDetail.Message != "" {
+			if buildErr == nil {
+				buildErr = errors.New(line.ErrorDetail.Message)
+			}
+			continue
+		}
+		if line.Error != "" {
+			if buildErr == nil {
+				buildErr = errors.New(line.Error)
+			}
+			continue
+		}
+		if line.Stream != "" {
+			stream := strings.TrimRight(line.Stream, "\r\n")
+			if stream == "" {
+				continue // 纯换行/回车行：不给 UI 制造空行噪音
+			}
+			if len(stream) > maxBuildStreamBytes {
+				stream = stream[len(stream)-maxBuildStreamBytes:]
+			}
+			emit(BuildProgress{Stream: stream})
+			continue
+		}
+		if line.ID != "" || line.Status != "" {
+			emit(BuildProgress{ID: line.ID, Status: line.Status})
+		}
+		// aux（最终镜像 id）：不产记录（终态项已说「构建完成」，镜像 id 进清单）。
+	}
 }
 
 func (a *sdkAdapter) VolumeRemove(ctx context.Context, name string, force bool) error {
@@ -902,13 +1184,24 @@ func (a *sdkAdapter) Events(ctx context.Context) (<-chan EventItem, io.Closer, e
 // toEventItem 把 SDK 事件折成本域记录：主体名取 Actor.Attributes["name"]
 // （容器/卷/网络名、镜像引用是属性而不是 Message 的顶层字段）。字段漂移只在这一行
 // 被拦 —— 本域之外不再出现 SDK 的 events 类型。
+//
+// die 事件单独把 exitCode 属性带出来：它是「正常收尾（0）」与「异常退出（≠ 0）」
+// 的**唯一事实源**，core 侧通知联动按它过滤。属性值是字符串形态（SDK 口径），
+// 数值化失败就当不可考（nil）—— 不猜测、不拦截整条事件。
 func toEventItem(msg events.Message) EventItem {
-	return EventItem{
+	it := EventItem{
 		Type:      string(msg.Type),
 		Action:    string(msg.Action),
 		ActorName: msg.Actor.Attributes["name"],
 		ActorID:   msg.Actor.ID,
 	}
+	if msg.Action == "die" {
+		if code, err := strconv.ParseInt(msg.Actor.Attributes["exitCode"], 10, 32); err == nil {
+			v := int32(code)
+			it.ExitCode = &v
+		}
+	}
+	return it
 }
 
 // round2 保留两位小数（页面上的百分比与 MB 只用到这个精度）。

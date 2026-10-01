@@ -7,6 +7,13 @@
  * 后帧是**更新**而不是新事实，列表里只该有一行 —— 两者的消费形态不同，与
  * utils/events.ts 单独成文的理由同一口径。
  *
+ * P2 起本文件是**镜像分发进度流的公共折叠器**：push 与 pull 是 daemon 的同一个
+ * JSON 进度流（协议 DockerPushProgressItem 与 DockerPullProgressItem 同形、
+ * agent 侧同一消费器 consumePullStream），差异只有终态集合/字节段文案/补满时机
+ * 三处字面量 —— 折成 LayerFeedFlavor 参数（缺省 = 拉取语义，4b 的两个既有调用
+ * 零改动），推送经 createPushFeed 取同一份折叠纪律。构建帧是另一种形态（文本
+ * 播报、无字节口径），单独收在 utils/build-push.ts，不硬凑进这份层表。
+ *
  * 行形状（core 的 docker_stream.go 的 pullNDJSONLine，字段与协议
  * DockerPullProgressItem 同名同义）：
  *   {"seq":n,"t":unix毫秒,"id":"层id","status":"Downloading","current":n,
@@ -109,6 +116,50 @@ export function isLayerDoneStatus(status: string): boolean {
 }
 
 /**
+ * 推送侧的层终态判定（与拉取同位不同词 —— daemon 对 push 用的是另一组状态）：
+ * Pushed 是主终态；Layer already exists / Mounted from … 是「这层直接复用了仓库
+ * 既有层」的等价终态（后者带仓库后缀，精确集合表不了，走前缀匹配）。
+ */
+export function isPushLayerDoneStatus(status: string): boolean {
+  return (
+    status === 'Pushed' || status === 'Layer already exists' || status.startsWith('Mounted from ')
+  )
+}
+
+/**
+ * 层折叠器的语义配置（拉取/推送两族的差异点，P2 起成为公共折叠器的参数）。
+ *
+ * 三处差异的字面量都来自 daemon 的状态文案，前端只镜像不发明：
+ *   - 拉取：终态 Pull complete / Already exists；字节段 Downloading；中途补满态
+ *     Download complete（下载确实完了，解压还在后面）；
+ *   - 推送：终态 Pushed / Layer already exists / Mounted from …；字节段 Pushing；
+ *     **没有中途补满态** —— Pushed 本身就是「传完了」，fillStatus 传空串表示
+ *     「层到终态即补满」。
+ */
+export interface LayerFeedFlavor {
+  /** 层终态判定。 */
+  isDoneStatus: (status: string) => boolean
+  /** 字节段的进行态文案（汇总行只认这段的字节，见 createPullFeed 的记账取舍）。 */
+  byteStatus: string
+  /** 字节记账的中途补满态文案；'' = 没有中途态，层到终态即补满（推送形态）。 */
+  fillStatus: string
+}
+
+/** 拉取语义（缺省 flavor —— 既有调用 createPullFeed() 与 4b 行为逐字一致）。 */
+const PULL_FEED_FLAVOR: LayerFeedFlavor = {
+  isDoneStatus: isLayerDoneStatus,
+  byteStatus: 'Downloading',
+  fillStatus: 'Download complete'
+}
+
+/** 推送语义（createPushFeed 用）。 */
+const PUSH_FEED_FLAVOR: LayerFeedFlavor = {
+  isDoneStatus: isPushLayerDoneStatus,
+  byteStatus: 'Pushing',
+  fillStatus: ''
+}
+
+/**
  * 层短 id：daemon 的层 id 是 64 位十六进制（不带 sha256: 前缀），与 docker CLI
  * 同口径取 12 位；带前缀的形态先剥前缀（对 digest 形态的层 id 也成立）。
  */
@@ -156,7 +207,7 @@ export interface PullFeed {
   readonly layers: readonly PullLayer[]
   /** 最新一条消息行文案（空串 = 还没有）。 */
   readonly note: string
-  /** 下载段已传输字节合计（汇总行「已下载」）。 */
+  /** 下载段已传输字节合计（汇总行「已下载」；推送形态下 = Pushing 段合计，页面文案换「已上传」）。 */
   readonly downloadedBytes: number
   /** 下载段总字节合计（汇总行「总字节」；0 = 还没有任何字节口径）。 */
   readonly totalBytes: number
@@ -181,19 +232,23 @@ interface LayerFold {
  * 拉取进度流消费端：NDJSON 原始 chunk → 按层 id 折叠的层表的一条流水线
  * （拆包 → 逐行解析 → 按层合并 → 终态捕获）。
  *
+ * flavor 参数（P2 起有值）只换语义字面量，不动折叠纪律 —— 推送经 createPushFeed
+ * 走同一条流水线，缺省值保持 4b 拉取的既有行为。
+ *
  * 两个合并取舍：
  *
- * **字节对「只进不退零」**。完成类状态行（"Download complete"/"Pull complete"）
- * 不带 progressDetail（协议 0 = 未知）—— 直接覆盖会把已知的 current/total 抹回
- * 0，条形从 90% 跳回不确定态。故非正值不改既有值；「Download complete」另把
- * 下载段记账补满（下载确实完了）。
+ * **字节对「只进不退零」**。完成类状态行（"Download complete"/"Pull complete"/推送的
+ * "Pushed"）不带 progressDetail（协议 0 = 未知）—— 直接覆盖会把已知的
+ * current/total 抹回 0，条形从 90% 跳回不确定态。故非正值不改既有值；拉取的
+ * 「Download complete」与推送的终态各自把字节记账补满（传输确实完了）。
  *
- * **汇总按「下载段」记账，条形按「最新一对」**。daemon 的 progressDetail 在
- * Downloading 与 Extracting 两段都会出现，解压字节与下载字节不是同一笔账 —— 条形
- * 跟着最新一对走（换段重走，与 docker CLI 同观感），而顶部「已下载/总字节」只认
- * Downloading 段的字节，否则解压一开始汇总行就会「倒退」。
+ * **汇总按「传输段」记账，条形按「最新一对」**。daemon 的 progressDetail 在
+ * Downloading 与 Extracting 两段（推送的 Pushing）都会出现，两段的字节不是同一笔
+ * 账 —— 条形跟着最新一对走（换段重走，与 docker CLI 同观感），而顶部汇总行只认
+ * 传输段（拉取的 Downloading / 推送的 Pushing）的字节，否则解压一开始汇总行就会
+ * 「倒退」。
  */
-export function createPullFeed(): PullFeed {
+export function createPullFeed(flavor: LayerFeedFlavor = PULL_FEED_FLAVOR): PullFeed {
   const parser = createNdjsonParser()
   const folds: LayerFold[] = []
   let noteText = ''
@@ -205,11 +260,15 @@ export function createPullFeed(): PullFeed {
     if (item.status !== '') v.status = item.status
     if (item.current > 0) v.current = item.current
     if (item.total > 0) v.total = item.total
-    if (isLayerDoneStatus(item.status)) v.done = true
-    if (item.status === 'Downloading' && item.total > 0) {
+    if (flavor.isDoneStatus(item.status)) v.done = true
+    if (item.status === flavor.byteStatus && item.total > 0) {
       fold.dlCurrent = item.current
       fold.dlTotal = item.total
-    } else if (item.status === 'Download complete' && fold.dlTotal > 0) {
+    } else if (
+      fold.dlTotal > 0 &&
+      (item.status === flavor.fillStatus || (flavor.fillStatus === '' && v.done))
+    ) {
+      // 中途补满（拉取的 Download complete）或终态补满（推送的 Pushed）。
       fold.dlCurrent = fold.dlTotal
     }
   }
@@ -233,10 +292,10 @@ export function createPullFeed(): PullFeed {
               status: item.status,
               current: item.current,
               total: item.total,
-              done: isLayerDoneStatus(item.status)
+              done: flavor.isDoneStatus(item.status)
             },
-            dlCurrent: item.status === 'Downloading' ? item.current : 0,
-            dlTotal: item.status === 'Downloading' ? item.total : 0
+            dlCurrent: item.status === flavor.byteStatus ? item.current : 0,
+            dlTotal: item.status === flavor.byteStatus ? item.total : 0
           }
           folds.push(created)
         }
@@ -282,6 +341,19 @@ export function createPullFeed(): PullFeed {
       return terminal
     }
   }
+}
+
+/**
+ * 推送进度流消费端（P2）：同一份折叠流水线换推送语义 —— 终态集合
+ * （Pushed / Layer already exists / Mounted from …）、字节段（Pushing）、
+ * 终态即补满（push 没有「Download complete」式的中途补满态）。
+ *
+ * 行解析直接复用 parsePullStreamLine（core 的 pushNDJSONLine 与 pullNDJSONLine
+ * 同字段集 —— daemon 的 push 与 pull 是同一个 JSON 进度流，发送端已同形，消费端
+ * 没理由分家）。
+ */
+export function createPushFeed(): PullFeed {
+  return createPullFeed(PUSH_FEED_FLAVOR)
 }
 
 /**

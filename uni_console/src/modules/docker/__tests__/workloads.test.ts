@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 /**
  * 跨主机统一工作负载表（切片 2）的页面行为：多主机渲染、服务端筛选参数、
- * 行操作按行主机派发、?host= 深链兼容、D-3 权限门控、抽屉入口。
+ * 行操作按行主机派发、?host= 深链兼容、D-3 权限门控、抽屉入口，以及 7b 的
+ * ?id= 深链抽屉外部打开模式（行桩 + inspect 兜底）。
  *
  * 挂载方式沿用 page-render.test.ts 的口径（mock ../api 与 useAuth，Art* 用
  * 轻量替身保留 slot）；行操作不走 DOM 点击 —— jsdom 里 ElTable 不渲染
@@ -112,15 +113,18 @@ beforeEach(() => {
   api.fetchDockerCmdResult.mockResolvedValue({ status: 'succeeded' })
 })
 
+/** 最近一次 mountPage 用的路由（?id 深链关抽屉清 query 的断言读它）。 */
+let currentRouter: ReturnType<typeof createRouter> | null = null
+
 async function mountPage(query: Record<string, string> = {}): Promise<VueWrapper> {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
       { path: '/', component: { template: '<div />' } },
-      { path: '/docker/containers', component: Containers },
-      { path: '/docker/container-detail/:id', component: { template: '<div />' } }
+      { path: '/docker/containers', component: Containers }
     ]
   })
+  currentRouter = router
   await router.push({ path: '/docker/containers', query })
   await router.isReady()
   const w = mount(Containers, { global: { plugins: [router], stubs: STUBS } })
@@ -128,6 +132,14 @@ async function mountPage(query: Record<string, string> = {}): Promise<VueWrapper
   await new Promise((r) => setTimeout(r, 0))
   await nextTick()
   return w
+}
+
+/** 深链抽屉的落定：首拉 ready 后 watch 才开抽屉，多等一轮宏任务 + 渲染。 */
+async function flushDeepLink() {
+  await new Promise((r) => setTimeout(r, 0))
+  await nextTick()
+  await new Promise((r) => setTimeout(r, 0))
+  await nextTick()
 }
 
 /** 页面 hero 的刷新按钮（ArtButtonTable 替身，title 经 attrs fallthrough 到根 div）。 */
@@ -319,3 +331,78 @@ describe('首拉失败的口径（统一表自己的 D-1 对应面）', () => {
     expect(w.html()).toContain('上次数据仍在，本次刷新失败')
   })
 })
+
+/* ── ?id= 深链 → 抽屉外部打开（7b：被删 container-detail 路由的替代形态）──────
+ * overview 异常表 / 工作台容器行 / 镜像详情关联容器的深链统一改指本页 + query。
+ * 两条路径都要钉住：目标行在视图里给全行（保护标记/状态句都在），不在就退到
+ * 行桩（id/hostId/hostname 三个事实），其余由抽屉里的 inspect 兜底填充。
+ */
+describe('?id= 深链：统一表页打开详情抽屉（外部打开模式）', () => {
+  it('目标行在视图里 → 抽屉拿全行（含主机筛选与保护标记）', async () => {
+    await mountPage({ host: 'h2', id: 'c2' })
+    await flushDeepLink()
+
+    const drawer = w0().findComponent({ name: 'DockerWorkloadDrawer' })
+    expect((drawer.props() as { modelValue: boolean }).modelValue).toBe(true)
+    expect((drawer.props() as { initialTab: string }).initialTab).toBe('overview')
+    const row = (drawer.props() as { row: DockerWorkloadItem }).row
+    expect(row.id).toBe('c2')
+    expect(row.hostId).toBe('h2')
+    expect(row.name).toBe('mysql')
+  })
+
+  it('目标行不在视图里 → 行桩打开，inspect 兜底填充名称与状态', async () => {
+    // cZ 不在首拉结果里（被筛掉/截断之外的形态）：行桩只有 id/hostId/hostname。
+    api.fetchDockerCmdResult.mockResolvedValue({
+      status: 'succeeded',
+      payload: { name: 'redis', image: 'redis:7', state: 'running' }
+    })
+    await mountPage({ host: 'h2', id: 'cZ' })
+    await flushDeepLink()
+
+    const drawer = w0().findComponent({ name: 'DockerWorkloadDrawer' })
+    expect((drawer.props() as { modelValue: boolean }).modelValue).toBe(true)
+    const row = (drawer.props() as { row: DockerWorkloadItem }).row
+    expect(row).toMatchObject({ id: 'cZ', hostId: 'h2', hostname: 'nas', name: '' })
+
+    // 抽屉按行桩发 inspect（host = 行主机），并把返回的名称/状态展示出来。
+    expect(api.sendDockerCmd).toHaveBeenCalledWith('h2', {
+      action: 'container:inspect',
+      target: 'cZ',
+      options: {}
+    })
+    // 抽屉 append-to-body：内容 teleport 到 body（workload-drawer.test 同款口径）。
+    expect(document.body.innerHTML).toContain('redis')
+    expect(document.body.innerHTML).toContain('运行中')
+  })
+
+  it('没有 docker:inspect 权限时不开抽屉（与被删路由的 authMark 同档）', async () => {
+    auth.allow = new Set(['docker:list', 'docker:manage', 'docker:delete'])
+    const w = await mountPage({ host: 'h1', id: 'c1' })
+    await flushDeepLink()
+
+    const drawer = w.findComponent({ name: 'DockerWorkloadDrawer' })
+    expect((drawer.props() as { modelValue: boolean }).modelValue).toBe(false)
+  })
+
+  it('关抽屉清掉深链 id（host 留作筛选初始值）：刷新不再重开抽屉', async () => {
+    await mountPage({ host: 'h2', id: 'c2' })
+    await flushDeepLink()
+
+    const drawer = w0().findComponent({ name: 'DockerWorkloadDrawer' })
+    drawer.vm.$emit('update:modelValue', false)
+    await flushDeepLink()
+
+    expect(currentRouter!.currentRoute.value.query.id).toBeUndefined()
+    expect(currentRouter!.currentRoute.value.query.host).toBe('h2')
+    // 关掉后模型值也回到关闭态（v-model 的另一半）。
+    expect((drawer.props() as { modelValue: boolean }).modelValue).toBe(false)
+  })
+})
+
+/** 深链用例里挂着抽屉的页面（mountPage 只返回 w，收口一个小取值器）。 */
+function w0(): VueWrapper {
+  const w = mounted[mounted.length - 1]
+  expect(w, '深链用例应已挂载页面').toBeTruthy()
+  return w!
+}

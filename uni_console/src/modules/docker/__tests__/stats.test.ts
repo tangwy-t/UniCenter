@@ -1,18 +1,37 @@
 /**
- * 五期 stats 流纯逻辑的测试：样本行解析（含 eof 的两种形态与坏行）与滑动窗口。
+ * 五期 stats 流纯逻辑的测试：样本行解析（含 eof 的两种形态与坏行）与滑动窗口；
+ * P2 起加上历史半边：30 分钟回看的衔接函数（同 t 去重 / 缺口 / 降级 / 滑窗让位）
+ * 与 stats-history 的 api 封装（端点与 toast 口径）。
  *
  * 与 stream.test.ts 同一理由：这些是**会静默出错**的最后一跳 —— 空收尾行被当成
  * 全零样本画进曲线（CPU 直接砸到 0）、窗口上限差一个点（内存随挂机时长线性涨）、
  * 坏行没跳过（整条流被一个畸形样本杀死）……页面都照常显示，只有肉眼事后能看出
- * 曲线不对。这里把行形状与窗口边界钉死。
+ * 曲线不对。这里把行形状与窗口边界钉死。历史衔接同理静默：同 t 去重丢了流帧
+ * （回看与实时之间多一道台阶）、缺口被假点填掉（「昨晚为什么慢」的形状被伪造），
+ * 曲线照样画、照样像那么回事。
  */
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+
+// api 封装的测法照抄 registry.test.ts：只替 request 这一个面、桩掉 user store
+// 的 import 链（node 环境没有 localStorage），api.ts 本体走真代码。
+vi.mock('@/utils/http', () => ({
+  default: { get: vi.fn() }
+}))
+vi.mock('@/store/modules/user', () => ({ useUserStore: vi.fn() }))
+
+import request from '@/utils/http'
+import { fetchDockerStatsHistory } from '../api'
 import {
   createStatsFeed,
   MAX_STATS_SAMPLES,
+  mergeStatsHistory,
   parseStatsStreamLine,
+  type StatsHistorySample,
   type StatsSample
 } from '../utils/stats'
+
+/** 与 api.ts 同源的口径取前缀（测试命令给 /api/v1；断言不赌具体环境值）。 */
+const PREFIX = import.meta.env.VITE_API_PREFIX
 
 /** 一个正常样本行（字段名与值都是 core statsNDJSONLine 的线上形状）。 */
 function sampleLine(t: number, over: Partial<StatsSample> = {}): string {
@@ -143,5 +162,116 @@ describe('stats 消费端（滑动窗口）', () => {
     )
     expect(feed.samples.map((s) => s.t)).toEqual([1000])
     expect(feed.eof).toBe(true)
+  })
+})
+
+// ── P2 历史半边：mergeStatsHistory ────────────────────────────────────
+
+/** 一枚历史样本（stats-history 端点的线上形状：apigen camelCase，无网络字段）。 */
+function hist(t: number, over: Partial<StatsHistorySample> = {}): StatsHistorySample {
+  return { t, cpuPercent: 2, memUsageMb: 100, memLimitMb: 512, ...over }
+}
+
+/** 一枚流样本（StatsSample 内部形状；网络字段流帧独有，这里必带）。 */
+function flow(t: number, over: Partial<StatsSample> = {}): StatsSample {
+  return {
+    t,
+    cpuPercent: 5,
+    memUsageMb: 300,
+    memLimitMb: 512,
+    netRxBytesSec: 1,
+    netTxBytesSec: 2,
+    ...over
+  }
+}
+
+describe('历史衔接（P2 · mergeStatsHistory）', () => {
+  it('拼接 + 折名：历史样本折成窗口形状（camelCase 直取），网络字段缺省而非 0', () => {
+    const merged = mergeStatsHistory([hist(1000), hist(2000)], [flow(3000)])
+    expect(merged.map((s) => s.t)).toEqual([1000, 2000, 3000])
+    expect(merged[0]).toEqual({ t: 1000, cpuPercent: 2, memUsageMb: 100, memLimitMb: 512 })
+    // 无数据 ≠ 0：历史段缺网络字段，网络曲线据此只画真实流样本。
+    expect(merged[0]!.netRxBytesSec).toBeUndefined()
+    expect(merged[2]!.netRxBytesSec).toBe(1)
+  })
+
+  it('同 t 去重：丢历史留流帧（留新弃旧，且保住网络字段）', () => {
+    const merged = mergeStatsHistory(
+      [hist(1000), hist(2000, { cpuPercent: 12 })],
+      [flow(2000, { cpuPercent: 9 })]
+    )
+    expect(merged.map((s) => s.t)).toEqual([1000, 2000])
+    expect(merged[1]!.cpuPercent).toBe(9)
+    expect(merged[1]!.netRxBytesSec).toBe(1)
+  })
+
+  it('缺口：两端点如实保留、不造中间假点（连线是图表口径，序列只认真实样本）', () => {
+    const merged = mergeStatsHistory([hist(1000)], [flow(61000)])
+    expect(merged.map((s) => s.t)).toEqual([1000, 61000])
+    expect(merged).toHaveLength(2)
+  })
+
+  it('空历史 / 空流：两侧各自退化（空历史 = 纯实时，即现状行为）', () => {
+    expect(mergeStatsHistory([], [flow(1000)])).toEqual([flow(1000)])
+    expect(mergeStatsHistory([], [])).toEqual([])
+    expect(mergeStatsHistory([hist(1000), hist(2000)], []).map((s) => s.t)).toEqual([1000, 2000])
+  })
+
+  it('流样本早于部分历史样本时按 t 穿插（归并看时刻，不看来源分组）', () => {
+    const merged = mergeStatsHistory([hist(1000), hist(3000)], [flow(2000)])
+    expect(merged.map((s) => s.t)).toEqual([1000, 2000, 3000])
+  })
+
+  it('滑窗上限 120：历史逐点让位给实时（回看是打开时的窗口，不是常驻监控面）', () => {
+    const history = Array.from({ length: 60 }, (_, k) => hist(1000 + k))
+    const stream = Array.from({ length: 61 }, (_, k) => flow(100000 + k))
+    const merged = mergeStatsHistory(history, stream)
+    expect(merged).toHaveLength(MAX_STATS_SAMPLES)
+    // 61 枚流帧全在（实时是主角），最旧的一枚历史被挤出窗。
+    expect(merged[0]!.t).toBe(1001)
+    expect(merged.filter((s) => s.netRxBytesSec === undefined)).toHaveLength(59)
+    // 上限可显式收窄（复用同一道守卫）。
+    expect(mergeStatsHistory([hist(1000), hist(2000)], [flow(3000)], 2).map((s) => s.t)).toEqual([
+      2000, 3000
+    ])
+  })
+
+  it('乱序回吐与同 t 重复帧不入窗（输出永远 t 严格递增）', () => {
+    const merged = mergeStatsHistory(
+      [hist(1000), hist(2000)],
+      [
+        flow(3000),
+        flow(2500), // 乱序回吐：比已入窗的 3000 旧
+        flow(3000), // 同 t 重复帧
+        flow(4000)
+      ]
+    )
+    expect(merged.map((s) => s.t)).toEqual([1000, 2000, 3000, 4000])
+  })
+
+  it('坏历史样本丢点不丢段（t 非正 / 字段非有限 / 字段缺失）', () => {
+    const merged = mergeStatsHistory(
+      [
+        hist(1000),
+        { t: 0, cpuPercent: 1, memUsageMb: 1, memLimitMb: 1 },
+        { t: 2000, cpuPercent: Number.NaN, memUsageMb: 1, memLimitMb: 1 },
+        { t: 1500 } as unknown as StatsHistorySample, // 运行时缺字段（JSON 形态漂移）
+        hist(3000)
+      ],
+      []
+    )
+    expect(merged.map((s) => s.t)).toEqual([1000, 3000])
+  })
+})
+
+describe('stats 历史封装（api.ts）', () => {
+  it('GET /docker/hosts/:id/containers/:cid/stats-history；错误不弹 toast（抽屉开着就地降级）', async () => {
+    const http = request as unknown as { get: ReturnType<typeof vi.fn> }
+    http.get.mockResolvedValueOnce({ samples: [] })
+    await fetchDockerStatsHistory('h2', 'abcdef1234567890')
+    expect(http.get).toHaveBeenCalledWith({
+      url: `${PREFIX}/docker/hosts/h2/containers/abcdef1234567890/stats-history`,
+      showErrorMessage: false
+    })
   })
 })

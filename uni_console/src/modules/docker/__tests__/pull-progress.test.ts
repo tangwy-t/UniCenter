@@ -4,13 +4,19 @@
  *
  * 组件把哪条数据接到哪个控件（取消路径 / 双通道收尾 / 关闭清理）在
  * pull-dialog.test.ts（jsdom）；这里只钉纯函数的语义。
+ *
+ * P2 起推送与拉取共用这份折叠器（daemon 的同一个 JSON 进度流，LayerFeedFlavor
+ * 换语义字面量）：推送组钉的是**换词后折叠纪律不变** —— 拉取组的每个用例都该
+ * 有对应的推送形态。构建帧是另一种形态，纯逻辑在 build-progress.test.ts。
  */
 import { describe, expect, it } from 'vitest'
 import {
   createPullFeed,
+  createPushFeed,
   formatPullBytes,
   isValidImageRef,
   isLayerDoneStatus,
+  isPushLayerDoneStatus,
   layerPercent,
   layerShortId,
   parsePullStreamLine
@@ -195,6 +201,64 @@ describe('按层折叠（createPullFeed）', () => {
       ].join('\n')
     )
     expect(feed.layers.map((l) => l.id)).toEqual([L2])
+  })
+})
+
+describe('推送语义（createPushFeed —— flavor 换词、折叠纪律不变）', () => {
+  it('层终态判定：Pushed / Layer already exists / Mounted from …；Pushing 不算', () => {
+    expect(isPushLayerDoneStatus('Pushed')).toBe(true)
+    expect(isPushLayerDoneStatus('Layer already exists')).toBe(true)
+    expect(isPushLayerDoneStatus('Mounted from library/nginx')).toBe(true)
+    expect(isPushLayerDoneStatus('Pushing')).toBe(false)
+    expect(isPushLayerDoneStatus('Preparing')).toBe(false)
+  })
+
+  it('字节段换 Pushing：汇总按推送段记账；拉取的 Downloading 不再是字节段', () => {
+    const feed = createPushFeed()
+    feed.pushRaw(frame({ id: L1, status: 'Pushing', current: 300, total: 600 }))
+    expect(feed.downloadedBytes).toBe(300)
+    expect(feed.totalBytes).toBe(600)
+    // 拉取语义词对推送折叠器只是普通状态行：不进字节账（也不报错）。
+    feed.pushRaw(frame({ id: L2, status: 'Downloading', current: 100, total: 200 }))
+    expect(feed.downloadedBytes).toBe(300)
+    expect(feed.totalBytes).toBe(600)
+  })
+
+  it('终态即补满（push 没有中途补满态）：Pushed 后汇总补满、字节不退零', () => {
+    const feed = createPushFeed()
+    feed.pushRaw(frame({ id: L1, status: 'Pushing', current: 800, total: 1000 }))
+    feed.pushRaw(frame({ id: L1, status: 'Pushed' }))
+    expect(feed.layers[0]!.done).toBe(true)
+    // Pushed 不带 progressDetail：条形字段保留 800/1000（不退零），记账补满到 1000。
+    expect(feed.layers[0]).toMatchObject({ current: 800, total: 1000 })
+    expect(feed.downloadedBytes).toBe(1000)
+  })
+
+  it('同层折叠 / 消息行 / 终态捕获 / eof 纪律与拉取逐条同源（只是词换了）', () => {
+    const feed = createPushFeed()
+    feed.pushRaw(
+      [
+        frame({ status: 'The push refers to repository [harbor.example.com/app]' }),
+        frame({ id: L1, status: 'Preparing' }),
+        frame({ id: L1, status: 'Pushing', current: 5, total: 10 }),
+        frame({ id: L2, status: 'Layer already exists' })
+      ].join('\n')
+    )
+    expect(feed.layers.map((l) => l.id)).toEqual([L1, L2])
+    expect(feed.layers[0]).toMatchObject({ status: 'Pushing', current: 5, total: 10 })
+    expect(feed.doneLayers).toBe(1)
+    expect(feed.note).toBe('The push refers to repository [harbor.example.com/app]')
+    feed.pushRaw(frame({ done: true, eof: true }))
+    expect(feed.terminal).toEqual({ ok: true, error: '' })
+    expect(feed.eof).toBe(true)
+  })
+
+  it('拉取语义未被推送改动（flavor 缺省值保持 4b 行为）：Downloading 仍是字节段', () => {
+    // 一条对拍：同一段帧喂两个 feed，拉取侧认 Downloading、推送侧不认 ——
+    // 缺省 flavor 没被 PUSH_FEED_FLAVOR 污染（createPullFeed() 无参调用走拉取语义）。
+    const pull = createPullFeed()
+    pull.pushRaw(frame({ id: L1, status: 'Downloading', current: 7, total: 10 }))
+    expect(pull.downloadedBytes).toBe(7)
   })
 })
 

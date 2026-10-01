@@ -52,15 +52,24 @@ type stubAPI struct {
 	imagePruneFreed int64
 	pulled          []string
 	// pullAuths 记录每次 ImagePull 收到的认证（4c）：nil 槽 = 无凭据拉取。
-	pullAuths []*PullAuth
+	pullAuths []*ImageAuth
 	// pullCh / pullErr 是 image:pull 的**进度流替身**（4b）：pullCh 非 nil 时逐条把
 	// 进度记录交给 emit（关闭 = 拉取结束、返回 pullErr），ctx 取消即时返回；nil =
 	// 一次性成功/失败（老用例的一期语义）。
-	pullCh           chan PullProgress
-	pullErr          error
-	tagged           []tagCall
-	saved            []saveCall
-	loaded           []string
+	pullCh  chan PullProgress
+	pullErr error
+	tagged  []tagCall
+	saved   []saveCall
+	loaded  []string
+	// P2·分发面：build/push 的**定型记录 + 进度流替身**（与 pull 同款语义：
+	// buildCh/pushCh 非 nil 时逐条交给 emit，关闭返回 buildErr/pushErr；
+	// nil = 一次性成功/失败）。
+	built            []buildCall
+	buildCh          chan BuildProgress
+	buildErr         error
+	pushed           []pushCall
+	pushCh           chan PullProgress
+	pushErr          error
 	volumesRemoved   []volumeRemoveCall
 	volumePruneCalls int
 	volumePruneFreed int64
@@ -119,6 +128,14 @@ type saveCall struct {
 	overwrite bool
 }
 
+// buildCall / pushCall 是 P2 的定型参数记录（断言执行器的解析与映射）。
+type buildCall struct{ spec BuildSpec }
+
+type pushCall struct {
+	ref  string
+	auth *ImageAuth
+}
+
 type volumeRemoveCall struct {
 	name  string
 	force bool
@@ -173,7 +190,7 @@ func (s *stubAPI) ImagePrune(_ context.Context, all bool) (int64, error) {
 	return s.imagePruneFreed, nil
 }
 
-func (s *stubAPI) ImagePull(ctx context.Context, ref string, auth *PullAuth, emit func(PullProgress)) error {
+func (s *stubAPI) ImagePull(ctx context.Context, ref string, auth *ImageAuth, emit func(PullProgress)) error {
 	s.pulled = append(s.pulled, ref)
 	s.pullAuths = append(s.pullAuths, auth)
 	if s.pullCh == nil {
@@ -210,6 +227,49 @@ func (s *stubAPI) ImageSave(_ context.Context, ref, path string, overwrite bool)
 func (s *stubAPI) ImageLoad(_ context.Context, path string) error {
 	s.loaded = append(s.loaded, path)
 	return nil
+}
+
+// ImageBuild / ImagePush 替身（P2）：与 ImagePull 同一记录型实现 —— 只把收到的
+// 定型参数记进切片（不碰 docker.sock、不做上下文 tar 校验 —— 校验在 adapter 的
+// scanBuildContext，替身只让它「通过」），进度通道逐条交给 emit。
+func (s *stubAPI) ImageBuild(ctx context.Context, spec BuildSpec, emit func(BuildProgress)) error {
+	s.built = append(s.built, buildCall{spec: spec})
+	if s.buildCh == nil {
+		return s.buildErr
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case b, ok := <-s.buildCh:
+			if !ok {
+				return s.buildErr
+			}
+			if emit != nil {
+				emit(b)
+			}
+		}
+	}
+}
+
+func (s *stubAPI) ImagePush(ctx context.Context, ref string, auth *ImageAuth, emit func(PullProgress)) error {
+	s.pushed = append(s.pushed, pushCall{ref: ref, auth: auth})
+	if s.pushCh == nil {
+		return s.pushErr
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case p, ok := <-s.pushCh:
+			if !ok {
+				return s.pushErr
+			}
+			if emit != nil {
+				emit(p)
+			}
+		}
+	}
 }
 
 func (s *stubAPI) VolumeRemove(_ context.Context, name string, force bool) error {

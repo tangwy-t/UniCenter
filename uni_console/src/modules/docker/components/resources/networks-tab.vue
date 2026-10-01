@@ -1,57 +1,41 @@
 <template>
-  <!-- ⚠ 单根包装：页面**必须只有一个根节点**（布局把页面放进 `<Transition mode="out-in">`，
-       而 Transition 只支持单根元素）。二期起本页多了确认弹窗，与容器页同一处理：
-       页面与弹窗收进一个根 div —— 双根会在切页时白屏（single-root.test.ts 扫描钉住）。 -->
-  <div class="docker-networks-page">
-    <DockerPage
-      :loading="loading"
-      :stale="stale"
-      :age-seconds="ageSeconds"
-      :never-reported="neverReported"
-      :load-error="loadError"
-      :has-state="hasState"
-      @refresh="refresh"
-    >
-      <template #search>
-        <ArtSearchBar
-          v-show="showSearchBar"
-          v-model="searchForm"
-          :items="searchItems"
-          @search="onSearch"
-          @reset="onReset"
-        />
-      </template>
+  <!-- 单根（single-root 守卫在库：布局的 Transition 只支持单根，双根切页白屏）。
+       本组件是 resources 页「网络」tab 的内容（7a 由原 views/networks.vue 平移）：
+       页面级的主机条/快照/四态在 views/resources.vue，这里只持有网络表自己的筛选
+       与行内删除。 -->
+  <div class="docker-networks-tab">
+    <ArtSearchBar
+      v-show="showSearchBar"
+      v-model="searchForm"
+      :items="searchItems"
+      @search="onSearch"
+      @reset="onReset"
+    />
 
-      <template #table>
-        <!-- 提示行：解释「为什么看到的网络比预期多」——bridge/host/none 是 Docker 自建的，
-             不是谁在本页创建的。讲清能力边界，不写「敬请期待」这类空话。 -->
-        <div class="docker-hint">默认网络由 Docker 自建，删除它们不在本页能力范围</div>
+    <!-- 结构对齐 DockerPage 的单列表形态：搜索栏在卡片外，表格在卡片内
+         （平移前的页面走 DockerPage 的 search/table 插槽，形态一致；
+         本 tab 没有页脚操作区 —— 网络没有批量动作）。 -->
+    <ElCard class="art-table-card" shadow="never">
+      <!-- 提示行：解释「为什么看到的网络比预期多」——bridge/host/none 是 Docker 自建的，
+           不是谁在本页创建的。讲清能力边界，不写「敬请期待」这类空话。 -->
+      <div class="docker-hint">默认网络由 Docker 自建，删除它们不在本页能力范围</div>
 
-        <ArtTableHeader
-          v-model:showSearchBar="showSearchBar"
-          :loading="loading"
-          @refresh="refresh"
-        />
+      <ArtTableHeader v-model:showSearchBar="showSearchBar" :loading="loading" @refresh="refresh" />
 
-        <!-- 两种空态分开：主机上没有网络 vs 筛选没命中（后者给「清除筛选」）。
-             纪律与容器/镜像页一致（「没有」与「筛没了」说成一句会让人以为机器空了）；
-             空态渲染在本页、不写进 ArtTable 的 `#empty` 插槽：ArtTable 不转发该插槽
-             （内部把 ElTable 的空态写死成「暂无数据」），写进去会被静默丢弃。
-             清单还没到时也不喊「没有网络」（那时还不知道有没有主机），故 v-if 把
-             主机清单的加载态一并算进来。 -->
-        <ArtTable v-if="showTable" :loading="listLoading" :data="filtered" :columns="columns" />
-        <!-- host-context.ts 的 reload 注释承诺：清单拉不到时页面显示「没有可管理的主机」 -->
-        <ElEmpty
-          v-else-if="!ctx.hosts.length"
-          class="docker-empty"
-          description="没有可管理的主机"
-        />
-        <ElEmpty v-else-if="hasFilter" class="docker-empty" description="没有符合筛选条件的网络">
-          <ElButton size="small" @click="onReset">清除筛选</ElButton>
-        </ElEmpty>
-        <ElEmpty v-else class="docker-empty" description="该主机上还没有网络" />
-      </template>
-    </DockerPage>
+      <!-- 两种空态分开：主机上没有网络 vs 筛选没命中（后者给「清除筛选」）。
+           纪律与容器/镜像页一致（「没有」与「筛没了」说成一句会让人以为机器空了）；
+           空态渲染在本组件、不写进 ArtTable 的 `#empty` 插槽：ArtTable 不转发该插槽
+           （内部把 ElTable 的空态写死成「暂无数据」），写进去会被静默丢弃。
+           清单还没到时也不喊「没有网络」（那时还不知道有没有主机），故 v-if 把
+           主机清单的加载态一并算进来。 -->
+      <ArtTable v-if="showTable" :loading="listLoading" :data="filtered" :columns="columns" />
+      <!-- host-context.ts 的 reload 注释承诺：清单拉不到时页面显示「没有可管理的主机」 -->
+      <ElEmpty v-else-if="!ctx.hosts.length" class="docker-empty" description="没有可管理的主机" />
+      <ElEmpty v-else-if="hasFilter" class="docker-empty" description="没有符合筛选条件的网络">
+        <ElButton size="small" @click="onReset">清除筛选</ElButton>
+      </ElEmpty>
+      <ElEmpty v-else class="docker-empty" description="该主机上还没有网络" />
+    </ElCard>
 
     <!-- 删除网络的确认弹窗：标准档（普通确认，无逐字输入）。网络没有保护粒度
          （快照 DTO 里没有 protected 字段），不需要 🔒/强制操作的处理。 -->
@@ -67,27 +51,46 @@
 </template>
 
 <script setup lang="ts">
+  /**
+   * 网络 tab（7a 平移自 views/networks.vue，逻辑零改动）：
+   *
+   * 数据源从「本组件自己拉快照（useDockerHostState）」换成页面级共享上下文 ——
+   * props.state / props.loading / props.refresh 由 views/resources.vue 下发（一份快照
+   * 三 tab 共用，切 tab 不重拉）；主机上下文仍是模块的 provide/inject（页面是提供者），
+   * 本组件经 useDockerHost() 注入后取 ctx.hosts。
+   *
+   * 主机切换的重置纪律（清筛选）收拢为页面级一份（resources.vue 的 onHostSwitch
+   * 调用本组件暴露的 resetForHostSwitch），不在每个 tab 里各写一份 watch。
+   */
   import { computed, h, ref } from 'vue'
-  import { ElButton, ElEmpty, ElMessage } from 'element-plus'
+  import { ElButton, ElCard, ElEmpty, ElMessage } from 'element-plus'
   import { useAuth } from '@/hooks/core/useAuth'
   import { PermDockerDelete } from '@/enums/permission'
   import ArtSearchBar from '@/components/core/forms/art-search-bar/index.vue'
   import ArtTable from '@/components/core/tables/art-table/index.vue'
   import ArtTableHeader from '@/components/core/tables/art-table-header/index.vue'
-  import DockerActionConfirm from '../components/action-confirm.vue'
-  import DockerActionMenu from '../components/action-menu.vue'
-  import DockerPage from '../components/docker-page.vue'
+  import DockerActionConfirm from '../action-confirm.vue'
+  import DockerActionMenu from '../action-menu.vue'
   import type { ColumnOption } from '@/types/component'
-  import type { DockerNetworkItem } from '../api'
-  import { runErrorMessage, useDockerCmds } from '../composables/useDockerCmds'
-  import { useDockerHostState } from '../composables/useDockerHostState'
-  import { filterNetworks } from '../utils/snapshot'
-  import { provideDockerHost } from '../utils/host-context'
+  import type { DockerNetworkItem, DockerStateResp } from '../../api'
+  import { runErrorMessage, useDockerCmds } from '../../composables/useDockerCmds'
+  import { filterNetworks } from '../../utils/snapshot'
+  import { useDockerHost } from '../../utils/host-context'
 
-  // 主机上下文是**页面级** provide/inject：DockerPage 与 HostSwitcher 都用 useDockerHost() 取它，
-  // 而模块里没有别的 provide 调用方 —— 页面就是这一层的提供者，故在这里 provide 并直接用其返回值。
-  // 不要解构：上下文字段是 getter，解构会把 hostId 定格成进入页面时的 ''（主机清单尚未到达）。
-  const ctx = provideDockerHost()
+  defineOptions({ name: 'DockerNetworksTab' })
+
+  const props = defineProps<{
+    /** 页面级共享快照（resources.vue 的 useDockerHostState.state，三 tab 同源）。 */
+    state: DockerStateResp | null
+    /** 快照拉取在途（页面级一份；本 tab 的表格加载态还叠加主机清单加载）。 */
+    loading: boolean
+    /** 重拉共享快照（页面级 refresh：写指令成功后、表头刷新按钮都走它）。 */
+    refresh: () => void | Promise<void>
+  }>()
+
+  // 主机上下文经 provide/inject 注入（页面 resources.vue 是提供者）。
+  // 不要解构：上下文字段是 getter，解构会把 hostId 定格成 inject 那一刻的值。
+  const ctx = useDockerHost()
   const { hasAuth } = useAuth()
 
   const showSearchBar = ref(false)
@@ -95,26 +98,18 @@
 
   const canDelete = computed(() => hasAuth(PermDockerDelete))
 
-  // 快照与四态收口在 composable（hosts 清单、seq 守卫、主机切换后的重拉都在它里面）。
-  // 主机切换 = 换一台机器：本页既有重置纪律是「清空筛选」。
-  const {
-    state,
-    loading,
-    listLoading,
-    stale,
-    ageSeconds,
-    neverReported,
-    loadError,
-    hasState,
-    refresh
-  } = useDockerHostState({
-    onHostSwitch: () => {
-      searchForm.value = {}
-    }
-  })
+  /** 表格的加载态：快照在拉，或主机清单还没到（后者尚不知有没有主机，不能先喊「没有」）。 */
+  const listLoading = computed(() => props.loading || ctx.loading)
 
-  // 写指令通道：受理 + 轮询 + 成功后重拉（重拉就是上面的 refresh）。
-  const { run, pendingId, busy } = useDockerCmds({ refresh })
+  /** 主机切换的重置纪律（原页面 onHostSwitch 的正文，平移零改动）：清空筛选。 */
+  function resetForHostSwitch() {
+    searchForm.value = {}
+  }
+  defineExpose({ resetForHostSwitch })
+
+  // 写指令通道：受理 + 轮询 + 成功后重拉（重拉就是页面级共享的 refresh）。
+  // 主机来源走 inject（本组件是页面级 provide 的后代，setup 期注入合法）。
+  const { run, pendingId, busy } = useDockerCmds({ refresh: () => props.refresh() })
 
   const searchItems = computed(() => [
     {
@@ -131,7 +126,7 @@
     () => Boolean(searchForm.value.keyword) || Boolean(searchForm.value.internalOnly)
   )
 
-  const filtered = computed(() => filterNetworks(state.value?.networks ?? [], searchForm.value))
+  const filtered = computed(() => filterNetworks(props.state?.networks ?? [], searchForm.value))
 
   /** 有命中行就渲染表格；纯加载中也用表格的 loading 遮罩，空态只在加载结束后判断。 */
   const showTable = computed(() => listLoading.value || filtered.value.length > 0)
@@ -243,7 +238,7 @@
 </script>
 
 <style lang="scss" scoped>
-  // 空态渲染在本页（ArtTable 不转发 `#empty`）：给它接近表格空态的留白。
+  // 空态渲染在本组件（ArtTable 不转发 `#empty`）：给它接近表格空态的留白。
   .docker-empty {
     padding: 56px 0;
   }

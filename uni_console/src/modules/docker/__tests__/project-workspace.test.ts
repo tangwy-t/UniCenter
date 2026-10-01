@@ -201,11 +201,7 @@ async function makeRouter(): Promise<Router> {
         component: ProjectWorkspace
       },
       // 容器行点击的目标路由（占位组件即可 —— 断言的是目标地址，不是那页的渲染）。
-      {
-        path: '/docker/container-detail/:id',
-        name: 'DockerContainerDetail',
-        component: { template: '<div />' }
-      }
+      { path: '/docker/containers', component: { template: '<div />' } }
     ]
   })
   await router.push('/')
@@ -362,13 +358,13 @@ describe('服务卡动作派发（语义平移自列表页：按容器逐个发�
     expect(calls[0]![1]).toMatchObject({ action: 'container:start', target: 'uni-center-web' })
   })
 
-  it('点容器行 → 进容器详情（带 host query）', async () => {
+  it('点容器行 → 容器列表页 ?host=&id=（7b：深链改指统一表抽屉，旧详情路由已删）', async () => {
     const w = await mountWorkspace()
     await w.findAll('.pws-container')[0]!.trigger('click')
     await flushPromises()
-    expect(currentRouter!.currentRoute.value.name).toBe('DockerContainerDetail')
-    expect(currentRouter!.currentRoute.value.params.id).toBe('c1')
+    expect(currentRouter!.currentRoute.value.path).toBe('/docker/containers')
     expect(currentRouter!.currentRoute.value.query.host).toBe('h1')
+    expect(currentRouter!.currentRoute.value.query.id).toBe('c1')
   })
 
   it('受保护网元的写动作先走确认弹窗（不直接发指令，弹窗里有「强制操作」开关）', async () => {

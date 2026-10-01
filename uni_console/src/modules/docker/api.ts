@@ -26,6 +26,8 @@ export type DockerRegistryItem = Api.Docker.DockerRegistryItem
 export type DockerRegistryListResp = Api.Docker.DockerRegistryListResp
 export type DockerTaskItem = Api.Docker.DockerTaskItem
 export type DockerTaskListResp = Api.Docker.DockerTaskListResp
+export type DockerStatsHistoryResp = Api.Docker.DockerStatsHistoryResp
+export type DockerStatsHistorySample = Api.Docker.DockerStatsHistorySample
 
 /**
  * 仓库凭据的创建/更新请求体（形状对齐 uni_core 的 request.DockerRegistrySaveReq）。
@@ -87,6 +89,23 @@ export function fetchDockerState(hostId: string) {
  */
 export function fetchDockerContainers(params: DockerWorkloadQuery = {}) {
   return request.get<DockerWorkloadListResp>({ url: `${PREFIX}/docker/containers`, params })
+}
+
+/**
+ * stats 历史回看（P2 监控面 · 历史半边）：GET /docker/hosts/:id/containers/:cid/
+ * stats-history —— 升序、最多 60 样本（30s × 60 = 30 分钟），无历史给空数组。
+ *
+ * 用途是抽屉打开时的**预填**：container-stats 先拉这一份让曲线立即有 30 分钟
+ * 形状，再开实时流，两段衔接见 utils/stats 的 mergeStatsHistory。样本与流帧
+ * 同义不同名（这里走 apigen 的 camelCase，流帧是 agent 的 snake_case 裸行），
+ * 对齐收在衔接函数里。showErrorMessage 关掉：历史是回看增强不是门槛，拉不到
+ * 就静默降级为纯实时 —— 抽屉还开着，结论句不进 toast。
+ */
+export function fetchDockerStatsHistory(hostId: string, containerId: string) {
+  return request.get<DockerStatsHistoryResp>({
+    url: `${PREFIX}/docker/hosts/${hostId}/containers/${containerId}/stats-history`,
+    showErrorMessage: false
+  })
 }
 
 /** 受理一条指令（202 + ref）。一期只用到四个只读动作。
@@ -266,6 +285,51 @@ export function openDockerPullStream(
 ): Promise<Response> {
   const { accessToken } = useUserStore()
   return fetch(streamUrl(`/docker/hosts/${hostId}/cmds/${ref}/pull`), {
+    method: 'GET',
+    headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
+    signal
+  })
+}
+
+// ── 构建与推送的进度流（P2·分发闭环）────────────────────────────────
+// 与 openDockerPullStream 同一条纪律（fetch + ReadableStream、Authorization 头照
+// http 层的口径手工带、**指令 pending 期间即可接入** —— 会话由 core 受理时按
+// 句柄 build_<ref>/push_<ref> 预登记、断开 = 服务端向 agent 下发 cancel 终止操作
+// 本身）。三条端点各自只承载自己的进度族（handler 按记录的 action 拒绝交叉接入），
+// 行形状不同：build 是步骤/文本行（id/status/stream），push 与 pull 同字段集
+//（daemon 的同一个 JSON 进度流）。
+
+/**
+ * 构建进度流（P2）：GET cmds/:ref/build —— NDJSON 构建记录行
+ * （{"seq","t","id","status","stream","done","error","eof"}，eof 挂在最后一条
+ * 记录行上；消费端见 utils/build-push.ts 的解析与播报折叠）。
+ */
+export function openDockerBuildStream(
+  hostId: string,
+  ref: string,
+  signal: AbortSignal
+): Promise<Response> {
+  const { accessToken } = useUserStore()
+  return fetch(streamUrl(`/docker/hosts/${hostId}/cmds/${ref}/build`), {
+    method: 'GET',
+    headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
+    signal
+  })
+}
+
+/**
+ * 推送进度流（P2）：GET cmds/:ref/push —— NDJSON 进度行（字段集与 pull 端点
+ * 逐字相同：{"seq","t","id","status","current","total","done","error","eof"}，
+ * 只是层的语义词换成推送侧 —— Pushing/Pushed；消费端复用 utils/pull.ts 的折叠器
+ * 经 createPushFeed 换语义）。
+ */
+export function openDockerPushStream(
+  hostId: string,
+  ref: string,
+  signal: AbortSignal
+): Promise<Response> {
+  const { accessToken } = useUserStore()
+  return fetch(streamUrl(`/docker/hosts/${hostId}/cmds/${ref}/push`), {
     method: 'GET',
     headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
     signal

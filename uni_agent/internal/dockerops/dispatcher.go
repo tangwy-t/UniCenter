@@ -43,6 +43,8 @@ var implementedActions = map[string]bool{
 	agentproto.DockerActionImageTag:         true,
 	agentproto.DockerActionImageSave:        true,
 	agentproto.DockerActionImageLoad:        true,
+	agentproto.DockerActionImageBuild:       true, // P2·分发面：构建（上下文 tar + 进度流）
+	agentproto.DockerActionImagePush:        true, // P2·分发面：推送（4c 凭据 + 进度流）
 	agentproto.DockerActionVolumeRemove:     true,
 	agentproto.DockerActionVolumePrune:      true,
 	agentproto.DockerActionNetworkRemove:    true,
@@ -106,6 +108,11 @@ var writeTimeouts = map[string]time.Duration{
 	agentproto.DockerActionImageTag:    30 * time.Second,
 	agentproto.DockerActionImageSave:   15 * time.Minute,
 	agentproto.DockerActionImageLoad:   15 * time.Minute,
+	// P2：构建给 30 分钟 —— 它是三族里最可能长时间合法的（冷缓存下的大工程构建，
+	// 15 分钟的 pull/save/load 档对它不成立；core 的 dockerpolicy 行同值，逐行
+	// 对齐的守卫在 write_test.go）；推送与拉取同档 15 分钟（同为网络长传输）。
+	agentproto.DockerActionImageBuild: 30 * time.Minute,
+	agentproto.DockerActionImagePush:  15 * time.Minute,
 
 	agentproto.DockerActionVolumeRemove: 60 * time.Second,
 	agentproto.DockerActionVolumePrune:  120 * time.Second,

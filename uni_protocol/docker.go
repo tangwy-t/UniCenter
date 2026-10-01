@@ -68,6 +68,17 @@ const (
 	DockerActionImageInspect = "image:inspect"
 	DockerActionImageSave    = "image:save"
 	DockerActionImageLoad    = "image:load"
+	// DockerActionImageBuild 是镜像构建（P2·分发闭环的一半）：Dockerfile + 构建
+	// 上下文（transferDir 里的 tar 文件，见 DockerCmdOptions.Context 的契约）→ 镜像。
+	// 形态与 image:pull 同族：15 分钟级长耗时写指令 + 进度走派生会话（build_<ref>），
+	// 确认档标准（构建的产物是一枚镜像，覆盖/删除风险都没有 —— 每个 tag 都有
+	// 下一步 image:tag 可以改挂）。
+	DockerActionImageBuild = "image:build"
+	// DockerActionImagePush 是镜像推送（P2·分发闭环的另一半）：本地镜像 → registry。
+	// 凭据复用 4c 的仓库凭据面（options.registry + Auth 三元组瞬时注入，与 image:pull
+	// 同一把键同一份解析）；进度走派生会话（push_<ref>）。确认档标准（同 image:pull：
+	// 推送的目标 tag 是否可覆盖由 registry 侧策略决定，本指令只是执行一次 push）。
+	DockerActionImagePush = "image:push"
 
 	DockerActionVolumeRemove = "volume:remove"
 	DockerActionVolumePrune  = "volume:prune"
@@ -170,6 +181,23 @@ const (
 	// 也远小于此，上限只为挡住畸形/恶意的超长字符串挤占凭据表索引）。
 	maxDockerRegistryAddrBytes = 255
 
+	// ── P2·镜像分发（image:build）的 options 上限 ─────────────────────────
+	//
+	// MaxDockerBuildContextBytes 是构建上下文 tar 的字节上限（512MB，**导出常量**：
+	// agent 在文件边界上执行这道闸 —— 协议定义尺、agent 执法，两端同一个数）：
+	// 对齐 agent 升级发布物的下载上限（downloadCap，本仓库唯一现存的「文件级」
+	// 尺寸先例）—— 构建上下文是**新的输入面**（浏览器/scp 侧打包好的任意 tar），
+	// 上限挡住的是「解压炸弹 / 恶意大文件把 agent 的扫描与 daemon 的上传吃满」。
+	// 真实构建上下文（源码 + Dockerfile）远到不了这个量级。
+	MaxDockerBuildContextBytes = 512 << 20
+	// maxDockerBuildArgs 是 build-args 的条目上限（与 create 的 env 32 同档：
+	// 表单里一次构建用不到几十个参数，上限只为挡住畸形/恶意的巨映射）。
+	maxDockerBuildArgs = 32
+	// maxDockerBuildArgValueBytes 是 build-arg 单值的字节上限（512B，与快照字符串
+	// 档一致）。**刻意不传秘密**：build-arg 会永驻镜像历史（docker history 可见），
+	// 协议注释与前端都必须把这一点讲清楚 —— 值上限只需挡住畸形/恶意的超长值。
+	maxDockerBuildArgValueBytes = 512
+
 	// ── 四支柱·创建面（container:create）的 options 上限 ─────────────────
 	//
 	// maxDockerCreateListItems 是 ports/env/mounts 各自的条目上限（与 exec argv 的
@@ -234,6 +262,13 @@ var dockerActionSpecs = []DockerActionSpec{
 	// 覆盖已有产物时确认值是**文件名**（§7.5 两段确认复用 cmd/result）。
 	{Action: DockerActionImageSave, Required: []string{"target", "filename"}, Confirm: DockerConfirmFilename},
 	{Action: DockerActionImageLoad, Required: []string{"filename"}},
+	// P2·分发闭环：build 的必填项是 context（上下文 tar 文件名）与 tag（目标镜像引用
+	// —— 分发的产物必须有名字，与 image:save 要求 filename 同一理由；想再挂别名走
+	// image:tag）。与 create 同型：**没有 target**（动作对象是「将要诞生的镜像」）。
+	{Action: DockerActionImageBuild, Required: []string{"context", "tag"}},
+	// P2·分发闭环：push 的必填项是 target（本地镜像引用，与 pull 同一字段同一形态 ——
+	// 都用镜像族早已冻结的 target，不为 push 新开字段）。registry 可选（4c 凭据键）。
+	{Action: DockerActionImagePush, Required: []string{"target"}},
 
 	{Action: DockerActionVolumeRemove, Required: []string{"target"}},
 	{Action: DockerActionVolumePrune, Confirm: DockerConfirmDelete},
@@ -273,6 +308,8 @@ var dockerOptionFields = []string{
 	"mem_limit_mb", "network", "start",
 	// 4c 仓库凭据。
 	"registry",
+	// P2·镜像分发（image:build 专属）。
+	"context", "dockerfile", "tag", "args",
 }
 
 // AllDockerActions 返回全部合法 action（顺序 = 白名单书写顺序）。
@@ -317,6 +354,15 @@ var (
 	// `<配置文件>.bak-<令牌>` —— 路径分隔符/`..`/空白因此都不可能出现在这条通道上
 	// （§8 路径白名单：协议上永远不出现路径）。
 	dockerBackupTokenRe = regexp.MustCompile(`^\d{8}-\d{6}$`)
+	// 构建上下文 tar 文件名（P2）：与 image:save/load 的 tar 文件名同一纪律（只传名、
+	// **不含路径分隔符与 ..**），后缀放宽到 tar 的两种 gzip 压缩形态 —— 构建上下文
+	// 是源码目录的打包，gzip 是它的常见形态；而 save 的镜像 tar 是未压缩的（daemon
+	// 原生导出），两者后缀集不同是各自事实的如实表达，不是口径分叉。
+	dockerBuildContextFilenameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*\.(tar|tar\.gz|tgz)$`)
+	// build-arg 键：POSIX 风格标识符（与 create 的 env 键同一把尺 —— ARG 名就是
+	// 会被 Dockerfile 拿去引用的符号，形态必须收敛；首字符不允许数字，避免与
+	// `docker build --build-arg` 的短选项形态混淆）。
+	dockerBuildArgKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	// 仓库地址（4c）：主机名（label 形态，含点/横线/xhy，或 IP）+ 可选 `:端口`。
 	// **不含协议头与镜像路径** —— RegistryAuth 的 ServerAddress 与凭据库的唯一键
 	// 都是这个形态；带 scheme 或 "registry/img:tag" 会被判成形态非法而不是静默截断，
@@ -354,6 +400,63 @@ func IsDockerRegistryAddr(s string) bool {
 // IsDockerBackupToken 报告 s 是否是合法的备份令牌（yyyyMMdd-HHmmss）。
 // 它是 compose.file:write 回滚模式的**唯一**现场输入，agent 据此重建备份文件路径。
 func IsDockerBackupToken(s string) bool { return s != "" && dockerBackupTokenRe.MatchString(s) }
+
+// IsDockerBuildContextFilename 报告 s 是否是合法的构建上下文 tar 文件名（image:build
+// 唯一的上下文引用口径：transferDir 内的文件名，tar / tar.gz / tgz 三种形态）。
+// 与 IsDockerTarFilename 同一纪律 —— 协议上不出现路径，就没有路径逃逸面。
+func IsDockerBuildContextFilename(s string) bool {
+	return s != "" && dockerBuildContextFilenameRe.MatchString(s)
+}
+
+// IsDockerBuildSubpath 报告 s 是否是合法的**上下文内相对路径**（image:build 的
+// dockerfile 选项）：
+//   - 相对路径、POSIX 分隔符、段非空且匹配 `[A-Za-z0-9][A-Za-z0-9._-]*`；
+//   - 没有任何一段是 `..`（路径逃逸形态在协议层出不去 —— 与 tar 文件名纪律互补：
+//     文件名拦「进目录」，段白名单拦「出目录」）；
+//   - 反斜杠与 NUL 一律拒绝（反斜杠在 Linux 上不是分隔符，但它是另一套文件名的
+//     分隔符 —— 与 transferPath 的取向一致）。
+//
+// 为什么不做成「只要不含 .. 就行的宽松正则」：dockerfile 路径最终会变成
+// ImageBuildOptions.Dockerfile 交给 daemon 在上下文里解析，daemon 对它的解析规则
+// 随版本漂移；协议层把形态收敛到「普通文件的相对路径」子集，daemon 的解析就
+// 只剩一种答案。
+func IsDockerBuildSubpath(s string) bool {
+	if s == "" || len(s) > MaxDockerStringBytes {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' || s[i] == 0 {
+			return false
+		}
+	}
+	segs := strings.Split(s, "/")
+	for _, seg := range segs {
+		if seg == "" || seg == ".." || seg == "." {
+			return false
+		}
+		// 每段用与容器/卷名同一把尺（首字符字母数字，后续字母数字/点/下划线/横线）。
+		if seg[0] < '0' || seg[0] > '9' {
+			if (seg[0] < 'a' || seg[0] > 'z') && (seg[0] < 'A' || seg[0] > 'Z') {
+				return false
+			}
+		}
+		for j := 1; j < len(seg); j++ {
+			c := seg[j]
+			switch {
+			case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9',
+				c == '.', c == '_', c == '-':
+			default:
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// IsDockerBuildArgKey 报告 s 是否是合法的 build-arg 键（POSIX 风格标识符，
+// 与 create 的 env 键同一把尺）：键会变成 Dockerfile 里被引用的符号，形态
+// 必须收敛到标识符子集（入口校验见 ValidateDockerCmdOptions 的 args 段）。
+func IsDockerBuildArgKey(s string) bool { return s != "" && dockerBuildArgKeyRe.MatchString(s) }
 
 func isDockerName(s string) bool { return s != "" && dockerNameRe.MatchString(s) }
 
@@ -403,6 +506,16 @@ func IsDockerSessionID(s string) bool {
 // 前缀 5 字符保证总长过 IsDockerSessionID 的 16 字节下限（ref 是 ≥19 位的十进制串），
 // 即使未来 ref 生成器变短，5+11=16 仍然成立（ref 的最短合法形态也不会再短）。
 func DockerPullSessionID(ref string) string { return "pull_" + ref }
+
+// DockerBuildSessionID / DockerPushSessionID 是构建/推送指令的进度会话句柄：
+// `"build_" + ref` / `"push_" + ref`（P2·分发闭环，照 4b 的派生会话模式各建各的）。
+//
+// 与 DockerPullSessionID 的选型论证**逐字同源**（受理时预登记、两端同一派生函数、
+// 公开不构成授权），差别只在动作的对象不同 —— 句柄前缀就是动作名，三族进度流
+// 不会共串一把句柄。前缀长度同为 5 字符（"build_"），总长下限同样成立。
+func DockerBuildSessionID(ref string) string { return "build_" + ref }
+
+func DockerPushSessionID(ref string) string { return "push_" + ref }
 
 // ── options 取值与校验 ──────────────────────────────────────────────────
 
@@ -512,6 +625,17 @@ func dockerOptionValue(o *DockerCmdOptions, field string) string {
 		return strconv.FormatBool(*o.Start)
 	case "registry":
 		return o.Registry
+	case "context":
+		return o.Context
+	case "dockerfile":
+		return o.Dockerfile
+	case "tag":
+		return o.Tag
+	case "args":
+		if len(o.Args) == 0 {
+			return ""
+		}
+		return "set"
 	default:
 		// 未知字段名返回空串 = 必填校验失败：字段名写错是可发现的红灯，不是静默放行。
 		return ""
@@ -633,11 +757,23 @@ func ValidateDockerCmdOptions(action string, o *DockerCmdOptions) error {
 	} else if f := firstSetCreateField(o); f != "" {
 		return decodeErr(StagePayload, f, ErrInvalidPayload)
 	}
-	// 仓库凭据引用（4c）：只属于 image:pull（同 backup 的字段归属纪律），
-	// 形态必须是不带协议头与路径的仓库地址 ——「凭据键」与「RegistryAuth 的
-	// ServerAddress」是同一个值，非法的键不能让它进入凭据查找。
+	// 分发面（P2）：build 专属字段同一纪律 —— 只在 build 上校验、只属于 build。
+	// 与 create 的字段归属拒绝分开写而不是合成一张表：两组字段的语义不同
+	//（create 的牛在那个动作、build 的牛在这个动作），合表会把两条行动线糊在一起。
+	if action == DockerActionImageBuild {
+		if err := validateDockerBuild(o); err != nil {
+			return err
+		}
+	} else if f := firstSetBuildField(o); f != "" {
+		return decodeErr(StagePayload, f, ErrInvalidPayload)
+	}
+	// 仓库凭据引用（4c）：只属于 image:pull 与 image:push（P2 起推拉共用同一把
+	// 凭据键 —— 同 backup 的字段归属纪律），形态必须是不带协议头与路径的仓库地址
+	// ——「凭据键」与「RegistryAuth 的 ServerAddress」是同一个值，非法的键不能
+	// 让它进入凭据查找。
 	if o.Registry != "" {
-		if action != DockerActionImagePull || !IsDockerRegistryAddr(o.Registry) {
+		if (action != DockerActionImagePull && action != DockerActionImagePush) ||
+			!IsDockerRegistryAddr(o.Registry) {
 			return decodeErr(StagePayload, "registry", ErrInvalidPayload)
 		}
 	}
@@ -764,6 +900,67 @@ func validateDockerContainerCreate(o *DockerCmdOptions) error {
 	return nil
 }
 
+// firstSetBuildField 返回第一个被填上的 build 专属字段名（全部缺席 = ""）。
+// 只在 action != image:build 时被调用（与 firstSetCreateField 同一纪律：字段归属
+// 唯一，挂在别的 action 上是归属错误，必须显式拒绝而不是无视）。
+func firstSetBuildField(o *DockerCmdOptions) string {
+	if o == nil {
+		return ""
+	}
+	switch {
+	case o.Context != "":
+		return "context"
+	case o.Dockerfile != "":
+		return "dockerfile"
+	case o.Tag != "":
+		return "tag"
+	case len(o.Args) > 0:
+		return "args"
+	}
+	return ""
+}
+
+// validateDockerBuild 校验 image:build 的 options **逐字段**（P2·分发面）。
+//
+// 四个字段各自一把尺（与 validateDockerContainerCreate 同一取向）：
+//   - context：tar 文件名白名单（transferDir 产物名纪律 —— 协议不出现路径，
+//     「文件名里带 ..」这类逃逸形态在第一道闸就出不去）；
+//   - dockerfile：上下文内子路径白名单（IsDockerBuildSubpath）—— 它最终进
+//     daemon 的 build 请求，是**它**在上下文里解析的相对路径，不是宿主路径；
+//   - tag：IsDockerImageRef（与 pull 的 target 同一把镜像引用尺）—— 它是构建
+//     产物的名字，daemon 会把它写进 `docker images` 的 REPOSITORY:TAG；
+//   - args：键 POSIX 标识符、条目/单值上限、值不含 NUL/换行 —— 值最终直传
+//     daemon 的 build-args（SDK 不经 shell），格式仍必须收敛。
+//
+// build **没有 target**（与 create 同型：动作对象是「将要诞生的镜像」，语义都在
+// context/tag 里），带 target 是字段归属错误 —— 这里显式拒掉。
+func validateDockerBuild(o *DockerCmdOptions) error {
+	if o.Target != "" {
+		return decodeErr(StagePayload, "target", ErrInvalidPayload)
+	}
+	if o.Context != "" && !IsDockerBuildContextFilename(o.Context) {
+		return decodeErr(StagePayload, "context", ErrInvalidPayload)
+	}
+	if o.Dockerfile != "" && !IsDockerBuildSubpath(o.Dockerfile) {
+		return decodeErr(StagePayload, "dockerfile", ErrInvalidPayload)
+	}
+	if o.Tag != "" && !IsDockerImageRef(o.Tag) {
+		return decodeErr(StagePayload, "tag", ErrInvalidPayload)
+	}
+	if len(o.Args) > maxDockerBuildArgs {
+		return decodeErr(StagePayload, "args", ErrInvalidPayload)
+	}
+	for k, v := range o.Args {
+		if !IsDockerBuildArgKey(k) {
+			return decodeErr(StagePayload, "args", ErrInvalidPayload)
+		}
+		if len(v) > maxDockerBuildArgValueBytes || strings.ContainsAny(v, "\x00\n") {
+			return decodeErr(StagePayload, "args", ErrInvalidPayload)
+		}
+	}
+	return nil
+}
+
 // validateDockerPortBind 校验一条端口映射（regex 匹配后补做范围判定：
 // 正则在位数上拦 0 与畸形，65536-99999 这档越界由数值判定收掉）。
 func validateDockerPortBind(s string) error {
@@ -876,7 +1073,7 @@ func validateDockerTarget(action, target string) error {
 			return decodeErr(StagePayload, "target", ErrInvalidPayload)
 		}
 	case DockerActionImageRemove, DockerActionImagePull, DockerActionImageInspect,
-		DockerActionImageSave:
+		DockerActionImageSave, DockerActionImagePush:
 		if !IsDockerImageRef(target) {
 			return decodeErr(StagePayload, "target", ErrInvalidPayload)
 		}
@@ -1358,7 +1555,35 @@ type DockerCmdOptions struct {
 	//
 	// 字段归属纪律照 backup 的先例：只属于 image:pull，挂在别的 action 上会被
 	// 校验拒绝而不是无视。
+	//
+	// P2 起它同样属于 image:push（4c 凭据面是**镜像分发**的公共设施，拉与推共用
+	// 同一把凭据键与同一条注入路径）：两个 action 之外的归属仍是拒绝。
 	Registry string `json:"registry,omitempty"`
+
+	// ── P2·镜像分发（image:build 专属）────────────────────────────────
+	//
+	// 这四个字段**只属于 image:build**（照 backup/create 的归属纪律），挂在别的
+	// action 上会被校验拒绝而不是无视。逐字段白名单在 ValidateDockerCmdOptions。
+	//
+	// Context 是构建上下文引用：transferDir 内的 tar 文件名（tar / tar.gz / tgz），
+	// **协议上不出现路径** —— 与 image:save/load 的 filename 同一纪律：UI 只传名，
+	// agent 按 transferDir 自己拼装；文件本体由运维走 scp/SFTP 落到主机（既有
+	// 搬运路径，spec §7.5）。它是**新的输入面**（一份由别处打包好的 tar），agent
+	// 侧的解包校验（路径穿越、条目上限、尺寸闸）是这道输入面上的护栏。
+	Context string `json:"context,omitempty"`
+	// Dockerfile 是 Dockerfile 在上下文内的相对路径（缺省 "Dockerfile"）。
+	// 形态是**上下文内子路径白名单**（IsDockerBuildSubpath：无 `..`、无绝对路径、
+	// 无反斜杠），它不是宿主路径 —— daemon 只在这个上下文里解析它。
+	Dockerfile string `json:"dockerfile,omitempty"`
+	// Tag 是构建产物的目标镜像引用（IsDockerImageRef；不含 tag 的镜像名按 docker
+	// 惯例由 agent 补 :latest，与 image:tag 的 defaultImageTag 同一行为）。
+	Tag string `json:"tag,omitempty"`
+	// Args 是 build-args 键值表（缺省空）。键是 POSIX 标识符（IsDockerBuildArgKey）、
+	// 条目 ≤32、单值 ≤512B 且不含 NUL/换行。
+	// **刻意不给秘密开通道**：build-arg 会以明文驻留在镜像分层历史里
+	// （docker history 可见），用它传凭据等于把秘密写进镜像 —— 需要秘密构建
+	// 走 docker buildx secrets 的宿主侧配置，不是这条协议通道的职责。
+	Args map[string]string `json:"args,omitempty"`
 }
 
 // DockerCmd 是一条操作指令。
@@ -1369,13 +1594,14 @@ type DockerCmd struct {
 	Options DockerCmdOptions `json:"options"`
 	// Confirm 是强确认档的确认值（标准档为空）。服务端校验，agent 二次校验。
 	Confirm string `json:"confirm,omitempty"`
-	// Auth 是 core 随 image:pull 指令**瞬时注入**的仓库认证（4c，选型 A）：
-	// 凭据库的密码只在受理这一刻解出、只随这一条消息去往要拉取的那台主机，
-	// agent 执行完毕即弃 —— 任何路径不落盘、不进进度帧、不进 result。
+	// Auth 是 core 随 image:pull / image:push 指令**瞬时注入**的仓库认证（4c，选型 A）：
+	// 凭据库的密码只在受理这一刻解出、只随这一条消息去往要拉取/推送的那台主机，
+	// agent 执行完毕即弃 —— 任何路径不落盘、不进进度帧、不进 result。P2 起推送与
+	// 拉取共用这一条注入路径（同一把凭据键、同一个 Decrypt 读口）。
 	//
 	// nil = 无凭据：与 4b 之前的拉取**逐字一致**（公共仓库或主机侧 docker login）。
-	// 协议只允许它出现在 image:pull 上，且 registry 必须与 options.registry
-	// 同一把键（防「用户要的凭据」与「下发的凭据」漂移，见 Validate）。
+	// 协议只允许它出现在 image:pull / image:push 上，且 registry 必须与
+	// options.registry 同一把键（防「用户要的凭据」与「下发的凭据」漂移，见 Validate）。
 	Auth *DockerRegistryAuth `json:"auth,omitempty"`
 }
 
@@ -1420,10 +1646,11 @@ func (c *DockerCmd) Validate() error {
 		return err
 	}
 	// 4c：认证三元组只许挂在 image:pull 上（与 options.registry 的归属纪律一致）；
+	// P2 起 image:push 同源使用（推拉共用同一把凭据键与同一条瞬时注入路径）。
 	// 且两个 registry 必须是同一把键 —— 漂移意味着「用户要的凭据」与「下发的凭据」
 	// 不是同一份，agent 宁可判非法执行，也不拿着错凭据去 daemon 上试一遍。
 	if c.Auth != nil {
-		if c.Action != DockerActionImagePull {
+		if c.Action != DockerActionImagePull && c.Action != DockerActionImagePush {
 			return decodeErr(StagePayload, "auth", ErrInvalidPayload)
 		}
 		if err := c.Auth.Validate(); err != nil {
@@ -1754,6 +1981,97 @@ func (p *DockerPullProgressItem) Validate() error {
 	return nil
 }
 
+// ── P2·分发闭环的进度记录载荷（image:build / image:push）────────────────────
+//
+// 与 DockerPullProgressItem 同一形态纪律：编码成一条 JSON 行放进帧 data、一行一条、
+// 行尾换行；**不自成一条协议消息**（session_id / seq / eof 与帧共用生命周期）。
+
+// DockerPushProgressItem 是 image:push 进度流会话的一个记录点。字段与
+// DockerPullProgressItem **同形**（id/status/current/total + done/error 终态项）——
+// daemon 的 push 与 pull 是同一个 JSON 进度流（jsonmessage），协议上如实共用同一把
+// 尺。独立成类型而不是直接复用 pull 的类型：两个动作的进度在协议上各归各家
+// （push 的终态/字段将来可以独立演化 —— 例如多 tag 推送逐仓库进度），而 pull 的
+// 类型自 4b 起冻结（零改动纪律）。终态项（Done/Error）恰一条、恰在最后；Distinct
+// 校验与 pull 同款。
+type DockerPushProgressItem struct {
+	// T 是该记录点的挂钟（unix 毫秒，agent 时钟）。与 stats/pull 同口径：只作
+	// 时间轴刻度，不参与陈旧度判定。
+	T int64 `json:"t"`
+	// ID 是层 id / 阶段标识（推送阶段通常没有层 —— Pushing 行不带 id；图层
+	// 复用时才有）；消息类记录留空。
+	ID string `json:"id,omitempty"`
+	// Status 是原文状态文案（"The push refers to …" / "Pushing" / "Pushed"…）。
+	Status string `json:"status,omitempty"`
+	// Current / Total 是该层已传输与总字节；未知时为 0（同 pull 的 progressDetail 缺席）。
+	Current int64 `json:"current,omitempty"`
+	Total   int64 `json:"total,omitempty"`
+	// Done 是成功终态项，Error 是失败终态项（daemon 原始 errorDetail 文本），
+	// 两者互斥且恰在流末一条。
+	Done  bool   `json:"done,omitempty"`
+	Error string `json:"error,omitempty"`
+}
+
+// Validate 校验一条推送进度记录（与 pull 的 Validate 同款同阈）。
+func (p *DockerPushProgressItem) Validate() error {
+	if p.T <= 0 {
+		return decodeErr(StagePayload, "t", ErrInvalidPayload)
+	}
+	if p.Done && p.Error != "" {
+		return decodeErr(StagePayload, "push", ErrInvalidPayload)
+	}
+	if p.Current < 0 || p.Total < 0 || (p.Total > 0 && p.Current > p.Total) {
+		return decodeErr(StagePayload, "push", ErrInvalidPayload)
+	}
+	if strTooLong(p.ID) || strTooLong(p.Status) || strTooLong(p.Error) {
+		return decodeErr(StagePayload, "push", ErrInvalidPayload)
+	}
+	return nil
+}
+
+// DockerBuildProgressItem 是 image:build 进度流会话的一个记录点。
+//
+// 与 pull/push 的差别只在**形状**：build 的 daemon 输出以**文本行**为主
+// （BuildKit 的 `#3 [2/4] RUN npm install` 步骤行与步骤输出、legacy builder 的
+// "Step 1/4 : FROM …"），层传输只在两种 deluge 之间出现 —— 故多一个 Stream
+// 字段承载文本行（ID/Status 仍保留给步骤标识与状态文案，两者不同行给出）。
+// 终态项（Done/Error）恰一条、恰在最后；文本行按到达顺序保留（折叠纪律见
+// agent 侧 buildProgress 折叠器 —— 文本行是内容不是状态，不做「取最新」式合并）。
+type DockerBuildProgressItem struct {
+	// T 是该记录点的挂钟（unix 毫秒，agent 时钟；口径同 pull）。
+	T int64 `json:"t"`
+	// ID 是步骤标识（legacy builder 的 "Step 1/4" 或 BuildKit 步骤号）；留空 =
+	// 消息类记录（构建开始的 "Dockerfile 用名" 行等）或纯文本行。
+	ID string `json:"id,omitempty"`
+	// Status 是原文状态文案（"FROM node:20" / "RUN npm install"…）。
+	Status string `json:"status,omitempty"`
+	// Stream 是构建输出的一段文本（单条 Stream ≤ MaxDockerFrameDataBytes，
+	// 超过时由 agent 折叠器截断 —— 构建输出是给人读的排障文本，截断器
+	// 取尾部保住「最后发生了什么」）。
+	Stream string `json:"stream,omitempty"`
+	// Done 是成功终态项，Error 是失败终态项（daemon 原文），两者互斥且
+	// 恰在流末一条（与 pull/push 同一契约）。
+	Done  bool   `json:"done,omitempty"`
+	Error string `json:"error,omitempty"`
+}
+
+// Validate 校验一条构建进度记录。文本行/状态文案/错误都收在快照字符串档；
+// Done 与 Error 互斥；T 必须为正。
+func (p *DockerBuildProgressItem) Validate() error {
+	if p.T <= 0 {
+		return decodeErr(StagePayload, "t", ErrInvalidPayload)
+	}
+	if p.Done && p.Error != "" {
+		return decodeErr(StagePayload, "build", ErrInvalidPayload)
+	}
+	if strTooLong(p.ID) || strTooLong(p.Status) || strTooLong(p.Error) {
+		return decodeErr(StagePayload, "build", ErrInvalidPayload)
+	}
+	if len(p.Stream) > MaxDockerFrameDataBytes {
+		return decodeErr(StagePayload, "build", ErrInvalidPayload)
+	}
+	return nil
+}
+
 // ── events 流的记录载荷（活动流，六期·监控面）─────────────────────────────
 
 // DockerEventType* 是事件订阅范围的四类资源。agent 把 daemon 的 Events API filter 到
@@ -1796,8 +2114,8 @@ var dockerEventActions = map[string]bool{
 //
 // 与 DockerStatsSample 同一形态纪律：**不自成一条协议消息**，agent 把它编码成 JSON
 // 放进帧的 data（一条一行，行尾换行），core 逐行解码、校验后注入 hostId/hostname
-// 再转发。字段只取展示与归因需要的四样 —— daemon 事件里的 scope、全量 attributes
-// 直接透传会被各版本的字段漂移带进前端，也会让载荷被无关内容撑大。
+// 再转发。字段只取展示、归因与告警判定需要的五样 —— daemon 事件里的 scope、全量
+// attributes 直接透传会被各版本的字段漂移带进前端，也会让载荷被无关内容撑大。
 type DockerEventItem struct {
 	// T 是 agent 采到该时刻的挂钟（unix 毫秒）。口径同 stats 样本的 T：
 	// 参与陈旧度判定的是 core 的**接收时刻**（agent 时钟可能偏），T 只是时间轴刻度。
@@ -1811,6 +2129,13 @@ type DockerEventItem struct {
 	ActorName string `json:"actor_name,omitempty"`
 	// ActorID 是主体短 id（daemon Actor.ID；镜像为 sha256:<hex> 形态）。
 	ActorID string `json:"actor_id,omitempty"`
+	// ExitCode 是 die 事件携带的**退出码**（daemon Actor.Attributes["exitCode"] 的数值
+	// 形态）。为什么只加这一个属性：通知联动要靠它区分「自己人停的」（exit 0）与
+	// 「异常退出」（exit ≠ 0）—— 它是 daemon 对 crash/kill/oom 收敛后的**唯一事实源**；
+	// 其余属性对归因与告警没有增量。nil = 不可考（非 die 事件 / 旧 agent 未上报 /
+	// daemon 没给）：消费侧一律**不据它告警、也不反推**（宁可少报一条，不把正常的
+	// stop 误报成事故，见 core 侧 dockernotify 的规则说明）。
+	ExitCode *int32 `json:"exit_code,omitempty"`
 }
 
 // Validate 校验一条事件记录。

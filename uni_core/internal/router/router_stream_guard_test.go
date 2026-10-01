@@ -120,3 +120,33 @@ func TestTasksRouteMountedWithListPerm(t *testing.T) {
 		t.Fatalf("任务中心不得挂进 api 组（%s）—— JWT 登录态是它的身份边界", offAuth)
 	}
 }
+
+// 构建/推送进度流端点的**挂载位置**守卫（P2）。
+//
+// build/push 进度与 pull/stats/日志同族：走 fetch + ReadableStream（浏览器能带
+// Authorization 头），必须**留在 auth 组**（api 组连 JWT 都不认，装了等于对任何
+// 人开放）；句柄取协议派生的 build_<ref>/push_<ref>（受理时预登记）。与
+// TestExecStreamRouteIsRegisteredOutsideAuthGroup 同款源码级断言理由：handler
+// 层测试挂裸引擎，挂错组照旧全绿。
+func TestBuildPushStreamRoutesStayOnAuthGroup(t *testing.T) {
+	src, err := os.ReadFile("router.go")
+	if err != nil {
+		t.Fatalf("读取 router.go 失败: %v", err)
+	}
+	text := string(src)
+
+	const buildOnAuth = `docker.GET("/hosts/:id/cmds/:ref/build", deps.Docker.Hdl.BuildStream)`
+	const pushOnAuth = `docker.GET("/hosts/:id/cmds/:ref/push", deps.Docker.Hdl.PushStream)`
+	if !strings.Contains(text, buildOnAuth) {
+		t.Fatalf("构建进度流应留在 auth 组上（%s）", buildOnAuth)
+	}
+	if !strings.Contains(text, pushOnAuth) {
+		t.Fatalf("推送进度流应留在 auth 组上（%s）", pushOnAuth)
+	}
+	if strings.Contains(text, `api.GET("/docker/hosts/:id/cmds/:ref/build"`) {
+		t.Fatal("构建进度流不得挂进 api 组 —— 它走 fetch + ReadableStream，凭据是 JWT")
+	}
+	if strings.Contains(text, `api.GET("/docker/hosts/:id/cmds/:ref/push"`) {
+		t.Fatal("推送进度流不得挂进 api 组 —— 它走 fetch + ReadableStream，凭据是 JWT")
+	}
+}

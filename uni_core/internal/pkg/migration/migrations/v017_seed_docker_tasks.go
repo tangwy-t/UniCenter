@@ -1,63 +1,41 @@
 package migrations
 
 import (
-	"errors"
-
 	"gorm.io/gorm"
 
-	"github.com/tangwy-t/UniCenter/uni_core/internal/model/entity"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/migration"
-	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/util"
 )
 
-// v017 给操作日志结果码字典补一条「执行失败」(70001)。
+// ── 墓碑：v017 的内容已并入 v005（7c 迁移链归一）──────────────────────────
 //
-// 为什么需要它：docker 指令结果审计（6c）在 sys_operation_log 上落**执行结果**，
-// Code 只有 0=成功 与非成功两态能选。既有字典（v005）的失败码全是 HTTP 信封语义
-// （40000 参数错误 / 50000 服务器内部错误……），拿「服务器内部错误」去标
-// 「agent 回一句拉取镜像失败」是把用户的执行失败伪装成基础设施故障，排障的人
-// 会照着错误的方向查。操作日志页的结果列与过滤下拉**完全由字典渲染**
-// （uni_console useDict('sys_opt_result_code')），加一条数据即可被 UI 认领，
-// 不新增字典类型、不新开表。
+// v017 原本给操作日志结果码字典（sys_opt_result_code）补一条「执行失败」(70001，
+// docker 指令结果审计 6c 的消费侧)。7c 归一把它并入 v005 的初始字典种子
+//（dictDefinitions —— 70001 行随「初始化即最终态」一次种齐），本迁移的定义与
+// 执行函数已删除，版本号保留为**墓碑**（Up 为 no-op）。
 //
-// 取 70000 族：与既有 1000x/40000/40400/40900/50000 都不相邻，留给后续
-// 「执行取消」等结果细分位的编址空间（6b 盘点结论：取消目前无独立生产者，
-// 语义由结论句承载；将来协议侧若出 cancelled 标志，接 70002 不入既有族）。
+// 为什么是墓碑而不是删文件（与 v016 同一裁决，说明见 v016_seed_docker_overview.go）：
 //
-// 幂等：迁移框架按版本号只跑一次（v013 注释把这条讲透了），这里仍按
-// type+value 判重 —— 半途重启/重复执行不产生重复行。
+//   - 迁移框架按「注册表 vs sys_migration 最高版本」求差集，版本号允许不连续 ——
+//     删掉 v017 对已执行过的库同样无伤害；但保留墓碑让 sys_migration 账本保持
+//     **单调且自解释**：旧库里「17 已执行」那行有代码可对照，新库里账本多一行
+//     「17 = 并入 v005」的记录，考古时不用猜 16 与 18 之间发生过什么；
+//   - 框架的 forward-only 教义（migration.go 文件头）本就禁止删已发布的迁移文件 ——
+//     开发期重构虽被豁免「不改旧种子」，但**删版本号**比留墓碑多打破一条账本
+//     约定，收益为零。
+//
+// 与 v016 墓碑的一个差别（为什么这次归一更便宜）：v016 并入的是**菜单形状**
+// （旧库的菜单面停在收敛前，需要重置口径处理）；v017 并入的是**纯追加的字典行**
+// —— 已执行过旧 v017 的开发库本来就有 70001 这行，fresh 库由新 v005 一次种齐，
+// 两类库的字典内容一致，不需要任何 reconcile。sys_migration 账本「17 的描述文本
+// 与现行代码不一致」这一点维持既定口径：开发库重置，不做对账迁移。
 func init() {
 	migration.Register(migration.Migration{
 		Version:     17,
-		Description: "操作日志结果码字典补「执行失败」(70001，docker 指令结果审计)",
-		Up:          seedDockerTasksAuditDict,
+		Description: "墓碑：执行失败(70001)字典码已并入 v005 初始字典种子（7c 迁移链归一）",
+		Up: func(tx *gorm.DB) error {
+			// no-op：内容在 v005 的 dictDefinitions 里（fresh 库由 v005 一次种齐；
+			// 已执行过旧 v017 的库本来就有这行字典，无需动作）。
+			return nil
+		},
 	})
-}
-
-func seedDockerTasksAuditDict(tx *gorm.DB) error {
-	var typ entity.SysDictType
-	if err := tx.Where("code = ?", "sys_opt_result_code").First(&typ).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			// v005 已保证这个字典类型存在（Version 5 < 17，必然先跑）；真缺了
-			// 让迁移失败早暴露，好过把数据挂进一个不存在的 type_id。
-			return err
-		}
-		return err
-	}
-	var n int64
-	if err := tx.Model(&entity.SysDictData{}).
-		Where("type_id = ? AND value = ?", typ.ID, "70001").Count(&n).Error; err != nil {
-		return err
-	}
-	if n > 0 {
-		return nil
-	}
-	return tx.Create(&entity.SysDictData{
-		TypeID:    typ.ID,
-		Label:     "执行失败",
-		Value:     "70001",
-		Sort:      util.Ptr(14),
-		Status:    util.Ptr[int8](entity.DictDataStatusEnabled),
-		ListClass: util.Ptr("danger"),
-	}).Error
 }

@@ -87,6 +87,11 @@ type EventItem struct {
 	Action    string
 	ActorName string
 	ActorID   string
+	// ExitCode 是 die 事件的退出码（daemon Actor.Attributes["exitCode"]；只有 die
+	// 事件会带上）。为什么事件流要专门带它：core 侧的通知联动按「exit ≠ 0 才算
+	// 异常退出」过滤 —— 正常的 docker stop 收尾成 exit 0 的 die，不该吵醒任何
+	// 人。nil = 不可考（非 die / daemon 没给 / 解析失败），core 侧不告警而不是猜测。
+	ExitCode *int32
 }
 
 // ImageInfo 是镜像列表项。
@@ -177,6 +182,39 @@ type NetworkInfo struct {
 	ContainersCount int
 }
 
+// ── P2·分发面（image:build / image:push）的本域参数 ────────────────────────
+//
+// 与 ContainerCreateSpec 同一包边界纪律：协议 options 里的字符串都由**执行器**
+// 解析定型（转移目录拼装、tar 白名单、缺省值补齐），adapter 只见最终值 ——
+// SDK 的 build 类型不出 adapter。
+
+// BuildSpec 是 image:build 的全部参数（adapter 直传 daemon，不做二次解析）。
+type BuildSpec struct {
+	// ContextPath 是上下文 tar 的**绝对路径**（transferDir 内，执行器按读侧
+	// 符号链接纪律拼装校验过）。
+	ContextPath string
+	// Dockerfile 是 Dockerfile 在上下文内的相对路径（执行器补齐过缺省 "Dockerfile"）；
+	// 它就是 ImageBuildOptions.Dockerfile —— daemon 在上下文 tar 里解析它。
+	Dockerfile string
+	// Tag 是目标镜像引用（执行器补过 :latest）。
+	Tag string
+	// BuildArgs 是 build-args（键值已过协议白名单：POSIX 标识符键、值尺寸上限）。
+	BuildArgs map[string]string
+}
+
+// BuildProgress 是 daemon 一条构建进度行的本域记录（SDK 类型不出 adapter）。
+//
+// 与 PullProgress 的差别只在**形状**：build 的 daemon 输出以文本行为主
+// （BuildKit 步骤行与输出），故多一个 Stream 字段；ID/Status 保留给步骤标识与
+// 状态文案。Current/Total 不进 build 记录 —— BuildKit 的层传输在 build 流里
+// 是内嵌的进度行重绘（\r 行），逐字节解析它们会把折叠器拖进终端渲染语义，
+// 文本行 + 步骤状态足以回答「构建走到哪一步」。
+type BuildProgress struct {
+	ID     string
+	Status string
+	Stream string
+}
+
 // ContainerDetail 是容器 inspect 的结果。
 type ContainerDetail struct {
 	ID            string
@@ -225,13 +263,16 @@ type ImageDetail struct {
 	History []ImageLayer
 }
 
-// PullAuth 是 image:pull 的仓库认证（4c）：core 受理时按凭据库解出的**瞬时凭据**，
+// ImageAuth 是仓库认证（4c）：core 受理时按凭据库解出的**瞬时凭据**，
 // 生命周期 = 本条指令执行期 —— 用完即弃，任何路径不落盘、不进帧、不进 result。
 // nil = 无凭据（公共仓库或主机侧 docker login），与 4b 之前的拉取**逐字一致**。
 //
+// P2 起它是 pull 与 push 的**公共凭据面**（同一把凭据键、同一条 core 注入路径、同一
+// 条 adapter 编码路径），名字从 PullAuth 扩成 ImageAuth 是为如实表达这一点。
+//
 // 刻意定义成本域类型而不是 SDK 的 types.AuthConfig 别名：SDK 类型不出 adapter
 // （包边界纪律），adapter 内完成到 daemon RegistryAuth 头的映射。
-type PullAuth struct {
+type ImageAuth struct {
 	// Registry 是仓库地址（ServerAddress；与凭据键 / options.registry 同一把键）。
 	Registry string
 	// Username / Password 是仓库登录三元组的另外两元。
@@ -294,7 +335,24 @@ type DockerAPI interface {
 	// auth（4c）是 core 随指令瞬时下发的仓库认证；nil = 不带凭据 —— 与 4b 之前的
 	// 拉取逐字一致。到 daemon 的映射（RegistryAuth 头）在 adapter 内完成，
 	// SDK 类型不出 adapter。
-	ImagePull(ctx context.Context, ref string, auth *PullAuth, emit func(PullProgress)) error
+	ImagePull(ctx context.Context, ref string, auth *ImageAuth, emit func(PullProgress)) error
+	// ImageBuild 构建镜像（P2·分发面）：contextPath 是已定型的上下文 tar 路径（执行器
+	// 按 transferDir 纪律拼装过了，adapter 只做**穿越校验 + 流式发送**两件事 —— 校验
+	// 先于发送，恶意 tar 到不了 daemon）；BuildSpec.Dockerfile 是上下文内相对路径、
+	// Tag 是目标镜像引用、BuildArgs 是 build-args（键值都已过协议白名单）。
+	//
+	// 构建期间 daemon 的进度行经 emit 逐条交出（与 ImagePull 同一回调纪律）。
+	// 返回**构建结束**的最终错误。
+	//
+	// 基础镜像的拉取**不注入认证**（4c 的凭据面只服务镜像本身的拉/推）：ARG/HTTP
+	// 头注入秘密会永驻镜像分层历史 —— 需要私有基础镜像的主机走宿主侧 docker login
+	// 或 buildx secrets（daemon 侧配置），与 4c 之前 pull 的自由度一致。
+	ImageBuild(ctx context.Context, spec BuildSpec, emit func(BuildProgress)) error
+	// ImagePush 推送镜像（P2·分发面）：auth 与 ImagePull 同一公共凭据面（nil = 无凭据，
+	// 与 4b 之前的拉取自由度一致 —— 公共仓库或宿主侧 docker login）。推送期间
+	// daemon 的进度行（与 pull **同一个** JSON 流形态）经 emit 逐条交出；
+	// 返回**推送结束**的最终错误。
+	ImagePush(ctx context.Context, ref string, auth *ImageAuth, emit func(PullProgress)) error
 	ImageTag(ctx context.Context, src, dst string) error
 	// ImageSave 把镜像写成 tar；path 由调用方按 transferDir 拼好。
 	// 目标已存在且未要求覆盖时返回 alreadyExists=true（**不覆盖**，两段确认由上层承载）。

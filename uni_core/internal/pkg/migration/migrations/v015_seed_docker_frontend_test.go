@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// 本文件守卫 v015 的五个 Docker 菜单与**前端插件路由表**的逐字一致（v012/v013 同款机制）。
+// 本文件守卫 v015 的 Docker 菜单与**前端插件路由表**的逐字一致（v012/v013 同款机制）。
 //
 // 为什么必须有：后端菜单模式下 MenuProcessor 用菜单的 path 去前端路由表取组件 ——
 //
@@ -19,6 +19,12 @@ import (
 // 而两处代码在**不同仓库目录**（Go 种子 vs TS 路由）里，人眼 review 极易漏掉。
 //
 // 本测试直接读前端源文件比对，故它同时守住「有人在一边改了 path / 换了页面文件」。
+//
+// 7a 后本守卫覆盖**最终菜单面**（v015 直种子最终集，原 v016 的总览菜单已并入）：
+// 总览 /docker、容器 /docker/containers、镜像与存储 /docker/resources、项目
+// /docker/projects。images/volumes/networks 三个旧列表路由已在前端整体删除
+// （不做 redirect），若有人把旧 path 加回路由表，本测试不会拦 —— 「旧 path 清零」
+// 由前端 routes.test.ts 的源码扫描守卫负责。
 //
 // 隔离副本（scripts/release-precheck.sh 的 .tmp-iso/）里没有前端树：repoRoot 找不到
 // 仓库根时自身 t.Skipf —— 这正是 v012/v013 守卫留下的先例（被比对的另一半不在这台
@@ -42,6 +48,7 @@ func TestV015DockerMenuPathsMatchFrontendRoutes(t *testing.T) {
 		routes[m[1]] = m[2]
 	}
 
+	// 最终菜单面的四个 type=menu 定义（1 dir + 4 menu + 5 btn）。
 	checked := 0
 	for _, d := range dockerMenuDefinitions {
 		if d.Type != "menu" {
@@ -63,7 +70,7 @@ func TestV015DockerMenuPathsMatchFrontendRoutes(t *testing.T) {
 		}
 		checked++
 	}
-	if checked != 5 {
-		t.Fatalf("本迁移应恰有 5 个列表菜单（type=menu），实得 %d", checked)
+	if checked != 4 {
+		t.Fatalf("本迁移应恰有 4 个页面菜单（type=menu，7a 最终面），实得 %d", checked)
 	}
 }

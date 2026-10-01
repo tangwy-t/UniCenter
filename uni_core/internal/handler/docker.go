@@ -166,6 +166,44 @@ func (h *DockerHandler) State(c *gin.Context) {
 	app.Success(c, resp)
 }
 
+// StatsHistory 返回一个容器的 stats 留存序列（docker:inspect，与 stats 实时流同档）。
+//
+// 为什么是静态路由权限而不是像流那样按记录校验：留存不是「接入某条已受理指令的
+// 会话」（流要防的是劫持发起人的会话），它是与快照同族的**读面** —— 权限档与
+// container:stats 指令（→ docker:inspect）对齐即可，路由上挂静态 perm。
+//
+// @Summary      容器 stats 历史
+// @Description  一台主机上一个容器的 CPU/内存留存读数（30s 快照节奏 × 60 样本 ≈ 30 分钟窗口，按时刻升序）；时刻为 core 收帧时刻；无历史返回空数组；容器消失后序列冻结在最后一次读数
+// @Tags         Docker 管理
+// @Produce      json
+// @Param        id   path      uint64  true  "设备ID"
+// @Param        cid  path      string  true  "容器ID（快照条目的完整 ID）"
+// @Security     BearerAuth
+// @Success      200  {object}  app.Response{data=response.DockerStatsHistoryResp}  "查询成功"
+// @Failure      400  {object}  app.Response  "参数错误"
+// @Failure      401  {object}  app.Response  "未登录"
+// @Failure      403  {object}  app.Response  "无权限(docker:inspect)"
+// @Failure      404  {object}  app.Response  "设备不存在"
+// @Failure      500  {object}  app.Response  "stats 留存未装配 / 内部错误"
+// @Router       /docker/hosts/{id}/containers/{cid}/stats-history [get]
+func (h *DockerHandler) StatsHistory(c *gin.Context) {
+	id, ok := app.Uint64Param(c, "id")
+	if !ok {
+		return
+	}
+	cid := c.Param("cid")
+	if cid == "" {
+		app.Error(c, apperror.BadRequest("请求参数不合法"))
+		return
+	}
+	resp, err := h.svc.ContainerStatsHistory(c.Request.Context(), id, cid)
+	if err != nil {
+		app.Error(c, err)
+		return
+	}
+	app.Success(c, resp)
+}
+
 // Tasks 返回任务中心的最近任务（docker:list，路由静态 perm）。
 //
 // 本切片不做取消动作（见 service/docker_tasks.go 的取消纪律）：前端对拉取类任务
@@ -217,11 +255,11 @@ func (h *DockerHandler) Tasks(c *gin.Context) {
 //     action 的权限之外，body 里 `options.force=true` 还要再过一次 docker:exec 级
 //     权限（保护档的风险等价于 root shell）—— 两关都过了才轮到业务；
 //  3. 身份由 middleware 提供，缺了就是 401；
-//  4. 受理失败的错误形态由 service 决定（409 在飞 / 400 期次闸 / 500 设备离线），
+//  4. 受理失败的错误形态由 service 决定（409 在飞 / 400 参数 / 500 设备离线），
 //     handler 只负责转达 —— 在这里再判断一次就会多出第二处口径。
 //
 // @Summary      受理 docker 指令
-// @Description  校验 action 对应的权限码与期次闸后下发；立即返回指令号（ref），结果靠轮询
+// @Description  校验 action 对应的权限码后下发；立即返回指令号（ref），结果靠轮询
 // @Tags         Docker 管理
 // @Accept       json
 // @Produce      json
@@ -229,7 +267,7 @@ func (h *DockerHandler) Tasks(c *gin.Context) {
 // @Param        body  body      request.DockerCmdReq      true  "指令请求"
 // @Security     BearerAuth
 // @Success      202  {object}  app.Response{data=response.DockerCmdResp}  "已受理（data.ref 为指令号）"
-// @Failure      400  {object}  app.Response  "参数错误 / 未知操作 / 该操作尚未开放"
+// @Failure      400  {object}  app.Response  "参数错误 / 未知操作"
 // @Failure      401  {object}  app.Response  "未登录"
 // @Failure      403  {object}  app.Response  "无操作权限（force=true 时还要求 docker:exec 级）"
 // @Failure      409  {object}  app.Response  "该目标上已有同一条指令在执行"

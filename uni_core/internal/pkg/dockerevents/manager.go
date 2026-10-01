@@ -4,21 +4,25 @@
 // 它与既有三类流（日志/终端/stats）的根本差别：后三类是**逐客户端代理** —— 由用户
 // 发指令、agent 回会话、客户端接流；事件流则是 **core 自己当常驻客户端**：
 //
-//	首个 console 会话连上聚合端点 → core 对全部 dockerOk 主机逐台发起 docker:events
-//	    指令并开流（复用 core.docker.cmd / agent.docker.result / agent.docker.frame
-//	    同一条指令通道，只因 frame 的 session 登记不同而归本包所有）；
-//	最后一个 console 会话断开 → 全部退订（**引用计数**，不许留下孤儿订阅）；
+//	首个**消费端**（console 会话，或注册进来的内部消费者）接入 → core 对全部
+//	    dockerOk 主机逐台发起 docker:events 指令并开流（复用 core.docker.cmd /
+//	    agent.docker.result / agent.docker.frame 同一条指令通道，只因 frame 的
+//	    session 登记不同而归本包所有）；
+//	HTTP 客户端全断开且内部消费者全退出 → 全部退订（引用计数，不许留下孤儿订阅）；
+//	内部消费者（通知联动器等）**不计入 HTTP 面的归零判据**：console 一面全断了，
+//	    只要内部消费者还在，订阅保持常开 —— 「看的人走了」不等于「没人需要它」。
 //	单台 agent 断连/结果失败/会话 eof → 该主机退订并按退避重试（不影响其它主机）；
 //	主机清单变化（新增可管主机 / 设备删除 / docker_ok 翻转）→ 对账循环增量订/退。
 //
-// 事件注入 hostId/hostname 后才扇出：console 拿到的是带归属的聚合流。
+// 事件注入 hostId/hostname 后才扇出：console 拿到的是带归属的聚合流；内部消费者
+// 拿到同样的带归属事件（节流与规则是其自己的事，管理器不替它过滤）。
 //
 // 三条不变式（测试逐条钉住）：
 //   - **投递绝不阻塞**：帧来自 agent 连接的唯一读循环，堵住它会连累指标/心跳 ——
 //     因此帧路径只在内存里动（JSON 解析 + 环形缓冲 + 分发），一切 Redis/网络 IO
 //     都在对账循环的锁外段执行；
-//   - **常驻订阅有寿命**：引用计数归零即全量退订；主机离开可管清单即退订且不留
-//     环形缓冲（设备删除后回放旧事件会让人误以为它还活着）；
+//   - **常驻订阅有寿命**：两类消费者（HTTP 面 + 内部面）全部退出即全量退订；主机
+//     离开可管清单即退订且不留环形缓冲（设备删除后回放旧事件会让人误以为它还活着）；
 //   - **失败是单台的**：一台主机的退避/断连不影响别的主机，也绝不升级成对客户端
 //     的错误 —— 活动流少一行（该主机的），好过整条流断掉。
 package dockerevents
@@ -152,11 +156,25 @@ type HostsReader interface {
 // docker:hosts 集合清理兜底收敛）。
 type HostnameFunc func(ctx context.Context, deviceID uint64) string
 
-// Event 是扇出给 console 客户端的一条事件（**已注入归属**）。
+// Event 是扇出给消费端的一条事件（**已注入归属**）。
 type Event struct {
 	DeviceID uint64
 	Hostname string
 	Item     agentproto.DockerEventItem
+}
+
+// ResidentSink 是**常驻内部消费者**的事件入口（与 Client 并列的第二种消费端）。形态
+// 是同步回调而不是队列：管理器只在内存里调用它（emitLocked 的扇出段），所以它必须
+// **绝不阻塞** —— 帧路径是 agent 读循环，堵住会连累指标/心跳（包不变式第一条）；
+// 需要跨 IO 的消费者（通知联动器）自己接一条有界队列 + 工作协程，丢事件也只在
+// 自己一侧丢。
+//
+// 为什么内部消费者抽象成「注册」而不是复用 Subscribe() 拿到的 Client：两者寿命
+// 契约不同 —— Client 是「HTTP 连接的替身」，断开即退订；内部消费者是**常驻**的，
+// 它的退出不随任何请求来去，单独一个登记面让「谁让订阅保持常开」在代码里可读、
+// 在日志里可辨。
+type ResidentSink interface {
+	DeliverDockerEvent(e Event)
 }
 
 // ErrClosed 表示客户端已关闭且缓冲已排空。
@@ -217,28 +235,30 @@ type Manager struct {
 	idGen    func() string
 	opts     Options
 
-	mu      sync.Mutex
-	subs    map[uint64]*hostSub
-	rings   map[uint64][]Event
-	clients map[*Client]struct{}
-	wake    chan struct{}
+	mu        sync.Mutex
+	subs      map[uint64]*hostSub
+	rings     map[uint64][]Event
+	clients   map[*Client]struct{}
+	residents map[string]ResidentSink
+	wake      chan struct{}
 }
 
 // NewManager 构造管理器（缺省参数见 Options.withDefaults）。
 func NewManager(opts Options, sender Sender, cmds CmdRecorder, hosts HostsReader,
 	hostname HostnameFunc, log logger.LoggerInterface) *Manager {
 	return &Manager{
-		sender:   sender,
-		cmds:     cmds,
-		hosts:    hosts,
-		hostname: hostname,
-		log:      log,
-		idGen:    defaultRefGen,
-		opts:     opts.withDefaults(),
-		subs:     map[uint64]*hostSub{},
-		rings:    map[uint64][]Event{},
-		clients:  map[*Client]struct{}{},
-		wake:     make(chan struct{}, 1),
+		sender:    sender,
+		cmds:      cmds,
+		hosts:     hosts,
+		hostname:  hostname,
+		log:       log,
+		idGen:     defaultRefGen,
+		opts:      opts.withDefaults(),
+		subs:      map[uint64]*hostSub{},
+		rings:     map[uint64][]Event{},
+		clients:   map[*Client]struct{}{},
+		residents: map[string]ResidentSink{},
+		wake:      make(chan struct{}, 1),
 	}
 }
 
@@ -268,11 +288,19 @@ func defaultRefGen() string {
 	return strconv.FormatInt(time.Now().UnixNano(), 10) + strconv.FormatUint(refSeq.Add(1), 10)
 }
 
-// SubscriberCount 返回当前连接的 console 客户端数（引用计数）。
+// SubscriberCount 返回当前连接的 console 客户端数（**HTTP 面的**引用计数；
+// 内部消费者不算在其中 —— 归零判据是两个面分开看的，见 RegisterResident）。
 func (m *Manager) SubscriberCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.clients)
+}
+
+// ResidentCount 返回当前登记的内部消费者数（测试与日志用）。
+func (m *Manager) ResidentCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.residents)
 }
 
 // SubscribedHosts 返回当前已建立/在途的订阅主机数（测试与日志用）。
@@ -317,9 +345,52 @@ func (m *Manager) sortedRingHostsLocked() []uint64 {
 	return ids
 }
 
-// teardownAll 在引用计数归零时退订全部主机（**保留环形缓冲**：下一个客户端打开
-// 活动流仍先看到「刚才发生了什么」）。cancel 是锁外 best-effort —— 发不出去只记
-// 日志，本地账目必须立即清掉（用户断开后不得再挂着 daemon 侧的事件流）。
+// RegisterResident 登记一个**常驻内部消费者**（如通知联动器），返回幂等的注销函数。
+//
+// 关键语义（七期·通知联动的常驻闭环）：内部消费者**不计入 HTTP 面的归零判据** ——
+// 最后一个 console 客户端断开时，只要内部消费者还在，订阅**保持常开**（runOnce
+// 的消费端判据 = 两个面任一面非空）；只有两个面都空了，才会全量退订 ——「看的人
+// 走了」不再等于「没人需要它」。HTTP 端点、引用计数、环形回放的一切既有语义
+// 不变（6b 测试面逐条钉住）。
+//
+// 名字是登记身份的键（日志/测试可辨），同名的后登记**替换**先登记（通知联动只有
+// 一个实例；替换是确定性的，也避免「重复登记漏注销」把同一消费者重复扇出）。
+//
+// 与 Subscribe() 的一个显式差别：**不做环形回放**。回放是「给人看的刚才」——
+// 内部消费者要的是「从登记这一刻起的实时事实」，回放反而会让它把启动前的老事件
+// 再告警一遍（通知的节流账本从零开始，不该被历史污染）。
+func (m *Manager) RegisterResident(name string, sink ResidentSink) func() {
+	if sink == nil {
+		return func() {} // 防御：nil 直接不起作用（调用方失误不 panic、不影响任何账目）
+	}
+	m.mu.Lock()
+	wasFirst := len(m.clients) == 0 && len(m.residents) == 0
+	m.residents[name] = sink
+	m.mu.Unlock()
+	if wasFirst {
+		m.kick() // 首个消费端到场：踢醒对账循环开始向主机订阅
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			m.mu.Lock()
+			if m.residents[name] == sink {
+				delete(m.residents, name)
+			}
+			last := len(m.clients) == 0 && len(m.residents) == 0
+			m.mu.Unlock()
+			if last {
+				m.teardownAll("内部消费者全部退出")
+			}
+		})
+	}
+}
+
+// teardownAll 在两个面的消费端**都归零**时退订全部主机（**保留环形缓冲**：下一个
+// 客户端打开活动流仍先看到「刚才发生了什么」）。HTTP 面单独归零不会走到这里 ——
+// 内部消费者还在时订阅保持常开（见 RegisterResident）。cancel 是锁外 best-effort ——
+// 发不出去只记日志，本地账目必须立即清掉（消费端退出后不得再挂着 daemon 侧的事件
+// 流）。
 func (m *Manager) teardownAll(reason string) {
 	m.mu.Lock()
 	type off struct {
@@ -426,6 +497,11 @@ func (m *Manager) emitLocked(sub *hostSub, f *agentproto.DockerFrame) {
 		for c := range m.clients {
 			c.pushLocked(e)
 		}
+		// 内部消费者与客户端**同一条扇出链**：归属注入与顺序都一致，不经二次加工。
+		// 契约（ResidentSink）：同步调用、绝不阻塞 —— 需要 IO 的消费者自己排队。
+		for _, r := range m.residents {
+			r.DeliverDockerEvent(e)
+		}
 	}
 }
 
@@ -499,10 +575,10 @@ func (m *Manager) runOnce(ctx context.Context) time.Duration {
 	next := m.opts.ReconcileInterval
 
 	m.mu.Lock()
-	hasClients := len(m.clients) != 0
+	hasConsumers := len(m.clients) != 0 || len(m.residents) != 0
 	m.mu.Unlock()
-	if !hasClients {
-		return next // 没有消费端：主机面静止（归零路径已同步退订，这里是每轮的兜底确认）
+	if !hasConsumers {
+		return next // 没有消费端（两个面都空）：主机面静止（归零路径已同步退订，这里是每轮的兜底确认）
 	}
 
 	desired, ok := m.computeDesired(ctx)
@@ -824,7 +900,8 @@ func (c *Client) Next(ctx context.Context) (Event, error) {
 	}
 }
 
-// Close 结束消费并**引用计数 -1**（幂等）：最后一个客户端退出时触发全量退订。
+// Close 结束消费并**HTTP 引用计数 -1**（幂等）：最后一个客户端退出**且没有内部
+// 消费者**时触发全量退订 —— 内部消费者还在则订阅留任（常驻语义，见 RegisterResident）。
 func (c *Client) Close() {
 	if c == nil {
 		return
@@ -841,7 +918,7 @@ func (c *Client) Close() {
 	m := c.m
 	m.mu.Lock()
 	delete(m.clients, c)
-	last := len(m.clients) == 0
+	last := len(m.clients) == 0 && len(m.residents) == 0
 	m.mu.Unlock()
 	if last {
 		m.teardownAll("客户端全部断开")

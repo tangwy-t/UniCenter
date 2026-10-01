@@ -7,6 +7,10 @@
  * 是**数值样本**（上限按点数、按字段喂给曲线）—— 两者的消费形态不同，混在一个
  * feed 里会让两个都不是纯函数。
  *
+ * P2 起这份纯逻辑多了另一半：stats-history 的 30 分钟回看与「历史段 ↔ 实时段」
+ * 的衔接（文件后半的 mergeStatsHistory）—— 抽屉打开先见历史再接实时，两段在
+ * 同一个滑窗里拼成一条 t 单调的序列。
+ *
  * 行形状（core 的 docker_stream.go 的 statsNDJSONLine，字段与快照 DockerContainer
  * 同名同义）：
  *   {"seq":n,"t":unix毫秒,"cpu_percent":f,"mem_usage_mb":f,"mem_limit_mb":f,
@@ -33,8 +37,12 @@ export interface StatsSample {
   cpuPercent: number
   memUsageMb: number
   memLimitMb: number
-  netRxBytesSec: number
-  netTxBytesSec: number
+  /**
+   * 网络速率：**只有实时流帧携带**（历史端点的契约只回 t/cpu/mem）。缺省 = 无
+   * 数据而不是 0 —— 网络曲线据此只画真实流样本，不拿假 0 充历史。
+   */
+  netRxBytesSec?: number
+  netTxBytesSec?: number
 }
 
 /** 解析结果：样本（空收尾行给 null）与 eof 信号分开携带。 */
@@ -136,4 +144,92 @@ export function createStatsFeed(maxSamples = MAX_STATS_SAMPLES): StatsFeed {
       return seen
     }
   }
+}
+
+// ── P2 历史半边：30 分钟回看与两段衔接 ───────────────────────────────
+//
+// 上面是「实时流」半边；这半边是它的前置数据源：GET stats-history（过去约
+// 30 分钟，30s 一采样共 ≤60 点）在开流**之前**拉回来预填曲线 —— 抽屉一打开
+// 曲线就有形状，「昨晚为什么慢」有了 30 分钟的回看窗口，而不是从一条空白
+// 曲线干等第一帧。
+
+/**
+ * 历史端点的样本形状（引用 apigen 生成类型 —— 生成物是唯一事实源）。
+ *
+ * 与实时流帧**同义不同名**：历史走生成 DTO 的 camelCase（t/cpuPercent/
+ * memUsageMb/memLimitMb），流帧是 agent 的 snake_case 裸行（t/cpu_percent/…，
+ * 已在 parseStatsStreamLine 折成同一套内部名）。两套命名的对齐只收在下面的
+ * 衔接函数里 —— 折名点唯一，生成物改名时只会在这里红灯。
+ */
+export type StatsHistorySample = Api.Docker.DockerStatsHistorySample
+
+/**
+ * 历史样本 → 窗口样本（折名 + 校验）。字段不齐或非有限数给 null —— 与流解析
+ * 同一纪律：丢一个点只让曲线缺一格；为一份坏历史抛异常，等于把整个回看窗口
+ * 一起丢掉。
+ */
+function historyToSample(h: StatsHistorySample): StatsSample | null {
+  if (!num(h.t) || h.t <= 0 || !num(h.cpuPercent) || !num(h.memUsageMb) || !num(h.memLimitMb)) {
+    return null
+  }
+  // 网络字段不折（历史没有它）：undefined = 无数据，见 StatsSample 的字段注。
+  return {
+    t: Math.floor(h.t),
+    cpuPercent: h.cpuPercent,
+    memUsageMb: h.memUsageMb,
+    memLimitMb: h.memLimitMb
+  }
+}
+
+/**
+ * 历史段与实时段的衔接：两段在同一个滑窗里拼成一条 **t 严格递增** 的序列。
+ *
+ * 两条衔接边界的口径（测试同款钉死）：
+ *   - **同 t 去重：丢历史、留流帧**。历史末样本与首帧撞在同一时刻时，流帧是
+ *     刚从 agent 采下的当下值（且带网络字段），历史是回看拷贝 —— 留新弃旧；
+ *   - **缺口连线**。历史末样本与首帧之间隔一段（受理 + 轮询建流的耗时，通常
+ *     几秒；30s 的历史采样节拍本身就可能留 ≤30s 的缝）时，序列如实保留两个
+ *     端点、不造中间假点 —— 曲线在时间比例轴上把这道缝画成相邻两点的直连
+ *     （折线图相邻样本之间本就直线相连，悬停也只吸附真实样本），不为这道缝
+ *     去动图表组件。
+ *
+ * 两侧都按升序喂入（历史端点升序返回、流样本按到达序入窗）；函数再兜一道
+ * 底：t 不严格大于已入窗尾样本的一律不入 —— 乱序回吐与同 t 重复帧都不会让
+ * 序列走回头路。上限沿用滑窗口径（默认 120 点）：历史逐点让位给实时，约
+ * 2 分钟实时后窗口回到纯实时 —— 回看是「打开时」的窗口，不是常驻监控面。
+ */
+export function mergeStatsHistory(
+  history: readonly StatsHistorySample[],
+  stream: readonly StatsSample[],
+  maxSamples = MAX_STATS_SAMPLES
+): StatsSample[] {
+  const cap =
+    Number.isFinite(maxSamples) && maxSamples > 0 ? Math.floor(maxSamples) : MAX_STATS_SAMPLES
+  const merged: StatsSample[] = []
+  /** 入窗守卫：t 严格递增（同 t 丢旧、乱序丢迟到 —— 口径见函数注释）。 */
+  const push = (s: StatsSample): void => {
+    const tail = merged[merged.length - 1]
+    if (tail !== undefined && s.t <= tail.t) return
+    merged.push(s)
+  }
+  let i = 0
+  let j = 0
+  while (i < history.length || j < stream.length) {
+    const h = i < history.length ? history[i] : undefined
+    const s = j < stream.length ? stream[j] : undefined
+    if (s !== undefined && (h === undefined || s.t <= h.t)) {
+      // 流样本不晚于历史样本（或历史已尽）：流侧先入窗 —— 同 t 即在此去重
+      // （留流弃历史）；流样本严格更早则历史样本留到下一轮再比。
+      push(s)
+      j++
+      if (h !== undefined && s.t === h.t) i++
+    } else if (h !== undefined) {
+      // 历史样本更早（或流已尽）：折名入窗；坏样本丢点不丢段。
+      const sample = historyToSample(h)
+      i++
+      if (sample !== null) push(sample)
+    }
+  }
+  if (merged.length > cap) merged.splice(0, merged.length - cap)
+  return merged
 }

@@ -269,27 +269,32 @@ func TestPullImageCancelStops(t *testing.T) {
 	}
 }
 
-// TestPullImageWithoutSessionsFallsBackToPhase1：流通道未装配（老装配/测试替身）时
-// image:pull 保持一期黑盒语义 —— 成功回 ok、无载荷；失败回「拉取镜像失败」。
-// 旧流程的回归钉：进度透出是增强，不是拉取的前提。
-func TestPullImageWithoutSessionsFallsBackToPhase1(t *testing.T) {
+// TestSetSessionsNilFailsFast：会话管理器的构造契约 —— SetSessions(nil) 与
+// 「从未注入」都必须 panic（fail fast）。
+//
+// 7c 删掉了「nil = 一期黑盒回退」分支后，这条测试取代了原先的
+// TestPullImageWithoutSessionsFallsBackToPhase1（旧流程回归钉）：那时 nil 是
+// 合法形态（进度透出只是增强，拉取必须照旧）；现在进度透出是写路径的常设依赖，
+// 生产 Runtime.New 永远注入，nil 只可能是装配缺陷 —— 旧的守卫对象已不存在，
+// 新的守卫对象是「缺陷必须立刻现形，而不是静默黑盒」。
+func TestSetSessionsNilFailsFast(t *testing.T) {
 	api := &stubAPI{}
-	w := NewWriteExecutor(api, nil, "", "", nil) // 不注入会话
-	payload, err := w.Do(context.Background(), pullCmd())
-	if err != nil || payload != nil {
-		t.Fatalf("无流通道的拉取成功必须照旧（空载荷、无错误）: %v %v", payload, err)
-	}
-	if len(api.pulled) != 1 || api.pulled[0] != "nginx:latest" {
-		t.Fatalf("拉取调用不符: %v", api.pulled)
-	}
-
-	fail := &stubAPI{pullErr: errors.New("no such host")}
-	w2 := NewWriteExecutor(fail, nil, "", "", nil)
-	_, err = w2.Do(context.Background(), pullCmd())
-	var ee *ExecError
-	if !errors.As(err, &ee) || ee.Msg != "拉取镜像失败" || ee.Detail != "no such host" {
-		t.Fatalf("无流通道的拉取失败结论句必须照旧: %v", err)
-	}
+	w := NewWriteExecutor(api, nil, "", "", nil)
+	m, _ := newTestSessions(&frameSink{}, streamIdleTimeout)
+	w.SetSessions(m) // 正常注入不 panic
+	func() {
+		defer func() { recover() }()
+		w.SetSessions(nil) // 显式注入 nil = 装配缺陷
+		t.Fatal("SetSessions(nil) 必须 panic")
+	}()
+	// 从未注入：执行器直接构造（不接替身）时，拉取路径必须 fail fast 而不是
+	// 静默走黑盒 —— 这里用独立的执行器（上面那个已注入过）。
+	w2 := NewWriteExecutor(api, nil, "", "", nil)
+	func() {
+		defer func() { recover() }()
+		_, _ = w2.Do(context.Background(), pullCmd())
+		t.Fatal("未注入会话管理器的拉取必须 panic")
+	}()
 }
 
 // TestPullImageSessionIDMatchesCoreRegistration：agent 开的进度会话句柄必须等于

@@ -25,15 +25,18 @@ import (
 //	                                          聚合日志共用 —— 5a 零新端点）
 //	GET /docker/hosts/:id/cmds/:ref/stats   —— stats 实时流：NDJSON（样本行），Bearer + 归属校验
 //	GET /docker/hosts/:id/cmds/:ref/pull    —— 拉取进度流：NDJSON（进度行），Bearer + 归属校验
+//	GET /docker/hosts/:id/cmds/:ref/build   —— 构建进度流：NDJSON（步骤/文本行），Bearer + 归属校验
+//	GET /docker/hosts/:id/cmds/:ref/push    —— 推送进度流：NDJSON（进度行），Bearer + 归属校验
 //	GET /docker/hosts/:id/stream/exec       —— 终端：WebSocket 升级，一次性 ticket
 //
-// 为什么两类端点的认证模型不同：日志 / stats / 拉取进度用 fetch + ReadableStream
+// 为什么两类端点的认证模型不同：日志 / stats / 各进度流用 fetch + ReadableStream
 // （前端 HTTP 层能带 Authorization），终端必须用浏览器 WebSocket（带不了头），故走
 // 一次性 ticket。这不是两套安全策略，而是同一条纪律（凭证不落 URL 长驻）在不同
-// 浏览器 API 下的形态。拉取进度走 fetch 形态（与日志/stats 同族），且它是唯一一条
+// 浏览器 API 下的形态。进度三族走 fetch 形态（与日志/stats 同族），且它们是
 // 「指令还在 pending 就可接入」的流 —— 会话由受理指令时预登记（见
-// service/docker_cmd.go 与协议 DockerPullSessionID），断开这条连接的 cancel
-// 终止的是拉取本身。
+// service/docker_cmd.go 与协议 DockerPullSessionID / DockerBuildSessionID /
+// DockerPushSessionID），断开这条连接的 cancel 终止的是操作本身（与
+// stats/logs「断开即停流」同一条纪律）。
 
 const (
 	// execWriteTimeout 是单条 WS 消息的写超时：对端 TCP 卡死时写侧不能永久挂住
@@ -353,13 +356,77 @@ func (h *DockerHandler) serveStatsNDJSON(c *gin.Context, sess *dockerstream.Sess
 	h.streams.CancelSession(context.Background(), sess, "客户端断开或写失败")
 }
 
-// PullStream 镜像拉取进度流：把会话帧里的进度记录以 NDJSON 持续写给客户端。
+// progressStreamSession 是进度三族（pull/build/push）端点共用的接入序：
+// 参数 → 记录 → 权限（记录的权限码）→ 发起人归属 → **派生句柄**接入。
+// 三族逐条同款（JWT 由 auth 组的前端 fetch 层负责；看进度与发起操作同档，
+// 因为进度如实露出「在拉/在推/在构建什么」）。
 //
-// 认证与归属与 stats/日志流**逐条相同**（JWT + 按记录权限码再校验 + 发起人归属）：
-// 权限码就是 image:pull 的受理权限码（docker:manage）—— 看进度与发起拉取同档，
-// 因为进度如实露出「在拉什么」（镜像名/层/体积都是仓库面的事实）。
-// 与 stats 流的差别：会话句柄不取记录的 session_id（result 只在拉取结束时回），
-// 而是与 core 受理时的预登记同源的**派生句柄**（协议 DockerPullSessionID）。
+// streamDesc 用于 action 不匹配时的结论句（每条端点报自己的名字）。
+// 失败路径已写好响应并返回 (nil, false)；成功返回已接入的会话。
+func (h *DockerHandler) progressStreamSession(c *gin.Context, streamAction, streamDesc string) (*dockerstream.Session, bool) {
+	id, ok := app.Uint64Param(c, "id")
+	if !ok {
+		return nil, false
+	}
+	ref := c.Param("ref")
+	if ref == "" {
+		app.Error(c, apperror.BadRequest("请求参数不合法"))
+		return nil, false
+	}
+	if h.streams == nil {
+		app.Error(c, apperror.Internal("流通道未装配"))
+		return nil, false
+	}
+	rec, err := h.cmds.Lookup(c.Request.Context(), id, ref)
+	if err != nil {
+		app.Error(c, err)
+		return nil, false
+	}
+	if !h.guard.Ensure(c, rec.Perm) {
+		return nil, false // Ensure 已写好 403
+	}
+	uid, ok := currentUserID(c)
+	if !ok {
+		app.Error(c, apperror.Unauthorized("未登录或 token 已过期"))
+		return nil, false
+	}
+	if rec.UserID != uid {
+		// 归属校验：发起人才能接（否则 403）。防止同权限用户劫持别人的进度/日志。
+		app.Error(c, apperror.Forbidden("无权接入该指令的流会话"))
+		return nil, false
+	}
+	if rec.Action != streamAction {
+		// 每条端点只承载自己的进度族：日志/stats 走各自端点（各通道的行形状不同，
+		// 交叉使用只会让 console 收到它解析不了的行）。
+		app.Error(c, apperror.BadRequest("该指令不支持"+streamDesc))
+		return nil, false
+	}
+	sess, err := h.streams.AttachSession(progressSessionIDOf(streamAction, rec.Ref), uid, id)
+	if err != nil {
+		app.Error(c, err)
+		return nil, false
+	}
+	return sess, true
+}
+
+// progressSessionIDOf 与 core 受理时预登记同源的**派生句柄**（协议
+// DockerPullSessionID / DockerBuildSessionID / DockerPushSessionID）—— 进度会话
+// 不取记录的 session_id（result 只在操作结束时回，届时进度也发完了）。
+func progressSessionIDOf(action, ref string) string {
+	switch action {
+	case agentproto.DockerActionImagePull:
+		return agentproto.DockerPullSessionID(ref)
+	case agentproto.DockerActionImageBuild:
+		return agentproto.DockerBuildSessionID(ref)
+	case agentproto.DockerActionImagePush:
+		return agentproto.DockerPushSessionID(ref)
+	}
+	return ""
+}
+
+// PullStream 镜像拉取进度流：接入序见 progressStreamSession —— 权限码就是
+// image:pull 的受理权限码（docker:manage），因为进度如实露出「在拉什么」
+// （镜像名/层/体积都是仓库面的事实）。
 //
 // @Summary      镜像拉取进度流(NDJSON)
 // @Description  按指令号接入拉取进度会话；每行一个进度记录 {"seq","t","id","status","current","total","done","error","eof"}；客户端断开即下发 cancel（终止拉取）
@@ -376,45 +443,8 @@ func (h *DockerHandler) serveStatsNDJSON(c *gin.Context, sess *dockerstream.Sess
 // @Failure      409  "该指令没有可接入的流会话 / 会话已有连接"
 // @Router       /docker/hosts/{id}/cmds/{ref}/pull [get]
 func (h *DockerHandler) PullStream(c *gin.Context) {
-	id, ok := app.Uint64Param(c, "id")
+	sess, ok := h.progressStreamSession(c, agentproto.DockerActionImagePull, "拉取进度流")
 	if !ok {
-		return
-	}
-	ref := c.Param("ref")
-	if ref == "" {
-		app.Error(c, apperror.BadRequest("请求参数不合法"))
-		return
-	}
-	if h.streams == nil {
-		app.Error(c, apperror.Internal("流通道未装配"))
-		return
-	}
-	rec, err := h.cmds.Lookup(c.Request.Context(), id, ref)
-	if err != nil {
-		app.Error(c, err)
-		return
-	}
-	if !h.guard.Ensure(c, rec.Perm) {
-		return // Ensure 已写好 403
-	}
-	uid, ok := currentUserID(c)
-	if !ok {
-		app.Error(c, apperror.Unauthorized("未登录或 token 已过期"))
-		return
-	}
-	if rec.UserID != uid {
-		app.Error(c, apperror.Forbidden("无权接入该指令的流会话"))
-		return
-	}
-	if rec.Action != agentproto.DockerActionImagePull {
-		// 这条端点只承载拉取进度：日志/stats 走各自端点（三个通道的行形状不同，
-		// 交叉使用只会让 console 收到它解析不了的行）。
-		app.Error(c, apperror.BadRequest("该指令不支持拉取进度流"))
-		return
-	}
-	sess, err := h.streams.AttachSession(agentproto.DockerPullSessionID(rec.Ref), uid, id)
-	if err != nil {
-		app.Error(c, err)
 		return
 	}
 	h.servePullNDJSON(c, sess)
@@ -514,8 +544,223 @@ func (h *DockerHandler) servePullNDJSON(c *gin.Context, sess *dockerstream.Sessi
 	h.streams.CancelSession(context.Background(), sess, "客户端断开或写失败")
 }
 
-// ── 终端（WebSocket）────────────────────────────────────────────────────
+// buildNDJSONLine 是构建进度流的一行（Content-Type: application/x-ndjson）。
 //
+// 记录字段**直接打平**（与 pull/stats 同一取向），字段名与协议
+// DockerBuildProgressItem 同名字段一一对应；Stream 是构建输出文本行
+// （步骤行/输出行 —— 页面按到达顺序渲染成一份「构建播报」）。
+type buildNDJSONLine struct {
+	Seq uint64 `json:"seq"`
+	T   int64  `json:"t"`
+	ID  string `json:"id,omitempty"`
+	// Status 是状态文案（步骤 1/2 + FROM node:20 这类 legacy 行）。
+	Status string `json:"status,omitempty"`
+	// Stream 是构建输出的文本行。
+	Stream string `json:"stream,omitempty"`
+	Done   bool   `json:"done,omitempty"`
+	Error  string `json:"error,omitempty"`
+	EOF    bool   `json:"eof"`
+}
+
+// BuildStream 镜像构建进度流（P2）：接入序与拉取进度**逐条相同**（权限码 =
+// image:build 的受理权限码 docker:manage —— 看进度与发起构建同档，构建输出会
+// 露出「用什么基础镜像、跑什么步骤」）。
+//
+// @Summary      镜像构建进度流(NDJSON)
+// @Description  按指令号接入构建进度会话；每行一个记录 {"seq","t","id","status","stream","done","error","eof"}；客户端断开即下发 cancel（终止构建）
+// @Tags         Docker 管理
+// @Produce      application/x-ndjson
+// @Param        id   path      uint64  true  "设备ID"
+// @Param        ref  path      string  true  "指令号"
+// @Security     BearerAuth
+// @Success      200  "流已建立(逐行 NDJSON)"
+// @Failure      400  "请求参数不合法 / 该指令不支持构建进度流"
+// @Failure      401  "未登录"
+// @Failure      403  "无权限 / 非发起人"
+// @Failure      404  "指令不存在或已过期"
+// @Failure      409  "该指令没有可接入的流会话 / 会话已有连接"
+// @Router       /docker/hosts/{id}/cmds/{ref}/build [get]
+func (h *DockerHandler) BuildStream(c *gin.Context) {
+	sess, ok := h.progressStreamSession(c, agentproto.DockerActionImageBuild, "构建进度流")
+	if !ok {
+		return
+	}
+	h.serveBuildNDJSON(c, sess)
+}
+
+// serveBuildNDJSON 是构建进度的转发循环：帧 data 逐行解码成字段写成 NDJSON 行；
+// eof 挂在最后一个记录行上；一行解码失败跳过并留痕（与 stats/pull 同纪律）。
+// 收尾纪律同 servePullNDJSON：收到 eof 转发完 → 幂等清理；其余 → 发 cancel
+// （终止构建本身）。
+func (h *DockerHandler) serveBuildNDJSON(c *gin.Context, sess *dockerstream.Session) {
+	ctx := c.Request.Context()
+	c.Header("Content-Type", "application/x-ndjson")
+	c.Header("Cache-Control", "no-store")
+	c.Header("X-Accel-Buffering", "no")
+	c.Status(http.StatusOK)
+	flusher, _ := c.Writer.(http.Flusher)
+	if flusher != nil {
+		flusher.Flush()
+	}
+
+	enc := json.NewEncoder(c.Writer)
+	ended := false
+	for {
+		f, err := sess.Next(ctx)
+		if err != nil {
+			break
+		}
+		lines := 0
+		for _, raw := range bytes.Split(f.Data, []byte{'\n'}) {
+			if len(raw) == 0 {
+				continue
+			}
+			var p agentproto.DockerBuildProgressItem
+			if err := json.Unmarshal(raw, &p); err != nil || p.Validate() != nil {
+				if h.log != nil {
+					h.log.Warn("docker build progress item dropped (invalid)",
+						zap.String("session", sess.ID()), zap.Uint64("seq", f.Seq), zap.Error(err))
+				}
+				continue
+			}
+			line := buildNDJSONLine{Seq: f.Seq, T: p.T, ID: p.ID, Status: p.Status,
+				Stream: p.Stream, Done: p.Done, Error: p.Error}
+			if f.EOF {
+				line.EOF = true
+			}
+			if err := enc.Encode(line); err != nil {
+				h.streams.CancelSession(context.Background(), sess, "客户端断开或写失败")
+				return
+			}
+			lines++
+		}
+		if f.EOF && lines == 0 {
+			if err := enc.Encode(buildNDJSONLine{Seq: f.Seq, EOF: true}); err != nil {
+				h.streams.CancelSession(context.Background(), sess, "客户端断开或写失败")
+				return
+			}
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+		if f.EOF {
+			ended = true
+			break
+		}
+	}
+	if ended {
+		h.streams.FinishSession(sess.ID())
+		return
+	}
+	h.streams.CancelSession(context.Background(), sess, "客户端断开或写失败")
+}
+
+// pushNDJSONLine 是推送进度流的一行（与 pull 同字段集 —— daemon 的 push 与
+// pull 是同一个 JSON 进度流，协议 DockerPushProgressItem 与 DockerPullProgressItem
+// 同形）。
+type pushNDJSONLine struct {
+	Seq uint64 `json:"seq"`
+	T   int64  `json:"t"`
+	ID  string `json:"id,omitempty"`
+	// Status 是原文状态文案（"The push refers to …" / "Pushing" / "Pushed"…）。
+	Status  string `json:"status,omitempty"`
+	Current int64  `json:"current,omitempty"`
+	Total   int64  `json:"total,omitempty"`
+	Done    bool   `json:"done,omitempty"`
+	Error   string `json:"error,omitempty"`
+	EOF     bool   `json:"eof"`
+}
+
+// PushStream 镜像推送进度流（P2）：接入序与拉取/构建进度**逐条相同**（权限码 =
+// image:push 的受理权限码 docker:manage —— 看进度与发起推送同档）。
+//
+// @Summary      镜像推送进度流(NDJSON)
+// @Description  按指令号接入推送进度会话；每行一个进度记录 {"seq","t","id","status","current","total","done","error","eof"}；客户端断开即下发 cancel（终止推送）
+// @Tags         Docker 管理
+// @Produce      application/x-ndjson
+// @Param        id   path      uint64  true  "设备ID"
+// @Param        ref  path      string  true  "指令号"
+// @Security     BearerAuth
+// @Success      200  "流已建立(逐行 NDJSON)"
+// @Failure      400  "请求参数不合法 / 该指令不支持推送进度流"
+// @Failure      401  "未登录"
+// @Failure      403  "无权限 / 非发起人"
+// @Failure      404  "指令不存在或已过期"
+// @Failure      409  "该指令没有可接入的流会话 / 会话已有连接"
+// @Router       /docker/hosts/{id}/cmds/{ref}/push [get]
+func (h *DockerHandler) PushStream(c *gin.Context) {
+	sess, ok := h.progressStreamSession(c, agentproto.DockerActionImagePush, "推送进度流")
+	if !ok {
+		return
+	}
+	h.servePushNDJSON(c, sess)
+}
+
+// servePushNDJSON 是推送进度的转发循环（与 servePullNDJSON 同构：同 line 形状、
+// 同 eof 纪律、同解码失败跳过、同断开即 cancel —— 只有 item 类型与日志措辞不同）。
+func (h *DockerHandler) servePushNDJSON(c *gin.Context, sess *dockerstream.Session) {
+	ctx := c.Request.Context()
+	c.Header("Content-Type", "application/x-ndjson")
+	c.Header("Cache-Control", "no-store")
+	c.Header("X-Accel-Buffering", "no")
+	c.Status(http.StatusOK)
+	flusher, _ := c.Writer.(http.Flusher)
+	if flusher != nil {
+		flusher.Flush()
+	}
+
+	enc := json.NewEncoder(c.Writer)
+	ended := false
+	for {
+		f, err := sess.Next(ctx)
+		if err != nil {
+			break
+		}
+		lines := 0
+		for _, raw := range bytes.Split(f.Data, []byte{'\n'}) {
+			if len(raw) == 0 {
+				continue
+			}
+			var p agentproto.DockerPushProgressItem
+			if err := json.Unmarshal(raw, &p); err != nil || p.Validate() != nil {
+				if h.log != nil {
+					h.log.Warn("docker push progress item dropped (invalid)",
+						zap.String("session", sess.ID()), zap.Uint64("seq", f.Seq), zap.Error(err))
+				}
+				continue
+			}
+			line := pushNDJSONLine{Seq: f.Seq, T: p.T, ID: p.ID, Status: p.Status,
+				Current: p.Current, Total: p.Total, Done: p.Done, Error: p.Error}
+			if f.EOF {
+				line.EOF = true
+			}
+			if err := enc.Encode(line); err != nil {
+				h.streams.CancelSession(context.Background(), sess, "客户端断开或写失败")
+				return
+			}
+			lines++
+		}
+		if f.EOF && lines == 0 {
+			if err := enc.Encode(pushNDJSONLine{Seq: f.Seq, EOF: true}); err != nil {
+				h.streams.CancelSession(context.Background(), sess, "客户端断开或写失败")
+				return
+			}
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+		if f.EOF {
+			ended = true
+			break
+		}
+	}
+	if ended {
+		h.streams.FinishSession(sess.ID())
+		return
+	}
+	h.streams.CancelSession(context.Background(), sess, "客户端断开或写失败")
+}
+
 // execClientMsg 是终端 WS 的**客户端 → 服务端**消息。
 //
 // input.data 是**明文 UTF-8**（键盘输入是文本，且 xterm 的 onData 本就是字符串）——

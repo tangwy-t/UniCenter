@@ -52,8 +52,8 @@ func TestDockerGoldenPayloadsDecode(t *testing.T) {
 // 多一条 → 协议承诺了一个没有策略的动作。
 func TestDockerActionWhiteListIsComplete(t *testing.T) {
 	all := AllDockerActions()
-	if len(all) != 33 {
-		t.Fatalf("action 白名单应为 33 条（含创建面 container:create、监控面 container:stats、常驻事件流 docker:events 与聚合日志 compose:logs），实际 %d 条: %v", len(all), all)
+	if len(all) != 35 {
+		t.Fatalf("action 白名单应为 35 条（含创建面 container:create、监控面 container:stats、常驻事件流 docker:events、聚合日志 compose:logs 与 P2 分发闭环 image:build/image:push），实际 %d 条: %v", len(all), all)
 	}
 	seen := map[string]bool{}
 	for _, a := range all {
@@ -99,6 +99,8 @@ func TestDockerOptionFieldNamesResolve(t *testing.T) {
 		Mounts: []string{"v:/d"}, RestartPolicy: "always", CPULimit: 1, MemLimitMB: 1,
 		Network: "net", Start: boolPtr(false),
 		Registry: "harbor.example.com:8443",
+		Context:  "src.tar.gz", Dockerfile: "docker/Dockerfile.prod", Tag: "app:1",
+		Args: map[string]string{"NODE_ENV": "production"},
 	}
 	for _, f := range dockerOptionFields {
 		if dockerOptionValue(filled, f) == "" {
@@ -1270,5 +1272,39 @@ func TestDockerCmdOptionsRegistryOwnership(t *testing.T) {
 	if err := ValidateDockerCmdOptions(DockerActionImagePull,
 		&DockerCmdOptions{Target: "x", Registry: "https://harbor.example.com"}); !errors.Is(err, ErrInvalidPayload) {
 		t.Fatalf("带协议头的仓库地址必须被拒: %v", err)
+	}
+}
+
+// TestDockerEventExitCodeRoundTrip：exit_code 是 die 事件的可选属性（omitempty）——
+// 帧行里 nil 时**不出键**（旧 core 也照常解码，字段是追加式的），非 nil 时数值
+// 原样往返。旧行（无 exit_code）解码后 ExitCode 必须是 nil（不可考与 0 是两个语义）。
+func TestDockerEventExitCodeRoundTrip(t *testing.T) {
+	item := DockerEventItem{T: 1, Type: "container", Action: "die",
+		ActorName: "web", ActorID: "ab12"}
+	b, err := json.Marshal(item)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(b), "exit_code") {
+		t.Fatalf("nil 退出码不得出键（旧解析器兼容）: %s", b)
+	}
+	var dec DockerEventItem
+	if err := json.Unmarshal(b, &dec); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if dec.ExitCode != nil {
+		t.Fatalf("无 exit_code 的行解码后应为 nil，实际 %v", *dec.ExitCode)
+	}
+	code := int32(137)
+	item.ExitCode = &code
+	b, err = json.Marshal(item)
+	if err != nil {
+		t.Fatalf("marshal with code: %v", err)
+	}
+	if err := json.Unmarshal(b, &dec); err != nil {
+		t.Fatalf("unmarshal with code: %v", err)
+	}
+	if dec.ExitCode == nil || *dec.ExitCode != 137 {
+		t.Fatalf("退出码往返不符: %v", dec.ExitCode)
 	}
 }

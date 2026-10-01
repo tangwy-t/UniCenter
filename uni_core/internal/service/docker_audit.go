@@ -39,7 +39,8 @@ const (
 	// 区分开 —— 这条不是 HTTP 写操作，是「受理后任务到达终态」的结果陈述。
 	dockerOpLogTaskResult = "任务结果"
 	// dockerCmdResultFailed 是「执行失败」的结果码，取值在字典 sys_opt_result_code
-	// 里由 v017 种子注册（Label 执行失败，Class danger）—— 操作日志页的结果列靠
+	// 里由 v005 初始字典种子注册（Label 执行失败，Class danger；原 v017 审计种子，
+	// 7c 归一并入 v005）—— 操作日志页的结果列靠
 	// 字典渲染，没有这条码失败任务会被显示成「成功」或借一个语义错位的既有码。
 	dockerCmdResultFailed = 70001
 	// dockerTaskSummarySucceeded 是成功终态的兜底结论句（成功记录通常不带 Error，

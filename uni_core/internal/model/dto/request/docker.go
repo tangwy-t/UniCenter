@@ -56,10 +56,19 @@ type DockerCmdOptionsReq struct {
 	MemLimitMB    int      `json:"memLimitMb"`
 	Network       string   `json:"network"`
 	Start         *bool    `json:"start"`
-	// Registry 是私有仓库凭据的键（4c）：image:pull 可选 —— 填了就用凭据库
-	// 解出的凭据拉取（密码由 core 受理时注入,本字段只是仓库地址、不含秘密）；
-	// 不填与 4b 之前的拉取逐字一致。形态校验在协议层（IsDockerRegistryAddr）。
+	// Registry 是私有仓库凭据的键（4c）：image:pull / image:push 可选 —— 填了就用
+	// 凭据库解出的凭据拉取/推送（密码由 core 受理时注入，本字段只是仓库地址、
+	// 不含秘密）；不填与 4b 之前的拉取逐字一致。形态校验在协议层（IsDockerRegistryAddr）。
 	Registry string `json:"registry"`
+	// ── P2·分发面（image:build 专属，4 个字段）─────────────────────────
+	// 契约与协议 DockerCmdOptions 同名字段逐字对应（校验在协议层，core 透传）：
+	// context 是 transferDir 内的构建上下文 tar 文件名（tar/tar.gz/tgz）、
+	// dockerfile 是上下文内相对路径（缺省 Dockerfile）、tag 是目标镜像引用、
+	// args 是 build-args 键值表（键白名单、值上限在协议层）。
+	Context    string            `json:"context"`
+	Dockerfile string            `json:"dockerfile"`
+	Tag        string            `json:"tag"`
+	Args       map[string]string `json:"args"`
 }
 
 // DockerWorkloadQuery 是跨主机统一工作负载表（GET /docker/containers）的查询参数。

@@ -364,6 +364,10 @@ func TestWriteTimeoutsMirrorSpec(t *testing.T) {
 		agentproto.DockerActionImageTag:    30 * time.Second,
 		agentproto.DockerActionImageSave:   15 * time.Minute,
 		agentproto.DockerActionImageLoad:   15 * time.Minute,
+		// P2·分发面：构建 30 分钟（冷缓存下的大工程构建，15 分钟的
+		// pull/save/load 档对它不成立）、推送 15 分钟（与拉取同档）。
+		agentproto.DockerActionImageBuild: 30 * time.Minute,
+		agentproto.DockerActionImagePush:  15 * time.Minute,
 
 		agentproto.DockerActionVolumeRemove: 60 * time.Second,
 		agentproto.DockerActionVolumePrune:  120 * time.Second,

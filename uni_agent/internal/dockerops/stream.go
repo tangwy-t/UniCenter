@@ -274,6 +274,7 @@ func (e *StreamExecutor) copyEvents(sess *streamSession, ch <-chan EventItem) {
 			Action:    ev.Action,
 			ActorName: ev.ActorName,
 			ActorID:   ev.ActorID,
+			ExitCode:  ev.ExitCode,
 		}
 		if err := item.Validate(); err != nil {
 			sess.mgr.cfg.log.Warn("docker event dropped (invalid)", "session", sess.ID(), "err", err.Error())

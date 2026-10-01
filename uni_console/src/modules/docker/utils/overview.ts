@@ -107,8 +107,10 @@ export function buildOverviewKpis(fleet: Api.Docker.DockerOverviewFleet): Overvi
       value: fleet.images.total,
       label: '镜像',
       sub: [{ text: `未使用 ${imagesUnused}`, tone: imagesUnused > 0 ? 'warning' : undefined }],
-      to: '/docker/images',
-      title: '跨全部主机合计的镜像账目 —— 点击进入镜像列表'
+      // 7a：三个旧列表页收敛为 /docker/resources 的 tab，下钻地址带 ?tab=（字符串
+      // 里的 query 由 router.push 解析；磁贴不带 host —— 账目本来就是跨主机合计）。
+      to: '/docker/resources?tab=images',
+      title: '跨全部主机合计的镜像账目 —— 点击进入镜像表'
     },
     {
       key: 'volumes',
@@ -117,8 +119,8 @@ export function buildOverviewKpis(fleet: Api.Docker.DockerOverviewFleet): Overvi
       value: fleet.volumes.total,
       label: '数据卷',
       sub: [{ text: `未使用 ${volumesUnused}`, tone: volumesUnused > 0 ? 'warning' : undefined }],
-      to: '/docker/volumes',
-      title: '跨全部主机合计的数据卷账目 —— 点击进入数据卷列表'
+      to: '/docker/resources?tab=volumes',
+      title: '跨全部主机合计的数据卷账目 —— 点击进入数据卷表'
     },
     {
       key: 'networks',
@@ -127,8 +129,8 @@ export function buildOverviewKpis(fleet: Api.Docker.DockerOverviewFleet): Overvi
       value: fleet.networks.total,
       label: '网络',
       sub: [],
-      to: '/docker/networks',
-      title: '跨全部主机合计的网络数 —— 点击进入网络列表'
+      to: '/docker/resources?tab=networks',
+      title: '跨全部主机合计的网络数 —— 点击进入网络表'
     },
     {
       key: 'projects',

@@ -29,11 +29,18 @@
       <ElButton size="small" @click="$emit('refresh')">重新检测</ElButton>
     </ElEmpty>
     <template v-else>
-      <slot name="search" />
-      <ElCard class="art-table-card" shadow="never">
-        <slot name="table" />
-        <slot name="footer" />
-      </ElCard>
+      <!-- 内容形态分岔（7a）：传**默认插槽**的页面自带完整内容区（resources 的
+           tab 容器页：每个 tab 里有自己的搜索栏与表格卡片）—— 这里不能再替它
+           包一层 ElCard（会卡片套卡片）。三段式命名插槽（search/table/footer）
+           是单列表页（projects 等）的既有形态，保持不变。 -->
+      <slot v-if="$slots.default" />
+      <template v-else>
+        <slot name="search" />
+        <ElCard class="art-table-card" shadow="never">
+          <slot name="table" />
+          <slot name="footer" />
+        </ElCard>
+      </template>
     </template>
 
     <!-- 任务中心抽屉（6b）：Docker 不可用的主机也有任务史（排障恰恰需要看「刚才对它

@@ -16,7 +16,7 @@ import (
 // 真正落库的验证在既有 v002_seed_menu_perm_test（权限双向）与集成测试里；
 // 这里守的是「定义写对了」这件事，让错误在单测阶段就暴露。
 func TestDockerMenuDefinitionsAreComplete(t *testing.T) {
-	// 五个列表页 + 一个目录
+	// 一个目录 + 四个页面（总览/容器/镜像与存储/项目 —— 7a 最终面）
 	var menus, dirs, btns int
 	keys := map[string]bool{}
 	for _, d := range dockerMenuDefinitions {
@@ -29,11 +29,20 @@ func TestDockerMenuDefinitionsAreComplete(t *testing.T) {
 			dirs++
 		case "menu":
 			menus++
-			if !strings.HasPrefix(d.Path, "/docker/") {
-				t.Fatalf("菜单 %s 的 path 必须是 /docker/ 前缀（与前端路由逐字一致）", d.Key)
+			// 总览页的 path 是 /docker 本身（不是 /docker/ 前缀）—— 它是 docker 域的
+			// 首页；其余页面都在 /docker/ 之下。两个都合法，别的都不合法。
+			if d.Path != "/docker" && !strings.HasPrefix(d.Path, "/docker/") {
+				t.Fatalf("菜单 %s 的 path 必须是 /docker 或 /docker/ 前缀（与前端路由逐字一致）", d.Key)
 			}
-			if d.Component == "" || d.Component != strings.TrimPrefix(d.Path, "/") {
-				t.Fatalf("菜单 %s 的 Component(%q) 必须等于去掉前导 / 的 Path(%q)", d.Key, d.Component, d.Path)
+			// Component 约定：`docker/<view>`。除总览页外 view 名与 path 尾段一致；
+			// 总览页的 path 是域根 /docker 本身，view 名（overview）与 path 尾段无关，
+			// 它与前端路由的对应关系由 v015_seed_docker_frontend_test.go 钉住。
+			want := "docker/overview"
+			if d.Path != "/docker" {
+				want = strings.TrimPrefix(d.Path, "/")
+			}
+			if d.Component == "" || d.Component != want {
+				t.Fatalf("菜单 %s 的 Component(%q) 必须是 %q", d.Key, d.Component, want)
 			}
 		case "btn":
 			btns++
@@ -44,8 +53,8 @@ func TestDockerMenuDefinitionsAreComplete(t *testing.T) {
 			t.Fatalf("未知菜单类型 %q", d.Type)
 		}
 	}
-	if dirs != 1 || menus != 5 {
-		t.Fatalf("应为 1 个目录 + 5 个列表页，实际 %d + %d", dirs, menus)
+	if dirs != 1 || menus != 4 {
+		t.Fatalf("应为 1 个目录 + 4 个页面菜单，实际 %d + %d", dirs, menus)
 	}
 	if btns != 5 {
 		t.Fatalf("应为 5 个按钮权限节点，实际 %d", btns)
@@ -65,6 +74,62 @@ func TestDockerMenuDefinitionsAreComplete(t *testing.T) {
 			t.Fatalf("权限码 %s 没有菜单/按钮承载（v002 双向守卫会判为死常量）", code)
 		}
 	}
+}
+
+// TestDockerMenuSortOrder 钉住最终菜单面的排序关系（原 v016 的排序守卫随定义并入）：
+// 总览（控制塔首页）→ 容器 → 镜像与存储 → 项目。Sort 是侧边栏的呈现顺序，
+// 错位「不报错、只是看起来像产品设计如此」，必须靠测试钉住。
+//
+// 期望序列用键名书写而不是硬编码 Sort 数字：任何一边改了排号，本测试都能抓住。
+func TestDockerMenuSortOrder(t *testing.T) {
+	wantOrder := []string{"docker:overview", "docker:containers", "docker:resources", "docker:projects"}
+	var got []int
+	var gotKeys []string
+	for _, want := range wantOrder {
+		found := false
+		for _, d := range dockerMenuDefinitions {
+			if d.Key == want {
+				got = append(got, d.Sort)
+				gotKeys = append(gotKeys, d.Key)
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("最终菜单面缺少 %s（键名改了？）", want)
+		}
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i-1] >= got[i] {
+			t.Fatalf("菜单排序错位：%s(Sort=%d) 应排在 %s(Sort=%d) 之前", gotKeys[i], got[i], gotKeys[i-1], got[i-1])
+		}
+	}
+}
+
+// TestDockerResourcesMenuShape 钉住 7a 新增的「镜像与存储」行的形状：这是收敛后的
+// 唯一新页面入口，path/组件/权限任何一处漂移都是「侧边栏静默消失」或「看得到点不进」。
+func TestDockerResourcesMenuShape(t *testing.T) {
+	for _, d := range dockerMenuDefinitions {
+		if d.Key != "docker:resources" {
+			continue
+		}
+		if d.Parent != "docker" {
+			t.Fatalf("菜单 %s 的 Parent = %q, want %q（应挂在 Docker 管理目录下）", d.Key, d.Parent, "docker")
+		}
+		if d.Path != "/docker/resources" {
+			t.Fatalf("菜单 %s 的 Path = %q, want %q（与前端 docker 插件路由逐字一致）", d.Key, d.Path, "/docker/resources")
+		}
+		if d.Component != "docker/resources" {
+			t.Fatalf("菜单 %s 的 Component = %q, want %q", d.Key, d.Component, "docker/resources")
+		}
+		if d.Perms != permission.PermDockerList {
+			t.Fatalf("菜单 %s 的 Perms = %q, want %q（与其余列表页同档）", d.Key, d.Perms, permission.PermDockerList)
+		}
+		if d.Type != "menu" || d.Name != "镜像与存储" {
+			t.Fatalf("菜单定义与规格不符: %+v", d)
+		}
+		return
+	}
+	t.Fatal("最终菜单面缺少 docker:resources（7a 收敛的目标入口）")
 }
 
 // 默认保护清单必须包含底座（它一旦为空，uni-center 自己的容器就成了可删对象）。

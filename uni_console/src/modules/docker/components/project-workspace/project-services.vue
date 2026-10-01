@@ -378,13 +378,12 @@
     return `${head}，${failures.length} 项失败：${shown.join('；')}`
   }
 
-  // ── 容器行 → 容器详情（带 host query，返回时现场可还原）──
+  // ── 容器行 → 容器详情抽屉（7b：深链指 /docker/containers?host=&id=，host 随行）──
 
   function openContainer(c: DockerContainerItem) {
     void router.push({
-      name: 'DockerContainerDetail',
-      params: { id: c.id },
-      query: { host: ctx.hostId }
+      path: '/docker/containers',
+      query: { host: ctx.hostId, id: c.id }
     })
   }
 </script>

@@ -180,11 +180,12 @@ describe('总览纯函数（口径错了只表现为页面说错话，必须钉�
       expect(by('hosts').value).toBe(3)
     })
 
-    it('五块下钻到对应列表页；主机/磁盘磁贴没有列表页 → 锚到本页面板', () => {
+    it('五块下钻到对应页面；主机/磁盘磁贴没有页面 → 锚到本页面板', () => {
       expect(by('containers').to).toBe('/docker/containers')
-      expect(by('images').to).toBe('/docker/images')
-      expect(by('volumes').to).toBe('/docker/volumes')
-      expect(by('networks').to).toBe('/docker/networks')
+      // 7a：镜像/数据卷/网络磁贴下钻到收敛页的对应 tab（字符串带 query，router.push 解析）。
+      expect(by('images').to).toBe('/docker/resources?tab=images')
+      expect(by('volumes').to).toBe('/docker/resources?tab=volumes')
+      expect(by('networks').to).toBe('/docker/resources?tab=networks')
       expect(by('projects').to).toBe('/docker/projects')
       expect(by('hosts').anchor).toBe('dov-hosts')
       expect(by('disk').to).toBeUndefined()
@@ -433,13 +434,7 @@ async function makeRouter(): Promise<Router> {
         meta: { title: 'Docker 总览', icon: 'ri:ship-line' }
       },
       { path: '/docker/containers', component: { template: '<div />' } },
-      { path: '/docker/images', component: { template: '<div />' } },
-      { path: '/docker/volumes', component: { template: '<div />' } },
-      {
-        path: '/docker/container-detail/:id',
-        name: 'DockerContainerDetail',
-        component: { template: '<div />' }
-      }
+      { path: '/docker/resources', component: { template: '<div />' } }
     ]
   })
   await router.push('/')
@@ -637,12 +632,13 @@ describe('下钻（控制塔的本职：把人交棒给列表页 / 详情页）'
     const goImages = h1Row.findAll('.dov-disk__go').find((b) => b.text() === '镜像清理…')!
     await goImages.trigger('click')
     await flush()
-    expect(router.currentRoute.value.fullPath).toBe('/docker/images?host=h1')
+    // 7a：磁盘面板下钻到收敛页的对应 tab（host + tab 都进 query，深链还原现场）。
+    expect(router.currentRoute.value.fullPath).toBe('/docker/resources?host=h1&tab=images')
 
     const goVolumes = h1Row.findAll('.dov-disk__go').find((b) => b.text() === '卷清理…')!
     await goVolumes.trigger('click')
     await flush()
-    expect(router.currentRoute.value.fullPath).toBe('/docker/volumes?host=h1')
+    expect(router.currentRoute.value.fullPath).toBe('/docker/resources?host=h1&tab=volumes')
   })
 
   it('主机卡片点击 → 容器列表带 ?host=（模块主机上下文的 query 约定）', async () => {
@@ -654,7 +650,7 @@ describe('下钻（控制塔的本职：把人交棒给列表页 / 详情页）'
     expect(router.currentRoute.value.fullPath).toBe('/docker/containers?host=h1')
   })
 
-  it('异常行打开 → 容器详情（与容器列表同一跳法：路由名 + params + query.host）', async () => {
+  it('异常行打开 → 容器列表页 ?host=&id=（7b：深链改指统一表抽屉，旧详情路由已删）', async () => {
     const { w, router } = await mountOverview()
 
     // jsdom 里 ElTable 不渲染行单元格：从组件面发 open（与列表页 onRowMenu 同口径）
@@ -670,9 +666,10 @@ describe('下钻（控制塔的本职：把人交棒给列表页 / 详情页）'
       protected: true
     })
     await flush()
-    expect(router.currentRoute.value.name).toBe('DockerContainerDetail')
-    expect(router.currentRoute.value.params.id).toBe('c1')
+    // 跳的是 path + query 形态：统一表页读 ?host 作主机筛选初始值、?id 打开抽屉。
+    expect(router.currentRoute.value.path).toBe('/docker/containers')
     expect(router.currentRoute.value.query.host).toBe('h1')
+    expect(router.currentRoute.value.query.id).toBe('c1')
   })
 })
 

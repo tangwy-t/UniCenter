@@ -80,6 +80,11 @@ type AgentIngestService struct {
 	// nil = 未装配：结果照常回写，审计关闭 —— 挂钩是**观察者不是参与者**，
 	// 它的缺失只关治理可视性，不关指令功能。
 	audit DockerTerminalAuditor
+	// statsHistory 是快照 ingest 的 stats 留存挂钩（P2；由 dockerstate.StatsHistoryStore
+	// 实现）：把每帧快照的容器 CPU/内存投影进 30 分钟环形序列。nil = 未装配：
+	// 快照照常落库，留存关闭 —— 同样是观察者不是参与者，它的缺失只关抽屉的
+	// 历史曲线，不关快照主链。
+	statsHistory DockerStatsRecorder
 }
 
 // DockerSessionRegisterer 是登记一条流会话的能力面（由 dockerstream.Registry 满足）。
@@ -101,6 +106,13 @@ type DockerEventsSinker interface {
 // 「观察者不是参与者」纪律）。
 type DockerTerminalAuditor interface {
 	RecordTerminal(rec *dockerstate.CmdRecord)
+}
+
+// DockerStatsRecorder 是快照 ingest 的 stats 留存挂钩入口（由
+// dockerstate.StatsHistoryStore 满足）：每帧快照落库后调它，把容器读数投影进
+// 环形序列（30 分钟窗口，见 dockerstate/stats_history.go 的键设计与体积账）。
+type DockerStatsRecorder interface {
+	Record(ctx context.Context, deviceID uint64, st *agentproto.DockerState, at time.Time) error
 }
 
 func NewAgentIngestService(repo AgentDeviceRepository, raw AgentRawStore, latest AgentLatestStore,
@@ -125,6 +137,12 @@ func (s *AgentIngestService) WithDockerEvents(e DockerEventsSinker) *AgentIngest
 // WithDockerAudit 注入终态审计挂钩（6c）。装配在 wireup 一处完成。
 func (s *AgentIngestService) WithDockerAudit(a DockerTerminalAuditor) *AgentIngestService {
 	s.audit = a
+	return s
+}
+
+// WithDockerStatsHistory 注入 stats 留存挂钩（P2）。装配在 wireup 一处完成。
+func (s *AgentIngestService) WithDockerStatsHistory(r DockerStatsRecorder) *AgentIngestService {
+	s.statsHistory = r
 	return s
 }
 
@@ -358,7 +376,27 @@ func (s *AgentIngestService) SaveDockerState(ctx context.Context, deviceID uint6
 	if st == nil {
 		return nil
 	}
-	return s.docker.Save(ctx, deviceID, st, time.Now())
+	now := time.Now()
+	if err := s.docker.Save(ctx, deviceID, st, now); err != nil {
+		return err
+	}
+	// stats 留存挂钩（P2，观察者不是参与者，与 6c 审计挂钩同款纪律）：
+	//   - **失败只 warn、不改返回值** —— 主链的答案永远是「快照落库是否成功」，
+	//     留存丢一帧只是抽屉历史少一个点（下帧 30s 后就补上）；
+	//   - 与审计挂钩不同，这里**同步**调用而不是 goroutine：留存是时间序列，
+	//     异步会让相邻两帧的样本赛跑（环形里出现乱序的时间轴）；而它的代价
+	//     只是同一量级的一次 Redis pipeline（与上面的 Save 同价），不值得为
+	//     它引入乱序风险。ctx 也因此直接复用帧处理的 ctx（同步返回前有效，
+	//     不存在审计那边「goroutine 逃出帧生命周期」的问题）。
+	//   - 收帧时刻与 Envelope.ReceivedAt 用**同一个** now：历史样本的 t 与页面的
+	//     lastSync 逐字对齐，两条叙事不出现一帧之差。
+	if s.statsHistory != nil {
+		if err := s.statsHistory.Record(ctx, deviceID, st, now); err != nil {
+			s.log.Warn("docker stats history 留存失败（快照主链不受影响）",
+				zap.Uint64("deviceId", deviceID), zap.Error(err))
+		}
+	}
+	return nil
 }
 
 // CompleteDockerCmd 回写一条指令结果。

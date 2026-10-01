@@ -36,12 +36,23 @@ type DockerDeviceReader interface {
 	FindByID(ctx context.Context, id uint64) (*entity.Device, error)
 }
 
+// DockerStatsHistoryReader 是容器 stats 留存的读取与清理能力面（由
+// dockerstate.StatsHistoryStore 满足）：读面查询历史曲线，删除设备时连带清理。
+type DockerStatsHistoryReader interface {
+	History(ctx context.Context, deviceID uint64, containerID string) ([]dockerstate.StatsSample, error)
+	Purge(ctx context.Context, deviceID uint64) error
+}
+
 // DockerService 是 docker 域的读面。
 type DockerService struct {
 	store   *dockerstate.Store
 	devices DockerDeviceReader
 	cfg     AgentConfigGetter
 	log     logger.LoggerInterface
+	// stats 是容器 stats 留存的读面（P2）。nil = 未装配：stats-history 端点给出
+	// 500（装配错误早暴露，好过假装一条空曲线 —— 那会让「容器没有历史」和
+	//「留存没接上」在页面上不可区分）。
+	stats DockerStatsHistoryReader
 	// now 可替换：陈旧度与年龄都是「相对现在」的结论，测试要一个确定的现在
 	//（否则断言会随执行时刻漂移，跨秒边界上还会随机红）。
 	now func() time.Time
@@ -51,6 +62,12 @@ type DockerService struct {
 func NewDockerService(store *dockerstate.Store, devices DockerDeviceReader,
 	cfg AgentConfigGetter, log logger.LoggerInterface) *DockerService {
 	return &DockerService{store: store, devices: devices, cfg: cfg, log: log, now: time.Now}
+}
+
+// WithStatsHistory 注入 stats 留存读面（P2）。装配在 wireup 一处完成。
+func (s *DockerService) WithStatsHistory(h DockerStatsHistoryReader) *DockerService {
+	s.stats = h
+	return s
 }
 
 // snapshotInterval 返回当前快照周期（秒）。
@@ -154,8 +171,14 @@ func (s *DockerService) hostRecords(ctx context.Context) ([]hostRecord, error) {
 			default:
 				// 设备确已删除（仓储的未命中哨兵，或返回了空设备）而集合里还留着它：
 				// 顺手清理（自愈），否则每次列表都要跳过这一行，且键永久泄漏。
+				// 快照键与 stats 留存一起清（与 PurgeDevice 同一条清理纪律）。
 				if perr := s.store.Purge(ctx, id); perr != nil && s.log != nil {
 					s.log.Warn("docker host purge failed", zap.Uint64("deviceId", id), zap.Error(perr))
+				}
+				if s.stats != nil {
+					if perr := s.stats.Purge(ctx, id); perr != nil && s.log != nil {
+						s.log.Warn("docker stats history purge failed", zap.Uint64("deviceId", id), zap.Error(perr))
+					}
 				}
 			}
 			continue
@@ -496,12 +519,53 @@ func (s *DockerService) State(ctx context.Context, deviceID uint64) (*response.D
 	return out, nil
 }
 
+// ContainerStatsHistory 返回一台主机上一个容器的 stats 留存序列（按 t 升序，
+// 至多 dockerstate.StatsHistoryKeep 条 ≈ 30 分钟窗口）。
+//
+// 三条与 State 同族的取舍：
+//   - 设备不存在 → 404（同一句话）：ID 打错时「设备不存在」比对着一页空曲线猜诚实；
+//   - 容器无历史 → 200 + samples 空数组（而非 404/null）：「容器没有留存」是正常
+//     答案（刚建、留存关闭、或容器死满 30 分钟后 TTL 收走了序列 —— 最后一种页面
+//     上还有快照在，两者不该在状态码上混淆）；
+//   - 字段口径照抄留存序列（与快照/实时流同源），映射只做命名转换（领域直陈 →
+//     DTO 驼峰），不重算任何值。
+func (s *DockerService) ContainerStatsHistory(ctx context.Context, deviceID uint64, containerID string) (*response.DockerStatsHistoryResp, error) {
+	if _, err := s.devices.FindByID(ctx, deviceID); err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, apperror.NotFound("设备不存在")
+		}
+		return nil, apperror.Internal("内部错误", err)
+	}
+	if s.stats == nil {
+		return nil, apperror.Internal("stats 留存未装配")
+	}
+	samples, err := s.stats.History(ctx, deviceID, containerID)
+	if err != nil {
+		return nil, apperror.Internal("读取 stats 历史失败", err)
+	}
+	// 空数组而非 null：与五清单同一约定（前端少一层判空）。
+	out := &response.DockerStatsHistoryResp{Samples: make([]response.DockerStatsHistorySample, 0, len(samples))}
+	for _, sm := range samples {
+		out.Samples = append(out.Samples, response.DockerStatsHistorySample{
+			T: sm.T, CPUPercent: sm.CPUPercent, MemUsageMB: sm.MemUsageMB, MemLimitMB: sm.MemLimitMB,
+		})
+	}
+	return out, nil
+}
+
 // PurgeDevice 是设备删除时的连带清理。
 //
 // 不做它，docker:state:<id> 会永久占着 Redis，而 docker:hosts 里的成员会让已删设备
-// 一直出现在主机切换器里（列表按集合枚举，不是按设备表）。
+// 一直出现在主机切换器里（列表按集合枚举，不是按设备表）。stats 留存键一起清
+// （它带 TTL，不清也只是晚 30 分钟消失 —— 但删除是明确动作，主动清掉比等兜底快）。
 func (s *DockerService) PurgeDevice(ctx context.Context, deviceID uint64) error {
-	return s.store.Purge(ctx, deviceID)
+	if err := s.store.Purge(ctx, deviceID); err != nil {
+		return err
+	}
+	if s.stats != nil {
+		return s.stats.Purge(ctx, deviceID)
+	}
+	return nil
 }
 
 // ── 协议载荷 → HTTP 响应 的逐字段映射 ─────────────────────────────────

@@ -411,3 +411,34 @@ type DockerTaskItem struct {
 type DockerTaskListResp struct {
 	Items []DockerTaskItem `json:"items"`
 }
+
+// ── 容器 stats 历史（P2：GET /docker/hosts/:id/containers/:cid/stats-history）──
+
+// DockerStatsHistoryResp 是一个容器的 stats 留存序列响应。
+//
+// 窗口契约：30s 快照节奏 × 60 样本 ≈ 30 分钟（dockerstate.StatsHistoryKeep）；
+// 容器消失后序列冻结在最后一次读数上、30 分钟后由 TTL 收走。**不报窗口宽度/
+// 样本上限字段**：那是后端容量决策，前端按「有什么画什么」渲染，承诺窗口形状
+// 反而会在容量调整时变成前端要适配的第二个口径。
+type DockerStatsHistoryResp struct {
+	// Samples 按时刻**升序**（曲线从左往右）；无历史时空数组而非 null ——
+	// 「没有留存」是正常答案（刚建的容器、升级前、容器死满 30 分钟后），
+	// 与 404（设备不存在）各说各的话。
+	Samples []DockerStatsHistorySample `json:"samples"`
+}
+
+// DockerStatsHistorySample 是留存序列的一个读数点。
+//
+// 字段与快照条目 / stats 实时流的同名字段**同一口径**（cpu_percent/mem_usage_mb/
+// mem_limit_mb，单位与 round2 一致）：抽屉里「历史曲线、实时曲线、表格读数」三处
+// 是同一套数据约定。差异只有两点：T 是 **core 收帧时刻**（不是 agent 时钟 ——
+// 留存侧无法逐样本改写流样本的时钟，两条曲线在时钟偏斜主机上的衔接由前端按
+// 先后拼接）；**不带网络字段**（30 分钟窗口内价值低且体积翻倍，取舍见
+// dockerstate/stats_history.go 的体积账）。
+type DockerStatsHistorySample struct {
+	// T 是 core 收到该快照帧的时刻（unix 毫秒），曲线的 x 轴刻度。
+	T          int64   `json:"t"`
+	CPUPercent float64 `json:"cpuPercent"`
+	MemUsageMB float64 `json:"memUsageMb"`
+	MemLimitMB float64 `json:"memLimitMb"`
+}

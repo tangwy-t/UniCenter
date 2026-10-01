@@ -765,3 +765,170 @@ func TestManagerDeliverUnknownHostAndInvalidFrame(t *testing.T) {
 		t.Fatalf("非法帧处理完成即止，不得让路由器再记一遍: %v", err)
 	}
 }
+
+// ── 常驻内部消费者（七期·通知联动的关键状态机改动）───────────────────────
+//
+// 管理器从「全 HTTP 引用计数」变为「双面消费端」：内部消费者不计入 HTTP 面的
+// 归零判据 —— console 全断开时订阅保持常开；两个面都空才全量退订。
+// HTTP 端点的行为（6b 钉住的 13 条用例）在此之下必须零回退。
+
+// fakeResident 是记录型内部消费者替身（DeliverDockerEvent 只记账，绝不阻塞）。
+type fakeResident struct {
+	mu  sync.Mutex
+	got []Event
+}
+
+func (r *fakeResident) DeliverDockerEvent(e Event) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.got = append(r.got, e)
+}
+
+func (r *fakeResident) events() []Event {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]Event(nil), r.got...)
+}
+
+// 内部消费者单独在册即可驱动订阅：HTTP 客户端数为 0，对账照常向可管主机发起订阅，
+// 事件以带归属的形态实时到达 —— 「没人看面板」不再等于「没人需要事件流」。
+func TestResidentKeepsSubscriptionWithoutClients(t *testing.T) {
+	env := newTestManager(t, 7, 9)
+	r := &fakeResident{}
+	unreg := env.m.RegisterResident("notify", r)
+	if env.m.ResidentCount() != 1 {
+		t.Fatalf("内部消费者计数应为 1，实际 %d", env.m.ResidentCount())
+	}
+	env.dol()
+	if got := env.sender.cmdRefs(7); len(got) != 1 {
+		t.Fatalf("内部消费者必须触发对主机 7 发起订阅，实际 %v", got)
+	}
+	if got := env.sender.cmdRefs(9); len(got) != 1 {
+		t.Fatalf("内部消费者必须触发对主机 9 发起订阅，实际 %v", got)
+	}
+	env.m.OnEventsResult(7, resultOK(7, env.sender.cmdRefs(7)[0], "sess-events-00000007"))
+	env.m.OnEventsResult(9, resultOK(9, env.sender.cmdRefs(9)[0], "sess-events-00000009"))
+
+	env.emit(7, "sess-events-00000007", 1, ev("container", "die", "web", "ab"))
+	got := r.events()
+	if len(got) != 1 || got[0].DeviceID != 7 || got[0].Hostname != "alpha" || got[0].Item.Action != "die" {
+		t.Fatalf("内部消费者应拿到带归属的实时事件: %+v", got)
+	}
+
+	// HTTP 客户端接进来再断开：订阅必须留任（内部面还在），也不得发 cancel ——
+	// 「看的人走了」不触发退订是常驻语义的核心。
+	cl := env.m.Subscribe()
+	if env.m.SubscriberCount() != 1 || env.m.ResidentCount() != 1 {
+		t.Fatalf("两个面的计数必须独立: clients=%d residents=%d",
+			env.m.SubscriberCount(), env.m.ResidentCount())
+	}
+	cl.Close()
+	if env.m.SubscriberCount() != 0 {
+		t.Fatalf("HTTP 面归零后客户端计数应为 0，实际 %d", env.m.SubscriberCount())
+	}
+	if env.m.SubscribedHosts() != 2 {
+		t.Fatalf("HTTP 面归零但有内部消费者时订阅必须留任，实际 %d 台", env.m.SubscribedHosts())
+	}
+	if got := env.sender.cancels(7); len(got) != 0 {
+		t.Fatalf("内部消费者在册期间不得下发 cancel: %v", got)
+	}
+
+	// 注销内部消费者（此刻 HTTP 面也是 0）：两个面都空了，才轮到全量退订。
+	unreg()
+	if env.m.ResidentCount() != 0 {
+		t.Fatalf("注销后内部消费者计数应为 0，实际 %d", env.m.ResidentCount())
+	}
+	if env.m.SubscribedHosts() != 0 {
+		t.Fatalf("两个面都空必须全量退订，实际 %d 台", env.m.SubscribedHosts())
+	}
+	if got := env.sender.cancels(7); len(got) != 1 || got[0] != "sess-events-00000007" {
+		t.Fatalf("主机 7 必须收到 cancel: %v", got)
+	}
+	if got := env.sender.cancels(9); len(got) != 1 || got[0] != "sess-events-00000009" {
+		t.Fatalf("主机 9 必须收到 cancel: %v", got)
+	}
+}
+
+// 内部消费者**不做环形回放**：登记前的老事件（活动流意义上的「刚才」）不算实时，
+// 通知联动不能把启动前的历史再告警一遍 —— 只收登记后的实时事实。
+func TestResidentNoRingReplay(t *testing.T) {
+	env := newTestManager(t, 7)
+	cl := env.m.Subscribe()
+	env.dol()
+	env.m.OnEventsResult(7, resultOK(7, env.sender.cmdRefs(7)[0], "sess-events-00000007"))
+	env.emit(7, "sess-events-00000007", 1, ev("container", "die", "old", "aa"))
+
+	r := &fakeResident{}
+	unreg := env.m.RegisterResident("notify", r)
+	env.emit(7, "sess-events-00000007", 2, ev("container", "die", "new", "bb"))
+	if got := r.events(); len(got) != 1 || got[0].Item.ActorName != "new" {
+		t.Fatalf("内部消费者只应收登记后的实时事件（不得回放环形缓冲）: %+v", got)
+	}
+	cl.Close()
+	unreg()
+}
+
+// 注销是**幂等**且按身份生效：同名后登记会替换先登记，先登记的注销函数不再删掉
+// 替身 —— 不会出现「旧注销把新消费者误删」的账目漂移。
+func TestResidentUnregisterIdempotentAndIdentityScoped(t *testing.T) {
+	env := newTestManager(t, 7)
+	r1, r2 := &fakeResident{}, &fakeResident{}
+	unreg1 := env.m.RegisterResident("notify", r1)
+	if env.m.ResidentCount() != 1 {
+		t.Fatalf("登记计数应为 1，实际 %d", env.m.ResidentCount())
+	}
+	unreg2 := env.m.RegisterResident("notify", r2)
+	if env.m.ResidentCount() != 1 {
+		t.Fatalf("同名替换后计数仍应为 1，实际 %d", env.m.ResidentCount())
+	}
+	unreg1() // 旧身份：不得删掉新替身
+	unreg1() // 幂等：再调一次无副作用
+	if env.m.ResidentCount() != 1 {
+		t.Fatalf("旧注销不得删掉替身后的消费者，实际 %d", env.m.ResidentCount())
+	}
+	env.dol()
+	if len(env.sender.cmdRefs(7)) == 0 {
+		t.Fatal("被替身后的消费者必须仍在驱动订阅")
+	}
+	unreg2()
+	if env.m.ResidentCount() != 0 || env.m.SubscribedHosts() != 0 {
+		t.Fatalf("新注销后必须全量退订: residents=%d hosts=%d",
+			env.m.ResidentCount(), env.m.SubscribedHosts())
+	}
+}
+
+// 内部消费者与 HTTP 客户端同链扇出：同一条事件两个面各收一份、顺序一致 ——
+// 通知联动看到的正是活动流看到的那条（归属与载荷同一实例）。
+func TestResidentAndClientShareFanout(t *testing.T) {
+	env := newTestManager(t, 7)
+	r := &fakeResident{}
+	unreg := env.m.RegisterResident("notify", r)
+	cl := env.m.Subscribe()
+	env.dol()
+	env.m.OnEventsResult(7, resultOK(7, env.sender.cmdRefs(7)[0], "sess-events-00000007"))
+
+	env.emit(7, "sess-events-00000007", 1,
+		ev("container", "die", "web", "ab"),
+		ev("container", "start", "web", "ab"))
+	clientGot := []Item(nil)
+	for range 2 {
+		e := nextWithTimeout(t, cl)
+		clientGot = append(clientGot, itemOf(e))
+	}
+	rg := r.events()
+	if len(rg) != 2 {
+		t.Fatalf("内部消费者应收到两条: %+v", rg)
+	}
+	for i := range 2 {
+		if rg[i].Item.Action != clientGot[i].Action || rg[i].Hostname != "alpha" {
+			t.Fatalf("两面扇出必须同序同形: resident=%+v client=%+v", rg[i], clientGot[i])
+		}
+	}
+	cl.Close()
+	unreg()
+}
+
+// Item 是别名以便断言（避免给测试引入协议包外的理解负担）。
+type Item = agentproto.DockerEventItem
+
+func itemOf(e Event) Item { return e.Item }

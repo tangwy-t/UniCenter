@@ -12,7 +12,7 @@
         <span class="wkl-stats__error">{{ errorText }}</span>
         <ElButton size="small" class="wkl-stats__retry" @click="restart">重试</ElButton>
       </template>
-      <span class="wkl-stats__meta">1 秒采样 · 最近约 2 分钟</span>
+      <span class="wkl-stats__meta">{{ metaText }}</span>
     </div>
 
     <!-- 未运行：曲线区缺席要有解释（而不是留下一个空框让人猜）。 -->
@@ -47,10 +47,12 @@
       </div>
 
       <!-- 网络速率 = 第二组（默认折叠）：CPU / 内存回答「这台容器稳不稳」，网络
-           是次要细节；折叠不影响流（样本照常累积，展开即见历史）。rx/tx 同量纲
-           （B/s）才允许同图双序列，须配图例。 -->
+           是次要细节；折叠不影响流（样本照常累积，展开即见）。rx/tx 同量纲
+           （B/s）才允许同图双序列，须配图例。P2 起本组多一条如实交代：历史
+           端点不回网络字段，这张图只有实时段（CPU/内存图才有 30 分钟回看）。 -->
       <ElCollapse v-model="netOpen" class="wkl-stats__net">
         <ElCollapseItem name="net" title="网络速率">
+          <p class="wkl-stats__net-note">网络速率仅实时段 —— 历史回看端点不回网络字段。</p>
           <div class="wkl-stats__tiles wkl-stats__tiles--net">
             <div class="wkl-stats__tile">
               <div class="wkl-stats__tile-head">
@@ -67,7 +69,7 @@
               <span class="wkl-stats__value">{{ netTxText }}</span>
             </div>
           </div>
-          <StatsChart :series="netSeries" :times="times" unit="B/s" />
+          <StatsChart :series="netSeries" :times="netTimes" unit="B/s" />
         </ElCollapseItem>
       </ElCollapse>
     </template>
@@ -83,6 +85,11 @@
    *      session_id 即「会话已建立」的信号（样本走流通道，不走结果载荷）；
    *   2. GET cmds/:ref/stats 接入 NDJSON 样本流（首帧即当前值，1 秒采样，eof 收尾）。
    *
+   * P2 历史半边：上面两步之前先拉一次 stats-history（过去约 30 分钟，一次性
+   * GET）预填曲线 —— 受理/建流还在路上时读数与曲线就有形状，「昨晚为什么慢」
+   * 有回看窗口。历史失败静默降级为纯实时（= 原行为）；两段数据按 t 去重衔接
+   * 成一条序列，口径见 utils/stats 的 mergeStatsHistory。
+   *
    * 生命周期纪律照抄终端 Tab（pty-terminal）：本组件由抽屉 `v-if`（概览 Tab 激活 +
    * 抽屉开着）+ `:key`（行主机:容器）挂载 —— 切 Tab / 关抽屉 / 换行都是**卸载**，
    * 卸载即 abort；AbortController 一断，服务端就向 agent 下发 cancel 释放会话。
@@ -93,11 +100,18 @@
   import { formatByUnit } from '@/modules/device/utils/display'
   import {
     fetchDockerCmdResult,
+    fetchDockerStatsHistory,
     openDockerStatsStream,
     sendDockerCmd,
     type DockerWorkloadItem
   } from '../api'
-  import { createStatsFeed, MAX_STATS_SAMPLES, type StatsSample } from '../utils/stats'
+  import {
+    createStatsFeed,
+    MAX_STATS_SAMPLES,
+    mergeStatsHistory,
+    type StatsHistorySample,
+    type StatsSample
+  } from '../utils/stats'
   import { pollDelay } from '../utils/cmd'
   import StatsChart, { type StatsSeries } from './stats-chart.vue'
 
@@ -124,6 +138,11 @@
   let streamAbort: AbortController | null = null
   /** 生命周期序号：断开/重试让在飞的「建立 + 读循环」失效。 */
   let statsSeq = 0
+  /**
+   * 历史段（P2 预填）：start() 拉一次留在本次会话里，实时流的每一帧都与它
+   * 衔接合并（mergeStatsHistory）。拉不到就是空数组 —— 纯实时，原行为。
+   */
+  let history: StatsHistorySample[] = []
 
   const netOpen = ref<string[]>([])
 
@@ -154,18 +173,40 @@
   const memSeries = computed<StatsSeries[]>(() => [
     { name: '内存用量', color: 'var(--stat-mem)', values: samples.value.map((s) => s.memUsageMb) }
   ])
+
+  // ── 网络曲线的数据视图：只画真实流样本 ─────────────────────────────
+  // 历史端点不回网络字段（契约只有 t/cpu/mem），这张图不拿假 0 充历史 ——
+  // 带网络字段的样本才进序列与时刻，历史段自然缺席（折叠组里的说明句交代）。
+  const netView = computed(() => {
+    const rows: { t: number; rx: number; tx: number }[] = []
+    for (const s of samples.value) {
+      if (s.netRxBytesSec !== undefined && s.netTxBytesSec !== undefined) {
+        rows.push({ t: s.t, rx: s.netRxBytesSec, tx: s.netTxBytesSec })
+      }
+    }
+    return rows
+  })
+  const netTimes = computed(() => netView.value.map((r) => r.t))
   const netSeries = computed<StatsSeries[]>(() => [
     {
       name: '接收（下行）',
       color: 'var(--stat-rx)',
-      values: samples.value.map((s) => s.netRxBytesSec)
+      values: netView.value.map((r) => r.rx)
     },
     {
       name: '发送（上行）',
       color: 'var(--stat-tx)',
-      values: samples.value.map((s) => s.netTxBytesSec)
+      values: netView.value.map((r) => r.tx)
     }
   ])
+
+  /** 采样口径摘要：窗内还有历史段（流帧独有网络字段作标记）就如实说两段
+      口径；历史滑出窗或没拉到时，维持纯实时的原口径 —— 摘要句不许说谎。 */
+  const metaText = computed(() =>
+    samples.value.some((s) => s.netRxBytesSec === undefined)
+      ? '历史约 30 分钟 · 实时 1 秒采样'
+      : '1 秒采样 · 最近约 2 分钟'
+  )
 
   // ── 流生命周期（照抄 startLogFollow 的节奏与守卫）──────────────────
   /** 受理期失败的文案：服务端给的结论句优先。 */
@@ -188,6 +229,22 @@
     phase.value = 'connecting'
     errorText.value = ''
     samples.value = []
+
+    // 0. 历史预填（P2 · 历史半边）：先拉过去约 30 分钟（一次性 GET，快），
+    //    再去受理实时流 —— 顺序是「先有形状，再接当下」。失败或为空**静默
+    //    降级为纯实时**（= 原行为）：历史是回看增强不是门槛，回看拉不到不该
+    //    把「现在稳不稳」的实时流一起拖下水 —— 不给错误态，重试按钮属于流。
+    try {
+      const resp = await fetchDockerStatsHistory(props.hostId, props.containerId)
+      history = Array.isArray(resp?.samples) ? resp.samples : []
+    } catch {
+      history = []
+    }
+    if (seq !== statsSeq) return
+    // 预填即上屏：受理/建流还在路上，读数与曲线先吃历史末样本（30s 采样，
+    // 末样本至多 30 秒旧 —— 仍好过行快照的刷新间隔）。
+    samples.value = mergeStatsHistory(history, [])
+
     try {
       // 1. 受理会话制指令 → 轮询到终态（终态携带 session_id = 会话已建立）。
       const accepted = await sendDockerCmd(props.hostId, {
@@ -225,13 +282,15 @@
         const { done, value } = await reader.read()
         if (done || seq !== statsSeq) break
         feed.pushRaw(chunkDecoder.decode(value, { stream: true }))
-        samples.value = feed.samples.slice()
+        // 两段衔接：历史段在前、流窗口在后，合并成一条 t 单调序列（同 t 丢
+        // 历史留流帧、缺口连线 —— 口径见 mergeStatsHistory）。
+        samples.value = mergeStatsHistory(history, feed.samples)
         if (feed.eof) break
       }
       if (seq !== statsSeq) return
       // 流自然收尾（agent 发了 eof）：最后一批字节可能还在解码器里。
       feed.pushRaw(chunkDecoder.decode())
-      samples.value = feed.samples.slice()
+      samples.value = mergeStatsHistory(history, feed.samples)
       streamAbort = null
       if (feed.eof) {
         phase.value = 'ended'
@@ -321,6 +380,14 @@
   }
 
   .wkl-stats__note {
+    color: var(--el-text-color-secondary);
+    font-size: 12px;
+  }
+
+  // 网络组的口径说明（历史缺席的如实交代）：与状态行 note 同一副次要色，
+  // 折叠展开后先于读数出现 —— 缺席要有解释，而不是留一截短曲线让人猜。
+  .wkl-stats__net-note {
+    margin: 0 0 8px;
     color: var(--el-text-color-secondary);
     font-size: 12px;
   }

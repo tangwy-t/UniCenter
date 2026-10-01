@@ -38,7 +38,11 @@ type dictDataDef struct {
 //   - sys_notice_publish_type 采用“通知接收范围”值域（targetType 0-3），
 //     合并了历史 v021 修正后的最终语义；
 //   - list_class 直接作为字段值写入（合并历史 v015 的样式预填）；
-//   - sys_opt_result_code 的 10001 文案取 v017 修正后的“认证失败”。
+//   - sys_opt_result_code 的 10001 文案取 v017 修正后的“认证失败”；
+//   - sys_opt_result_code 末尾的 70001「执行失败」并入自本仓库 v017 的审计
+//     字典种子（docker 指令结果审计 6c —— 操作日志页的结果列靠字典渲染，
+//     没有这条码，失败任务会被显示成「成功」或借一个语义错位的既有码）。
+//     7c 迁移链归一：v017 已改为墓碑，fresh 库由本种子一次种齐。
 var dictDefinitions = []dictTypeDef{
 	{Code: "sys_normal_disable", Name: "系统开关", Data: []dictDataDef{
 		{Label: "正常", Value: "1", Class: "success", Sort: 1, IsDefault: true},
@@ -143,6 +147,10 @@ var dictDefinitions = []dictTypeDef{
 		{Label: "资源不存在", Value: "40400", Class: "danger", Sort: 11},
 		{Label: "操作冲突", Value: "40900", Class: "danger", Sort: 12},
 		{Label: "服务器内部错误", Value: "50000", Class: "danger", Sort: 13},
+		// 70001 执行失败（7c 并入，原 v017）：70 千族与既有 HTTP 信封语义的
+		// 1000x/40000/40400/40900/50000 都不相邻 —— 「agent 回一句拉取镜像失败」
+		// 是任务的执行失败，不是基础设施故障；给后续「执行取消」等细分位留编址空间。
+		{Label: "执行失败", Value: "70001", Class: "danger", Sort: 14},
 	}},
 }
 

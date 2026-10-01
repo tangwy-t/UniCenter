@@ -144,7 +144,8 @@
    * 列表页保留不动；服务行归纳的派生口径在 utils/projects.ts（两处同步改的提醒
    * 写在那份文件头）。
    *
-   * 主机跟随（照 container-detail 纪律）：hostId 落定/切换 → 快照重拉（seq 守卫在
+   * 主机跟随（单主机详情页的既有纪律，先例出自被删的 container-detail）：
+   * hostId 落定/切换 → 快照重拉（seq 守卫在
    * useDockerHostState），各子区自己 watch hostId 重置/断流；query host 是页面事实源
    * （项目是主机作用域的，入口链接都带它）。
    */

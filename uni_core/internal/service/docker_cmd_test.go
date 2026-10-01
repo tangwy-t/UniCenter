@@ -40,7 +40,7 @@ func (f *fakeCmdSender) SendToDevice(deviceID uint64, msg *agentproto.Message) e
 	return nil
 }
 
-// 指令受理：权限码来自策略表、期次闸、确认档、在飞去重、离线 503。
+// 指令受理：权限码来自策略表、确认档、在飞去重、离线 503。
 func TestDockerCmdServiceSend(t *testing.T) {
 	mr := miniredis.RunT(t)
 	rdb := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
@@ -62,7 +62,7 @@ func TestDockerCmdServiceSend(t *testing.T) {
 	if _, err := svc.Send(ctx, 42, 7, &request.DockerCmdReq{Action: agentproto.DockerActionContainerLogs, Target: "mysql"}); err == nil {
 		t.Fatal("在飞指令必须拒绝（否则同一目标会并发执行两条）")
 	}
-	// 四期（配置编辑）已交付：期次闸不再拦截，但「强确认」（照抄项目名）仍是硬要求。
+	// 配置编辑的「强确认」（照抄项目名）是硬要求：缺 confirm 一律拒（4xx 结论句）。
 	if _, err := svc.Send(ctx, 42, 7, &request.DockerCmdReq{
 		Action: agentproto.DockerActionComposeFileWrite, Target: "uni-center",
 		Options: &request.DockerCmdOptionsReq{Content: "services: {}\n", BaseHash: strings.Repeat("a", 64)},

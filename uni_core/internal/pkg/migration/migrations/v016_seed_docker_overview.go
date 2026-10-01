@@ -1,90 +1,46 @@
 package migrations
 
 import (
-	"fmt"
-
 	"gorm.io/gorm"
 
-	"github.com/tangwy-t/UniCenter/uni_core/internal/model/entity"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/migration"
-	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/permission"
-	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/util"
 )
 
+// ── 墓碑：v016 的内容已并入 v015（7a 旧页收敛）──────────────────────────
+//
+// v016 原本把「Docker 总览」菜单（/docker）作为独立批次追加到 v015 种下的菜单树上。
+// 7a 收敛把 Docker 菜单种子重构为「初始化即最终态」：v015 直接种子最终菜单面
+// （总览 / 容器 / 镜像与存储 / 项目，见 v015 的 dockerMenuDefinitions），本迁移
+// 的定义与执行函数已删除，版本号保留为**墓碑**（Up 为 no-op）。
+//
+// 为什么是墓碑而不是删文件：
+//
+//   - 迁移框架按「注册表 vs sys_migration 最高版本」求差集（Run 的 lastApplied
+//     扫的是注册表），版本号允许不连续 —— 删掉 v016 对已执行过的库同样无伤害；
+//     但保留墓碑让 sys_migration 账本保持**单调且自解释**：旧库里「16 已执行」
+//     那行有代码可对照，新库里账本多一行「16 = 并入 v015」的记录，考古时不用
+//     猜 15→17 之间发生过什么。
+//   - 框架的 forward-only 教义（migration.go 文件头）本就禁止删已发布的迁移文件
+//     —— 这里是开发期重构，协调方明确豁免了「不改旧种子」的约束，但**删版本号**
+//     比留墓碑多打破一条账本约定，收益为零。
+//
+// 已迁移的开发库怎么办（协调方定的口径：重置，不做 reconcile）：
+//
+//	旧库的 sys_migration 记着 15/16/17，新 v015 定义不会重放 —— 它的菜单面停在
+//	收敛前（5 个列表菜单 + 总览），缺「镜像与存储」且多三条旧列表行；旧 path 的
+//	前端路由已删，那三条菜单会被 MenuProcessor 判定「无对应页面」而静默消失，
+//	功能上只剩「侧边栏缺镜像与存储入口」。处理口径：**开发库直接重置**（删
+//	sys_menu 里 parent 为「Docker 管理」目录的子树后重放种子，或整库重建）。
+//	不为几台开发机写一条 reconcile 迁移 —— 它要把刚被宣告死亡的旧菜单形状
+//	（/docker/images 三行）永久编码进迁移史，纯粹的死代码。
 func init() {
 	migration.Register(migration.Migration{
 		Version:     16,
-		Description: "新增 Docker 总览菜单（控制塔跨主机总览页）",
-		Up:          seedDockerOverviewMenu,
+		Description: "墓碑：Docker 总览菜单已并入 v015 最终种子（7a 旧页收敛）",
+		Up: func(tx *gorm.DB) error {
+			// no-op：内容在 v015 的 dockerMenuDefinitions 里（fresh 库由 v015
+			// 一次种齐；已执行过旧 v016 的库本来就有这行菜单，无需动作）。
+			return nil
+		},
 	})
-}
-
-// dockerOverviewMenuDefinitions 是控制塔总览页的菜单定义（**新增**，不改 v015 ——
-// v015 已在真实库执行过（sys_migration 有版本 15 的账本记录），改老定义对已部署
-// 的库无效 —— 见 v012 开头的同款说明）。
-//
-// Sort=0：排在「容器」列表（v015 里 Sort=1）之前 —— 控制塔是 docker 域的首页，
-// 点开目录先看到跨主机总览，再进各资源列表。
-//
-// Icon 复用 docker 菜单族用过的 ri:ship-line（航队隐喻，与总览响应的 fleet KPI
-// 命名同一套语言；也在离线图标集内，check:icons 不会因为新图标名翻车）。
-//
-// ── 前端依赖（本切片只做主后端半边，窗口期必须写清楚）────────────────
-//
-// 后端菜单模式下 MenuProcessor 用菜单 path 去前端插件路由表取组件，取不到则
-// **整条菜单静默消失**（不报错、不打日志）。前端控制塔页面（切片 2）落地时必须：
-//
-//	① 在 uni_console/src/modules/docker/index.ts 注册 path: '/docker' 的路由
-//	   （component: () => import('./views/overview.vue')）；
-//	② 补上 v012/v013/v015 同款的「菜单 path ↔ 前端路由」逐字守卫测试，把这条
-//	   约束从注释升格为自动检查。
-//
-// 在那之前侧边栏暂时看不到本菜单 —— 这是「后端先落地、前端随后」的既有成本，
-// 不是 bug（接口与类型此时已可供前端 slice 直接消费）。
-var dockerOverviewMenuDefinitions = []menuDef{
-	{Key: "docker:overview", Parent: "docker", Name: "Docker 总览", Type: "menu",
-		Perms: permission.PermDockerList, Path: "/docker",
-		Component: "docker/overview", Sort: 0, Icon: "ri:ship-line"},
-}
-
-// seedDockerOverviewMenu 把总览菜单挂到**已存在**的「Docker 管理」目录下。
-//
-// 与 v015 的写法有两处刻意不同（与 v012 同款，因为本迁移同样是「只加子菜单」）：
-//  1. **查父而不靠 idByKey**：父目录是 v015 留下的，必须从库里查；查不到就报错
-//     （不静默把 ParentID 置 0 —— 那会让菜单变成顶级项，看起来像 bug 但不报错）。
-//  2. **幂等：按 (parent_id, path) 查重后跳过**：从旧备份恢复 + 重启会让同一 Up
-//     在语义上重放，重复插入的症状是侧边栏两条同名菜单。
-func seedDockerOverviewMenu(tx *gorm.DB) error {
-	var parent entity.SysMenu
-	if err := tx.Where("type = ? AND name = ?", "dir", "Docker 管理").First(&parent).Error; err != nil {
-		return fmt.Errorf("v016 找不到「Docker 管理」目录菜单（v015 应已创建）: %w", err)
-	}
-
-	for _, d := range dockerOverviewMenuDefinitions {
-		var n int64
-		if err := tx.Model(&entity.SysMenu{}).
-			Where("parent_id = ? AND path = ?", parent.ID, d.Path).
-			Count(&n).Error; err != nil {
-			return fmt.Errorf("v016 查询菜单 %s: %w", d.Key, err)
-		}
-		if n > 0 {
-			continue // 已存在（重放/手工建过）→ 保持现状，不覆盖运维可能的调整
-		}
-		menu := entity.SysMenu{
-			ParentID:  util.Ptr(parent.ID),
-			Name:      d.Name,
-			Type:      d.Type,
-			Perms:     strPtr(d.Perms),
-			Path:      strPtr(d.Path),
-			Component: strPtr(d.Component),
-			Sort:      util.Ptr(d.Sort),
-			Icon:      strPtr(d.Icon),
-			Visible:   util.Ptr[int8](entity.MenuVisible),
-			Status:    util.Ptr[int8](entity.MenuStatusEnabled),
-		}
-		if err := tx.Create(&menu).Error; err != nil {
-			return fmt.Errorf("v016 创建菜单 %s: %w", d.Key, err)
-		}
-	}
-	return nil
 }

@@ -49,6 +49,12 @@ const (
 	// 回，届时进度也发完了。故本类会话在**受理指令时**就预登记（句柄 = 协议派生的
 	// pull_<ref>，见 docker_cmd.go），帧通道因此在指令 pending 期间就能被接入。
 	KindPull
+	// KindBuild 是构建进度流（image:build，P2）：帧里装 DockerBuildProgressItem
+	// 记录行。与KindPull 同一登记时点（受理时预登记，句柄 = 协议派生的 build_<ref>）。
+	KindBuild
+	// KindPush 是推送进度流（image:push，P2）：帧里装 DockerPushProgressItem
+	// 记录行。与 KindPull 同一登记时点（受理时预登记，句柄 = 协议派生的 push_<ref>）。
+	KindPush
 )
 
 func (k Kind) String() string {
@@ -59,8 +65,21 @@ func (k Kind) String() string {
 		return "stats"
 	case KindPull:
 		return "pull"
+	case KindBuild:
+		return "build"
+	case KindPush:
+		return "push"
 	}
 	return "log"
+}
+
+// backgroundKind 报告该 kind 是否属于**后台进度三族**（pull/build/push）：
+// 三族共用同一套豁免纪律 —— 不占用户流槽位（它们是一场已受理写指令的进度透出，
+// 不是用户开的流）、豁免空闲清退（停滞/静默是长耗时指令的常态而非泄漏）、
+// 生命周期 = 指令寿命（终态对账回收）。用单一谓词表达，新增进度族不用改
+// 三处条件。
+func backgroundKind(k Kind) bool {
+	return k == KindPull || k == KindBuild || k == KindPush
 }
 
 // KindForAction 按 action 判定会话种类（日志之外的会话按日志处理：多一条流不致命，
@@ -177,9 +196,10 @@ func (r *Registry) Register(meta Meta) error {
 	if _, exists := r.sessions[meta.SessionID]; exists {
 		return ErrDuplicate
 	}
-	// 淘汰闸只对**用户流**生效：拉取进度会话不占用户槽位（它是一场已受理写指令的
-	// 进度透出），反过来用户流开满也不该挤掉它 —— 两个方向的粘连都要切断。
-	if meta.Kind != KindPull {
+	// 淘汰闸只对**用户流**生效：后台进度会话（拉取/构建/推送）不占用户槽位（它们是
+	// 一场已受理写指令的进度透出），反过来用户流开满也不该挤掉它 —— 两个方向的
+	// 粘连都要切断。
+	if !backgroundKind(meta.Kind) {
 		for len(r.deviceSessionsLocked(meta.DeviceID)) >= r.opts.MaxSessionsPerDevice {
 			oldest := oldestOf(r.deviceSessionsLocked(meta.DeviceID))
 			if oldest == nil {
@@ -217,14 +237,15 @@ func oldestOf(list []*Session) *Session {
 
 // deviceSessionsLocked 返回该设备当前**未收尾**的会话（调用方必须持 r.mu）。
 //
-// 拉取进度会话（KindPull）**不进这份账**：它是「每设备至多 3 条**用户流**」上限的
-// 计数基础（受理预检与淘汰都走它）—— 把一场已经受理的拉取算成用户开的流，会让
-// 开满日志/终端的用户被 409 挡住、或让终端挤掉一场正在跑的拉取的进度。用户流的
-// 槽位语义（user 主动开的、会忘关的）与拉取（指令的一部分、寿命=指令）不同。
+// 后台进度会话（KindPull/KindBuild/KindPush）**不进这份账**：它是「每设备至多 3 条
+// **用户流**」上限的计数基础（受理预检与淘汰都走它）—— 把一场已经受理的拉取/构建/
+// 推送算成用户开的流，会让开满日志/终端的用户被 409 挡住、或让终端挤掉一场正在跑
+// 的拉取的进度。用户流的槽位语义（user 主动开的、会忘关的）与后台进度（指令的
+// 一部分、寿命=指令）不同。
 func (r *Registry) deviceSessionsLocked(deviceID uint64) []*Session {
 	out := make([]*Session, 0, len(r.sessions))
 	for _, s := range r.sessions {
-		if s.meta.DeviceID == deviceID && !s.isClosed() && s.meta.Kind != KindPull {
+		if s.meta.DeviceID == deviceID && !s.isClosed() && !backgroundKind(s.meta.Kind) {
 			out = append(out, s)
 		}
 	}
@@ -265,16 +286,17 @@ func (r *Registry) All() []*Session {
 
 // Expired 返回空闲超过 IdleTimeout 的会话（lastActivity 由投递与控制帧刷新）。
 //
-// 拉取进度会话**豁免**：排队中的拉取几十分钟没有一帧是常态（dispatcher 串行，
+// 后台进度会话**豁免**：排队中的拉取几十分钟没有一帧是常态（dispatcher 串行，
 // 它前面的 15 分钟指令还没跑完 ——「无数据」正是它此刻的事实，不是被遗忘的会话）；
-// 它的寿命与指令同长，由 docker_stream 服务的**终态对账**回收（见 Sweep），
-// 空闲清退对它的语义是错的 —— 清退会下发 cancel，把一场合法的拉取腰斩。
+// 构建的 RUN 步骤静默几分钟同样是常态。它们的寿命与指令同长，由 docker_stream
+// 服务的**终态对账**回收（见 Sweep），空闲清退对它们的语义是错的 —— 清退会下发
+// cancel，把一场合法的拉取/构建/推送腰斩。
 func (r *Registry) Expired(now time.Time) []*Session {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var out []*Session
 	for _, s := range r.sessions {
-		if s.meta.Kind == KindPull {
+		if backgroundKind(s.meta.Kind) {
 			continue
 		}
 		if now.Sub(s.lastActivityTime()) >= r.opts.IdleTimeout {

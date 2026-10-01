@@ -31,14 +31,14 @@ func pullCmdWithAuth() *agentproto.DockerCmd {
 	}
 }
 
-// TestEncodePullAuthRoundTrip：PullAuth → SDK AuthConfig → X-Registry-Auth 头
+// TestEncodePullAuthRoundTrip：ImageAuth（P2 起 pull/push 的公共凭据面）→ SDK AuthConfig → X-Registry-Auth 头
 // 的解码往返 —— 认证三元组逐字段无损（本包唯一碰 SDK 的地方，没有 daemon 也要测到）。
 func TestEncodePullAuthRoundTrip(t *testing.T) {
-	encoded, err := encodePullAuth(&PullAuth{
+	encoded, err := encodeImageAuth(&ImageAuth{
 		Registry: "harbor.example.com:8443", Username: "robot$ci", Password: "s3/p@ss:with:colons",
 	})
 	if err != nil {
-		t.Fatalf("encodePullAuth: %v", err)
+		t.Fatalf("encodeImageAuth: %v", err)
 	}
 	got, err := registry.DecodeAuthConfig(encoded)
 	if err != nil {
@@ -51,9 +51,13 @@ func TestEncodePullAuthRoundTrip(t *testing.T) {
 
 // TestPullImageAuthPassesToAdapter：执行器把注入的认证**原样**交给 adapter
 // （stubAPI 记录 pullAuths）；无凭据指令保持 nil（与 4b 逐字一致）。
+//
+// 7c 起会话管理器是写执行器的必接依赖（构造契约见 SetSessions），本测试与
+// pull_progress_test 的折叠测试同用 newPullFixture —— 断言的仍是「认证在
+// 指令 → adapter 这一条瞬时路径上」的保真，进度帧只是伴随产物。
 func TestPullImageAuthPassesToAdapter(t *testing.T) {
 	api := &stubAPI{}
-	w := NewWriteExecutor(api, nil, "", "", nil)
+	w, _, _, _ := newPullFixture(api)
 
 	if _, err := w.Do(context.Background(), pullCmdWithAuth()); err != nil {
 		t.Fatalf("带凭据拉取应成功: %v", err)
@@ -155,7 +159,7 @@ func TestPullAuthFailureResultCarriesNoSecret(t *testing.T) {
 // 凭据库已按规范化键解出,agent 只管把同一把键折进 ServerAddress（译码保真）。
 func TestPullAuthNormalizedByCoreNotAgent(t *testing.T) {
 	api := &stubAPI{}
-	w := NewWriteExecutor(api, nil, "", "", nil)
+	w, _, _, _ := newPullFixture(api)
 	cmd := pullCmdWithAuth()
 	cmd.Options.Registry = "Harbor.Example.COM"
 	cmd.Auth.Registry = "Harbor.Example.COM"

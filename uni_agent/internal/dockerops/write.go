@@ -43,10 +43,10 @@ type WriteExecutor struct {
 	transferDir string
 	flavor      string
 	note        string
-	// sessions 是流会话管理器（4b 拉取进度用）：nil = 未装配 —— image:pull 退回到
-	// 一期黑盒形态（进度透出是**最上层设施的增强**，通道没接好时拉取本身必须照旧
-	// 可用）。由 Runtime.New 装配后经 SetSessions 注入（与 Set* 同一模式：执行器由
-	// 测试直接构造时不强制流通道依赖）。
+	// sessions 是流会话管理器（4b 拉取进度用，P2 起 build/push 共用）：**必须非 nil**
+	// —— 由 Runtime.New 构造会话管理器后经 SetSessions 注入（见 runtime.go 的装配
+	// 顺序）。7c 删掉了「nil = 一期黑盒回退」的宽容分支：进度透出已是写路径的
+	// 常设依赖而不是增强，装配缺失属于缺陷，fail fast（panic）好过静默黑盒。
 	sessions *SessionManager
 	// now 是挂钟注入（四期备份令牌取它）：测试要能确定性地产生「同秒连续保存」这类
 	// 时序，而 Runtime 的 Deps.Now 已经是全模块统一的时钟入口。
@@ -83,19 +83,30 @@ func (e *WriteExecutor) SetNow(now func() time.Time) {
 	e.mu.Unlock()
 }
 
-// SetSessions 注入流会话管理器（4b 拉取进度）。nil = 回到一期黑盒形态：
-// image:pull 仍然完整可执行，只是没有进度可见性 —— 装配缺失不得成为拉取的故障
-// 点（旧流程的另一半守卫）。由 Runtime.New 调用（构造晚于执行器，见 runtime.go）。
+// SetSessions 注入流会话管理器（4b 拉取进度；P2 起 build/push 共用）。
+//
+// 契约：**必须非 nil** —— 传 nil 直接 panic。为什么不留「nil = 黑盒回退」：生产
+// 装配（Runtime.New）永远注入（audit 已核实），nil 只可能出现在装配缺陷或测试
+// 忘了接替身的场合 —— 那两种情形都该在第一发 image:pull 之前现形，而不是把
+// 「进度悄悄没有」的黑盒形态带到线上。由 Runtime.New 调用（构造晚于执行器，
+// 见 runtime.go）。
 func (e *WriteExecutor) SetSessions(m *SessionManager) {
+	if m == nil {
+		panic("dockerops: WriteExecutor 的流会话管理器必须非 nil（Runtime.New 必经注入；测试请接会话替身）")
+	}
 	e.mu.Lock()
 	e.sessions = m
 	e.mu.Unlock()
 }
 
-// sessionsValue 返回当前的会话管理器（nil = 未装配）。
+// sessionsValue 返回当前的会话管理器；未注入即 panic（同 SetSessions 的契约 ——
+// 「从未调用 SetSessions」与「注入了 nil」是同一种装配缺陷）。
 func (e *WriteExecutor) sessionsValue() *SessionManager {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.sessions == nil {
+		panic("dockerops: WriteExecutor 未注入流会话管理器（New 之后必须 SetSessions；生产由 Runtime.New 完成）")
+	}
 	return e.sessions
 }
 
@@ -245,7 +256,20 @@ func (e *WriteExecutor) Do(ctx context.Context, cmd *agentproto.DockerCmd) ([]by
 		// eof 对齐 —— 见 pull_progress.go 的选型说明）。cmd.Ref 进方法：进度会话的
 		// 句柄由 ref 派生（core 受理时预登记的就是它）。
 		// 4c：core 随指令注入的仓库认证一并透传（无凭据 = nil，与 4b 逐字一致）。
-		return nil, e.pullImage(ctx, cmd.Ref, o.Target, pullAuthOf(cmd))
+		return nil, e.pullImage(ctx, cmd.Ref, o.Target, imageAuthOf(cmd))
+
+	case agentproto.DockerActionImageBuild:
+		// P2：构建是同一形态的长耗时写指令（受理 → 轮询 → 终态结论句），进度走
+		// build_<ref> 派生会话（buildImage 里完成接线），上下文 tar 的安全校验
+		//（穿越/尺寸/条目/Dockerfile 存在性）在 adapter 的 scanBuildContext
+		// —— 恶意上下文到不了 daemon。
+		return nil, e.buildImage(ctx, cmd.Ref, o)
+
+	case agentproto.DockerActionImagePush:
+		// P2：推送与拉取完全同源 —— 进度走 push_<ref> 派生会话，凭据走 4c 的
+		// 公共注入面（imageAuthOf 与 pull 同一函数；无凭据 = nil，与 4b 之前
+		// 拉取的自由度一致）。
+		return nil, e.pushImage(ctx, cmd.Ref, o.Target, imageAuthOf(cmd))
 
 	case agentproto.DockerActionImageTag:
 		if err := e.api.ImageTag(ctx, o.Src, defaultImageTag(o.Dst)); err != nil {

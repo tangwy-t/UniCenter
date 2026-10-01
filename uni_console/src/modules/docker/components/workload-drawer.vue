@@ -8,26 +8,19 @@
     :close-on-press-escape="!writeConfirmLoading"
   >
     <!-- 头部：容器名 + 短 id + 状态 + 行操作（与行菜单同一套注册表与确认档）。
-         抽屉是「列表上多看一眼」的轻量入口，全功能仍在详情页（头部给链接）。 -->
+         7b 起抽屉是容器详情的**唯一**表面（container-detail 页已删）：四个 Tab
+         收全功能；名称/状态在「行桩」场景（?id 深链进来、行不在当前过滤视图里）
+         由 inspect 结果兜底（view.name / view.state）。 -->
     <template #header>
       <div v-if="row" class="wkl-drawer__head">
         <div class="wkl-drawer__title-row">
-          <h3 class="wkl-drawer__title">{{ row.name }}</h3>
+          <h3 class="wkl-drawer__title">{{ titleText }}</h3>
           <ElTag v-if="stateText" size="small" :type="stateTagType">{{ stateText }}</ElTag>
           <ElTag v-if="row.protected" size="small" type="warning">受保护</ElTag>
         </div>
         <p class="wkl-drawer__sub">
           <span class="wkl-drawer__id" :title="row.id">{{ shortId }}</span>
           <span class="wkl-drawer__host">@ {{ row.hostname }}</span>
-          <a
-            v-if="canInspect"
-            class="wkl-drawer__full"
-            title="打开全功能详情页（概览 / 日志 / 终端 / 环境变量）"
-            @click.prevent="openFullDetail"
-          >
-            在详情页打开
-            <ArtSvgIcon icon="ri:external-link-line" class="wkl-drawer__full-icon" />
-          </a>
         </p>
         <div class="wkl-drawer__actions">
           <ElButton v-if="canManage" size="small" :disabled="writeDisabled" @click="onToggle">
@@ -64,7 +57,7 @@
              （docker:inspect），无权限不渲染（spec §11.0）。 -->
         <ContainerStats
           v-if="canInspect && activeTab === 'overview' && modelValue && row"
-          :key="`${row.hostId}:${row.id}`"
+          :key="`${row.hostId}:${row.id}:${isRunning}`"
           :host-id="row.hostId"
           :container-id="row.id"
           :running="isRunning"
@@ -77,7 +70,7 @@
         <template v-else-if="view">
           <ElDescriptions :column="2" border size="small">
             <ElDescriptionsItem label="状态">{{ stateText || '—' }}</ElDescriptionsItem>
-            <ElDescriptionsItem label="镜像">{{ row?.image || '—' }}</ElDescriptionsItem>
+            <ElDescriptionsItem label="镜像">{{ imageText }}</ElDescriptionsItem>
             <ElDescriptionsItem label="创建时刻">{{ createdText }}</ElDescriptionsItem>
             <ElDescriptionsItem label="启动时刻">{{ startedText }}</ElDescriptionsItem>
             <ElDescriptionsItem label="重启策略">{{
@@ -146,13 +139,56 @@
           :container-id="row.id"
         />
       </ElTabPane>
+
+      <!-- 环境与启动配置（7b 从 container-detail 的「环境变量与配置」Tab 平移，同一次
+           inspect，不重复发指令）：明文环境变量/标签 + 入口点/命令等宽块。展示口径
+           原样：不做掩码 —— 掩码会让「这个变量到底配了什么」无从核对（管理员视图
+           的取舍），风险提示用一行 Alert 说清楚。 -->
+      <ElTabPane label="环境" name="env">
+        <ElAlert
+          class="wkl-drawer__env-notice"
+          type="warning"
+          :closable="false"
+          show-icon
+          title="环境变量常含口令类变量，本区仅对具备查看权限的用户可见"
+        />
+        <ElSkeleton v-if="loading && !view" :rows="5" animated />
+        <ElEmpty v-else-if="errorText" :description="errorText">
+          <ElButton size="small" @click="loadInspect">重试</ElButton>
+        </ElEmpty>
+        <template v-else-if="view">
+          <div class="wkl-drawer__block">
+            <div class="wkl-drawer__block-title">环境变量（{{ envRows.length }} 项）</div>
+            <ArtTable v-if="envRows.length" :data="envRows" :columns="envColumns" />
+            <ElEmpty v-else description="这个容器没有环境变量" />
+          </div>
+
+          <div class="wkl-drawer__block">
+            <div class="wkl-drawer__block-title">标签（{{ labelRows.length }} 项）</div>
+            <ArtTable v-if="labelRows.length" :data="labelRows" :columns="labelColumns" />
+            <ElEmpty v-else description="这个容器没有标签" />
+          </div>
+
+          <div class="wkl-drawer__block">
+            <div class="wkl-drawer__block-title">入口点与命令</div>
+            <div class="wkl-drawer__code">
+              <span class="wkl-drawer__code-label">入口点</span>
+              <code class="wkl-drawer__code-value">{{ joinArgs(view.entrypoint) }}</code>
+            </div>
+            <div class="wkl-drawer__code">
+              <span class="wkl-drawer__code-label">命令</span>
+              <code class="wkl-drawer__code-value">{{ joinArgs(view.cmd) }}</code>
+            </div>
+          </div>
+        </template>
+      </ElTabPane>
     </ElTabs>
 
-    <!-- 写操作的确认弹窗：与行菜单/详情页同一套（注册表档 + 保护档的「强制操作」开关）。 -->
+    <!-- 写操作的确认弹窗：与行菜单同一套（注册表档 + 保护档的「强制操作」开关）。 -->
     <DockerActionConfirm
       v-model="writeConfirmVisible"
       :action="writeConfirmAction"
-      :target="row?.name ?? ''"
+      :target="actionTarget"
       :target-protected="row?.protected === true"
       target-kind="容器"
       :loading="writeConfirmLoading"
@@ -163,23 +199,28 @@
 
 <script setup lang="ts">
   /**
-   * 工作负载抽屉：跨主机统一表的详情入口（列表页「详情 / 日志」不再跳详情页，
-   * 而是原地右滑打开本抽屉 —— 换页面会丢掉筛选现场，抽屉保住它）。
+   * 工作负载抽屉：容器详情的**唯一**表面（7b 起 container-detail 整页删除，能力收敛
+   * 到这里；跨主机统一表的行「详情 / 日志」原地右滑打开 —— 换页面会丢掉筛选现场，
+   * 抽屉保住它）。
    *
-   * 三个 Tab 与容器详情页同源同口径（概览 = container:inspect + 详情页概览 Tab 的
-   * 展示字段 + 实时 stats 曲线（五期监控面）；日志 = log-viewer + 行数 + Follow；
-   * 终端 = pty-terminal 懒挂载），区别只有一件事：**host 取行主机**。统一表的行来自
-   * 任意主机，抽屉没有页面级 provide 主机上下文可用 —— 行数据自带 hostId，所有指令
-   * 都按它发。
+   * 四个 Tab 与被删的 container-detail 页同源同口径（概览 = container:inspect +
+   * 概览 Tab 的展示字段 + 实时 stats 曲线；日志 = log-viewer + 行数 + Follow；
+   * 终端 = pty-terminal 懒挂载；环境 = 明文 env/labels/入口点/命令，复用同一次
+   * inspect），区别只有一件事：**host 取行主机**。统一表的行来自任意主机，抽屉
+   * 没有页面级 provide 主机上下文可用 —— 行数据自带 hostId，所有指令都按它发。
    *
-   * 生命周期纪律照抄详情页：Tab 懒挂载（日志首切才拉、终端首切才建会话）、切走断流、
-   * 关抽屉断流（日志 AbortController + 终端/stats 走 v-if 卸载断流）。全功能详情页
-   * 保留（头部「在详情页打开」链接），环境变量/配置这类重读取仍在那边 —— 抽屉只收
-   * 「看一眼、动一下」的高频动作。
+   * 外部打开模式（7b，替代被删的详情页路由）：统一表页用「行桩」打开抽屉（
+   * ?host=&id= 深链 —— 目标容器可能不在当前过滤视图里）。行桩只有 id/hostId/
+   * hostname 三个事实，名称/状态/镜像等展示与写操作 target 由 inspect 结果兜底
+   * （view.name / view.state / view.image）；保护标记只在行数据里，行桩场景未知
+   * —— 受保护容器的写指令会被 agent 的保护档拒回结论句，不静默丢能力。
+   *
+   * 生命周期纪律照抄被删的详情页：Tab 懒挂载（日志首切才拉、终端首切才建会话）、
+   * 切走断流、关抽屉断流（日志 AbortController + 终端/stats 走 v-if 卸载断流）。
    */
   import { computed, defineAsyncComponent, ref, watch } from 'vue'
-  import { useRouter } from 'vue-router'
   import {
+    ElAlert,
     ElButton,
     ElDescriptions,
     ElDescriptionsItem,
@@ -193,7 +234,7 @@
     ElTabs,
     ElTag
   } from 'element-plus'
-  // ArtSvgIcon 走 unplugin-vue-components 自动注册（与 overview.vue 同款用法）。
+  import ArtTable from '@/components/core/tables/art-table/index.vue'
   import { formatUnixSeconds } from '@/modules/device/utils/display'
   import { useAppBreakpoints } from '@/hooks/core/useAppBreakpoints'
   import { useAuth } from '@/hooks/core/useAuth'
@@ -210,6 +251,7 @@
     fetchDockerCmdResult,
     openDockerLogStream,
     sendDockerCmd,
+    type DockerPortItem,
     type DockerWorkloadItem
   } from '../api'
   import { runErrorMessage, useDockerCmds } from '../composables/useDockerCmds'
@@ -226,13 +268,17 @@
 
   defineOptions({ name: 'DockerWorkloadDrawer' })
 
-  type TabName = 'overview' | 'logs' | 'pty'
+  type TabName = 'overview' | 'logs' | 'pty' | 'env'
 
   const props = withDefaults(
     defineProps<{
       /** 抽屉开关（v-model）。 */
       modelValue: boolean
-      /** 当前行（null = 关闭态兜底，模板全部 v-if 守卫）。 */
+      /**
+       * 当前行（null = 关闭态兜底，模板全部 v-if 守卫）。「行桩」形态合法：只有
+       * id/hostId/hostname 三个字段是实的（外部深链打开，行不在过滤视图里），
+       * 其余字段由 inspect 结果兜底展示。
+       */
       row: DockerWorkloadItem | null
       /** 打开时落在哪个 Tab（行菜单「日志」带 'logs'；缺省概览）。 */
       initialTab?: TabName
@@ -248,7 +294,6 @@
   // （与「首次切到终端 Tab 才建立会话」是同一取向）。
   const PtyTerminal = defineAsyncComponent(() => import('./pty-terminal.vue'))
 
-  const router = useRouter()
   const { hasAuth } = useAuth()
   const { smaller } = useAppBreakpoints()
 
@@ -269,11 +314,19 @@
 
   // ── 概览（container:inspect，host = 行主机）──────────────────────
   const activeTab = ref<TabName>(props.initialTab)
-  /** 详情视图：F1 解析结果（+ 端口/挂载；快照态字段直接用行数据）。 */
-  const view = ref<ContainerInspectView | null>(null)
+  /**
+   * 详情视图：F1 解析结果（+ 端口；概览/环境两个 Tab 共用同一次读取，快照态字段
+   * 才用行数据）。行桩场景里它是名称/状态/镜像的**唯一**事实来源。
+   */
+  const view = ref<DrawerInspectView | null>(null)
   const loading = ref(false)
   const errorText = ref('')
   let inspectSeq = 0
+
+  /** 抽屉版解析视图：端口不在 F1 解析字段里，单独从载荷取（被删详情页同一口径）。 */
+  interface DrawerInspectView extends ContainerInspectView {
+    ports: DockerPortItem[]
+  }
 
   const STATE_TEXT: Record<string, string> = {
     running: '运行中',
@@ -290,14 +343,31 @@
   }
 
   const shortId = computed(() => props.row?.id.slice(0, 12) ?? '')
-  const isRunning = computed(() => props.row?.state === 'running')
+
+  /**
+   * 头部标题：行数据优先（列表/快照的名字先到），行桩（名字为空串）落到
+   * inspect 的 name —— 都没有时短 id 也能认出是哪个容器，不显示空标题。
+   */
+  const titleText = computed(() => props.row?.name || view.value?.name || shortId.value)
+
+  /** 行状态为空（行桩）时以 inspect 的 state 兜底 —— 概览/头部/写按钮的启停二选一都看它。 */
+  const rowState = computed(() => props.row?.state || view.value?.state || '')
+  const isRunning = computed(() => rowState.value === 'running')
+
+  /** 镜像：快照引用与列表逐字一致故优先；行桩落到 inspect 的引用（同一个事实不写两种话）。 */
+  const imageText = computed(() => props.row?.image || view.value?.image || '—')
+
+  /** 端口：行数据优先，行桩用 inspect 载荷里的端口列表（被删详情页同一来源）。 */
+  const portsValue = computed(() =>
+    props.row?.ports && props.row.ports.length ? props.row.ports : (view.value?.ports ?? [])
+  )
 
   /**
    * 状态结论：运行中优先行上的原生状态句（与列表列逐字一致，同一个事实不写两种话）；
-   * 已停止说结论与退出码（判因的第一条线索）——口径复刻详情页。
+   * 已停止说结论与退出码（判因的第一条线索）——口径复刻被删的详情页。
    */
   const stateText = computed(() => {
-    const state = props.row?.state ?? ''
+    const state = rowState.value
     if (!state) return ''
     if (state === 'running') return props.row?.statusText || STATE_TEXT.running
     if (state === 'exited' || state === 'dead') {
@@ -308,7 +378,7 @@
   })
 
   const stateTagType = computed<'success' | 'info' | 'warning'>(() => {
-    const state = props.row?.state
+    const state = rowState.value
     if (state === 'running') return 'success'
     if (state === 'exited' || state === 'dead') return 'info'
     return 'warning'
@@ -323,12 +393,40 @@
 
   const createdText = computed(() => formatUnixSeconds(view.value?.createdAt))
   const startedText = computed(() => formatUnixSeconds(view.value?.startedAt))
-  const portsTextValue = computed(() => portsText(props.row?.ports))
+  const portsTextValue = computed(() => portsText(portsValue.value))
   const networksText = computed(() => {
     const list = view.value?.networks ?? []
     return list.length ? list.join('、') : '—'
   })
   const mounts = computed(() => view.value?.mounts ?? [])
+
+  // ── 环境与启动配置（7b：被删详情页「环境变量与配置」Tab 的展示口径原样平移）──
+  const envRows = computed(() => (view.value?.env ?? []).map(envPair))
+  const labelRows = computed(() =>
+    Object.entries(view.value?.labels ?? {}).map(([name, value]) => ({ name, value }))
+  )
+
+  // 数据列用 minWidth（口径见 components/core/tables/responsive-columns.ts）：
+  // 窄屏下表格收缩到各自最小宽度后出现横向滚动，不裁掉变量名/值。
+  const envColumns = [
+    { prop: 'name', label: '变量名', minWidth: 260, showOverflowTooltip: true },
+    { prop: 'value', label: '值', minWidth: 300, showOverflowTooltip: true }
+  ]
+  const labelColumns = [
+    { prop: 'name', label: '标签', minWidth: 260, showOverflowTooltip: true },
+    { prop: 'value', label: '值', minWidth: 300, showOverflowTooltip: true }
+  ]
+
+  /** 环境变量「名=值」拆开：值里允许再有 `=`，故只按**第一个** `=` 切。 */
+  function envPair(raw: string): { name: string; value: string } {
+    const i = raw.indexOf('=')
+    return i < 0 ? { name: raw, value: '' } : { name: raw.slice(0, i), value: raw.slice(i + 1) }
+  }
+
+  /** 入口点/命令数组拼成一行（等宽展示），空数组给「—」。 */
+  function joinArgs(args: string[] | undefined): string {
+    return args && args.length ? args.join(' ') : '—'
+  }
 
   function mountText(m: ContainerInspectView['mounts'][number]): string {
     const path = `${m.source || '—'} → ${m.destination || '—'}`
@@ -367,11 +465,12 @@
 
   /**
    * 载荷 → 视图。载荷原样来自 agent（协议侧多词字段是 snake_case），边界上折成
-   * camelCase —— 不折的话创建时刻/重启策略/退出码会**静默显示为空**（详情页同一坑）。
+   * camelCase —— 不折的话创建时刻/重启策略/退出码会**静默显示为空**（被删详情页
+   * 同一坑）。端口不在解析字段里，单独取（概览 Tab 与环境 Tab 共用这一次读取）。
    */
-  function toView(payload: unknown): ContainerInspectView {
+  function toView(payload: unknown): DrawerInspectView {
     const raw = (payload ?? {}) as Record<string, unknown>
-    return parseContainerInspectPayload({
+    const base = parseContainerInspectPayload({
       ...raw,
       createdAt: raw.createdAt ?? raw.created,
       startedAt: raw.startedAt ?? raw.started_at,
@@ -379,6 +478,7 @@
       exitCode: raw.exitCode ?? raw.exit_code,
       restartPolicy: raw.restartPolicy ?? raw.restart_policy
     })
+    return { ...base, ports: Array.isArray(raw.ports) ? (raw.ports as DockerPortItem[]) : [] }
   }
 
   /**
@@ -454,8 +554,9 @@
   }
 
   /**
-   * 开启跟随：建立日志流会话 → 接入 NDJSON 流 → 持续喂进缓冲（与详情页同款两步，
-   * 契约见 container-detail.vue 的注释；AbortController 一断，服务端即下发取消）。
+   * 开启跟随：建立日志流会话 → 接入 NDJSON 流 → 持续喂进缓冲（两步与后端契约一一
+   * 对应：`container:logs{follow:true}` 的结果只有会话句柄，数据从 `cmds/:ref/stream`
+   * 以 NDJSON 收；AbortController 一断，服务端即下发取消会话）。
    */
   async function startLogFollow() {
     if (!props.row) {
@@ -574,6 +675,13 @@
     refresh: () => props.refresh?.()
   })
 
+  /**
+   * 写操作的 target：优先行上的容器名（与列表页同一口径）；行桩场景名字未知时
+   * 退化用 inspect 里的名字 —— inspect 拉失败前它是空串，此时按钮组靠行桩事实
+   * （id）也无法定向，禁用并提示先等概览到达。
+   */
+  const actionTarget = computed(() => props.row?.name || view.value?.name || '')
+
   /** 受保护档判定（agent 算好的结论）：受保护 + 没有强制权限 = 动作不可执行。 */
   const protectionGate = computed(() =>
     protectedGate({ protected: props.row?.protected === true }, canExec.value)
@@ -581,7 +689,13 @@
   const protectedBlockedConclusion = computed(() =>
     protectionGate.value.allowed ? '' : protectionGate.value.conclusion
   )
-  const writeDisabled = computed(() => busy.value || !protectionGate.value.allowed)
+  /**
+   * 头部写按钮的禁用：指令在途、保护档不允许，或 target 还没有名字（行桩场景
+   * inspect 未回来 —— 此刻发指令只能拿到一个「目标为空」的失败结论，等一等更好）。
+   */
+  const writeDisabled = computed(
+    () => busy.value || !protectionGate.value.allowed || !actionTarget.value
+  )
 
   const writeConfirmVisible = ref(false)
   const writeConfirmAction = ref('')
@@ -615,10 +729,10 @@
 
   /** 发一条写指令并把结论给用户；成功后的列表重拉由 composable 统一触发。 */
   async function runWrite(action: string, confirm?: string, force?: boolean) {
-    if (!props.row) return
-    const options: Record<string, unknown> = { target: props.row.name }
+    if (!props.row || !actionTarget.value) return
+    const options: Record<string, unknown> = { target: actionTarget.value }
     if (force) options.force = true
-    const res = await run({ action, target: props.row.name, options, confirm })
+    const res = await run({ action, target: actionTarget.value, options, confirm })
     if (res.ok) ElMessage.success(res.detail || '操作已完成')
     else ElMessage.error(runErrorMessage(res, '操作未完成'))
   }
@@ -636,8 +750,9 @@
   }
 
   // ── 生命周期：懒挂载 + 断流（照抄详情页纪律）───────────────────────
-  // 打开 / 换行：重置三 Tab 的就地状态（概览数据、日志缓冲、跟随流），落 initialTab，
-  // 概览立即读（它是默认第一屏）；终端的「换行即换会话」由 :key 完成。
+  // 打开 / 换行：重置各 Tab 的就地状态（概览/环境共用的 inspect 数据、日志缓冲、
+  // 跟随流），落 initialTab，概览立即读（它是默认第一屏，环境 Tab 复用这次读取）；
+  // 终端的「换行即换会话」由 :key 完成。
   watch(
     () => [props.modelValue, props.row?.hostId ?? '', props.row?.id ?? ''],
     ([visible]) => {
@@ -672,17 +787,6 @@
     if (on) void startLogFollow()
     else stopLogFollow()
   })
-
-  /** 全功能详情页（本切片保留）：带 host query，返回列表页时现场也能还原。 */
-  function openFullDetail() {
-    if (!props.row) return
-    visibleModel.value = false
-    void router.push({
-      name: 'DockerContainerDetail',
-      params: { id: props.row.id },
-      query: { host: props.row.hostId }
-    })
-  }
 </script>
 
 <style lang="scss" scoped>
@@ -727,19 +831,6 @@
   // 行归属（跨主机表的行来自任意一台机器）：次要文字色，与短 id 并排。
   .wkl-drawer__host {
     color: var(--el-text-color-secondary);
-  }
-
-  // 「在详情页打开」：抽屉的补充出口（不是主路径），主题色弱化呈现。
-  .wkl-drawer__full {
-    display: inline-flex;
-    gap: 4px;
-    align-items: center;
-    color: var(--el-color-primary);
-    cursor: pointer;
-  }
-
-  .wkl-drawer__full-icon {
-    font-size: 12px;
   }
 
   .wkl-drawer__actions {
@@ -824,6 +915,32 @@
   .wkl-drawer__logs-note {
     color: var(--el-text-color-secondary);
     font-size: 13px;
+  }
+
+  // 环境 Tab 的风险提示行（明文口径的告示牌，见模板注释）。
+  .wkl-drawer__env-notice {
+    margin-bottom: 12px;
+  }
+
+  // 入口点/命令的等宽块（值可能很长，break-all 不撑破抽屉）。
+  .wkl-drawer__code {
+    display: flex;
+    gap: 12px;
+    align-items: baseline;
+    padding: 6px 0;
+    font-size: 13px;
+
+    &-label {
+      flex: none;
+      min-width: 56px;
+      color: var(--el-text-color-secondary);
+      font-size: 12px;
+    }
+
+    &-value {
+      font-family: var(--el-font-family-mono, ui-monospace, 'SFMono-Regular', Consolas, monospace);
+      word-break: break-all;
+    }
   }
 
   // 手机横屏（<768）：头部动作组换行铺开，日志工具条允许换行（详情页同一口径）。

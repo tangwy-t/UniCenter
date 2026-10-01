@@ -14,7 +14,7 @@ import (
 func init() {
 	migration.Register(migration.Migration{
 		Version:     15,
-		Description: "新增 Docker 管理菜单、按钮权限与配置键",
+		Description: "新增 Docker 管理菜单（总览/容器/镜像与存储/项目）、按钮权限与配置键",
 		Up:          seedDocker,
 	})
 }
@@ -23,27 +23,46 @@ func init() {
 //
 // `Path` 必须与 uni_console/src/modules/docker/index.ts 注册的路由**逐字一致**：
 // MenuProcessor 用菜单 path 去前端路由表取组件，取不到就**整条菜单静默消失**
-// （无报错、无日志）。该约束由前端侧守卫测试钉住（随前端路由落地同批提交，Plan 1b）。
+// （无报错、无日志）。该约束由前端侧守卫测试钉住（v015_seed_docker_frontend_test.go）。
 //
 // 权限码与菜单的**双向**约束（v002_seed_menu_perm_test）：菜单引用的码必须在 All()
 // 注册，All() 里每个码也必须被某个菜单引用 —— 故六个码各有一个菜单/按钮承载。
+//
+// ── 7a 旧页收敛：种子按「初始化即最终态」构造 ────────────────────────
+//
+// 本列表当前是 Docker 域的**最终菜单面**：总览 /docker、容器 /docker/containers、
+// 镜像与存储 /docker/resources、项目 /docker/projects。它是两次历史变更的合并结果：
+//
+//   - v016 曾把「Docker 总览」（/docker）作为独立批次追加 —— 已并入本列表
+//     （v016 文件现为墓碑，说明见 v016_seed_docker_overview.go）；
+//   - images / volumes / networks 三个列表菜单曾被本迁移种下 —— 7a 把三个旧列表页
+//     收敛为 /docker/resources 的三个 tab 后**整行删除**（不留菜单、不留 redirect，
+//     开发阶段零兼容负担：已迁移的开发库按重置口径处理，见 v016 墓碑文件头的说明）。
+//
+// 「初始化即最终态」的取向：fresh 库只跑一次 v015 就得到正确菜单，不再靠
+// v016/v018 的增删链把历史形状搬运到最终形状 —— 迁移链是给**数据**记账的，
+// 开发期反复改种子时，链条越长越容易在中途形状上出错。
 var dockerMenuDefinitions = []menuDef{
 	{Key: "docker", Name: "Docker 管理", Type: "dir", Sort: 3, Icon: "ri:stack-line"},
+	// 控制塔总览（原 v016）：Sort=0，点开目录先看到跨主机总览，再进各资源页。
+	// Icon 复用舰队隐喻 ri:ship-line（与总览响应的 fleet KPI 同一套语言）。
+	{Key: "docker:overview", Parent: "docker", Name: "Docker 总览", Type: "menu",
+		Perms: permission.PermDockerList, Path: "/docker",
+		Component: "docker/overview", Sort: 0, Icon: "ri:ship-line"},
 	{Key: "docker:containers", Parent: "docker", Name: "容器", Type: "menu",
 		Perms: permission.PermDockerList, Path: "/docker/containers", Component: "docker/containers",
 		Sort: 1, Icon: "ri:ship-line"},
-	{Key: "docker:images", Parent: "docker", Name: "镜像", Type: "menu",
-		Perms: permission.PermDockerList, Path: "/docker/images", Component: "docker/images",
-		Sort: 2, Icon: "ri:box-1-line"},
-	{Key: "docker:volumes", Parent: "docker", Name: "数据卷", Type: "menu",
-		Perms: permission.PermDockerList, Path: "/docker/volumes", Component: "docker/volumes",
-		Sort: 3, Icon: "ri:hard-drive-3-line"},
-	{Key: "docker:networks", Parent: "docker", Name: "网络", Type: "menu",
-		Perms: permission.PermDockerList, Path: "/docker/networks", Component: "docker/networks",
-		Sort: 4, Icon: "ri:share-forward-line"},
+	// 镜像与存储（7a 新增）：镜像/数据卷/网络三个旧列表页收敛为一个 tab 容器页。
+	// Sort=2：容器之后、项目之前 —— 与被替换的三条旧菜单（原 Sort 2/3/4）占同一段。
+	// Icon 取 ri:database-2-line（存储池隐喻）：页面名以「镜像」开头、以「存储」收尾，
+	// 单取 box（镜像）或 hard-drive（磁盘）都会偏到一半；ri: 前缀整套离线内置，
+	// 不用担心离线图标集。
+	{Key: "docker:resources", Parent: "docker", Name: "镜像与存储", Type: "menu",
+		Perms: permission.PermDockerList, Path: "/docker/resources", Component: "docker/resources",
+		Sort: 2, Icon: "ri:database-2-line"},
 	{Key: "docker:projects", Parent: "docker", Name: "项目", Type: "menu",
 		Perms: permission.PermDockerList, Path: "/docker/projects", Component: "docker/projects",
-		Sort: 5, Icon: "ri:stack-line"},
+		Sort: 3, Icon: "ri:stack-line"},
 
 	// 按钮权限挂在各自的页面下。**一期页面不渲染二期按钮**（§11.0 矩阵），
 	// 但权限码必须先存在于菜单树里 —— 授权界面（角色管理）据此分配。
@@ -154,6 +173,10 @@ func seedDockerMenus(tx *gorm.DB) error {
 //   - dir  ：按 (parent_id, name, type) —— 目录的身份就是「顶层下的这个分类」；
 //   - menu ：按 path（前端路由逐字一致，改 path 即新页面）；
 //   - btn  ：按 perms（按钮无 path，权限码即身份）。
+//
+// 7a 提示：菜单查重键是 path —— 已按旧 v015 执行过的开发库里，images/volumes/
+// networks 三行的 path 不在本定义里，若手工让 v015 重放会**再种一遍新面**而不是
+// 清掉旧行（重放语义是「补缺」不是「对账」）。这正是开发库走重置口径的原因之一。
 func dockerMenuExists(tx *gorm.DB, parentID uint64, d menuDef) (bool, error) {
 	q := tx.Model(&entity.SysMenu{}).Where("parent_id = ?", parentID)
 	switch {

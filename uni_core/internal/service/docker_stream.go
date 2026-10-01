@@ -187,12 +187,14 @@ func (s *DockerStreamService) sendControl(_ context.Context, sess *dockerstream.
 }
 
 // Sweep 清理流会话（由 wireup 的 docker sweep 周期调用）：
-//   - 拉取进度会话对账：指令已终态/已消失即移除（**不发 cancel**）—— 指令终态时
-//     agent 侧的拉取会话要么已随 eof 收摊、要么根本没开（排队中/设备已死），
-//     cancel 对排队中的后续拉取是「腰斩」，对已死的会话是噪音，两者都不该发；
-//     指令还在 pending 就留着 —— 排队几十分钟一帧没有是常态，会话的寿命 = 指令寿命；
-//   - 空闲超时（10 分钟无数据）：下发 cancel + 移除（拉取会话被注册表豁免，见
-//     Registry.Expired —— 停滞的拉取是「进行中的事实」，不是被遗忘的流）；
+//   - 进度会话对账（pull/build/push 三族同一规则）：指令已终态/已消失即移除
+//     （**不发 cancel**）—— 指令终态时 agent 侧的进度会话要么已随 eof 收摊、
+//     要么根本没开（排队中/设备已死），cancel 对排队中的后续操作是「腰斩」，
+//     对已死的会话是噪音，两者都不该发；指令还在 pending 就留着 —— 排队
+//     几十分钟一帧没有是常态，会话的寿命 = 指令寿命；
+//   - 空闲超时（10 分钟无数据）：下发 cancel + 移除（进度会话被注册表豁免，见
+//     Registry.Expired —— 停滞的拉取/静默的构建步骤是「进行中的事实」，不是
+//     被遗忘的流）；
 //   - 设备离线：会话已无数据来源，移除（不必发 cancel，发也送不到）。
 //
 // 返回清理条数（供调用方判定「这一轮有没有事发生」，口径与 cmd sweep 一致）。
@@ -200,7 +202,9 @@ func (s *DockerStreamService) Sweep(ctx context.Context) (int, error) {
 	n := 0
 	if s.pullPending != nil {
 		for _, sess := range s.sessions.All() {
-			if sess.Kind() != dockerstream.KindPull {
+			switch sess.Kind() {
+			case dockerstream.KindPull, dockerstream.KindBuild, dockerstream.KindPush:
+			default:
 				continue
 			}
 			pending, err := s.pullPending(ctx, sess.Ref())

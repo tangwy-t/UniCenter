@@ -2063,6 +2063,29 @@ definitions:
           $ref: '#/definitions/response.DockerVolumeItem'
         type: array
     type: object
+  response.DockerStatsHistoryResp:
+    properties:
+      samples:
+        description: |-
+          Samples 按时刻**升序**（曲线从左往右）；无历史时空数组而非 null ——
+          「没有留存」是正常答案（刚建的容器、升级前、容器死满 30 分钟后），
+          与 404（设备不存在）各说各的话。
+        items:
+          $ref: '#/definitions/response.DockerStatsHistorySample'
+        type: array
+    type: object
+  response.DockerStatsHistorySample:
+    properties:
+      cpuPercent:
+        type: number
+      memLimitMb:
+        type: number
+      memUsageMb:
+        type: number
+      t:
+        description: T 是 core 收到该快照帧的时刻（unix 毫秒），曲线的 x 轴刻度。
+        type: integer
+    type: object
   response.DockerTaskItem:
     properties:
       action:
@@ -4987,7 +5010,7 @@ paths:
     post:
       consumes:
       - application/json
-      description: 校验 action 对应的权限码与期次闸后下发；立即返回指令号（ref），结果靠轮询
+      description: 校验 action 对应的权限码后下发；立即返回指令号（ref），结果靠轮询
       parameters:
       - description: 设备ID
         format: int64
@@ -5014,7 +5037,7 @@ paths:
                   $ref: '#/definitions/response.DockerCmdResp'
               type: object
         "400":
-          description: 参数错误 / 未知操作 / 该操作尚未开放
+          description: 参数错误 / 未知操作
           schema:
             $ref: '#/definitions/app.Response'
         "401":
@@ -5083,6 +5106,42 @@ paths:
       summary: 轮询 docker 指令结果
       tags:
       - Docker 管理
+  /docker/hosts/{id}/cmds/{ref}/build:
+    get:
+      description: 按指令号接入构建进度会话；每行一个记录 {"seq","t","id","status","stream","done","error","eof"}；客户端断开即下发
+        cancel（终止构建）
+      parameters:
+      - description: 设备ID
+        format: int64
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: 指令号
+        in: path
+        name: ref
+        required: true
+        type: string
+      produces:
+      - application/x-ndjson
+      responses:
+        "200":
+          description: 流已建立(逐行 NDJSON)
+        "400":
+          description: 请求参数不合法 / 该指令不支持构建进度流
+        "401":
+          description: 未登录
+        "403":
+          description: 无权限 / 非发起人
+        "404":
+          description: 指令不存在或已过期
+        "409":
+          description: 该指令没有可接入的流会话 / 会话已有连接
+      security:
+      - BearerAuth: []
+      summary: 镜像构建进度流(NDJSON)
+      tags:
+      - Docker 管理
   /docker/hosts/{id}/cmds/{ref}/pull:
     get:
       description: 按指令号接入拉取进度会话；每行一个进度记录 {"seq","t","id","status","current","total","done","error","eof"}；客户端断开即下发
@@ -5117,6 +5176,42 @@ paths:
       security:
       - BearerAuth: []
       summary: 镜像拉取进度流(NDJSON)
+      tags:
+      - Docker 管理
+  /docker/hosts/{id}/cmds/{ref}/push:
+    get:
+      description: 按指令号接入推送进度会话；每行一个进度记录 {"seq","t","id","status","current","total","done","error","eof"}；客户端断开即下发
+        cancel（终止推送）
+      parameters:
+      - description: 设备ID
+        format: int64
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: 指令号
+        in: path
+        name: ref
+        required: true
+        type: string
+      produces:
+      - application/x-ndjson
+      responses:
+        "200":
+          description: 流已建立(逐行 NDJSON)
+        "400":
+          description: 请求参数不合法 / 该指令不支持推送进度流
+        "401":
+          description: 未登录
+        "403":
+          description: 无权限 / 非发起人
+        "404":
+          description: 指令不存在或已过期
+        "409":
+          description: 该指令没有可接入的流会话 / 会话已有连接
+      security:
+      - BearerAuth: []
+      summary: 镜像推送进度流(NDJSON)
       tags:
       - Docker 管理
   /docker/hosts/{id}/cmds/{ref}/stats:
@@ -5189,6 +5284,59 @@ paths:
       security:
       - BearerAuth: []
       summary: 容器/项目聚合日志流(NDJSON Follow)
+      tags:
+      - Docker 管理
+  /docker/hosts/{id}/containers/{cid}/stats-history:
+    get:
+      description: 一台主机上一个容器的 CPU/内存留存读数（30s 快照节奏 × 60 样本 ≈ 30 分钟窗口，按时刻升序）；时刻为 core
+        收帧时刻；无历史返回空数组；容器消失后序列冻结在最后一次读数
+      parameters:
+      - description: 设备ID
+        format: int64
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: 容器ID（快照条目的完整 ID）
+        in: path
+        name: cid
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 查询成功
+          schema:
+            allOf:
+            - $ref: '#/definitions/app.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/response.DockerStatsHistoryResp'
+              type: object
+        "400":
+          description: 参数错误
+          schema:
+            $ref: '#/definitions/app.Response'
+        "401":
+          description: 未登录
+          schema:
+            $ref: '#/definitions/app.Response'
+        "403":
+          description: 无权限(docker:inspect)
+          schema:
+            $ref: '#/definitions/app.Response'
+        "404":
+          description: 设备不存在
+          schema:
+            $ref: '#/definitions/app.Response'
+        "500":
+          description: stats 留存未装配 / 内部错误
+          schema:
+            $ref: '#/definitions/app.Response'
+      security:
+      - BearerAuth: []
+      summary: 容器 stats 历史
       tags:
       - Docker 管理
   /docker/hosts/{id}/state:

@@ -1147,6 +1147,17 @@ declare namespace Api {
     interface DockerTaskListResp {
       items: Api.Docker.DockerTaskItem[]
     }
+
+    interface DockerStatsHistoryResp {
+      samples: Api.Docker.DockerStatsHistorySample[]
+    }
+
+    interface DockerStatsHistorySample {
+      t: number
+      cpuPercent: number
+      memUsageMb: number
+      memLimitMb: number
+    }
   }
 
   namespace File {

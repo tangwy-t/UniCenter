@@ -14,6 +14,5 @@ var menuDefBatches = [][]menuDef{
 	deviceMenuDefinitions,         // v008 设备管理菜单
 	deviceOverviewMenuDefinitions, // v012 设备监控总览菜单
 	agentUpgradeMenuDefinitions,   // v013 agent 升级菜单与按钮权限
-	dockerMenuDefinitions,         // v015 Docker 管理菜单与按钮权限
-	dockerOverviewMenuDefinitions, // v016 Docker 总览菜单（控制塔）
+	dockerMenuDefinitions,         // v015 Docker 管理菜单与按钮权限（7a 起为最终面：含原 v016 的总览菜单）
 }

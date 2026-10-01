@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/mount"
 )
 
@@ -192,3 +193,45 @@ func TestRateDelta(t *testing.T) {
 		})
 	}
 }
+
+// TestToEventItemDieExitCode：die 事件的 exitCode 属性被数值化带出（正常收尾 0 与
+// 异常退出 137 都是合法值）；非 die 事件、属性缺失、数值化失败一律 nil ——
+// 「不可考」与「0」是两个语义，翻译层不许把前者伪造进后者。
+func TestToEventItemDieExitCode(t *testing.T) {
+	dieMsg := func(attrs map[string]string) events.Message {
+		return events.Message{Type: "container", Action: "die",
+			Actor: events.Actor{ID: "ab12", Attributes: attrs}}
+	}
+	cases := []struct {
+		name string
+		msg  events.Message
+		want *int32
+	}{
+		{"die 正常收尾 exit 0", dieMsg(map[string]string{"name": "web", "exitCode": "0"}), int32p(0)},
+		{"die 被 kill exit 137", dieMsg(map[string]string{"name": "web", "exitCode": "137"}), int32p(137)},
+		{"die 无 exitCode 属性", dieMsg(map[string]string{"name": "web"}), nil},
+		{"die exitCode 非数值", dieMsg(map[string]string{"name": "web", "exitCode": "boom"}), nil},
+		{"非 die 不取值", events.Message{Type: "container", Action: "start",
+			Actor: events.Actor{ID: "ab12", Attributes: map[string]string{"exitCode": "1"}}}, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := toEventItem(c.msg)
+			if got.Type != string(c.msg.Type) || got.Action != string(c.msg.Action) ||
+				got.ActorID != c.msg.Actor.ID {
+				t.Fatalf("基础字段映射被破坏: %+v", got)
+			}
+			if c.want == nil {
+				if got.ExitCode != nil {
+					t.Fatalf("退出码应为不可考(nil)，实际 %d", *got.ExitCode)
+				}
+				return
+			}
+			if got.ExitCode == nil || *got.ExitCode != *c.want {
+				t.Fatalf("退出码 = %v，want %d", got.ExitCode, *c.want)
+			}
+		})
+	}
+}
+
+func int32p(v int32) *int32 { return &v }

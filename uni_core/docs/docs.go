@@ -3273,7 +3273,7 @@ const docTemplate = `{
                         "BearerAuth": []
                     }
                 ],
-                "description": "校验 action 对应的权限码与期次闸后下发；立即返回指令号（ref），结果靠轮询",
+                "description": "校验 action 对应的权限码后下发；立即返回指令号（ref），结果靠轮询",
                 "consumes": [
                     "application/json"
                 ],
@@ -3323,7 +3323,7 @@ const docTemplate = `{
                         }
                     },
                     "400": {
-                        "description": "参数错误 / 未知操作 / 该操作尚未开放",
+                        "description": "参数错误 / 未知操作",
                         "schema": {
                             "$ref": "#/definitions/app.Response"
                         }
@@ -3427,6 +3427,60 @@ const docTemplate = `{
                 }
             }
         },
+        "/docker/hosts/{id}/cmds/{ref}/build": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "按指令号接入构建进度会话；每行一个记录 {\"seq\",\"t\",\"id\",\"status\",\"stream\",\"done\",\"error\",\"eof\"}；客户端断开即下发 cancel（终止构建）",
+                "produces": [
+                    "application/x-ndjson"
+                ],
+                "tags": [
+                    "Docker 管理"
+                ],
+                "summary": "镜像构建进度流(NDJSON)",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "format": "int64",
+                        "description": "设备ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "指令号",
+                        "name": "ref",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "流已建立(逐行 NDJSON)"
+                    },
+                    "400": {
+                        "description": "请求参数不合法 / 该指令不支持构建进度流"
+                    },
+                    "401": {
+                        "description": "未登录"
+                    },
+                    "403": {
+                        "description": "无权限 / 非发起人"
+                    },
+                    "404": {
+                        "description": "指令不存在或已过期"
+                    },
+                    "409": {
+                        "description": "该指令没有可接入的流会话 / 会话已有连接"
+                    }
+                }
+            }
+        },
         "/docker/hosts/{id}/cmds/{ref}/pull": {
             "get": {
                 "security": [
@@ -3465,6 +3519,60 @@ const docTemplate = `{
                     },
                     "400": {
                         "description": "请求参数不合法 / 该指令不支持拉取进度流"
+                    },
+                    "401": {
+                        "description": "未登录"
+                    },
+                    "403": {
+                        "description": "无权限 / 非发起人"
+                    },
+                    "404": {
+                        "description": "指令不存在或已过期"
+                    },
+                    "409": {
+                        "description": "该指令没有可接入的流会话 / 会话已有连接"
+                    }
+                }
+            }
+        },
+        "/docker/hosts/{id}/cmds/{ref}/push": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "按指令号接入推送进度会话；每行一个进度记录 {\"seq\",\"t\",\"id\",\"status\",\"current\",\"total\",\"done\",\"error\",\"eof\"}；客户端断开即下发 cancel（终止推送）",
+                "produces": [
+                    "application/x-ndjson"
+                ],
+                "tags": [
+                    "Docker 管理"
+                ],
+                "summary": "镜像推送进度流(NDJSON)",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "format": "int64",
+                        "description": "设备ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "指令号",
+                        "name": "ref",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "流已建立(逐行 NDJSON)"
+                    },
+                    "400": {
+                        "description": "请求参数不合法 / 该指令不支持推送进度流"
                     },
                     "401": {
                         "description": "未登录"
@@ -3585,6 +3693,90 @@ const docTemplate = `{
                     },
                     "409": {
                         "description": "该指令没有可接入的流会话 / 会话已有连接"
+                    }
+                }
+            }
+        },
+        "/docker/hosts/{id}/containers/{cid}/stats-history": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "一台主机上一个容器的 CPU/内存留存读数（30s 快照节奏 × 60 样本 ≈ 30 分钟窗口，按时刻升序）；时刻为 core 收帧时刻；无历史返回空数组；容器消失后序列冻结在最后一次读数",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Docker 管理"
+                ],
+                "summary": "容器 stats 历史",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "format": "int64",
+                        "description": "设备ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "容器ID（快照条目的完整 ID）",
+                        "name": "cid",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "查询成功",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/app.Response"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/response.DockerStatsHistoryResp"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "参数错误",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "401": {
+                        "description": "未登录",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "403": {
+                        "description": "无权限(docker:inspect)",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "404": {
+                        "description": "设备不存在",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
+                    },
+                    "500": {
+                        "description": "stats 留存未装配 / 内部错误",
+                        "schema": {
+                            "$ref": "#/definitions/app.Response"
+                        }
                     }
                 }
             }
@@ -12251,6 +12443,36 @@ const docTemplate = `{
                     "items": {
                         "$ref": "#/definitions/response.DockerVolumeItem"
                     }
+                }
+            }
+        },
+        "response.DockerStatsHistoryResp": {
+            "type": "object",
+            "properties": {
+                "samples": {
+                    "description": "Samples 按时刻**升序**（曲线从左往右）；无历史时空数组而非 null ——\n「没有留存」是正常答案（刚建的容器、升级前、容器死满 30 分钟后），\n与 404（设备不存在）各说各的话。",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/response.DockerStatsHistorySample"
+                    }
+                }
+            }
+        },
+        "response.DockerStatsHistorySample": {
+            "type": "object",
+            "properties": {
+                "cpuPercent": {
+                    "type": "number"
+                },
+                "memLimitMb": {
+                    "type": "number"
+                },
+                "memUsageMb": {
+                    "type": "number"
+                },
+                "t": {
+                    "description": "T 是 core 收到该快照帧的时刻（unix 毫秒），曲线的 x 轴刻度。",
+                    "type": "integer"
                 }
             }
         },

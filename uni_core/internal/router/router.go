@@ -547,6 +547,12 @@ func Setup(deps Dependencies) *gin.Engine {
 			docker.GET("/containers", perm(permission.PermDockerList), deps.Docker.Hdl.Workloads)
 			docker.GET("/hosts", perm(permission.PermDockerList), deps.Docker.Hdl.Hosts)
 			docker.GET("/hosts/:id/state", perm(permission.PermDockerList), deps.Docker.Hdl.State)
+			// 容器 stats 历史（P2 抽屉曲线的历史半边）：30 分钟环形留存（快照 ingest
+			// 观察者写入，见 dockerstate/stats_history.go）。权限 docker:inspect ——
+			// 与 stats 实时流（container:stats 指令的权限码）同档：两处看的是同一个
+			// 容器的同一类读数，权限档分家会让「能看实时不能看历史」这种怪状态出现。
+			// 静态 perm 挂路由（不是流那类按记录判定 —— 留存是读面，没有会话归属）。
+			docker.GET("/hosts/:id/containers/:cid/stats-history", perm(permission.PermDockerInspect), deps.Docker.Hdl.StatsHistory)
 			// 任务中心（6b）：最近指令的任务化列表 —— pull/up 等长任务不再靠弹窗
 			// 转圈，收口成跨主机的可见性。数据全是既有数据面（指令记录 + 6b 补的
 			// 最近枚举索引），权限与读面其余端点同档 docker:list；取消动作 =
@@ -565,9 +571,14 @@ func Setup(deps Dependencies) *gin.Engine {
 			// 受理同档）与归属在处理器内判定；唯一「指令 pending 期间即可接入」的流
 			//（会话由受理时预登记，句柄取协议派生的 pull_<ref>）。
 			docker.GET("/hosts/:id/cmds/:ref/pull", deps.Docker.Hdl.PullStream)
+			// 构建/推送进度流（P2）：与拉取进度流同款 fetch 形态与接入纪律，
+			// 句柄取协议派生的 build_<ref>/push_<ref>（受理时预登记，pending 期间
+			// 即可接入）。
+			docker.GET("/hosts/:id/cmds/:ref/build", deps.Docker.Hdl.BuildStream)
+			docker.GET("/hosts/:id/cmds/:ref/push", deps.Docker.Hdl.PushStream)
 			// 私有仓库凭据（4c）：静态 docker:config —— 凭据是「分发」支柱的密钥
 			// 材料，读（列表）与写（增/改/删）同档；密码任何读路径只回掩码，
-			// 解密只发生在 image:pull 的受理注入（service 侧唯一读口）。
+			// 解密只在 image:pull/image:push 的受理注入（service 侧唯一读口）。
 			docker.GET("/registries", perm(permission.PermDockerConfig), deps.Docker.RegistryHdl.List)
 			docker.POST("/registries", perm(permission.PermDockerConfig), deps.Docker.RegistryHdl.Create)
 			docker.PUT("/registries", perm(permission.PermDockerConfig), deps.Docker.RegistryHdl.Update)

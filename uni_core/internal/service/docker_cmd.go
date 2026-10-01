@@ -23,7 +23,7 @@ import (
 // Docker 域的**下发面**：受理、跟踪、结果查询、sweep（读面在 docker.go）。
 //
 // 三个依赖各自对应一条纪律：
-//   - dockerpolicy 是权限码/超时/期次的唯一事实源（本文件不写任何 action 相关的策略）；
+//   - dockerpolicy 是权限码/超时/会话制的唯一事实源（本文件不写任何 action 相关的策略）；
 //   - agenthub 是唯一的送达路径（本域不碰 socket，也不缓存连接）；
 //   - dockerstate 承担状态机（记录/在飞索引/到期索引），本文件只做「一次性编排」。
 
@@ -35,13 +35,14 @@ type DockerCmdSender interface {
 	SendToDevice(deviceID uint64, msg *agentproto.Message) error
 }
 
-// DockerSessionCounter 是「该设备当前有几条流会话」与「受理拉取时预登记进度会话」
-// 的能力面（由 dockerstream.Registry 满足）。
+// DockerSessionCounter 是「该设备当前有几条流会话」与「受理分发操作时预登记进度
+// 会话」的能力面（由 dockerstream.Registry 满足）。
 //
-// 两个方法两件事：上限预检只看**用户流**（拉取进度会话已被注册表排除在账目外）；
-// Register 预登记的正是拉取进度会话 —— core 在**受理时**登记、agent 在开始拉取时
-// 用协议派生的同一句柄开会话（DockerPullSessionID），帧才能在指令 pending 期间
-// 找到主人（4b 的关键时序，选型论证见 pull_progress 侧与协议注释）。
+// 两个方法两件事：上限预检只看**用户流**（进度会话已被注册表排除在账目外）；
+// Register 预登记的正是进度会话 —— core 在**受理时**登记、agent 在开始执行时
+// 用协议派生的同一句柄开会话（pull_<ref>/build_<ref>/push_<ref>），帧才能在指令
+// pending 期间找到主人（4b 的关键时序，P2 起三族共用；选型论证见 pull_progress
+// 侧与协议注释）。
 type DockerSessionCounter interface {
 	CountByDevice(deviceID uint64) int
 	Register(meta dockerstream.Meta) error
@@ -107,6 +108,21 @@ func createsStreamSession(pol dockerpolicy.Policy, action string, opts *agentpro
 	return action == agentproto.DockerActionContainerLogs && opts != nil && opts.Follow
 }
 
+// progressSessionOf 按 action 给出**进度会话**的派生句柄与种类（4b/P2 —— pull/
+// build/push 三族都在受理时预登记，句柄两端同源：core 在这里、agent 在写执行器里
+// 用同一个协议派生函数）。returns false for 不产进度会话的 action。
+func progressSessionOf(action, ref string) (sessionID string, kind dockerstream.Kind, ok bool) {
+	switch action {
+	case agentproto.DockerActionImagePull:
+		return agentproto.DockerPullSessionID(ref), dockerstream.KindPull, true
+	case agentproto.DockerActionImageBuild:
+		return agentproto.DockerBuildSessionID(ref), dockerstream.KindBuild, true
+	case agentproto.DockerActionImagePush:
+		return agentproto.DockerPushSessionID(ref), dockerstream.KindPush, true
+	}
+	return "", 0, false
+}
+
 // newDockerRef 是 idGen 的缺省实现。
 //
 // 复用升级域的 newRequestID（纳秒时间戳 + 进程内自增序号）而不是自己造一套，
@@ -122,10 +138,10 @@ func (s *DockerCmdService) RequiredPerm(action string) (string, bool) {
 	return dockerpolicy.RequiredPerm(action)
 }
 
-// Send 受理一条指令：校验（策略/期次/确认/参数/能力）→ 去重 → 建记录 → 下发。
+// Send 受理一条指令：校验（策略/确认/参数/能力）→ 去重 → 建记录 → 下发。
 //
 // 失败形态与 HTTP 语义的对应（spec §4.1）：
-//   - 未登记 action / 参数不合法 / 期次未到 / 确认不符 → 400（apperror.BadRequest）；
+//   - 未登记 action / 参数不合法 / 确认不符 → 400（apperror.BadRequest）；
 //   - 同 (device, action, target) 已有在飞 → **409**（apperror.Conflict）；
 //   - docker 不可用 / agent 离线 / 未送达 → **503** 语义。本仓库的 apperror 没有 503
 //     构造函数（只有 4xx 一批 + Internal），故用 apperror.Internal 承载：500 与 503 同属
@@ -137,12 +153,10 @@ func (s *DockerCmdService) Send(ctx context.Context, userID, deviceID uint64, re
 	if !ok {
 		return "", apperror.BadRequest("未知操作")
 	}
-	if pol.Phase > dockerpolicy.CurrentPhase {
-		// 期次闸：页面不该渲染这些按钮，服务端这道闸是它的兜底（curl 也过不去）。
-		// 会话制指令（exec）三期已交付：它的期次由同一张表的 Phase 列表达，
-		// 不再需要一条单独的分支（曾经的「三期未接线 → 一律拒绝」已随流通道落地）。
-		return "", apperror.BadRequest("该操作尚未开放")
-	}
+	// 7c 删掉了这里曾经的期次闸（Phase > CurrentPhase → 400「该操作尚未开放」）：
+	// CurrentPhase=5 且全表 action 期次 ≤5，那道闸永不触发，Phase 列已从策略表删除。
+	// 「尚未开放」的语义仍活在 agent 分派器的能力差集上（这一版 agent 没实现的
+	// action 由 agent 回结论句），core 受理处不再有第二道发布节奏闸。
 	opts := toProtocolOptions(req)
 	if err := agentproto.ValidateDockerCmdOptions(req.Action, opts); err != nil {
 		return "", apperror.BadRequest("指令参数不合法")
@@ -151,16 +165,18 @@ func (s *DockerCmdService) Send(ctx context.Context, userID, deviceID uint64, re
 		return "", apperror.BadRequest("缺少确认信息")
 	}
 
-	// 仓库凭据注入（4c，选型 A）：image:pull 带 registry 时，受理处解出凭据、
-	// 随指令消息瞬时下发 —— 凭据读取**只发生在这里**（鉴权/审计链路上的任何
-	// 其它环节都接触不到密码）。三个结论：
+	// 仓库凭据注入（4c，选型 A）：image:pull / image:push 带 registry 时，受理处
+	// 解出凭据、随指令消息瞬时下发 —— 凭据读取**只发生在这里**（鉴权/审计链路上
+	// 的任何其它环节都接触不到密码）。P2 起推送与拉取共用同一条注入路径。
+	// 三个结论：
 	//   - 未装配解析器 → 500：配了选项却没有解析能力是装配错误，早暴露好过
 	//     agent 在 daemon 上吃一个没法解释的 401；
 	//   - 凭据不存在 → 400 结论句「没有这个仓库的凭据」（删除即失效就在这里兑现）；
 	//   - 解密失败/主密钥缺失 → 500 结论句（服务端问题，不是请求写错了）。
-	// 解出的明文只进 pullAuth 局部变量，绝不进记录/日志/审计。
-	var pullAuth *agentproto.DockerRegistryAuth
-	if req.Action == agentproto.DockerActionImagePull && opts.Registry != "" {
+	// 解出的明文只进 imageAuth 局部变量，绝不进记录/日志/审计。
+	var imageAuth *agentproto.DockerRegistryAuth
+	if (req.Action == agentproto.DockerActionImagePull ||
+		req.Action == agentproto.DockerActionImagePush) && opts.Registry != "" {
 		if s.auth == nil {
 			return "", apperror.Internal("仓库凭据服务未装配，指令未下发")
 		}
@@ -171,7 +187,7 @@ func (s *DockerCmdService) Send(ctx context.Context, userID, deviceID uint64, re
 		if !found {
 			return "", apperror.BadRequest("没有这个仓库的凭据")
 		}
-		pullAuth = &agentproto.DockerRegistryAuth{Registry: opts.Registry, Username: username, Password: password}
+		imageAuth = &agentproto.DockerRegistryAuth{Registry: opts.Registry, Username: username, Password: password}
 	}
 	if s.store != nil {
 		// 能力闸：agent 已自报 docker 不可用（快照 docker_ok=false）时不受理。
@@ -211,32 +227,35 @@ func (s *DockerCmdService) Send(ctx context.Context, userID, deviceID uint64, re
 		return "", apperror.Internal("内部错误", err)
 	}
 
-	// 拉取进度会话的**预登记**（4b）：必须在消息下发之前 —— agent 收到指令即可开始
-	// 拉取，帧可能先于任何 result 到达，届时注册表里必须已经有主人。句柄两端同源
-	//（协议 DockerPullSessionID(ref)），result 不上句柄（它只在拉取结束时回）。
+	// 进度会话的**预登记**（4b/P2）：必须在消息下发之前 —— agent 收到指令即可开始
+	// 拉取/构建/推送，帧可能先于任何 result 到达，届时注册表里必须已经有主人。
+	// 句柄两端同源（协议 DockerPullSessionID / DockerBuildSessionID /
+	// DockerPushSessionID），result 不上句柄（它只在操作结束时回）。
 	//
-	// 登记失败只记日志不判死指令：进度不可用是可见性的损失，拉取本身照常（旧流程
+	// 登记失败只记日志不判死指令：进度不可用是可见性的损失，操作本身照常（旧流程
 	// 最坏就是退回「黑盒等待」，与 4b 之前的形态一致）。
-	if s.sessions != nil && req.Action == agentproto.DockerActionImagePull {
-		if err := s.sessions.Register(dockerstream.Meta{
-			SessionID: agentproto.DockerPullSessionID(rec.Ref),
-			DeviceID:  rec.DeviceID,
-			UserID:    rec.UserID,
-			Action:    rec.Action,
-			Ref:       rec.Ref,
-			Kind:      dockerstream.KindPull,
-			CreatedAt: s.now(),
-		}); err != nil && s.log != nil {
-			s.log.Warn("docker pull progress session 预登记失败（进度流不可用，指令照常）",
-				zap.String("ref", rec.Ref), zap.Error(err))
+	if s.sessions != nil {
+		if sid, kind, ok := progressSessionOf(req.Action, rec.Ref); ok {
+			if err := s.sessions.Register(dockerstream.Meta{
+				SessionID: sid,
+				DeviceID:  rec.DeviceID,
+				UserID:    rec.UserID,
+				Action:    rec.Action,
+				Ref:       rec.Ref,
+				Kind:      kind,
+				CreatedAt: s.now(),
+			}); err != nil && s.log != nil {
+				s.log.Warn("docker progress session 预登记失败（进度流不可用，指令照常）",
+					zap.String("ref", rec.Ref), zap.String("action", rec.Action), zap.Error(err))
+			}
 		}
 	}
 
 	msg, err := agentproto.NewMessage(rec.Ref, agentproto.TypeCoreDockerCmd, &agentproto.DockerCmd{
 		Ref: rec.Ref, Action: rec.Action, Options: *opts, Confirm: rec.Confirm,
-		// 4c：凭据随指令瞬时注入（无凭据的拉取 auth 为 nil —— 与 4b 之前的
+		// 4c：凭据随指令瞬时注入（无凭据的拉取/推送 auth 为 nil —— 与 4b 之前的
 		// 消息逐字一致，agent 侧行为不变）。
-		Auth: pullAuth,
+		Auth: imageAuth,
 	})
 	if err != nil {
 		s.discard(ctx, rec)
@@ -394,5 +413,16 @@ func toProtocolOptions(req *request.DockerCmdReq) *agentproto.DockerCmdOptions {
 	// 4c：registry 是凭据键（不含秘密），原样进协议载荷 —— 密码在 Send 的
 	// 受理段才解出注入（auth 不进 options，见协议 DockerCmd.Auth 的说明）。
 	opts.Registry = o.Registry
+	// P2：build 四个选项照抄（校验在协议层；args 复制一份 —— 载荷会编码进
+	// 消息，不该持有请求体里的 map 引用）。
+	opts.Context = o.Context
+	opts.Dockerfile = o.Dockerfile
+	opts.Tag = o.Tag
+	if len(o.Args) > 0 {
+		opts.Args = make(map[string]string, len(o.Args))
+		for k, v := range o.Args {
+			opts.Args[k] = v
+		}
+	}
 	return opts
 }

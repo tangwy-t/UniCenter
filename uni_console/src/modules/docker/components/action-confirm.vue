@@ -22,7 +22,8 @@
       </div>
     </div>
 
-    <!-- 逐字确认：强档必须一字不差，输入不匹配时主按钮禁用。 -->
+    <!-- 逐字档与输入档共用这只输入框：强档一字不差（期望值比对），输入档走
+         条目校验（非法值禁提交）；不通过时主按钮禁用。 -->
     <div v-if="form.needsInput" class="ac-input">
       <div class="ac-input__label">{{ form.inputLabel }}</div>
       <ElInput
@@ -31,6 +32,10 @@
         :disabled="loading"
         @keyup.enter="onConfirm"
       />
+      <!-- 输入档的操作提示（如「只填文件名，产物落在 agent 下载目录」）。 -->
+      <div v-if="form.inputHint" class="ac-input__hint">{{ form.inputHint }}</div>
+      <!-- 输入档的就地错误（空串不显：空值靠按钮禁用表达，不该一开口就挨骂）。 -->
+      <div v-if="inputError" class="ac-input__error">{{ inputError }}</div>
     </div>
 
     <!-- 受保护目标 + 有强制权限才出现；勾选后才带 force 发给服务端。 -->
@@ -48,18 +53,24 @@
 </template>
 
 <script setup lang="ts">
-  import { computed, ref } from 'vue'
+  import { computed, ref, watch } from 'vue'
   import { ElButton, ElCheckbox, ElDialog, ElInput } from 'element-plus'
   import { useAuth } from '@/hooks/core/useAuth'
   import { PermDockerExec } from '@/enums/permission'
   import type { DockerActionOptions } from '../utils/actions'
-  import { confirmForm, confirmInputValid, type ConfirmOverride } from '../utils/confirm'
+  import {
+    actionInputError,
+    confirmForm,
+    confirmInputValid,
+    needsWordInput,
+    type ConfirmOverride
+  } from '../utils/confirm'
 
   defineOptions({ name: 'DockerActionConfirm' })
 
   interface Props {
     modelValue: boolean
-    /** 要执行的动作（注册表内的二期写动作；只读动作不走确认弹窗）。 */
+    /** 要执行的动作（注册表内的写动作；只读动作不走确认弹窗）。 */
     action: string
     /** 目标名（展示 + 逐字比对的来源）。 */
     target?: string
@@ -71,7 +82,7 @@
     targetKind?: string
     /** 提交中：禁用按钮与关闭。 */
     loading?: boolean
-    /** 注册表之外的动作（四期配置编辑）：标签/结论/确认档/期望值由调用方给出。 */
+    /** 注册表之外的动作（配置编辑）：标签/结论/确认档/期望值由调用方给出。 */
     override?: ConfirmOverride
   }
 
@@ -86,8 +97,12 @@
 
   const emit = defineEmits<{
     (e: 'update:modelValue', value: boolean): void
-    /** confirm 为空串 = 标准档（后端不要求逐字值）；force 仅在开关出现且被勾选时为 true。 */
-    (e: 'confirm', payload: { confirm: string; force: boolean }): void
+    /**
+     * confirm 为空串 = 标准档/输入档（后端不要求逐字值）；force 仅在开关出现且
+     * 被勾选时为 true；value 仅输入档给出 —— 收集到的参数值（已裁剪首尾空白，
+     * 调用方把它放进自己的 options 字段）。
+     */
+    (e: 'confirm', payload: { confirm: string; force: boolean; value?: string }): void
   }>()
 
   const { hasAuth } = useAuth()
@@ -109,6 +124,20 @@
     )
   )
 
+  /** 输入档的就地错误句（非空但不合法时显示；其余形态恒空）。 */
+  const inputError = computed(() => actionInputError(form.value, input.value))
+
+  // 形态或期望值变化时清空已输入的值：image:save 的两段式会在**同一只弹窗**里从
+  // 输入档（填文件名）切到逐字档（照抄文件名确认覆盖）—— 第二段必须重新照抄，
+  // 不能沿用第一段已填的值（否则「照抄一遍」退化成「直接点确定」）。关闭重开的
+  // 路径由 @closed 的 reset 兜底，这里只兜「不关就切」的那条。
+  watch(
+    () => [form.value.kind, form.value.expected],
+    () => {
+      input.value = ''
+    }
+  )
+
   const canSubmit = computed(
     () =>
       !props.loading &&
@@ -120,7 +149,13 @@
 
   function onConfirm() {
     if (!canSubmit.value) return
-    emit('confirm', { confirm: form.value.needsInput ? input.value : '', force: force.value })
+    // 逐字档把输入**原样**作为 confirm 值（协议逐字比对，不裁剪）；输入档的
+    // confirm 恒空（协议不要求），值走 value 单独带回（裁剪首尾空白）。
+    emit('confirm', {
+      confirm: form.value.needsInput && needsWordInput(form.value.kind) ? input.value : '',
+      force: force.value,
+      value: form.value.kind === 'input' ? input.value.trim() : undefined
+    })
   }
 
   /** 关闭后清掉输入与勾选：下次打开是同一动作的不同目标，不能沿用上一次的确认状态。 */
@@ -175,6 +210,22 @@
     &__label {
       margin-bottom: 6px;
       font-size: 13px;
+    }
+
+    // 输入档的操作提示（原自建 prompt 的正文口径搬过来的那句）：弱化、随输入框。
+    &__hint {
+      margin-top: 6px;
+      color: var(--el-text-color-secondary);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    // 输入档的就地错误句：与拉取对话框同一形态（红字、紧跟输入框）。
+    &__error {
+      margin-top: 6px;
+      color: var(--el-color-danger);
+      font-size: 12px;
+      line-height: 1.5;
     }
   }
 
