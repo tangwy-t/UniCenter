@@ -442,3 +442,16 @@ type DockerStatsHistorySample struct {
 	MemUsageMB float64 `json:"memUsageMb"`
 	MemLimitMB float64 `json:"memLimitMb"`
 }
+
+// ── 构建上下文上传（v1.3：POST /docker/hosts/:id/build-context）────────────
+
+// DockerBuildContextUploadResp 是构建上下文上传的响应：filename 是 image:build
+// 的 `options.context` 要填的值（core 由会话号推导的 transferDir 内产物文件名，
+// 形态即 IsDockerBuildContextFilename 白名单 —— 构建对话框拿到它原样塞回指令）。
+//
+// 为什么只有 filename 一个字段：上传段不承诺任何 tar 内容事实（条目/层次是
+// build 执行时 scanBuildContext 的深度校验），尺寸与哈希是**传输完整性**的内部
+// 账目（随完成控制帧核对），对用户不可行动 —— 报出去只会变成第二个口径源头。
+type DockerBuildContextUploadResp struct {
+	FileName string `json:"filename"`
+}

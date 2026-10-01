@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -85,6 +86,14 @@ type AgentIngestService struct {
 	// 快照照常落库，留存关闭 —— 同样是观察者不是参与者，它的缺失只关抽屉的
 	// 历史曲线，不关快照主链。
 	statsHistory DockerStatsRecorder
+	// scanCache 是 image:scan 结果的缓存写入面（P3·安全面；由 dockerstate.ScanCacheStore
+	// 实现）：一次成功扫描回写后把报告按镜像内容键写进 24h 缓存。nil = 未装配：
+	// 结果照常回写，缓存关闭 —— 观察者纪律同上：它的缺失只影响下一次同镜像扫描
+	// 的秒回，不影响指令主链。
+	scanCache DockerScanRecorder
+	// now 是扫描缓存挂钩的时钟（可替换 —— 测试要一个确定的收帧时刻来断言
+	// scanned_at 的重盖语义；与 DockerCmdService.now 同一条纪律）。
+	now func() time.Time
 }
 
 // DockerSessionRegisterer 是登记一条流会话的能力面（由 dockerstream.Registry 满足）。
@@ -115,11 +124,18 @@ type DockerStatsRecorder interface {
 	Record(ctx context.Context, deviceID uint64, st *agentproto.DockerState, at time.Time) error
 }
 
+// DockerScanRecorder 是 image:scan 结果的缓存写入面（由 dockerstate.ScanCacheStore
+// 满足）：一次成功扫描的 result 回写完成后调它，报告按镜像内容键落进 24h 缓存
+// （键设计与「缓存 DTO 与报告同形」的口径见 dockerstate/scan_cache.go）。
+type DockerScanRecorder interface {
+	Save(ctx context.Context, imageID string, report *agentproto.DockerScanReport, at time.Time) error
+}
+
 func NewAgentIngestService(repo AgentDeviceRepository, raw AgentRawStore, latest AgentLatestStore,
 	docker *dockerstate.Store, cmd *dockerstate.CmdStore,
 	cfg AgentConfigGetter, log logger.LoggerInterface) *AgentIngestService {
 	return &AgentIngestService{repo: repo, raw: raw, latest: latest,
-		docker: docker, cmd: cmd, cfg: cfg, log: log}
+		docker: docker, cmd: cmd, cfg: cfg, log: log, now: time.Now}
 }
 
 // WithDockerSessions 注入流会话登记面（三期）。装配在 wireup 一处完成。
@@ -144,6 +160,24 @@ func (s *AgentIngestService) WithDockerAudit(a DockerTerminalAuditor) *AgentInge
 func (s *AgentIngestService) WithDockerStatsHistory(r DockerStatsRecorder) *AgentIngestService {
 	s.statsHistory = r
 	return s
+}
+
+// WithDockerScanCache 注入扫描缓存写入面（P3·安全面）。装配在 wireup 一处完成；
+// 与 DockerCmdService 的读面共用同一个 store 实例。
+func (s *AgentIngestService) WithDockerScanCache(c *dockerstate.ScanCacheStore) *AgentIngestService {
+	if c != nil {
+		s.scanCache = c
+	}
+	return s
+}
+
+// nowValue 返回注入挂钟（未注入时 time.Now —— 构造函数已填缺省，这里兜底
+// 零值形态的测试构造）。
+func (s *AgentIngestService) nowValue() time.Time {
+	if s.now == nil {
+		return time.Now()
+	}
+	return s.now()
 }
 
 // Enroll 处理带 enroll_token 的首次注册。
@@ -437,6 +471,27 @@ func (s *AgentIngestService) CompleteDockerCmd(ctx context.Context, deviceID uin
 		// DockerCmdAuditor 内部（warn 不阻塞），指令的轮询/流路径零影响。
 		// docker:events 常驻订阅（UserID=0）由挂钩自行豁免。
 		s.audit.RecordTerminal(rec)
+	}
+	// 扫描缓存挂钩（P3·安全面）：成功的 image:scan 把报告按镜像内容键写进 24h
+	// 缓存。同步调用（与 statsHistory 的留存同理 —— 但理由不同：这里是「结果
+	// 刚落地、下一个同类请求可能立刻到」的收尾动作，异步窗口里到达的请求会
+	// 白白等一次分钟级扫描），失败只 warn —— 缓存是加速器，写不进去的最坏
+	// 结果是下一扫不秒回，绝不能反向影响已经成功的结果回写。
+	if s.scanCache != nil && rec.Action == agentproto.DockerActionImageScan &&
+		res.OK && len(res.Payload) > 0 {
+		var report agentproto.DockerScanReport
+		if err := json.Unmarshal(res.Payload, &report); err != nil {
+			s.log.Warn("docker scan 报告解码失败（缓存未写入，指令主链不受影响）",
+				zap.String("ref", rec.Ref), zap.Error(err))
+		} else if !dockerstate.IsDockerScanImageID(report.ImageID) {
+			// agent 填的 image_id 形态不合法（agent 缺陷/被伪造）：不写缓存也不猜键 ——
+			// 键空间只有「sha256:hex64」一种形状（scan_cache 的形态闸）。
+			s.log.Warn("docker scan 报告的 image_id 形态不合法（缓存未写入）",
+				zap.String("ref", rec.Ref), zap.String("imageId", report.ImageID))
+		} else if err := s.scanCache.Save(ctx, report.ImageID, &report, s.nowValue()); err != nil {
+			s.log.Warn("docker scan cache 写入失败（下一扫不秒回，指令主链不受影响）",
+				zap.String("ref", rec.Ref), zap.String("imageId", report.ImageID), zap.Error(err))
+		}
 	}
 	if rec.Action == agentproto.DockerActionEvents {
 		// docker:events 是 core 的**常驻订阅**：不进用户流注册表（无发起人、不占用户

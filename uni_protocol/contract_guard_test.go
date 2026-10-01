@@ -91,6 +91,10 @@ func typeNameOf(v any) string {
 		return "DockerFrame"
 	case *CoreDockerFrame:
 		return "CoreDockerFrame"
+	case *CoreDockerBuildCtxFinish:
+		return "CoreDockerBuildCtxFinish"
+	case *CoreDockerBuildCtxAbort:
+		return "CoreDockerBuildCtxAbort"
 	default:
 		return ""
 	}

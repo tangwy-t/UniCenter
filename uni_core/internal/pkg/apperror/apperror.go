@@ -20,7 +20,11 @@ const (
 	CodeBadRequest       = 40000
 	CodeNotFound         = 40400
 	CodeConflict         = 40900
-	CodeInternal         = 50000
+	// CodeUnavailable 是「服务暂时不可用」（503：可重试性故障 —— v1.3 起的上传
+	// 通道用它表达「设备离线 / 通道中断」这类时间性故障；与 500 的内部故障分开，
+	// 前端可以据码给出「稍后重试」而不是「联系管理员」的提示）。
+	CodeUnavailable = 50300
+	CodeInternal    = 50000
 )
 
 // AppError represents a structured application error with an error code,
@@ -104,6 +108,16 @@ func NotFound(msg string) *AppError {
 // Conflict creates a 409 AppError with the given message.
 func Conflict(msg string) *AppError {
 	return &AppError{Code: CodeConflict, Message: msg, HTTPStatus: http.StatusConflict}
+}
+
+// Unavailable creates a 503 AppError for transient, retryable failures
+// (device offline / channel broken) with the given conclusion sentence.
+func Unavailable(msg string, cause ...error) *AppError {
+	var c error
+	if len(cause) > 0 {
+		c = cause[0]
+	}
+	return &AppError{Code: CodeUnavailable, Message: msg, HTTPStatus: http.StatusServiceUnavailable, cause: c}
 }
 
 // Internal creates a 500 AppError with the given message and optional underlying cause.

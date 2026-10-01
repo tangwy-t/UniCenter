@@ -2,6 +2,8 @@ package repository
 
 import (
 	"context"
+	"sort"
+	"strings"
 
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/request"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/entity"
@@ -213,4 +215,70 @@ func (r *RoleRepo) FindUserIDsByRoleID(ctx context.Context, roleID uint64) ([]ui
 		Where("role_id = ?", roleID).
 		Pluck("user_id", &userIDs).Error
 	return userIDs, err
+}
+
+// FindRoleIDsByPerm 反查持有指定权限码的角色集合（docker 事件通知的受众
+// 收敛用，满足 dockernotify.RolePermQuery 的口径）。链路：sys_menu.perms
+// （码挂在菜单/按钮上）→ sys_role_menu → 角色并集。
+//
+// SQL 拉取「perms 非空」的 (role_id, perms) 扁平行后在 Go 侧做码匹配，
+// 两个「为什么」：
+//   - perms 的**多值形态**：历史数据里 perms 可能是逗号分隔多码（本仓库的
+//     种子都是单码，但字段语义不排除 CSV）。运行时权限检查按整串精确比对
+//     （slices.Contains），CSV 行等于一个码都不授；受众口径取「按码拆开算」
+//     —— 收敛的语义是「组织里谁该被通报」，比「谁能过运行时检查」宽半格
+//     是有意的（通知侧宁误报不漏报）。CSV 匹配留在 Go 侧还因为它跨库：
+//     FIND_IN_SET 绑死 MySQL，四段 LIKE 是晦涩的方言；RBAC 表规模小
+//     （角色×菜单），全量行是几 KB 的事，不值一条方言 SQL。
+//   - 与运行时权限解析**同口径**的不额外过滤：不按 sys_role.status /
+//     菜单 status 过滤（auth 的 FindRoleMenuIDs 同样不看它们 —— 被停用的
+//     角色在运行时照常授权，受众跟着同口径，不在这里发明第二套语义）；
+//     菜单软删由 Model(&entity.SysMenu{}) 注入的软删条件兜住（与
+//     FindMenuPerms 同款）。角色软删不显式过滤：角色删除走
+//     DeleteWithAssociations（join 行硬删），该角色自然从结果消失。
+//
+// 结果去重升序：同一码挂多个菜单（docker:list 挂 4 个页面）时同一角色
+// 会出多行，去重是本方法的契约；升序让缓存与 TargetIDs 的呈现稳定。
+func (r *RoleRepo) FindRoleIDsByPerm(ctx context.Context, perm string) ([]uint64, error) {
+	if perm == "" {
+		return nil, nil
+	}
+	var rows []struct {
+		RoleID uint64
+		Perms  string
+	}
+	err := r.db.WithContext(ctx).Model(&entity.SysMenu{}).
+		Joins("JOIN sys_role_menu ON sys_role_menu.menu_id = sys_menu.id").
+		Where("sys_menu.perms IS NOT NULL AND sys_menu.perms != ''").
+		Select("sys_role_menu.role_id AS role_id, sys_menu.perms AS perms").
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[uint64]struct{}, len(rows))
+	ids := make([]uint64, 0, len(rows))
+	for _, row := range rows {
+		if !permCSVContains(row.Perms, perm) {
+			continue
+		}
+		if _, dup := seen[row.RoleID]; dup {
+			continue
+		}
+		seen[row.RoleID] = struct{}{}
+		ids = append(ids, row.RoleID)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	return ids, nil
+}
+
+// permCSVContains 判断 perms 串（单码或逗号多码）是否含有 code：
+// 按逗号拆开、trim 后**整词**比对 —— 子串不算命中（docker:listing 不得
+// 顶替 docker:list），空白容错只是对人工录入形态的防御。
+func permCSVContains(perms, code string) bool {
+	for _, part := range strings.Split(perms, ",") {
+		if strings.TrimSpace(part) == code {
+			return true
+		}
+	}
+	return false
 }

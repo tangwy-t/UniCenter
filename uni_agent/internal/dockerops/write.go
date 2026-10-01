@@ -35,6 +35,10 @@ type WriteExecutor struct {
 	// exec 是固定 argv 的执行入口（B2 的 compose CLI 用它；零 shell、参数以列表交出）。
 	// 由 runtime 注入 exec.CommandContext，测试可换成替身。
 	exec func(ctx context.Context, name string, args ...string) *exec.Cmd
+	// scanner 是 image:scan 的 trivy 执行器（P3·安全面）。复用同一个 exec 注入
+	//（compose CLI 与 trivy 是同一族的「主机级 CLI」），探测（LookPath）单独
+	// 注入 —— 测试要能独立伪造「未安装」形态。见 image_scan.go。
+	scanner *trivyScanner
 
 	// mu 守住可热更新的配置与「本次执行的附带说明」：
 	// 配置会在 hello_ack 后变化（Runtime 调 Set*），而 Do 在分派器 worker 里并发读。
@@ -70,7 +74,7 @@ func NewWriteExecutor(api DockerAPI, protected *ProtectedList, transferDir strin
 		execCommand = exec.CommandContext
 	}
 	return &WriteExecutor{api: api, protected: protected, transferDir: transferDir, flavor: flavor,
-		exec: execCommand, now: time.Now}
+		exec: execCommand, scanner: newTrivyScanner(execCommand), now: time.Now}
 }
 
 // SetNow 注入时钟（备份令牌用它；Runtime 传 Deps.Now 保持全模块同一时钟入口）。
@@ -168,6 +172,12 @@ func (e *WriteExecutor) flavorValue() string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.flavor
+}
+
+// scannerValue 返回 trivy 扫描器。扫描器在构造时建立（与 exec 同一注入点），
+// 只读字段（execFn/lookPath）不再有热更面，故不走 mu —— 它与 exec 同一待遇。
+func (e *WriteExecutor) scannerValue() *trivyScanner {
+	return e.scanner
 }
 
 // setNote / takeNote 是「成功路径的附带说明」出口：dispatcher 在一条指令成功后会
@@ -270,6 +280,14 @@ func (e *WriteExecutor) Do(ctx context.Context, cmd *agentproto.DockerCmd) ([]by
 		// 公共注入面（imageAuthOf 与 pull 同一函数；无凭据 = nil，与 4b 之前
 		// 拉取的自由度一致）。
 		return nil, e.pushImage(ctx, cmd.Ref, o.Target, imageAuthOf(cmd))
+
+	case agentproto.DockerActionImageScan:
+		// P3·安全面：扫描是只读语义（不 guard —— 没有可破坏的目标），但它要在
+		// 主机上跑 trivy 分钟级（15 分钟执行档，超时口径见 image_scan.go），报告
+		// 是 image:inspect 同族的 result.payload 数据面。任务中心的 pending
+		// 期可见性由 cmd 通道天然提供（trivy json 模式中途无可流的增量，进度流
+		// 刻意不建 —— 见协议 DockerActionImageScan 的取舍注释）。
+		return e.scanImage(ctx, cmd)
 
 	case agentproto.DockerActionImageTag:
 		if err := e.api.ImageTag(ctx, o.Src, defaultImageTag(o.Dst)); err != nil {

@@ -79,12 +79,14 @@ type Conn struct {
 	observedIP string
 
 	// sendFn/writeCloseFn 是**唯一**的出站通路；nil 表示未接管真实 socket（测试态）。
-	sendFn       func(b []byte) error
+	// sendFn 收 (消息类型, 字节)：文本信封与二进制帧（上传中转）共用一条队列。
+	sendFn       func(mt int, b []byte) error
 	writeCloseFn func(code int, reason string) error
 
 	// send 是数据帧的出站队列（Task 2 的背压面）：满了就丢弃并计数，绝不阻塞读循环。
 	// 控制帧（ping / 关闭）不走这里 —— 见 conn.go 的 sendPing 与 finish。
-	send chan []byte
+	// 元素带消息类型（outbound）：文本/二进制同队，帧序由队列唯一确定（见 outbound）。
+	send chan outbound
 
 	// done 在关闭时被关闭，用于让发送协程退出。
 	done chan struct{}

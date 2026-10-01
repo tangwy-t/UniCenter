@@ -82,7 +82,10 @@ type UpgradeHook interface {
 // 升级、只装 docker、或都装），合并会让任一能力缺失时另一个也得实现空方法 ——
 // 而「实现了但什么都不做」正是最难发现的那类接线错误。
 //
-// 三个回调都必须在**读循环里非阻塞**（OnConnected/OnCmd 由 dockerops.Runtime 保证）。
+// 全部回调都必须在**读循环里非阻塞**（OnConnected/OnCmd 由 dockerops.Runtime
+// 保证；OnBinaryFrame 的一次调用只做「查表 + 一次有界文件写」—— 分片 ≤ 256KB、
+// 写的是页缓存，不走 fsync，不会把读循环拖进磁盘停摆，选型注释见
+// dockerops/build_ctx_receive.go 的 Chunk）。
 type DockerHook interface {
 	// OnConnected 握手完成（docker 侧据此立刻上报首帧快照）。
 	OnConnected()
@@ -92,6 +95,18 @@ type DockerHook interface {
 	OnCmd(cmd *agentproto.DockerCmd)
 	// OnFrame 收到一条流控制帧（一期不消费）。
 	OnFrame(f *agentproto.CoreDockerFrame)
+	// ── v1.3：构建上下文上传通道的接收面 ─────────────────────────────
+	// OnBinaryFrame 收到一帧二进制分片（core 中转的浏览器上传字节）。
+	// 帧头已由协议层解包并校验（魔数/版本/标志位/序号形态）—— 组装层的
+	// 序号纪律（乱序/重复/末帧）与文件落盘在 dockerops 的接收器里做。
+	OnBinaryFrame(f agentproto.BinaryFrame)
+	// OnBuildCtxFinish 收到完成控制帧（期望哈希 + 产物名）：终验入口。
+	OnBuildCtxFinish(m *agentproto.CoreDockerBuildCtxFinish)
+	// OnBuildCtxAbort 收到中止控制帧：丢弃半成品。
+	OnBuildCtxAbort(m *agentproto.CoreDockerBuildCtxAbort)
+	// OnDisconnected 连接结束（读/写任一方向终止，从 runOnce 收尾前回调）：
+	// 半成品上传必须在这里被收掉 —— 通道断了，完成/中止帧都不会再来。
+	OnDisconnected()
 }
 
 // Logger 是本包依赖的最小日志接口（避免把 zap 拖进 agent）。
@@ -424,6 +439,15 @@ func (c *Client) runOnce(ctx context.Context) error {
 	closeRead := make(chan struct{})
 	go func() { readErr <- c.readLoop(ws, closeRead) }()
 
+	// 每次连接结束（不管哪一路）都必须通知 docker 侧一次「连接没了」：半成品
+	// 上传的分片流到此为止，完成/中止帧都不会再送达 —— 接收器靠它删掉半成品。
+	disconnected := sync.OnceFunc(func() {
+		if c.cfg.DockerHook != nil {
+			c.cfg.DockerHook.OnDisconnected()
+		}
+	})
+	defer disconnected()
+
 	if err := c.sendHello(ws); err != nil {
 		close(closeRead)
 		return err
@@ -522,7 +546,7 @@ func (c *Client) readLoop(ws *websocket.Conn, done <-chan struct{}) error {
 		default:
 		}
 		ws.SetReadDeadline(time.Now().Add(readWait))
-		_, raw, err := ws.ReadMessage()
+		mt, raw, err := ws.ReadMessage()
 		if err != nil {
 			// 关闭码要记下来：4001（凭据失效）与 4007（服务端停机）对运维
 			// 是完全不同的处置方向。
@@ -531,7 +555,30 @@ func (c *Client) readLoop(ws *websocket.Conn, done <-chan struct{}) error {
 			}
 			return fmt.Errorf("read: %w", err)
 		}
-		c.handleFrame(raw)
+		switch mt {
+		case websocket.TextMessage:
+			c.handleFrame(raw)
+		case websocket.BinaryMessage:
+			c.handleBinaryFrame(raw)
+		default:
+			c.log.Debug("ignoring ws frame", "message_type", mt)
+		}
+	}
+}
+
+// handleBinaryFrame 处理一条二进制消息（v1.3 core→agent 上传分片）。
+//
+// 解包失败只记日志**不断连**：二进制帧是搭在连接上的旁路载荷，为它断连会
+// 连累指标与心跳 —— 帧头的严格校验已由协议层在解包时做完（魔数/版本/标志
+// 位），「分片的序号纪律」由 dockerops 的接收器裁决（弃会话而不是弃连接）。
+func (c *Client) handleBinaryFrame(raw []byte) {
+	f, err := agentproto.UnpackBinaryFrame(raw)
+	if err != nil {
+		c.log.Warn("bad binary frame from core", "err", err.Error())
+		return
+	}
+	if c.cfg.DockerHook != nil {
+		c.cfg.DockerHook.OnBinaryFrame(f)
 	}
 }
 
@@ -622,6 +669,23 @@ func (c *Client) handleFrame(raw []byte) {
 		}
 		if f, ok := decoded.(*agentproto.CoreDockerFrame); ok && c.cfg.DockerHook != nil {
 			c.cfg.DockerHook.OnFrame(f)
+		}
+	case agentproto.TypeCoreDockerBuildCtxFinish, agentproto.TypeCoreDockerBuildCtxAbort:
+		// v1.3 上传控制帧：与升级指令同一取向 —— 类型登记了就不该「未知」，
+		// 解不出来只记日志（被丢弃的半成品由 24h 清扫与断连清理兜底）。
+		decoded, err := agentproto.DecodeTypedFor(m, agentproto.DirCoreToAgent)
+		if err != nil {
+			c.log.Warn("bad build_ctx control", "type", m.Type, "err", err.Error())
+			return
+		}
+		if c.cfg.DockerHook == nil {
+			return
+		}
+		switch ctl := decoded.(type) {
+		case *agentproto.CoreDockerBuildCtxFinish:
+			c.cfg.DockerHook.OnBuildCtxFinish(ctl)
+		case *agentproto.CoreDockerBuildCtxAbort:
+			c.cfg.DockerHook.OnBuildCtxAbort(ctl)
 		}
 	default:
 		// 未知/未处理的类型：忽略（不关连接）。

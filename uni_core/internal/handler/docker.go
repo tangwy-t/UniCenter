@@ -2,6 +2,7 @@ package handler
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -16,6 +17,7 @@ import (
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/permission"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/service"
+	agentproto "github.com/tangwy-t/UniCenter/uni_protocol"
 )
 
 // Docker 管理的 HTTP 入口：主机清单 / 快照（读面）+ 指令受理与轮询（下发面）。
@@ -49,7 +51,9 @@ type DockerHandler struct {
 	// tasks 是任务面（6b）：任务中心的最近指令列表。
 	// nil = 未装配：/docker/tasks 整体不可用（路由仍在，处理器给出 500 语义）。
 	tasks *service.DockerTaskService
-	log   logger.LoggerInterface
+	// buildCtx 是构建上下文上传中转（v1.3）：nil = 未装配（语义同 tasks）。
+	buildCtx *service.DockerBuildContextService
+	log      logger.LoggerInterface
 }
 
 // NewDockerHandler 构造 handler。
@@ -67,6 +71,12 @@ func (h *DockerHandler) WithEvents(m *dockerevents.Manager) *DockerHandler {
 // WithTasks 注入任务面（6b；装配在 wireup 一处完成，测试装配替身）。
 func (h *DockerHandler) WithTasks(t *service.DockerTaskService) *DockerHandler {
 	h.tasks = t
+	return h
+}
+
+// WithBuildContext 注入构建上下文上传中转（v1.3；装配在 wireup 一处完成）。
+func (h *DockerHandler) WithBuildContext(s *service.DockerBuildContextService) *DockerHandler {
+	h.buildCtx = s
 	return h
 }
 
@@ -387,6 +397,65 @@ func (h *DockerHandler) CmdResult(c *gin.Context) {
 		}
 	}
 	app.Success(c, out)
+}
+
+// BuildContextUpload 接收浏览器直传的构建上下文 tar.gz（image:build 的输入准备段）。
+//
+// 传输拓扑：本端点**不做存储** —— 字节流经 core 中转成 WSS 二进制分片直达
+// agent 的 transferDir（中间零落盘），全程 sha256 累计，转完由 agent 侧终验。
+// 因此它没有「指令记录」，也就没有 CmdResult 那套「按记录校验权限与发起人
+// 归属」—— 权限由路由**静态 perm(docker:manage)** 挂住（与 image:build 受理
+// 同档：上下文是「即将构建并留痕在镜像里的代码」，与分发同档的输入面），
+// 「发起人」语义在此不适用（上传不建立任何按用户归属的账目）。
+//
+// 响应 200 + {filename}：该值即 image:build 的 options.context（推导名纪律
+// 见协议 build_context.go —— 名字由会话号唯一推导，agent 不接受客户端命名）。
+//
+// @Summary      上传构建上下文
+// @Description  直传 gzip 压缩的 tar 构建上下文（octet-stream/chunked）；core 流式中转至 agent 的 transferDir 并逐字节累计 sha256，agent 终验后落名 build-ctx-<会话号>.tar.gz；返回文件名（image:build 的 context 值）
+// @Tags         Docker 管理
+// @Accept       application/octet-stream
+// @Produce      json
+// @Param        id   path      uint64  true  "设备ID"
+// @Security     BearerAuth
+// @Success      200  {object}  app.Response{data=response.DockerBuildContextUploadResp}  "上传完成（filename 即 context 值）"
+// @Failure      400  {object}  app.Response{data=response.DockerBuildContextUploadResp}  "参数错误 / 超过 512MB 上限 / 内容不是 gzip tar / 上传为空"
+// @Failure      401  {object}  app.Response  "未登录"
+// @Failure      403  {object}  app.Response  "无权限(docker:manage)"
+// @Failure      503  {object}  app.Response  "设备离线 / 通道中断（上传未完成，请重试）"
+// @Router       /docker/hosts/{id}/build-context [post]
+func (h *DockerHandler) BuildContextUpload(c *gin.Context) {
+	id, ok := app.Uint64Param(c, "id")
+	if !ok {
+		return
+	}
+	if h.buildCtx == nil {
+		// 与 WithEvents/WithTasks 同款「未装配」语义：路由仍在，处理器给出 500
+		//（装配错误早暴露，好过假装收了一个没人接的字节流）。
+		app.Error(c, apperror.Internal("构建上下文上传未装配"))
+		return
+	}
+	// Content-Type 判形：请求体就是 tar 字节流本身，content-type 只是形态声明
+	// —— 传了别的形态（multipart 等）说明调用方拿错了端点，明说胜过让 agent
+	// 侧魔数/哈希终验去猜。
+	if ct := c.ContentType(); !strings.HasPrefix(ct, "application/octet-stream") {
+		app.Error(c, apperror.BadRequest("Content-Type 必须是 application/octet-stream"))
+		return
+	}
+	contentLen := c.Request.ContentLength
+	// MaxBytesReader：客户端不报 Content-Length（chunked）时，超出 512MB 也会
+	// 在读到上限的那一点立即以错误收住读 —— 「即拒不等传完」的第二段
+	// （第一段是 service 里 Content-Length>上限的直接 400）。上限与 agent 侧
+	// 扫描、505 发布物档同源：协议 MaxDockerBuildContextBytes。
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body,
+		agentproto.MaxDockerBuildContextBytes)
+
+	name, err := h.buildCtx.Transfer(c.Request.Context(), id, c.Request.Body, contentLen)
+	if err != nil {
+		app.Error(c, err)
+		return
+	}
+	app.Success(c, response.DockerBuildContextUploadResp{FileName: name})
 }
 
 // currentUserID 取当前登录用户（身份唯一来源是 middleware.CtxClaims，

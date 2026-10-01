@@ -1,6 +1,7 @@
 package agenthub
 
 import (
+	"context"
 	"errors"
 	"sort"
 	"sync"
@@ -146,6 +147,21 @@ func (h *Hub) SendToDevice(deviceID uint64, msg *agentproto.Message) error {
 		return ErrDeviceOffline
 	}
 	return c.SendMessage(msg)
+}
+
+// SendBinaryToDevice 把一帧二进制数据**阻塞式**送达在线设备（构建上下文上传的
+// 中转面：ctx 取消会解开等待 —— 背压传导给浏览器 TCP，见 Conn.EnqueueBinary）。
+//
+// 与 SendToDevice 的差别就是 Conn.EnqueueBinary 与 SendMessage 的差别：
+// 分片帧**不丢弃**（丢了哈希终验就断），而文本消息（升级指令/承载的完成帧）
+// 走既有语义。错误面：ErrDeviceOffline（离线）、ctx 取消、连接收尾 —— 三者在
+// 上传服务里各自折成句号。
+func (h *Hub) SendBinaryToDevice(ctx context.Context, deviceID uint64, payload []byte) error {
+	c, ok := h.Get(deviceID)
+	if !ok {
+		return ErrDeviceOffline
+	}
+	return c.EnqueueBinary(ctx, payload)
 }
 
 // CloseDevice 向指定设备的连接下发关闭码；设备不在线返回 false。

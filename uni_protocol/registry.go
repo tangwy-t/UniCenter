@@ -24,6 +24,8 @@ var typeRegistry = []TypeSpec{
 	{Type: TypeAgentDockerResult, Direction: DirAgentToCore, Kind: KindPayload, New: func() any { return &DockerCmdResult{} }},
 	{Type: TypeAgentDockerFrame, Direction: DirAgentToCore, Kind: KindPayload, New: func() any { return &DockerFrame{} }},
 	{Type: TypeCoreDockerFrame, Direction: DirCoreToAgent, Kind: KindPayload, New: func() any { return &CoreDockerFrame{} }},
+	{Type: TypeCoreDockerBuildCtxFinish, Direction: DirCoreToAgent, Kind: KindPayload, New: func() any { return &CoreDockerBuildCtxFinish{} }},
+	{Type: TypeCoreDockerBuildCtxAbort, Direction: DirCoreToAgent, Kind: KindPayload, New: func() any { return &CoreDockerBuildCtxAbort{} }},
 }
 
 // AllTypes 返回按注册顺序排列的全部消息类型。

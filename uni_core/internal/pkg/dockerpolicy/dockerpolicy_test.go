@@ -12,7 +12,7 @@ import (
 //
 // 为什么要双源：这张表是「哪个 action 需要哪个权限」的唯一事实源，而它的错误形态是
 // **越权**（把 delete 写成 manage）而不是崩溃 —— 只有一份独立的期望值才能看见它。
-//（7c 删掉了期次列：CurrentPhase=5 且全表 ≤5，那道闸永不触发；权限/超时/会话制
+// （7c 删掉了期次列：CurrentPhase=5 且全表 ≤5，那道闸永不触发；权限/超时/会话制
 // 三项是活语义，期望表随之收窄。）
 func TestPolicyTableMatchesSpec(t *testing.T) {
 	want := []struct {
@@ -41,6 +41,9 @@ func TestPolicyTableMatchesSpec(t *testing.T) {
 		// P2·分发闭环：build 30 分钟（冷缓存大工程）、push 15 分钟（网络长传输同 pull）。
 		{agentproto.DockerActionImageBuild, permission.PermDockerManage, 30 * time.Minute, false},
 		{agentproto.DockerActionImagePush, permission.PermDockerManage, 15 * time.Minute, false},
+		// P3·安全面：scan 是 manage 档（trivy 执行 + 漏洞库下载 = 外部内容落主机，
+		// 同 pull 的信任决定）+ 15 分钟档（首扫下载漏洞库）。
+		{agentproto.DockerActionImageScan, permission.PermDockerManage, 15 * time.Minute, false},
 		{agentproto.DockerActionVolumeRemove, permission.PermDockerDelete, 60 * time.Second, false},
 		{agentproto.DockerActionVolumePrune, permission.PermDockerDelete, 120 * time.Second, false},
 		{agentproto.DockerActionNetworkRemove, permission.PermDockerDelete, 60 * time.Second, false},

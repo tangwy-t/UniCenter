@@ -79,6 +79,29 @@ const (
 	// 同一把键同一份解析）；进度走派生会话（push_<ref>）。确认档标准（同 image:pull：
 	// 推送的目标 tag 是否可覆盖由 registry 侧策略决定，本指令只是执行一次 push）。
 	DockerActionImagePush = "image:push"
+	// DockerActionImageScan 是镜像漏洞扫描（P3·安全面）：agent 在主机上跑 trivy
+	// （`trivy image --format json --quiet --timeout 14m <ref>`），把 JSON 报告归一化
+	// 成 DockerScanReport 经 result.payload 回来。
+	//
+	// 三条口径与既有 action 的对齐关系：
+	//   - **读操作语义但走 cmd 通道**：扫描不改动主机上任何 Docker 资源（与
+	//     image:inspect 同族），但它一次要跑数分钟、trivy 首扫还要下载漏洞库 ——
+	//     30 秒的只读受理档对它不成立，且「pending 期间在任务中心可见」正是长任务
+	//     的可见性要求，故走 cmd/result 而不是快返回；
+	//   - **权限档是 docker:manage 而不是 docker:inspect**：扫描会在主机上**执行
+	//     一个外部二进制**（trivy）并**从网络下载漏洞库**（首扫），这与 image:pull
+	//     「让外部内容落到这台主机上执行」是同一类信任决定，与「只看 daemon 里
+	//     已有的东西」（inspect）不是一档。报告本身（镜像内容里有什么 CVE）是
+	//     docker:manage 持有者本来就能拿到的信息（镜像内容他可拉可导出）；
+	//   - **确认档无**：没有破坏性动作（扫描是只读语义），要用户抄一遍 target
+	//     只会把确认档训练成例行公事。
+	//
+	// 进度流**刻意不建**：trivy 的 json 模式是「结束才出一份完整报告」的批处理形态，
+	// 中途没有可增量的结构化进度（CLI 的进度条是面向 tty 的重绘文本，解析它等于
+	// 把 UI 实现细节烧进协议）。pending 期在任务中心可见已经覆盖「扫了没反应」的
+	// 焦虑；trivy --timeout（14m）比 agent 的 15 分钟执行档短一截，让「trivy 自己
+	// 报超时」优先于「agent 杀进程」。
+	DockerActionImageScan = "image:scan"
 
 	DockerActionVolumeRemove = "volume:remove"
 	DockerActionVolumePrune  = "volume:prune"
@@ -211,6 +234,29 @@ const (
 	// 32 核同档 —— 上限要的是「拦手滑」而不是「限制场景」；0 = 不限额（缺席形态，
 	// 与 logs 的 tail=0 同语义）。
 	maxDockerMemLimitMB = 32 << 10
+
+	// ── P3·安全面（image:scan）的报告尺寸口径 ─────────────────────────────
+	//
+	// MaxDockerScanVulnEntries 是扫描报告里 CVE 条目的上限（**导出常量**：协议定义
+	// 尺、agent 执法 —— 与 MaxDockerBuildContextBytes 同一纪律，两端同一个数）。
+	//
+	// 为什么必须有它：trivy 全量报告可达数千条 CVE（裸的旧基础镜像常态），而
+	// result.payload 的硬上限是 MaxDockerPayloadBytes（256KB）—— 不截断的话
+	// 一份大报告会让整条 result 被协议层拒掉（**扫描成功却报不出来**）。
+	// 取 500 的体积账是两端一起算的：典型条目 ≈120B（id 15 + pkg 20 + severity 8 +
+	// fixed 12 + title 60 的实测量级），500 条 ≈ 60KB；即便每条都同时顶到字段
+	// 截断上限（id ≈20B + pkg ≈64B + fixed ≈32B + title 256B + JSON 开销 ≈70B，
+	// 单条 ≈ 440B），500 条 ≈ 220KB 仍在上限内 —— 条数与字段裁剪（title 上限
+	// 见 MaxDockerScanVulnTitleBytes）合起来才是完整的闸，缺一半都会靠运气。
+	// **计数不受截断影响**（severity 计数对全量如实、Truncated 标注截断）——
+	//「共 3200 条，展示前 500 条」是可行动的事实，「共 500 条」是截断后的谎言。
+	MaxDockerScanVulnEntries = 500
+	// MaxDockerScanVulnTitleBytes 是单条 CVE title 的截断长度（字节，**导出常量**：
+	// 协议定义尺、agent 执法 —— agent 归一化 trivy 报告时对超长 title 截到这个长度，
+	// 两端同一个数）。title 是 trivy 的 CVE 摘要（英文长句），页面只拿它做一行摘要 ——
+	// 500 条 × 无界 title 会把上面算好的体积账悄悄翻倍，256B（≈一行摘要的可读上限）
+	// 够表达又够安全。
+	MaxDockerScanVulnTitleBytes = 256
 )
 
 // DockerActionSpec 是 action 的静态属性中**两端都必须一致**的那部分。
@@ -269,6 +315,9 @@ var dockerActionSpecs = []DockerActionSpec{
 	// P2·分发闭环：push 的必填项是 target（本地镜像引用，与 pull 同一字段同一形态 ——
 	// 都用镜像族早已冻结的 target，不为 push 新开字段）。registry 可选（4c 凭据键）。
 	{Action: DockerActionImagePush, Required: []string{"target"}},
+	// P3·安全面：scan 的必填项是 target（镜像引用，与 inspect/pull 同字段同形态）。
+	// 确认档无（读操作语义，见常量注释的档位口径说明）。
+	{Action: DockerActionImageScan, Required: []string{"target"}},
 
 	{Action: DockerActionVolumeRemove, Required: []string{"target"}},
 	{Action: DockerActionVolumePrune, Confirm: DockerConfirmDelete},
@@ -1073,7 +1122,7 @@ func validateDockerTarget(action, target string) error {
 			return decodeErr(StagePayload, "target", ErrInvalidPayload)
 		}
 	case DockerActionImageRemove, DockerActionImagePull, DockerActionImageInspect,
-		DockerActionImageSave, DockerActionImagePush:
+		DockerActionImageSave, DockerActionImagePush, DockerActionImageScan:
 		if !IsDockerImageRef(target) {
 			return decodeErr(StagePayload, "target", ErrInvalidPayload)
 		}
@@ -1791,6 +1840,83 @@ type DockerImageLayer struct {
 	Comment    string `json:"comment,omitempty"`
 }
 
+// ── P3·安全面：image:scan 的结果载荷（DockerScanReport）──────────────────────
+//
+// 通道与 image:inspect 同族：报告进 result.payload（一次指令一个结果，生命周期
+// 与 result 完全一致，不为它另开消息类型）。它同时是 core 侧扫描缓存
+//（docker:scan:<镜像ID>，24h）的存储形态 ——「缓存 DTO 与报告同形」让缓存命中
+// 回放的字节与 agent 直发的字节只有一个字段之差（scanned_at 由 core 重盖，见
+// core 侧扫描缓存的时钟纪律），前端不需要两套解析。
+
+// DockerScanSeverity* 是 severity 的五档枚举（trivy 的 CRITICAL/HIGH/MEDIUM/LOW/
+// UNKNOWN 折成小写）。协议导出它们而不是各写各的字符串：agent 的归一化、core
+// 缓存的校验、前端的着色都从这一个枚举源取值，任何一边拼错大小写都会让
+// 「计数与条目对不上」这类静默错位。
+const (
+	DockerScanSeverityCritical = "critical"
+	DockerScanSeverityHigh     = "high"
+	DockerScanSeverityMedium   = "medium"
+	DockerScanSeverityLow      = "low"
+	// DockerScanSeverityUnknown 是空/无法归类档：trivy 对缺评分的 CVE 报
+	// UNKNOWN，归一化把空串与白名单外的值（新档/拼写漂移）都折到这里 ——
+	// 「未知」比「丢弃」诚实：丢弃会让计数与条目数对不上。
+	DockerScanSeverityUnknown = "unknown"
+)
+
+// DockerScanCounts 是 severity 维度的**全量**计数（critical/high/medium/low/unknown）。
+//
+// 计数对 trivy 报告的**全部**去重条目如实求和，**不受** Vulns 500 条截断的影响：
+// 「共 N 条、其中 critical M 条」是页面的行动依据（要不要立刻处理），
+// 截断后的数字会把 3200 条的大镜像谎报成 500 条的干净镜像。
+type DockerScanCounts struct {
+	Critical int `json:"critical"`
+	High     int `json:"high"`
+	Medium   int `json:"medium"`
+	Low      int `json:"low"`
+	Unknown  int `json:"unknown"`
+}
+
+// DockerScanVuln 是一条 CVE（按 severity 降序、同档按 id 排序后的数组元素）。
+//
+// 刻意只留五个字段：Description/PrimaryURL/CVSS 这类 trivy 大字段不进协议 ——
+// 详情排查走 CVE 号到公开库（NVD/GHSA）查权威原文，报告要的是「哪个包、多严重、
+// 有没有修复版」三问，抄全文只会把 256KB 的载荷预算烧掉（体积账见
+// MaxDockerScanVulnEntries 的注释）。
+type DockerScanVuln struct {
+	// ID 是 CVE 编号（CVE-2023-1234 / GHSA-xxxx）。
+	ID string `json:"id"`
+	// Pkg 是受影响包名（trivy 的 PkgName，os-pkgs 与语言包同字段）。
+	Pkg string `json:"pkg"`
+	// Severity ∈ DockerScanSeverity* 五档（小写）。
+	Severity string `json:"severity"`
+	// FixedVersion 是修复版本（**有修复才有**；空 = 修复未发布/不适用 ——
+	// 「能不能修」是页面分组排序的依据，缺席本身是信息）。
+	FixedVersion string `json:"fixed_version,omitempty"`
+	// Title 是一句话摘要（trivy 的 Title，截断到 256B）。
+	Title string `json:"title,omitempty"`
+}
+
+// DockerScanReport 是 image:scan 的结果数据（镜像详情页「安全」Tab）。
+type DockerScanReport struct {
+	// ImageID 是被扫镜像的完整 ID（sha256:<64hex>，daemon inspect 的口径）。
+	// 它是**内容寻址键**：core 的 24h 缓存按它存取 —— tag 可以换、同一内容无论
+	// 挂什么 tag 都命中同一份缓存，而 tag 换了内容（重新 build/pull）ID 变了，
+	// 自然走向一次新扫描。由 agent 填（扫描前 ImageInspect 解析的权威值，
+	// 不是 trivy 报告里的自述值 —— 两者本应一致，但协议键以 daemon 为准）。
+	ImageID string `json:"image_id"`
+	// ScannedAt 是扫描完成时刻（unix 秒）。agent 填自己的挂钟；core 写缓存时
+	// **重盖**成收帧时刻（agent 时钟可能偏，stats-history 的同一条纪律）——
+	// 「扫描于 N 小时前」的陈述在缓存回放路径上以 core 时钟为准。
+	ScannedAt int64 `json:"scanned_at"`
+	// Counts 是 severity 全量计数（见自己的注释：不受截断影响）。
+	Counts DockerScanCounts `json:"counts"`
+	// Vulns 是 CVE 条目（severity 降序、同档按 id；同 (id,pkg) 已去重）。
+	// 上限 MaxDockerScanVulnEntries，超限时 Truncated=true。
+	Vulns []DockerScanVuln `json:"vulns"`
+	// Truncated 表示条目因上限被截断（页面只说「仅显示前 500 条，计数为全量」）。
+	Truncated bool `json:"truncated,omitempty"`
+}
+
 // DockerComposeFilePayload 是 compose.file:read 的结果数据。
 //
 // v1.2.4 起它也是 compose.file:write/patch 成功后的结果数据：保存收尾以 agent 回读的
@@ -1888,6 +2014,75 @@ func (f *CoreDockerFrame) Validate() error {
 		}
 	default:
 		return decodeErr(StagePayload, "op", ErrInvalidPayload)
+	}
+	return nil
+}
+
+// ── 构建上下文上传通道的控制消息（v1.3）──────────────────────────────────
+//
+// 上传通道的线上形态是「一条二进制分片流 + 两条文本控制消息」：
+//
+//	core ──(binary×N)──▶ agent   分片（头格式见 build_context.go）
+//	core ──(json 完成帧)──▶ agent   CoreDockerBuildCtxFinish：期望哈希 + 产物名
+//	core ──(json 中止帧)──▶ agent   CoreDockerBuildCtxAbort：丢弃半成品
+//
+// 为什么完成/中止走 JSON 而不是二进制帧的标志位：中断与完成是**控制语义**，
+// 要与数据面分开走同一条「信封 + 方向 + 类型登记」的既有通路 —— 它们携带
+// 结构字段（sha256 / 文件名 / 大小），塞进 1 字节 flags 会让帧头失去定长的
+// 简单性，而 JSON 控制帧在失败路径上（队列、日志、调试）可读可检索。
+// 「既有 JSON 消息零改动」指的是**既有**消息族 —— 这两条是新增族。
+
+// CoreDockerBuildCtxFinish 是上传会话的完成控制帧（core→agent）：全部分片
+// 转发完毕后发送，携带期望 sha256 与产物文件名 —— agent 据此做「组装结果 vs
+// 期望」的终验：不匹配 = 传输损坏/分片丢失，**删除产物文件并记错**
+// （v1 无回执通道：core 的 HTTP 响应在转完时就发完了，agent 侧终验失败
+// 只落日志，用户在随后的 image:build 里以「找不到这个产物文件」看到它）。
+//
+// 深度校验（tar 条目/穿越/Dockerfile 存在性）**不在这里**：它是 image:build
+// 执行时 scanBuildContext 的职责 —— 单一校验事实源；上传段只验
+// 「像不像 gzip tar」（魔数）+ 大小 + 传输完整性（哈希）。
+type CoreDockerBuildCtxFinish struct {
+	SessionID uint64 `json:"session_id"`
+	// Name 是产物文件名。Validate 钉死它**必须等于**会话号的推导名
+	//（DockerBuildCtxTransferName）—— agent 不接受任何客户端命名，
+	// core 写错这个字段是构造错误，在发出的那一刻就被拒。
+	Name string `json:"name"`
+	// SHA256Hex 是 core 中转全程累计的期望哈希（64 位小写 hex）。
+	SHA256Hex string `json:"sha256"`
+	// SizeBytes 是期望字节数（与 agent 组装账目互核；哈希之外的第二道对照）。
+	SizeBytes int64 `json:"size_bytes"`
+}
+
+// Validate 校验完成控制帧。
+func (f *CoreDockerBuildCtxFinish) Validate() error {
+	if f.SessionID == 0 {
+		return decodeErr(StagePayload, "session_id", ErrMissingField)
+	}
+	if f.Name != DockerBuildCtxTransferName(f.SessionID) {
+		// 名字必须由会话号唯一推导 —— 协议层就把「客户端命名」这条路钉死。
+		return decodeErr(StagePayload, "name", ErrInvalidPayload)
+	}
+	if !IsHexSHA256(f.SHA256Hex) {
+		return decodeErr(StagePayload, "sha256", ErrInvalidPayload)
+	}
+	if f.SizeBytes < 0 {
+		return decodeErr(StagePayload, "size_bytes", ErrInvalidPayload)
+	}
+	return nil
+}
+
+// CoreDockerBuildCtxAbort 是上传会话的中止控制帧（core→agent）：
+// 丢弃该会话的半成品文件并释放会话状态。触发源：浏览器断开（HTTP ctx 取消）、
+// 通道在转完前中断、core 侧参数错误（超尺寸/魔数不符）与「组装失败」的先手清理。
+// v1 无续传 —— 中止之后只能重传整份。
+type CoreDockerBuildCtxAbort struct {
+	SessionID uint64 `json:"session_id"`
+}
+
+// Validate 校验中止控制帧。
+func (f *CoreDockerBuildCtxAbort) Validate() error {
+	if f.SessionID == 0 {
+		return decodeErr(StagePayload, "session_id", ErrMissingField)
 	}
 	return nil
 }

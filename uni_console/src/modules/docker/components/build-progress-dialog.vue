@@ -29,18 +29,92 @@
       </div>
 
       <div class="bp-field">
-        <label class="bp-field__label">构建上下文（tar 文件名）</label>
-        <ElInput
-          v-model="contextInput"
-          placeholder="例如 app.tar"
-          :disabled="accepting"
-          clearable
-          @keyup.enter="startBuild"
-        />
-        <p v-if="contextErrorText" class="bp-field__error">{{ contextErrorText }}</p>
-        <p class="bp-field__hint"
-          >只填文件名（tar / tar.gz / tgz，≤512MB），需已放在该主机的 agent 下载目录。</p
-        >
+        <div class="bp-field__head">
+          <label class="bp-field__label">构建上下文（tar 文件名）</label>
+          <!-- 两种形态（P3·上传控件）：本机文件直传（② 端点，进度可见）vs 主机已有
+               tar 的手填文件名（老路径保留）。上传在途时锁形态：切走会让「上传的
+               结论」与「表单里的值」两份事实互相追尾。 -->
+          <ElRadioGroup v-model="ctxMode" size="small" :disabled="accepting || ctxUploading">
+            <ElRadioButton value="upload">上传文件</ElRadioButton>
+            <ElRadioButton value="manual">主机已有文件</ElRadioButton>
+          </ElRadioGroup>
+        </div>
+
+        <!-- 手动形态：主机上已放好 tar 的场景（原路径原样）。 -->
+        <template v-if="ctxMode === 'manual'">
+          <ElInput
+            v-model="contextInput"
+            placeholder="例如 app.tar"
+            :disabled="accepting"
+            clearable
+            @keyup.enter="startBuild"
+          />
+          <p v-if="contextErrorText" class="bp-field__error">{{ contextErrorText }}</p>
+          <p class="bp-field__hint"
+            >只填文件名（tar / tar.gz / tgz，≤512MB），需已放在该主机的 agent 下载目录。</p
+          >
+        </template>
+
+        <!-- 上传形态：选文件 → 预检（后缀/512MB/gzip 魔数）→ 流式上传（进度条）→
+             成功把服务端产物名填进 context。 -->
+        <template v-else>
+          <!-- 藏起来的原生 file input：ElUpload 自带一套上传语义（列表/自动分批），
+               与「一个文件、一条流、自管进度」的诉求不合 —— 原生 input + 自管按钮
+               每一步都可断言。 -->
+          <input
+            ref="fileInputEl"
+            type="file"
+            class="bp-file-hidden"
+            :accept="BUILD_CONTEXT_ACCEPT"
+            @change="onFilePicked"
+          />
+
+          <!-- 空闲/失败：入口按钮 + 预检结论（失败句就地给，不上传才知道便宜）。
+               失败态的入口措辞换成「重新选择」—— 重试的心智就是「换个/重选文件」。 -->
+          <template v-if="ctxUploadPhase !== 'uploading' && ctxUploadPhase !== 'done'">
+            <div class="bp-upload-entry">
+              <ElButton size="small" :disabled="accepting" @click="onEntryClick">
+                {{ ctxUploadPhase === 'failed' ? '重新选择' : '选择文件…' }}
+              </ElButton>
+              <span class="bp-upload-entry__name">{{ ctxFileName }}</span>
+            </div>
+            <p v-if="ctxUploadError" class="bp-field__error">{{ ctxUploadError }}</p>
+            <p class="bp-field__hint"
+              >选择本机的 gzip 压缩 tar（≤512MB），上传后自动填入上下文文件名。</p
+            >
+          </template>
+
+          <!-- 上传在途：文件名 + 进度条（XHR 的 upload 进度，fetch 没有这个事件）。 -->
+          <template v-else-if="ctxUploadPhase === 'uploading'">
+            <p class="bp-upload-file">{{ ctxFileName }}</p>
+            <ElProgress
+              :percentage="ctxUploadPercent"
+              :stroke-width="8"
+              :show-text="true"
+              class="bp-upload-progress"
+            />
+          </template>
+
+          <!-- 完成：只读展示「已上传：产物名」（值就是 context，改它只能清除重选或
+               切回手动形态 —— 手动形态里它是可编辑的）。 -->
+          <template v-else>
+            <div class="bp-uploaded">
+              <ArtSvgIcon icon="ri:checkbox-circle-line" class="bp-uploaded__icon" />
+              <span>已上传：</span><code class="bp-uploaded__name">{{ trimmedContext }}</code>
+            </div>
+            <div class="bp-uploaded__ops">
+              <ElButton size="small" text :disabled="accepting" @click="resetUpload">
+                重新选择
+              </ElButton>
+              <ElButton size="small" text :disabled="accepting" @click="ctxMode = 'manual'">
+                改回手动输入
+              </ElButton>
+            </div>
+            <p class="bp-field__hint"
+              >文件已传到该主机的 agent 下载目录，「开始构建」将直接使用它。</p
+            >
+          </template>
+        </template>
       </div>
 
       <div class="bp-field">
@@ -173,9 +247,21 @@
    * 组件内再把 hostId 在受理时钉死一道（双保险）。
    */
   import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
-  import { ElButton, ElDialog, ElInput } from 'element-plus'
+  import {
+    ElButton,
+    ElDialog,
+    ElInput,
+    ElProgress,
+    ElRadioButton,
+    ElRadioGroup
+  } from 'element-plus'
   import { formatByUnit } from '@/modules/device/utils/display'
-  import { fetchDockerCmdResult, openDockerBuildStream, sendDockerCmd } from '../api'
+  import {
+    fetchDockerCmdResult,
+    openDockerBuildStream,
+    sendDockerCmd,
+    uploadDockerBuildContext
+  } from '../api'
   import { classifyAcceptError } from '../composables/useDockerCmds'
   import { pollDelay } from '../utils/cmd'
   import { isValidImageRef } from '../utils/pull'
@@ -186,6 +272,10 @@
     isValidBuildSubpath,
     MAX_BUILD_ARG_VALUE_BYTES,
     MAX_BUILD_ARGS,
+    MAX_BUILD_CONTEXT_BYTES,
+    BUILD_CONTEXT_ACCEPT,
+    hasBuildContextSuffix,
+    isGzipFile,
     type BuildFeed,
     type BuildFeedLine,
     type BuildTerminal
@@ -228,6 +318,28 @@
   const argRows = ref<ArgRow[]>([])
   const acceptError = ref('')
   const accepting = ref(false)
+
+  // ── 构建上下文的上传形态（P3·② 端点的消费面）────────────────────────
+  // 与手填形态共用 contextInput 这一个值（image:build 的 options.context 只认
+  // 它）；上传通道的差异全部收在下面这组状态里，模板按 ctxMode 分叉。
+
+  /** 上下文来源：manual = 手填主机上已有 tar 的文件名（老路径）；upload = 本机直传。 */
+  const ctxMode = ref<'manual' | 'upload'>('manual')
+  /** 上传段状态机：idle（未选/已清）→ uploading → done（产物名已回填）/
+   *  failed（预检拒或服务端拒 —— 结论句就地给，重选即重试）。 */
+  const ctxUploadPhase = ref<'idle' | 'uploading' | 'done' | 'failed'>('idle')
+  /** 本地选中的文件名（选择/在途/失败时回显；成功后回显切到服务端产物名）。 */
+  const ctxFileName = ref('')
+  const ctxUploadPercent = ref(0)
+  /** 预检与上传的失败结论句（与受理错误同一条「对话框还开着，结论就地给」纪律）。 */
+  const ctxUploadError = ref('')
+  const ctxUploading = computed(() => ctxUploadPhase.value === 'uploading')
+  /** 藏起来的原生文件选择器（模板见 file input 的注释）。 */
+  const fileInputEl = ref<HTMLInputElement | null>(null)
+  /** 上传段生命周期序号：关对话框/重开/清除重选让在飞的「预检 await + 上传」失效。 */
+  let ctxUploadSeq = 0
+  /** 在途上传的断流柄：断开 = 中止请求（服务端会向 agent 发中止帧清理半成品）。 */
+  let uploadAbort: AbortController | null = null
 
   const feedView = ref<FeedView>({ lines: [], droppedLines: 0 })
   const canceled = ref(false)
@@ -315,6 +427,9 @@
       contextErrorText.value === '' &&
       dockerfileErrorText.value === '' &&
       argErrorText.value === '' &&
+      // 上传在途不放行（此时 context 是空的本来也拦住了，这里把「为什么不能开始」
+      // 的语义钉在状态机上，不靠「恰好为空」这个间接事实）。
+      !ctxUploading.value &&
       !accepting.value
   )
 
@@ -337,6 +452,130 @@
       args[k] = v
     }
     return args
+  }
+
+  // ── 上下文上传段（P3）：选文件 → 预检 → 流式上传 → 产物名回填 ──
+
+  /**
+   * 断开在途上传（幂等）：序号让在飞的「预检 await / 进度回调 / 上传 promise」
+   * 失效，abort 中止请求本身。状态机与表单值的归零在 resetUpload（重开/重选场景
+   * 才需要），这里只断流 —— 与 abortStream/cleanup 的分工同款。
+   */
+  function abortUpload(): void {
+    ctxUploadSeq++
+    uploadAbort?.abort()
+    uploadAbort = null
+  }
+
+  /**
+   * 清除上传段（「重新选择」与切形态共用）：状态机归零 + context 一并清。
+   *
+   * context 必须一起清：上传形态下它是上传通道的唯一产物，旧值残留会变成
+   * 「界面上看不见、载荷里却发得出去」的暗事实。成功后的值要保留只能走
+   * 「改回手动输入」（手动形态里它是可编辑的普通输入）。
+   */
+  function resetUpload(): void {
+    abortUpload()
+    ctxUploadPhase.value = 'idle'
+    ctxUploadError.value = ''
+    ctxFileName.value = ''
+    ctxUploadPercent.value = 0
+    contextInput.value = ''
+  }
+
+  // 切形态：切进上传 = 来源换成上传通道，手填值与旧上传状态一并清零（「显示的
+  // 结论」与「将发送的值」不能是两份事实）；切回手动保留现值（上传成功后 =
+  // 服务端产物名，可编辑可清空 —— 手动形态本来就是为「主机已有 tar」留的路）。
+  watch(ctxMode, (mode) => {
+    if (mode === 'upload') resetUpload()
+  })
+
+  function pickFile(): void {
+    fileInputEl.value?.click()
+  }
+
+  /**
+   * 入口按钮（空闲/失败两态共用）：失败态先清结论再开选择器 ——「重新选择」的
+   * 心智是从头来，旧错误句不该跟着进下一轮（选完新文件本来也会清，这里让
+   * 点击的瞬间就有反馈）。
+   */
+  function onEntryClick(): void {
+    if (ctxUploadPhase.value === 'failed') {
+      ctxUploadPhase.value = 'idle'
+      ctxUploadError.value = ''
+    }
+    pickFile()
+  }
+
+  /** 预检失败的就地结论（状态机停在 failed，重选即重试 —— 与受理失败同款）。 */
+  function failUpload(message: string): void {
+    ctxUploadPhase.value = 'failed'
+    ctxUploadError.value = message
+  }
+
+  /**
+   * 选定文件：预检三连（后缀 / 512MB / gzip 魔数，全是毫秒级反馈）→ 通过即发
+   * 起流式上传。预检是服务端同一把尺的前移，不是替它执法（跳过预检的路径 ——
+   * 比如直接 POST —— 服务端照拒，只是反馈从毫秒级变成「传完才知道」）。
+   */
+  async function onFilePicked(e: Event): Promise<void> {
+    const input = e.target as HTMLInputElement
+    const file = input.files?.[0]
+    // value 先清：否则第二次选同一个文件不触发 change（浏览器按值判变化）。
+    input.value = ''
+    if (!file || phase.value !== 'input' || accepting.value || ctxUploading.value) return
+    const seq = ctxUploadSeq
+    ctxFileName.value = file.name
+    ctxUploadError.value = ''
+    ctxUploadPhase.value = 'idle'
+
+    if (!hasBuildContextSuffix(file.name)) {
+      failUpload('只支持 tar / tar.gz / tgz 文件')
+      return
+    }
+    if (file.size > MAX_BUILD_CONTEXT_BYTES) {
+      failUpload(`文件超过 ${MAX_BUILD_CONTEXT_BYTES / (1024 * 1024)}MB 上限`)
+      return
+    }
+    // gzip 魔数（异步读切片的头部两字节）：await 之后对话框可能已被关掉/重置，
+    // 序号守卫让这次选择静默作废（与构建流的 seq 同一条纪律）。
+    if (!(await isGzipFile(file))) {
+      if (seq !== ctxUploadSeq) return
+      failUpload('内容不是 gzip 压缩的 tar 归档')
+      return
+    }
+    if (seq !== ctxUploadSeq) return
+
+    // 发起上传：hostId 在此钉死（与 startBuild 同理由 —— 一次上传只属于受理它
+    // 的那台主机，切机后由页面关掉本对话框，这里钉死是兜那条缝）。
+    ctxUploadPhase.value = 'uploading'
+    ctxUploadPercent.value = 0
+    const controller = new AbortController()
+    uploadAbort = controller
+    try {
+      const resp = await uploadDockerBuildContext(
+        props.hostId,
+        file,
+        (percent) => {
+          if (seq === ctxUploadSeq) ctxUploadPercent.value = percent
+        },
+        controller.signal
+      )
+      if (seq !== ctxUploadSeq) return
+      // 成功：产物名回填 context（它就是 image:build 的 options.context 要填的
+      // 值 —— 服务端由会话号推导，形态过协议的文件名白名单，校验不会挡它）。
+      contextInput.value = resp.filename
+      ctxUploadPhase.value = 'done'
+    } catch (err) {
+      // 收口路径（关对话框/清除重选）上的 abort 不是故障：请求是被自己掐断的。
+      if (seq !== ctxUploadSeq) return
+      ctxUploadPhase.value = 'failed'
+      // 服务端结论句优先（离线 503 / 超限 400 的原文比前端编的准），分类兜底
+      // 同 classifyAcceptError 的口径。
+      ctxUploadError.value = classifyAcceptError(err).message
+    } finally {
+      if (uploadAbort === controller) uploadAbort = null
+    }
   }
 
   // ── 进度态的派生展示 ──
@@ -584,10 +823,11 @@
     streamAbort = null
   }
 
-  /** 收口：序号让在飞的流与轮询失效 + 断流（= 服务端取消构建）。幂等。 */
+  /** 收口：序号让在飞的流与轮询失效 + 断流（= 服务端取消构建）+ 断开在途上传。幂等。 */
   function cleanup(): void {
     buildSeq++
     abortStream()
+    abortUpload()
   }
 
   /** 关对话框的完整收口（幂等）：清理 + 成功后的双次重拉。 */
@@ -653,6 +893,10 @@
     argRows.value = []
     acceptError.value = ''
     accepting.value = false
+    // 上传段整段归零（含 context 与 abort —— resetUpload 里会再清一次 context，
+    // 幂等无害）：上一次会话的产物名/进度/失败句不进新一场。
+    ctxMode.value = 'manual'
+    resetUpload()
     feedView.value = { lines: [], droppedLines: 0 }
     canceled.value = false
     streamEnded.value = false
@@ -702,6 +946,81 @@
 
     &__hint {
       color: var(--el-text-color-secondary);
+    }
+  }
+
+  // 上下文字段头：标签与形态切换（radio）同行 —— 手填/上传是同一份语义的两种
+  // 来源，切换就近放在标签旁；标签自己的下边距在这里由头部行接管（不然 radio
+  // 会被顶出基线）。
+  .bp-field__head {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+
+    .bp-field__label {
+      margin-bottom: 0;
+    }
+  }
+
+  // 原生文件选择器常驻 DOM（要它可被触发/断言），视觉上完全让位给自管按钮。
+  .bp-file-hidden {
+    display: none;
+  }
+
+  // 上传入口：按钮 + 已选文件名（文件名是「选了什么」的回执，弱化展示）。
+  .bp-upload-entry {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+
+    &__name {
+      font-size: 12px;
+      color: var(--el-text-color-secondary);
+      word-break: break-all;
+    }
+  }
+
+  // 在途：文件名（正文色）+ 进度条（传输进度是这段唯一的事实）。
+  .bp-upload-file {
+    margin: 0;
+    font-size: 13px;
+    color: var(--el-text-color-regular);
+    word-break: break-all;
+  }
+
+  .bp-upload-progress {
+    margin-top: 8px;
+    margin-bottom: 2px;
+  }
+
+  // 完成：结论行（成功色图标 + 产物名等宽 —— 它是要被填进指令的标识符，等宽
+  // 才读得出会话号段），两个次级动作以 text 按钮就近给出。
+  .bp-uploaded {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+    font-size: 13px;
+
+    &__icon {
+      flex: none;
+      font-size: 16px;
+      color: var(--el-color-success);
+    }
+
+    &__name {
+      font-family: var(--el-font-family-mono, ui-monospace, 'SFMono-Regular', Consolas, monospace);
+      word-break: break-all;
+    }
+
+    &__ops {
+      display: flex;
+      gap: 4px;
+      margin-top: 2px;
     }
   }
 

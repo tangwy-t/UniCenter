@@ -368,6 +368,9 @@ func TestWriteTimeoutsMirrorSpec(t *testing.T) {
 		// pull/save/load 档对它不成立）、推送 15 分钟（与拉取同档）。
 		agentproto.DockerActionImageBuild: 30 * time.Minute,
 		agentproto.DockerActionImagePush:  15 * time.Minute,
+		// P3·安全面：trivy 扫描（含首扫漏洞库下载）归 15 分钟档（网络+本地 IO 的
+		// 分钟级操作，与 pull/save/load 同族）。
+		agentproto.DockerActionImageScan: 15 * time.Minute,
 
 		agentproto.DockerActionVolumeRemove: 60 * time.Second,
 		agentproto.DockerActionVolumePrune:  120 * time.Second,
@@ -430,6 +433,8 @@ func TestImplementedActionsIncludesPhase2Writes(t *testing.T) {
 		agentproto.DockerActionImageTag,
 		agentproto.DockerActionImageSave,
 		agentproto.DockerActionImageLoad,
+		// P3·安全面：scan 走写执行器（主机级 CLI + 15 分钟执行档，见 image_scan.go）。
+		agentproto.DockerActionImageScan,
 		agentproto.DockerActionVolumeRemove,
 		agentproto.DockerActionVolumePrune,
 		agentproto.DockerActionNetworkRemove,

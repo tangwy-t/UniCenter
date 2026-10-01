@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -76,6 +77,10 @@ type DockerCmdService struct {
 	// auth 是仓库凭据解析面（4c）。nil = 未装配：带 registry 的拉取被 500 拒
 	//（「配了选项却没有解析能力」是装配错误，早暴露好过 agent 在 daemon 上吃 401）。
 	auth RegistryAuthResolver
+	// scanCache 是镜像扫描缓存面（P3·安全面）。nil = 未装配：image:scan 照常
+	// 下发 agent 真扫描 —— 缓存只是加速器，缺失不挡功能（与 stats-history 挂钩
+	// 的「观察者不是参与者」同一纪律）。
+	scanCache *dockerstate.ScanCacheStore
 }
 
 // WithStreamSessions 注入流会话计数/登记面（三期日志 Follow / 终端的上限预检；
@@ -89,6 +94,14 @@ func (s *DockerCmdService) WithStreamSessions(c DockerSessionCounter) *DockerCmd
 // 非空时才被调用 —— 其余 action 连解析器都不经过。
 func (s *DockerCmdService) WithRegistryAuth(r RegistryAuthResolver) *DockerCmdService {
 	s.auth = r
+	return s
+}
+
+// WithScanCache 注入镜像扫描缓存面（P3·安全面）。装配在 wireup 一处完成；
+// 受理侧（image:scan 的秒回快路径）与 ingest 侧（成功扫描落缓存）共用同一个
+// store 实例 —— 两边读写的是同一族键。
+func (s *DockerCmdService) WithScanCache(c *dockerstate.ScanCacheStore) *DockerCmdService {
+	s.scanCache = c
 	return s
 }
 
@@ -217,6 +230,15 @@ func (s *DockerCmdService) Send(ctx context.Context, userID, deviceID uint64, re
 		return "", apperror.Conflict("该目标上已有同一条指令在执行")
 	}
 
+	// 扫描缓存快路径（P3·安全面，见 scanFastPath 的口径说明）：排在在飞去重
+	// **之后** —— 同目标正有一场真扫描在跑时，409 优先于缓存秒回（在飞的那次
+	// 扫完会把缓存换新，现在秒回一份旧的反而误导）。
+	if ref, hit, err := s.scanFastPath(ctx, userID, deviceID, req, opts, pol); err != nil {
+		return "", err
+	} else if hit {
+		return ref, nil
+	}
+
 	rec := &dockerstate.CmdRecord{
 		Ref: s.idGen(), DeviceID: deviceID, Action: req.Action, Target: opts.Target,
 		UserID: userID, Perm: pol.Perm, Confirm: req.Confirm, CreatedAt: s.now().UnixMilli(),
@@ -272,6 +294,123 @@ func (s *DockerCmdService) Send(ctx context.Context, userID, deviceID uint64, re
 		return "", apperror.Internal("指令未送达设备，请稍后重试")
 	}
 	return rec.Ref, nil
+}
+
+// scanFastPath 是 image:scan 的缓存秒回路径（P3·安全面）。命中时受理一条指令
+// 记录并**立刻**以缓存报告终结它 —— 不下发 agent。
+//
+// 四条口径（裁决都写在这里，别处不再复述）：
+//   - **照常走 cmd、任务中心留痕**：不是「直接回 HTTP 响应里的报告」。受理返回
+//     ref、轮询拿结果、任务中心出现一条 succeeded 的 image:scan —— 与真扫描
+//     **同一个交互形状**（用户点按钮 → 任务出现 → 结果回来），差别只是秒回。
+//     跳过记录的「HTTP 直回报告」省一次轮询，代价是任务中心看不到这次扫描
+//     （「刚点了没反应」的焦虑恰恰要靠这条记录缓解）与轮询端点的归属校验
+//     被绕开（result 通道的权限与审计链路就断了一截）；
+//   - **不审计**：缓存的 Complete 不经 CompleteDockerCmd 的审计挂钩 —— 审计
+//     记录的是「在这台主机上执行了什么」的事实，缓存回放是一次读，不是一次
+//     执行（与 sweep 的 timeout 不入审计同一裁决：推断/回放不是事实）；
+//   - **不依赖主机在线**：报告是镜像**内容**的事实（内容寻址键），缓存里有的
+//     话离线也能回 —— 主机掉线期间用户仍能看到「N 小时前扫的报告」；
+//   - **缓存只是加速器**：解析不到内容键（快照没有这个 tag）、读缓存失败
+//     （Redis 抖动）、没扫过 —— 一律回落真扫描（见各分支注释），缓存面故障
+//     的最坏结果是「不秒回」，不是「不能扫」。
+func (s *DockerCmdService) scanFastPath(ctx context.Context, userID, deviceID uint64,
+	req *request.DockerCmdReq, opts *agentproto.DockerCmdOptions, pol dockerpolicy.Policy) (string, bool, error) {
+	if s.scanCache == nil || req.Action != agentproto.DockerActionImageScan {
+		return "", false, nil
+	}
+	imageID, ok := s.scanImageIDOf(ctx, deviceID, opts.Target)
+	if !ok {
+		// 快照里找不到这个 target（刚 pull 快照未更新 / 目标是截断 ID）：
+		// 不是错误 —— agent 的扫描前置里有 ImageInspect，它才是「镜像存不存在」
+		// 的权威判定；这里只是解析不出内容键，回落真扫描（扫完报告会带 image_id
+		// 把缓存补上，下一扫即可命中）。
+		return "", false, nil
+	}
+	report, err := s.scanCache.Get(ctx, imageID)
+	if err != nil {
+		// Redis 抖动：回落真扫描并留一条日志（零日志会让「为什么突然不秒回了」
+		// 成为无迹可查的谜）。快照读失败在能力闸里也是同一条「放行」纪律 ——
+		// 旁证不可用时不能把功能关掉。
+		if s.log != nil {
+			s.log.Warn("docker scan cache 读取失败（回落真扫描）",
+				zap.Uint64("deviceId", deviceID), zap.String("imageId", imageID), zap.Error(err))
+		}
+		return "", false, nil
+	}
+	if report == nil {
+		return "", false, nil // 没扫过 / TTL 已过：正常的「没有缓存」。
+	}
+	rec := &dockerstate.CmdRecord{
+		Ref: s.idGen(), DeviceID: deviceID, Action: req.Action, Target: opts.Target,
+		UserID: userID, Perm: pol.Perm, Confirm: req.Confirm, CreatedAt: s.now().UnixMilli(),
+	}
+	// Create + 立刻 Complete：Create 先把记录写进任务中心索引与在飞索引（留痕），
+	// Complete 随即终结它并清掉在飞/到期索引 —— 记录只以「已终结」形态存在，
+	// 不会挡住同目标的后续指令。Create 的 timeout 形参在此只是到期索引的登记
+	// 值（Complete 会把索引摘掉，值本身不再有意义）。
+	if err := s.cmds.Create(ctx, rec, pol.AcceptTimeout()); err != nil {
+		return "", false, apperror.Internal("内部错误", err)
+	}
+	payload, err := json.Marshal(report)
+	if err != nil {
+		s.discard(ctx, rec)
+		return "", false, apperror.Internal("内部错误", err)
+	}
+	if err := s.cmds.Complete(ctx, rec, &agentproto.DockerCmdResult{Ref: rec.Ref, OK: true, Payload: payload}); err != nil {
+		s.discard(ctx, rec)
+		return "", false, apperror.Internal("内部错误", err)
+	}
+	return rec.Ref, true, nil
+}
+
+// scanImageIDOf 从快照解析 target 的镜像内容键（完整镜像 ID）。
+//
+// 命中口径：target 等于镜像条目的 ID，或等于 RepoTags 之一；target 不带 tag
+// 时按 daemon 的解析口径补隐式 :latest 再试一次（快照的 RepoTags 总是显式
+// tag，「nginx」与「nginx:latest」是同一个镜像）。取不到（没这个条目 / ID
+// 形态异常）返回 false —— 调用方回落真扫描，绝不在这里猜一个键。
+func (s *DockerCmdService) scanImageIDOf(ctx context.Context, deviceID uint64, target string) (string, bool) {
+	if s.store == nil {
+		return "", false // 未装配快照面（测试构造形态）：没有旁证，回落真扫描。
+	}
+	env, err := s.store.Get(ctx, deviceID)
+	if err != nil || env == nil {
+		return "", false // 快照读失败/从未上报：没有旁证，回落真扫描。
+	}
+	ref := defaultTagOf(target)
+	for i := range env.State.Images {
+		img := &env.State.Images[i]
+		if img.ID == target ||
+			slices.Contains(img.RepoTags, target) ||
+			slices.Contains(img.RepoTags, ref) {
+			if dockerstate.IsDockerScanImageID(img.ID) {
+				return img.ID, true
+			}
+			// 形态异常的 ID（老 agent/畸形快照）：宁可回落真扫描也不用它当键 ——
+			// 键空间只有「sha256:hex64」一种形状（scan_cache 的形态闸同源）。
+			return "", false
+		}
+	}
+	return "", false
+}
+
+// defaultTagOf 给不带 tag 的镜像引用补 :latest（与 docker CLI 的解析口径一致；
+// 逻辑与 agent 侧 write.go 的 defaultImageTag 互为镜像 —— 两模块各自需要、协议
+// 不导出「补 tag」是因为它是 CLI 行为的复刻而不是线上契约）。digest 形态
+// （repo@sha256:…）不可再补 tag，原样交出。
+func defaultTagOf(ref string) string {
+	if strings.ContainsRune(ref, '@') {
+		return ref
+	}
+	seg := ref
+	if i := strings.LastIndexByte(seg, '/'); i >= 0 {
+		seg = seg[i+1:]
+	}
+	if seg == "" || strings.ContainsRune(seg, ':') {
+		return ref
+	}
+	return ref + ":latest"
 }
 
 // Lookup 读取一条指令记录（供轮询端点校验归属与设备匹配）。

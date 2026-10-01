@@ -3,18 +3,18 @@
  *
  * 白名单 = **前端已接线**的动作全集，按语义分类收在六处（互为分类事实，不是发布期次）：
  *   - 只读轮询 4 条（utils/cmd.ts 的 PHASE1_ACTIONS —— 名字是历史遗留，内容是分类事实）
- *   - 写动作 24 条（utils/actions.ts 的注册表）
+ *   - 写动作 25 条（utils/actions.ts 的注册表）
  *   - 终端 1 条（container:exec，字面量只在 pty-terminal 组件里）
  *   - 配置编辑 3 条（compose.file:write/validate/patch，清单本体在 utils/compose.ts）
  *   - 统计流 1 条（container:stats，字面量只在 container-stats 组件里）
  *   - 聚合日志 1 条（compose:logs，收在 utils/cmd.ts 的 COMPOSE_LOGS_ACTIONS —— 会话制
  *     只读，不进只读 runRead 清单，也不进写动作注册表）
- *   合计已接线 34 条；协议全集（`uni_protocol/docker.go` 的 dockerActionSpecs，
- *   六前缀口径、docker:events 不在扫描口径内）34 条 —— P2 收编 image:build /
- *   image:push 后**两层相等**（PENDING_WIRING 已清空：协议再有新动作而前端没跟，
- *   差额会重新出现在红灯里）。
+ *   合计已接线 35 条；协议全集（`uni_protocol/docker.go` 的 dockerActionSpecs，
+ *   六前缀口径、docker:events 不在扫描口径内）35 条 —— P2 收编 image:build /
+ *   image:push、P3 收编 image:scan 后**两层相等**（PENDING_WIRING 已清空：协议
+ *   再有新动作而前端没跟，差额会重新出现在红灯里）。
  *   本守卫**没有「后期动作」清单**：模块源码里出现的 action 字面量必须全部落在
- *   已接线 34 条内（新增动作而忘了同步，就会以「不在白名单」红灯）。
+ *   已接线 35 条内（新增动作而忘了同步，就会以「不在白名单」红灯）。
  *   - 各分类清单互补的条数断言保留（清单少一条、注册表多一条都不行）。
  *   - 配置编辑入口的存在断言：「入口存在且受 docker:config 权限门控」（不渲染 ≠
  *     禁用；没有权限的人连按钮都不该看到 —— spec §11.0 控件矩阵）。
@@ -61,13 +61,13 @@ const STATS_STREAM_ACTIONS = ['container:stats']
  */
 
 /** 协议全集的总条数（六前缀口径；docker:events 不在扫描口径内，见文件头）。 */
-const PROTOCOL_ACTION_COUNT = 34
+const PROTOCOL_ACTION_COUNT = 35
 
 /** 前端已接线的总条数（各分类清单合计；见文件头的分解）。 */
-const WIRED_ACTION_COUNT = 34
+const WIRED_ACTION_COUNT = 35
 
 /**
- * 协议有、前端尚未接线（P2 收编 image:build / image:push 后为空）。
+ * 协议有、前端尚未接线（P3 收编 image:scan 后为空）。
  * 常量保留而不是删掉：两层口径的「全集 = 已接线 + 待接线」等式仍然成立（为空
  * 即「收编完成」），协议下次加动作而前端没跟时差额在这里重新出现。
  */
@@ -120,7 +120,7 @@ describe('分类控件矩阵：action 字面量全在白名单内', () => {
     expect(files.some((f) => f.endsWith('components/compose-editor/yaml-mode.vue'))).toBe(true)
   })
 
-  it('模块源码里出现的每个 action 字面量都在已接线 34 条白名单内', () => {
+  it('模块源码里出现的每个 action 字面量都在已接线 35 条白名单内', () => {
     const whitelist = new Set(ACTION_WHITELIST)
     const seen = new Set<string>()
     for (const file of walk(ROOT)) {
@@ -129,12 +129,12 @@ describe('分类控件矩阵：action 字面量全在白名单内', () => {
         seen.add(literal)
         expect(
           whitelist.has(literal),
-          `${file} 出现了白名单之外的 action 字面量「${literal}」（已接线 34 条的名单见本文件头）`
+          `${file} 出现了白名单之外的 action 字面量「${literal}」（已接线 35 条的名单见本文件头）`
         ).toBe(true)
       }
     }
-    // 反向自检：扫描确实命中了配置编辑、终端、统计流、创建面、聚合日志与 P2
-    // 分发闭环的关键动作（不然这个守卫可能空转）。
+    // 反向自检：扫描确实命中了配置编辑、终端、统计流、创建面、聚合日志、P2
+    // 分发闭环与 P3 安全面的关键动作（不然这个守卫可能空转）。
     for (const must of [
       'compose.file:read',
       'compose.file:validate',
@@ -146,7 +146,8 @@ describe('分类控件矩阵：action 字面量全在白名单内', () => {
       'compose:up',
       'compose:logs',
       'image:build',
-      'image:push'
+      'image:push',
+      'image:scan'
     ]) {
       expect(seen.has(must), `扫描没有命中 ${must}（守空转）`).toBe(true)
     }
@@ -156,10 +157,10 @@ describe('分类控件矩阵：action 字面量全在白名单内', () => {
     expect([...PHASE1_ACTIONS]).toHaveLength(4)
   })
 
-  it('六份清单互补：已接线 34 = 4 只读 + 24 写 + 1 终端 + 3 配置编辑 + 1 统计流 + 1 聚合日志，无重复、无交集', () => {
+  it('六份清单互补：已接线 35 = 4 只读 + 25 写 + 1 终端 + 3 配置编辑 + 1 统计流 + 1 聚合日志，无重复、无交集', () => {
     // 防的是「从清单或注册表里删掉一条」这种静默失守：条数不对就红灯。
     const writes = DOCKER_ACTION_REGISTRY.map((e) => e.action)
-    expect(DOCKER_ACTION_REGISTRY).toHaveLength(24)
+    expect(DOCKER_ACTION_REGISTRY).toHaveLength(25)
     expect(new Set(CONFIG_EDIT_ACTIONS).size).toBe(CONFIG_EDIT_ACTIONS.length)
     expect(new Set(INTERACTIVE_ACTIONS).size).toBe(INTERACTIVE_ACTIONS.length)
     expect(new Set(STATS_STREAM_ACTIONS).size).toBe(STATS_STREAM_ACTIONS.length)
@@ -192,7 +193,7 @@ describe('分类控件矩阵：action 字面量全在白名单内', () => {
     }
   })
 
-  it('两层口径：协议全集 34 = 已接线 34 + 待接线 0（image:build / image:push 已收编）', () => {
+  it('两层口径：协议全集 35 = 已接线 35 + 待接线 0（image:build / image:push / image:scan 已收编）', () => {
     // 待接线动作不进白名单（模块源码出现它们 = 提前接线而忘了收编清单，红灯）；
     // PENDING_WIRING 为空的现在，这条等式断的是「收编完成」—— 协议再加动作而
     // 前端没跟，差额会在这里重新变红。
@@ -302,6 +303,38 @@ describe('分类控件矩阵：action 字面量全在白名单内', () => {
     expect(pushSrc).toContain("action: 'image:push'")
     expect(pushSrc).toContain('openDockerPushStream')
     expect(pushSrc).toContain('createPushFeed')
+  })
+
+  it('P3 安全面已接线：详情页「安全」Tab 挂扫描面板（面板发 image:scan 并解析报告），镜像 tab 行内可触发', () => {
+    // 详情页层：第四个 Tab（安全）挂 ImageScanPanel，出入两份事实（主机 + 目标引用，
+    // target 与页面写操作的 actionTarget 同源 —— 仓库标签优先、无标签退回镜像 id）。
+    const detailSrc = readFileSync(join(ROOT, 'views/image-detail.vue'), 'utf8')
+    expect(detailSrc).toContain('ImageScanPanel')
+    expect(detailSrc).toContain('label="安全"')
+    expect(detailSrc).toContain(':target="actionTarget"')
+    // 组件层：走指令通道发 image:scan（manage 档、无确认），报告经 utils/scan 的
+    // 本地类型镜像解析（payload 通道在生成类型里是 unknown —— 同 image:inspect 先例）。
+    const panelSrc = readFileSync(join(ROOT, 'components/image-scan-panel.vue'), 'utf8')
+    expect(panelSrc).toContain("action: 'image:scan'")
+    expect(panelSrc).toContain('parseDockerScanReport')
+    // 列表层：行 ⋯ 菜单的 actions 含扫描条目（注册表驱动）—— 行内就近触发，
+    // 分钟级的进行态由任务中心呈现（只受理不轮询，见组件内 onScanImage 注释）。
+    const tabSrc = readFileSync(join(ROOT, 'components/resources/images-tab.vue'), 'utf8')
+    expect(tabSrc).toContain("'image:scan'")
+    expect(tabSrc).toContain('onScanImage')
+  })
+
+  it('P3 构建上下文上传已接线：构建对话框以上传形态消费 ② 端点（进度经 http 层的 XHR 通道）', () => {
+    // 对话框层：上下文字段有「上传文件 / 主机已有文件」两种形态，选择后走
+    // uploadDockerBuildContext（api.ts 的封装：octet-stream 流式 + onUploadProgress）。
+    const buildSrc = readFileSync(join(ROOT, 'components/build-progress-dialog.vue'), 'utf8')
+    expect(buildSrc).toContain('uploadDockerBuildContext')
+    expect(buildSrc).toContain('isGzipFile')
+    expect(buildSrc).toContain('MAX_BUILD_CONTEXT_BYTES')
+    // api 层：上传端点带进度回调与显式超时/类型头（为什么不用 fetch：无上传进度事件）。
+    const apiSrc = readFileSync(join(ROOT, 'api.ts'), 'utf8')
+    expect(apiSrc).toContain('uploadDockerBuildContext')
+    expect(apiSrc).toContain('onUploadProgress')
   })
 
   it('5b 工作台已接线：四个分区组件挂进页面，聚合日志发 compose:logs 并复用日志流端点', () => {

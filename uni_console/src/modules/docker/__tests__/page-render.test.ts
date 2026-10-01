@@ -33,6 +33,8 @@ const api = vi.hoisted(() => ({
   openDockerPullStream: vi.fn(),
   openDockerBuildStream: vi.fn(),
   openDockerPushStream: vi.fn(),
+  // P3 构建上下文上传（构建对话框的上传形态；冒烟里不触发，import 面补齐）。
+  uploadDockerBuildContext: vi.fn(),
   // 4c 凭据面（pull 对话框的下拉与凭据管理对话框；页面冒烟里不会真调）。
   fetchDockerRegistries: vi.fn(),
   // 6b 任务中心抽屉（docker-page 主机条入口）挂载但不开 —— import 面必须齐全。

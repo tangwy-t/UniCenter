@@ -71,6 +71,45 @@
       "omit_empty": true
     }
   ],
+  "CoreDockerBuildCtxAbort": [
+    {
+      "name": "SessionID",
+      "json": "session_id",
+      "type": "uint64",
+      "pointer": false,
+      "omit_empty": false
+    }
+  ],
+  "CoreDockerBuildCtxFinish": [
+    {
+      "name": "SessionID",
+      "json": "session_id",
+      "type": "uint64",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Name",
+      "json": "name",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "SHA256Hex",
+      "json": "sha256",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "SizeBytes",
+      "json": "size_bytes",
+      "type": "int64",
+      "pointer": false,
+      "omit_empty": false
+    }
+  ],
   "CoreDockerFrame": [
     {
       "name": "SessionID",
@@ -224,6 +263,13 @@
       "type": "string",
       "pointer": false,
       "omit_empty": true
+    },
+    {
+      "name": "Auth",
+      "json": "auth",
+      "type": "*agentproto.DockerRegistryAuth",
+      "pointer": true,
+      "omit_empty": true
     }
   ],
   "DockerCmdOptions": [
@@ -350,6 +396,111 @@
       "name": "Backup",
       "json": "backup",
       "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Image",
+      "json": "image",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Name",
+      "json": "name",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Ports",
+      "json": "ports",
+      "type": "[]string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Env",
+      "json": "env",
+      "type": "[]string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Mounts",
+      "json": "mounts",
+      "type": "[]string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "RestartPolicy",
+      "json": "restart_policy",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "CPULimit",
+      "json": "cpu_limit",
+      "type": "float64",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "MemLimitMB",
+      "json": "mem_limit_mb",
+      "type": "int",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Network",
+      "json": "network",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Start",
+      "json": "start",
+      "type": "*bool",
+      "pointer": true,
+      "omit_empty": true
+    },
+    {
+      "name": "Registry",
+      "json": "registry",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Context",
+      "json": "context",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Dockerfile",
+      "json": "dockerfile",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Tag",
+      "json": "tag",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Args",
+      "json": "args",
+      "type": "map[string]string",
       "pointer": false,
       "omit_empty": true
     }
@@ -1121,6 +1272,117 @@
       "omit_empty": true
     }
   ],
+  "DockerScanCounts": [
+    {
+      "name": "Critical",
+      "json": "critical",
+      "type": "int",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "High",
+      "json": "high",
+      "type": "int",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Medium",
+      "json": "medium",
+      "type": "int",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Low",
+      "json": "low",
+      "type": "int",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Unknown",
+      "json": "unknown",
+      "type": "int",
+      "pointer": false,
+      "omit_empty": false
+    }
+  ],
+  "DockerScanReport": [
+    {
+      "name": "ImageID",
+      "json": "image_id",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "ScannedAt",
+      "json": "scanned_at",
+      "type": "int64",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Counts",
+      "json": "counts",
+      "type": "agentproto.DockerScanCounts",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Vulns",
+      "json": "vulns",
+      "type": "[]agentproto.DockerScanVuln",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Truncated",
+      "json": "truncated",
+      "type": "bool",
+      "pointer": false,
+      "omit_empty": true
+    }
+  ],
+  "DockerScanVuln": [
+    {
+      "name": "ID",
+      "json": "id",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Pkg",
+      "json": "pkg",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "Severity",
+      "json": "severity",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": false
+    },
+    {
+      "name": "FixedVersion",
+      "json": "fixed_version",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    },
+    {
+      "name": "Title",
+      "json": "title",
+      "type": "string",
+      "pointer": false,
+      "omit_empty": true
+    }
+  ],
   "DockerState": [
     {
       "name": "T",
@@ -1184,6 +1446,13 @@
       "type": "[]agentproto.DockerProject",
       "pointer": false,
       "omit_empty": false
+    },
+    {
+      "name": "DiskUsage",
+      "json": "disk_usage",
+      "type": "*agentproto.DockerDiskUsage",
+      "pointer": true,
+      "omit_empty": true
     }
   ],
   "DockerVolume": [

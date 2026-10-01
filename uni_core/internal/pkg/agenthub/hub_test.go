@@ -1,6 +1,8 @@
 package agenthub
 
 import (
+	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -12,10 +14,17 @@ import (
 
 // idleSink 是「未接管真实 socket」的连接所用的出站记录器：把出站帧收进内存，
 // 让测试能断言「到底下发了哪个关闭码、下发了多少次」，而无需起真实 TCP。
+// kind 记录帧的消息类型（v1.3 起文本/二进制同队路过这里，二进制只有上传中转）。
 type idleSink struct {
 	mu     sync.Mutex
-	sends  [][]byte
+	sends  []idleSend
 	closes []idleClose
+}
+
+// idleSend 是一次出站数据帧记录。
+type idleSend struct {
+	kind int
+	b    []byte
 }
 
 type idleClose struct {
@@ -23,12 +32,12 @@ type idleClose struct {
 	reason string
 }
 
-func (s *idleSink) send(b []byte) error {
+func (s *idleSink) send(kind int, b []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cp := make([]byte, len(b))
 	copy(cp, b)
-	s.sends = append(s.sends, cp)
+	s.sends = append(s.sends, idleSend{kind: kind, b: cp})
 	return nil
 }
 
@@ -396,5 +405,30 @@ func TestOptionsDefaults(t *testing.T) {
 	explicit := Options{WriteTimeout: 3 * time.Second, SendQueue: 7}.withDefaults()
 	if explicit.WriteTimeout != 3*time.Second || explicit.SendQueue != 7 {
 		t.Fatalf("显式配置被 withDefaults 覆盖: %+v", explicit)
+	}
+}
+
+// TestHubSendBinaryToDevice 钉住注册表侧对二进制帧面的两个语义：
+// 离线 → ErrDeviceOffline（上传服务据此 503）；在线（无 socket 的测试态连接）
+// → 短路返回 nil（EnqueueBinary 的测试态纪律：不排队、不 panic）。
+func TestHubSendBinaryToDevice(t *testing.T) {
+	h := newTestHub(t)
+
+	if err := h.SendBinaryToDevice(context.Background(), 1001, []byte("x")); !errors.Is(err, ErrDeviceOffline) {
+		t.Fatalf("无连接应返回 ErrDeviceOffline: %v", err)
+	}
+
+	idle := newIdleConn(h, 1001)
+	if err := h.Register(idle); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := h.Get(1001); !ok || got != idle {
+		t.Fatal("夹具失效：注册后应取到连接")
+	}
+	if err := h.SendBinaryToDevice(context.Background(), 1001, []byte("x")); err != nil {
+		t.Fatalf("测试态连接（未接管 socket）必须短路: %v", err)
+	}
+	if err := h.SendBinaryToDevice(context.Background(), 1002, []byte("x")); !errors.Is(err, ErrDeviceOffline) {
+		t.Fatalf("别设备仍应离线: %v", err)
 	}
 }

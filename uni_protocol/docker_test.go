@@ -43,8 +43,8 @@ func TestDockerGoldenPayloadsDecode(t *testing.T) {
 		}
 		checked++
 	}
-	if checked != 6 {
-		t.Fatalf("应检查 6 个 docker golden（5 条消息 + hello_ack 的配置块），实际 %d 个", checked)
+	if checked != 8 {
+		t.Fatalf("应检查 8 个 docker golden（5 条消息 + hello_ack 的配置块 + 2 条上传控制帧），实际 %d 个", checked)
 	}
 }
 
@@ -52,8 +52,8 @@ func TestDockerGoldenPayloadsDecode(t *testing.T) {
 // 多一条 → 协议承诺了一个没有策略的动作。
 func TestDockerActionWhiteListIsComplete(t *testing.T) {
 	all := AllDockerActions()
-	if len(all) != 35 {
-		t.Fatalf("action 白名单应为 35 条（含创建面 container:create、监控面 container:stats、常驻事件流 docker:events、聚合日志 compose:logs 与 P2 分发闭环 image:build/image:push），实际 %d 条: %v", len(all), all)
+	if len(all) != 36 {
+		t.Fatalf("action 白名单应为 36 条（含创建面 container:create、监控面 container:stats、常驻事件流 docker:events、聚合日志 compose:logs、P2 分发闭环 image:build/image:push 与 P3 安全面 image:scan），实际 %d 条: %v", len(all), all)
 	}
 	seen := map[string]bool{}
 	for _, a := range all {
@@ -169,6 +169,13 @@ func TestDockerOptionValidation(t *testing.T) {
 		{"聚合日志项目名含斜杠被拒", DockerActionComposeLogs, ok(&DockerCmdOptions{Target: "uni-center/uni_core"}), ErrInvalidPayload},
 		{"聚合日志带 since 被拒", DockerActionComposeLogs, ok(&DockerCmdOptions{Target: "uni-center", Since: 1790000000}), ErrInvalidPayload},
 		{"聚合日志 tail 越界被拒", DockerActionComposeLogs, ok(&DockerCmdOptions{Target: "uni-center", Tail: 100001}), ErrInvalidPayload},
+		// image:scan（P3·安全面）：target 与 inspect/pull 同族（镜像引用白名单），
+		// 无确认档 —— 只读语义，无破坏性动作。
+		{"扫描缺 target", DockerActionImageScan, &DockerCmdOptions{}, ErrMissingField},
+		{"扫描 target 合法（带 tag）", DockerActionImageScan, ok(&DockerCmdOptions{Target: "nginx:1.27"}), nil},
+		{"扫描 target 合法（digest）", DockerActionImageScan, ok(&DockerCmdOptions{Target: "reg.local:5000/a/b@sha256:abc"}), nil},
+		{"扫描 target 含空白被拒", DockerActionImageScan, ok(&DockerCmdOptions{Target: "nginx 1.27"}), ErrInvalidPayload},
+		{"扫描 target 横线开头被拒（flag 形态）", DockerActionImageScan, ok(&DockerCmdOptions{Target: "-nginx"}), ErrInvalidPayload},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1089,6 +1096,54 @@ func TestDockerReadPayloadRoundTrip(t *testing.T) {
 	}
 	if len(insp.History) != 1 || insp.History[0].CreatedBy != "CMD x" {
 		t.Fatalf("镜像 inspect 载荷解码不符: %+v", insp)
+	}
+}
+
+// 扫描报告（P3·安全面）的回环：它是 result.payload 通道里的数据面（前端按同一
+// 形状解析 agent 直发与缓存回放两种来源），且 Vulns 的上限语义（计数全量、
+// 条目截断、Truncated 标注）是协议的口径 —— 这里把「编解码往返不丢字段」钉住。
+func TestDockerScanReportRoundTrip(t *testing.T) {
+	report := &DockerScanReport{
+		ImageID:   "sha256:" + strings.Repeat("ab", 32),
+		ScannedAt: 1790000000,
+		Counts:    DockerScanCounts{Critical: 2, High: 1, Medium: 0, Low: 3, Unknown: 1},
+		Vulns: []DockerScanVuln{
+			{ID: "CVE-2026-0001", Pkg: "openssl", Severity: DockerScanSeverityCritical, FixedVersion: "3.0.12", Title: "openssl: X.509 chain issue"},
+			{ID: "CVE-2026-0002", Pkg: "libxml2", Severity: DockerScanSeverityHigh},
+			{ID: "CVE-2026-0003", Pkg: "zlib", Severity: DockerScanSeverityUnknown, Title: "no advisory text"},
+		},
+		Truncated: true,
+	}
+	b, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back DockerScanReport
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.ImageID != report.ImageID || back.ScannedAt != report.ScannedAt || back.Truncated != true {
+		t.Fatalf("扫描报告回环不符: %+v", back)
+	}
+	if back.Counts != report.Counts {
+		t.Fatalf("severity 计数回环不符: %+v", back.Counts)
+	}
+	if len(back.Vulns) != 3 {
+		t.Fatalf("CVE 条目回环不符: %+v", back.Vulns)
+	}
+	// 无修复版/无 title 的条目：omitempty 形态（fixed_version/title 缺席），
+	// 解码侧拿到空串 —— 缺席本身是「修复未发布」的信息，不允许被误读成别的值。
+	if back.Vulns[1].FixedVersion != "" || back.Vulns[1].Title != "" {
+		t.Fatalf("omitempty 字段应解码为空串: %+v", back.Vulns[1])
+	}
+	// Vulns 用非 omitempty 数组：空清单是「扫了，确实没有 CVE」的显式表达，
+	// 与「字段缺席（没扫过）」两个答案（与 DockerState 五清单同一条纪律）。
+	empty, err := json.Marshal(&DockerScanReport{ImageID: "sha256:x", ScannedAt: 1, Vulns: []DockerScanVuln{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(empty), `"vulns":[]`) {
+		t.Fatalf("空清单必须是显式空数组而不是字段缺席: %s", empty)
 	}
 }
 

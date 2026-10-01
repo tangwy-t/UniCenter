@@ -54,8 +54,16 @@ func snapshottedDTOs() []struct {
 		{"DockerMount", DockerMount{}},
 		{"DockerImageInspectPayload", DockerImageInspectPayload{}},
 		{"DockerImageLayer", DockerImageLayer{}},
+		// P3·安全面：image:scan 的报告载荷三件套（报告/计数/条目）。
+		// 它们走 result.payload 而不是独立消息类型，但形状演进同样要被
+		// additive-only 守卫盯住 —— 前端按同一形状解析缓存回放的字节。
+		{"DockerScanReport", DockerScanReport{}},
+		{"DockerScanCounts", DockerScanCounts{}},
+		{"DockerScanVuln", DockerScanVuln{}},
 		{"DockerComposeFilePayload", DockerComposeFilePayload{}},
 		{"DockerComposeBackup", DockerComposeBackup{}},
+		{"CoreDockerBuildCtxFinish", CoreDockerBuildCtxFinish{}},
+		{"CoreDockerBuildCtxAbort", CoreDockerBuildCtxAbort{}},
 	}
 }
 

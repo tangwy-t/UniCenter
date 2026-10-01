@@ -561,6 +561,12 @@ func Setup(deps Dependencies) *gin.Engine {
 			// 指令面：**无静态 perm**（权限按 action 决定，见 DockerDeps 的说明）。
 			docker.POST("/hosts/:id/cmds", deps.Docker.Hdl.SendCmd)
 			docker.GET("/hosts/:id/cmds/:ref", deps.Docker.Hdl.CmdResult)
+			// 构建上下文上传（v1.3）：**静态 perm(docker:manage)** —— 与指令面不同，
+			// 它没有「按 action 变化」的权限维度（动作就一个），且不建立指令记录
+			//（也就没有 CmdResult 那套「按记录校验权限与发起人归属」）；docker:manage
+			// 与 image:build 受理同档 —— 上下文是「即将构建并留痕进镜像的代码」。
+			// 字节流由 core 中转（零落盘）成 WSS 二进制分片直达 agent 的 transferDir。
+			docker.POST("/hosts/:id/build-context", perm(permission.PermDockerManage), deps.Docker.Hdl.BuildContextUpload)
 			// 日志流（三期）：**留在 auth 组**——日志走 fetch + ReadableStream，
 			// 浏览器能给这条请求带 Authorization 头；权限码与归属在处理器内判定。
 			docker.GET("/hosts/:id/cmds/:ref/stream", deps.Docker.Hdl.LogStream)

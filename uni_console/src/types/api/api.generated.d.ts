@@ -1158,6 +1158,10 @@ declare namespace Api {
       memUsageMb: number
       memLimitMb: number
     }
+
+    interface DockerBuildContextUploadResp {
+      filename: string
+    }
   }
 
   namespace File {

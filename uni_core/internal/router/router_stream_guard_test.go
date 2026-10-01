@@ -150,3 +150,28 @@ func TestBuildPushStreamRoutesStayOnAuthGroup(t *testing.T) {
 		t.Fatal("推送进度流不得挂进 api 组 —— 它走 fetch + ReadableStream，凭据是 JWT")
 	}
 }
+
+// 构建上下文上传端点的**挂载位置 + 权限**守卫（v1.3）。
+//
+// 上传端点走 fetch（浏览器能带 Authorization），必须像日志/stats 一样挂在
+// auth 组（JWT + 操作日志）；权限是**静态的** docker:manage（与 image:build
+// 受理同档 —— 上下文是即将留痕进镜像的代码）。它没有指令记录，处理器内没有
+// 「按记录校验归属」这一步（上传不建立任何按用户归属的账目），路由丢了 perm
+// 就等于把「往任意主机写构建产物」向只读用户敞开。形态与
+// TestEventsStreamRouteMountedWithPerm 相同：源码级断言。
+func TestBuildContextUploadRouteMountedWithManagePerm(t *testing.T) {
+	src, err := os.ReadFile("router.go")
+	if err != nil {
+		t.Fatalf("读取 router.go 失败: %v", err)
+	}
+	text := string(src)
+
+	const want = `docker.POST("/hosts/:id/build-context", perm(permission.PermDockerManage), deps.Docker.Hdl.BuildContextUpload)`
+	if !strings.Contains(text, want) {
+		t.Fatalf("上传端点必须以 %s 挂在 auth 组并带静态 perm(docker:manage)（当前缺失）", want)
+	}
+	const offAuth = `api.POST("/docker/hosts/:id/build-context"`
+	if strings.Contains(text, offAuth) {
+		t.Fatalf("上传端点不得挂进 api 组（%s）—— 它走 fetch，凭据是 JWT", offAuth)
+	}
+}

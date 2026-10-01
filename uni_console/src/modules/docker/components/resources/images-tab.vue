@@ -156,8 +156,9 @@
   import PullProgressDialog from '../pull-progress-dialog.vue'
   import RegistryCredentialsDialog from '../registry-credentials-dialog.vue'
   import type { ColumnOption } from '@/types/component'
-  import type { DockerImageItem, DockerStateResp } from '../../api'
+  import { sendDockerCmd, type DockerImageItem, type DockerStateResp } from '../../api'
   import {
+    classifyAcceptError,
     runErrorMessage,
     useDockerCmds,
     type DockerCmdRunResult
@@ -459,18 +460,19 @@
    * 行 ⋯ 菜单的条目。
    *
    * 只读的「详情」走 action-menu 的 extraItems（写动作的权限/禁用/🔒 规则都在它里面对，
-   * 页面另拼一份等于两处各维护一遍）；写动作（打标签/导出/删除）走 actions，标签、权限、
-   * 危险色全部取自动作注册表。
+   * 页面另拼一份等于两处各维护一遍）；写动作（扫描/打标签/导出/删除）走 actions，标签、
+   * 权限、危险色全部取自动作注册表。扫描（P3·安全面）也走注册表条目：行内就近触发，
+   * 分钟级的进行态由任务中心呈现（见 onScanImage 的取舍注释）。
    *
    * 「使用中」的镜像不把删除放进 actions：action-menu 的 disabled 是**整组**禁用，表达不了
-   * 「只禁删除」（打标签/导出对在用镜像依然合法），故删除改为 extraItems 里的**禁用条目**，
+   * 「只禁删除」（打标签/导出/扫描对在用镜像依然合法），故删除改为 extraItems 里的**禁用条目**，
    * 结论写在条目上（禁用的条目点不动，结论只能在看得见的地方给）。这是基础设施的缺口。
    */
   function rowMenuItems(row: DockerImageItem): { actions: string[]; extraItems: RowMenuItem[] } {
     const extraItems: RowMenuItem[] = [
       { key: 'detail', label: '详情', icon: 'ri:eye-line', auth: PermDockerInspect }
     ]
-    const actions = ['image:tag', 'image:save']
+    const actions = ['image:tag', 'image:save', 'image:scan']
     if (row.inUse) {
       const entry = lookupDockerAction('image:remove')
       extraItems.push({
@@ -498,8 +500,31 @@
       case 'image:save':
         askSave(row)
         return
+      case 'image:scan':
+        void onScanImage(row)
+        return
       case 'image:remove':
         openRemove(row)
+    }
+  }
+
+  /**
+   * 安全扫描（P3·安全面）：行内触发 + 任务中心看进度 —— **只受理、不轮询**。
+   *
+   * 为什么不像其它行内动作那样走 runWrite（受理 + 轮询到终态）：useDockerCmds 的
+   * 在途伴随 busy（全局禁用操作栏），而真扫描以分钟计（trivy 首扫还要下载漏洞库）——
+   * 把整页锁十几分钟换不来任何新信息；「pending 期间任务中心可见」正是长任务的
+   * 可见性要求（受理即留痕，终态结论句也落在任务中心）。报告本体在镜像详情页的
+   * 「安全」Tab 读取：再点一次扫描会命中服务端 24h 缓存秒回最近一次结果。
+   */
+  async function onScanImage(image: DockerImageItem): Promise<void> {
+    try {
+      await sendDockerCmd(ctx.hostId, { action: 'image:scan', target: actionRef(image) })
+      ElMessage.success('已发起安全扫描，进度可在任务中心查看')
+    } catch (e) {
+      // 受理期结论（离线/同目标已在执行/无权限）分类后给出：行内动作没有就地
+      // 结论的容器，toast 是这条入口唯一的反馈位。
+      ElMessage.error(classifyAcceptError(e).message)
     }
   }
 

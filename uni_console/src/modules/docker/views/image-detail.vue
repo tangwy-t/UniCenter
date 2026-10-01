@@ -154,6 +154,15 @@
               </template>
             </template>
           </ElTabPane>
+
+          <!-- 4. 安全（P3·安全面）：漏洞扫描报告（触发 + 呈现都在面板内）。
+               lazy：没点开不挂载；挂载后切走再切回不丢已读到的报告 —— ElTabPane 的
+               默认（非 lazy）会把内容常驻，这里按需挂载与其余三个 Tab 的「共用一次
+               inspect 读取」不同源（面板走自己的指令通道），挂载时机由用户的第一
+               次兴趣决定。 -->
+          <ElTabPane label="安全" name="scan" lazy>
+            <ImageScanPanel :host-id="ctx.hostId" :target="actionTarget" />
+          </ElTabPane>
         </ElTabs>
       </ElCard>
     </div>
@@ -218,6 +227,7 @@
   import { formatByUnit, formatUnixSeconds } from '@/modules/device/utils/display'
   import DockerActionConfirm from '../components/action-confirm.vue'
   import CreateContainerDrawer from '../components/create-container-drawer.vue'
+  import ImageScanPanel from '../components/image-scan-panel.vue'
   import PushProgressDialog from '../components/push-progress-dialog.vue'
   import {
     fetchDockerCmdResult,
@@ -250,7 +260,7 @@
 
   defineOptions({ name: 'DockerImageDetail' })
 
-  type TabName = 'layers' | 'meta' | 'containers'
+  type TabName = 'layers' | 'meta' | 'containers' | 'scan'
 
   interface LayerRow {
     key: number

@@ -6,12 +6,12 @@
  * 权限码：`uni_core/internal/pkg/dockerpolicy` 的 `policies`（spec §4.3.1）。
  *
  * ── 两层条数口径（别混）────────────────────────────────────────────
- * 「协议全集」= dockerActionSpecs 的六前缀动作 34 条（docker:events 走流订阅、
- * 不带六前缀，不在扫描口径）；「前端已接线」= 本模块各分类清单合计 **34 条** ——
- * P2 收编 image:build / image:push 后**两层相等**（PENDING_WIRING 已清空：协议
- * 分发动作全部接线，此后协议再加动作而前端没跟，差额会重新出现在红灯里）。
+ * 「协议全集」= dockerActionSpecs 的六前缀动作 35 条（docker:events 走流订阅、
+ * 不带六前缀，不在扫描口径）；「前端已接线」= 本模块各分类清单合计 **35 条** ——
+ * P3 收编 image:scan 后**两层相等**（PENDING_WIRING 已清空：协议动作全部接线，
+ * 此后协议再加动作而前端没跟，差额会重新出现在红灯里）。
  * 分类是**语义**的（读 / 写 / 会话流 / 配置编辑），不是发布期次：
- *   前端已接线 34 = 4 只读轮询（utils/cmd.ts）+ 24 写（本注册表）+ 1 终端 exec
+ *   前端已接线 35 = 4 只读轮询（utils/cmd.ts）+ 25 写（本注册表）+ 1 终端 exec
  *   + 3 配置编辑 + 1 统计流 + 1 聚合日志流。
  * 以后协议加动作时，先改协议/策略，再改这里，最后两处测试与 phase-gate 一起对齐。
  */
@@ -43,27 +43,27 @@ const CONFIG_EDIT_ACTIONS = ['compose.file:write', 'compose.file:validate', 'com
 const STATS_STREAM_ACTIONS = ['container:stats']
 
 /** 协议全集（六前缀口径；docker:events 走流订阅不在该口径内，见文件头）。 */
-const PROTOCOL_ACTION_COUNT = 34
+const PROTOCOL_ACTION_COUNT = 35
 
 /** 前端已接线（本模块全部分类清单合计；见文件头的分解）。 */
-const WIRED_ACTION_COUNT = 34
+const WIRED_ACTION_COUNT = 35
 
 /**
- * 协议有、前端尚未接线（P2 收编 image:build / image:push 后为空）。
+ * 协议有、前端尚未接线（P3 收编 image:scan 后为空）。
  * 清单本体保留而不是删常量：两层口径的「全集 = 已接线 + 待接线」等式仍然成立
  * （为空时即「收编完成」），协议下次加动作时这里重新出现差额就是红灯。
  */
 const PENDING_WIRING: string[] = []
 
 describe('写动作注册表', () => {
-  it('恰好覆盖 24 条写动作，无重复、顺序与 WRITE_ACTIONS 一致', () => {
-    expect(DOCKER_ACTION_REGISTRY).toHaveLength(24)
+  it('恰好覆盖 25 条写动作，无重复、顺序与 WRITE_ACTIONS 一致', () => {
+    expect(DOCKER_ACTION_REGISTRY).toHaveLength(25)
     const actions = DOCKER_ACTION_REGISTRY.map((e) => e.action)
     expect(new Set(actions).size).toBe(actions.length)
     expect(actions).toEqual([...WRITE_ACTIONS])
   })
 
-  it('分类互补：已接线 34 = 4 只读 + 24 写 + 1 终端 + 3 配置编辑 + 1 统计流 + 1 聚合日志流，无交集', () => {
+  it('分类互补：已接线 35 = 4 只读 + 25 写 + 1 终端 + 3 配置编辑 + 1 统计流 + 1 聚合日志流，无交集', () => {
     const writes = DOCKER_ACTION_REGISTRY.map((e) => e.action)
     const all = [
       ...PHASE1_ACTIONS,
@@ -86,7 +86,7 @@ describe('写动作注册表', () => {
     }
   })
 
-  it('两层口径：协议全集 34 = 已接线 34 + 待接线 0（image:build / image:push 已收编）', () => {
+  it('两层口径：协议全集 35 = 已接线 35 + 待接线 0（image:build / image:push / image:scan 已收编）', () => {
     // 防的是「协议加了动作、前端清单没跟」与「把未接线动作算进已接线」两个方向的漂移。
     const wired = [
       ...PHASE1_ACTIONS,
@@ -102,8 +102,8 @@ describe('写动作注册表', () => {
     }
     expect(wired).toHaveLength(WIRED_ACTION_COUNT)
     expect(WIRED_ACTION_COUNT + PENDING_WIRING.length).toBe(PROTOCOL_ACTION_COUNT)
-    // P2 收编的正向断言：两条分发动作已进注册表（此前是 PENDING_WIRING 的全部差额）。
-    for (const a of ['image:build', 'image:push']) {
+    // P2/P3 收编的正向断言：三条镜像侧动作已进注册表（此前是 PENDING_WIRING 的差额）。
+    for (const a of ['image:build', 'image:push', 'image:scan']) {
       expect(isWriteAction(a), `${a} 应已收编写动作注册表`).toBe(true)
     }
   })
@@ -163,6 +163,24 @@ describe('写动作注册表', () => {
       expect(expectedConfirm(e.action, {})).toBe('')
       expect(confirmKind(e.action, {})).toBe('none')
     }
+  })
+
+  it('P3 安全面一条：scan 有 target、manage 档、无确认（照 image:pull 形态；读语义但走长任务通道）', () => {
+    // 逐条对照协议 dockerActionSpecs：image:scan Required=[target]（与 pull 同字段）；
+    // 权限码 docker:manage（协议裁决：扫描要执行外部二进制并下载漏洞库，与 pull
+    // 同档而非 inspect 档）。它读语义但住在写注册表 —— 理由是交互形态（分钟级
+    // 长任务 + 任务中心可见 + 行内就近触发），不是读写之分（见注册表条目注释）。
+    const scan = lookupDockerAction('image:scan')
+    expect(scan).toBeTruthy()
+    expect(scan!.needsTarget, 'scan 的 target 是镜像引用（与 pull 同字段）').toBe(true)
+    expect(scan!.perm).toBe('docker:manage')
+    expect(scan!.danger).toBe('normal')
+    // 无破坏性动作：抄一遍 target 只会把确认训练成例行公事（协议无 Confirm 要求）。
+    expect(scan!.confirm).toBe('none')
+    expect(scan!.guarded, '镜像无保护粒度').toBe(false)
+    expect(scan!.input).toBeUndefined()
+    expect(expectedConfirm('image:scan', {})).toBe('')
+    expect(confirmKind('image:scan', {})).toBe('none')
   })
 })
 

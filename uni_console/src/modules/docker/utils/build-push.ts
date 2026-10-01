@@ -252,3 +252,58 @@ export const MAX_BUILD_ARGS = 32
  * 注释钉的披露义务，表单侧的 hint 必须把这一点讲清楚（见 build-progress-dialog）。
  */
 export const MAX_BUILD_ARG_VALUE_BYTES = 512
+
+// ── P3·构建上下文上传（② 端点）的客户端预检 ─────────────────────────
+// 上传端点（POST /docker/hosts/:id/build-context）对内容的执法在服务端：512MB
+// 尺寸闸「即拒不等传完」、gzip 魔数「发出任何一帧之前拒」。客户端把同一把尺前移
+// 到选择文件的瞬间 —— 不是替服务端执法（服务端照拒），是**别让用户白传 512MB
+// 才收到 400**：上传的在途时间以分钟计，预检的反馈以毫秒计。
+
+/**
+ * 构建上下文的字节上限（**镜像协议常量** MaxDockerBuildContextBytes = 512<<20：
+ * 协议定义尺、core/agent 两端执法，前端预检与提示共用同一个数）。
+ */
+export const MAX_BUILD_CONTEXT_BYTES = 512 * 1024 * 1024
+
+/**
+ * 文件选择器的 accept 与就地校验共用的后缀白名单（tar / tar.gz / tgz / gz）。
+ * 刻意比「合法 context 文件名」宽一档：accept 是**引导**不是闸（.tar 也可能只是
+ * 改错了后缀的 gzip），真正的闸是下面的 gzip 魔数 —— 它读的是内容不是名字。
+ */
+const BUILD_CONTEXT_SUFFIX_RE = /\.(tar|tar\.gz|tgz|gz)$/i
+
+/** 文件选择器的 accept 值（与后缀白名单同一份事实，写死一处只会漂移）。 */
+export const BUILD_CONTEXT_ACCEPT = '.tar,.tar.gz,.tgz,.gz'
+
+/** 后缀是否在构建上下文的选择白名单内（就地校验用，与 accept 同一份事实）。 */
+export function hasBuildContextSuffix(name: string): boolean {
+  return BUILD_CONTEXT_SUFFIX_RE.test(name.trim())
+}
+
+/**
+ * 读文件头两字节判 gzip 魔数（1f 8b）。
+ *
+ * **逐字镜像**服务端的上传段判定（core 的 buildCtxGzipMagic）：端点只收 gzip
+ * 压缩的 tar 归档（agent 解压后喂 daemon），裸 tar 会被服务端以「内容不是 gzip
+ * 压缩的 tar 归档」拒 —— 前端先读同样的两个字节，把同一句话提前到选文件的瞬间。
+ * 用 FileReader（而非 blob.arrayBuffer()）读**切片**（file.slice(0, 2)）：
+ * 只碰头部两字节，512MB 的文件也不会被整个读进内存。
+ */
+export function isGzipFile(file: Blob): Promise<boolean> {
+  return new Promise((resolve) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const buf = reader.result
+      const ok =
+        buf instanceof ArrayBuffer &&
+        buf.byteLength >= 2 &&
+        new Uint8Array(buf)[0] === 0x1f &&
+        new Uint8Array(buf)[1] === 0x8b
+      resolve(ok)
+    }
+    // 读两个字节都失败 = 文件不可读：当「不是 gzip」处理（服务端同样会拒），
+    // 不让一次 IO 意外变成白屏。
+    reader.onerror = () => resolve(false)
+    reader.readAsArrayBuffer(file.slice(0, 2))
+  })
+}

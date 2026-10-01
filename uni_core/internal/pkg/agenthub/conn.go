@@ -138,6 +138,17 @@ var (
 	errNilMessage = errors.New("agenthub: nil message")
 )
 
+// outbound 是发送队列的元素：mt 区分文本/二进制出站帧。
+//
+// 二进制出站只有**构建上下文上传中转**这一家（v1.3），其余全部是文本信封 ——
+// 队列元素带类型而不是再开一条二进制队列，是因为两条队列会引入「谁先写 socket」
+// 的次序歧义：上传分片必须严格按 seq 交序，与文本帧混在**同一条**队列里，
+// 序号到 socket 的次序才能由队列唯一确定。
+type outbound struct {
+	mt int
+	b  []byte
+}
+
 const (
 	// minReportIntervalSeconds 是契约层的下限：HelloAck.ReportInterval 非 0 时必须 ≥2。
 	minReportIntervalSeconds = 2
@@ -215,7 +226,7 @@ func newConn(hub SelfUnregisterer, ws socket, deps Deps, log logger.LoggerInterf
 		deps:  deps,
 		log:   log,
 		ws:    ws,
-		send:  make(chan []byte, opts.SendQueue),
+		send:  make(chan outbound, opts.SendQueue),
 		done:  make(chan struct{}),
 		state: StateAwaitHello,
 		// 展示用的来源 IP：**原样收下**，不在这一层做解析/规范化。
@@ -227,8 +238,8 @@ func newConn(hub SelfUnregisterer, ws socket, deps Deps, log logger.LoggerInterf
 		// 远端 IP 在这里算**一次**（而非每帧从 socket 取）：它只在未鉴权阶段的限流键上
 		// 用到，而每帧解析一次地址串是白付的开销。host 部分不含端口 —— 理由见 remoteIPOf。
 		c.remoteIP = remoteIPOf(ws.RemoteAddr())
-		c.sendFn = func(b []byte) error {
-			return ws.WriteMessage(websocket.TextMessage, b)
+		c.sendFn = func(mt int, b []byte) error {
+			return ws.WriteMessage(mt, b)
 		}
 		c.writeCloseFn = func(code int, reason string) error {
 			return ws.WriteControl(websocket.CloseMessage,
@@ -343,9 +354,9 @@ func (c *Conn) writeLoop() {
 		case <-ticker.C:
 			c.sendPing()
 		case b := <-c.send:
-			if err := c.sendFn(b); err != nil {
+			if err := c.sendFn(b.mt, b.b); err != nil {
 				// 写失败说明链路已断：收尾并退出 —— 不再尝试下发关闭帧（写不出去）。
-				c.log.Warn("agent write failed", zap.Uint64("device_id", c.deviceID()), zap.Error(err))
+				c.log.Warn("agent write failed", zap.Uint64("device_id", c.deviceID()), zap.Int("message_type", b.mt), zap.Error(err))
 				c.teardown("写 socket 失败")
 				return
 			}
@@ -424,7 +435,7 @@ func (c *Conn) enqueue(b []byte) error {
 	default:
 	}
 	select {
-	case c.send <- b:
+	case c.send <- outbound{mt: websocket.TextMessage, b: b}:
 		return nil
 	default:
 		c.mu.Lock()
@@ -435,6 +446,42 @@ func (c *Conn) enqueue(b []byte) error {
 			zap.Uint64("device_id", c.deviceID()),
 			zap.Int64("dropped_total", dropped))
 		return errSendQueueFull
+	}
+}
+
+// EnqueueBinary 把一帧**二进制**出站数据**阻塞式**排入发送队列。
+//
+// 它是构建上下文上传中转的专用面，与 enqueue（SendMessage 用）有两个刻意差别，
+// 每一处都是「为什么」级的取舍：
+//
+//  1. **队列满时等待腾位而不是丢弃**：上传分片丢了这字节流就断了（agent 侧
+//     哈希终验对不上，只能整份重传），背压必须沿调用栈传回浏览器 TCP ——
+//     让浏览器发慢而不是让 core 丢帧。代价是它**可阻塞**，因此绝不在读循环
+//     里调用（读循环只发非阻塞的文本帧）；调用方（上传服务）在 HTTP handler
+//     的请求 goroutine 上阻塞是预期形态。
+//  2. 解除阻塞的三个信号：ctx 取消（浏览器断开/请求超时）、连接收尾（done ——
+//     链路断了，等再久也没有写协程会取队列）、队列腾位（写协程正常推进）。
+//
+// 帧字节（含协议头）由调用方经 agentproto.PackBinaryFrame 组好 —— 本包不碰
+// 线上格式（与「hub 一律直接写协议常量」的取向一致）。
+func (c *Conn) EnqueueBinary(ctx context.Context, b []byte) error {
+	if c.send == nil || c.sendFn == nil {
+		// 未接管真实 socket（测试态）：短路（与 enqueue 同纪律 —— 不排队、不计数、
+		// 不 panic；真实发送由接管 socket 的测试自行断言）。
+		return nil
+	}
+	select {
+	case <-c.done:
+		return errConnClosed
+	default:
+	}
+	select {
+	case c.send <- outbound{mt: websocket.BinaryMessage, b: b}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.done:
+		return errConnClosed
 	}
 }
 
@@ -469,9 +516,17 @@ func (c *Conn) readLoop(ctx context.Context, sock socket) {
 	sock.SetPongHandler(func(string) error { return c.refreshReadDeadline(sock) })
 
 	for {
-		_, raw, err := sock.ReadMessage()
+		mt, raw, err := sock.ReadMessage()
 		if err != nil {
 			c.handleReadError(err)
+			return
+		}
+		if mt != websocket.TextMessage {
+			// 二进制入站在 agent→core 方向**未定义**（v1.3 的二进制帧是单向的
+			// core→agent 通道）。收到 = 协议违规/回环：与「发来非 JSON 字节」
+			// 同族，归 4002 报文损坏 —— 关闭码语义不变，老 agent 的文本帧行为
+			// 零改动。
+			c.CloseWith(agentproto.CloseMalformedMessage, "agent→core 二进制帧未定义")
 			return
 		}
 		// 任何入站消息都刷新读超时窗口（不只是心跳）：上报类消息同样证明设备活着。

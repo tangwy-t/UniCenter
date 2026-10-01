@@ -28,6 +28,7 @@ export type DockerTaskItem = Api.Docker.DockerTaskItem
 export type DockerTaskListResp = Api.Docker.DockerTaskListResp
 export type DockerStatsHistoryResp = Api.Docker.DockerStatsHistoryResp
 export type DockerStatsHistorySample = Api.Docker.DockerStatsHistorySample
+export type DockerBuildContextUploadResp = Api.Docker.DockerBuildContextUploadResp
 
 /**
  * 仓库凭据的创建/更新请求体（形状对齐 uni_core 的 request.DockerRegistrySaveReq）。
@@ -126,6 +127,52 @@ export function sendDockerCmd(hostId: string, body: DockerCmdBody) {
 export function fetchDockerCmdResult(hostId: string, ref: string) {
   return request.get<DockerCmdResultResp>({
     url: `${PREFIX}/docker/hosts/${hostId}/cmds/${ref}`,
+    showErrorMessage: false
+  })
+}
+
+/**
+ * 构建上下文上传（P3·分发输入段）：POST /docker/hosts/:id/build-context，
+ * 请求体就是 tar.gz 字节流本身（不是 multipart —— 服务端按 Content-Type 判形），
+ * 200 回 `{ filename }`（core 由会话号推导的产物名，直接喂给 image:build 的
+ * options.context）。
+ *
+ * 为什么**留在这条 http 层**而不是像流端点那样另起 fetch：axios 在浏览器里
+ * 走的就是 XHR 适配器 —— 上传进度事件（xhr.upload.onprogress）axios 原生以
+ * `onUploadProgress` 暴露，经 request.post 的透传配置直通；fetch 没有上传进度
+ * 事件（下载才有），为进度换 fetch 反而要自己拼 XHR —— 留在 http 层还能保住
+ * 401 刷新重放与 {code,msg,data} 信封解包（新写一套 XHR 就要重做这两件事）。
+ * 两处**必须**显式覆盖默认值的配置：
+ *   - `timeout: 0`：实例默认 15s 是给 JSON 往返的；512MB 慢链路上传以分钟计，
+ *     不覆盖会在第 15 秒被掐断（进度条的尽头是超时）；
+ *   - `Content-Type: application/octet-stream`：请求拦截器对「无类型头的对象体」
+ *     会 JSON.stringify —— 显式给头，File/Blob 才能原样进 body。
+ * 512MB 上限与 gzip 魔数（1f 8b）由服务端执法、客户端预检前移（utils/build-push）；
+ * 结论就地显示（对话框还开着），故 showErrorMessage 关掉 —— 与 sendDockerCmd
+ * 同一条「结论不放 toast」的纪律。
+ *
+ * @param onProgress 上传进度回调（0-100 整数；服务端不回「已收字节」之外的
+ *   阶段信息，进度就是传输进度的全部事实）。
+ * @param signal 断开用（关对话框/卸载时中止在途上传；服务端收尾见下）。
+ */
+export function uploadDockerBuildContext(
+  hostId: string,
+  file: Blob,
+  onProgress?: (percent: number) => void,
+  signal?: AbortSignal
+) {
+  return request.post<DockerBuildContextUploadResp>({
+    url: `${PREFIX}/docker/hosts/${hostId}/build-context`,
+    data: file,
+    headers: { 'Content-Type': 'application/octet-stream' },
+    timeout: 0,
+    signal,
+    onUploadProgress: (e) => {
+      if (!onProgress) return
+      // total 缺席（分块上传无长度头）时不报进度：未知总量的「50%」是编造。
+      if (!e.total || e.total <= 0) return
+      onProgress(Math.min(100, Math.floor((e.loaded / e.total) * 100)))
+    },
     showErrorMessage: false
   })
 }

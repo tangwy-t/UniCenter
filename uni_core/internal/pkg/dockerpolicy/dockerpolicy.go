@@ -76,6 +76,13 @@ var policies = []Policy{
 	//（与拉取同为网络长传输）。
 	{agentproto.DockerActionImageBuild, permission.PermDockerManage, 30 * time.Minute, false},
 	{agentproto.DockerActionImagePush, permission.PermDockerManage, 15 * time.Minute, false},
+	// image:scan（P3·安全面）：**docker:manage 档**（不是 inspect）—— 扫描会在主机上
+	// 执行外部二进制（trivy）并下载漏洞库，与 pull 的「让外部内容落到这台主机」是
+	// 同一信任决定；报告的内容（镜像里有什么 CVE）是 manage 持有者本就能拉能导的
+	// 信息。确认档无（只读语义，协议侧的档位口径说明见 DockerActionImageScan 注释）。
+	// 超时 15 分钟（首扫漏洞库下载 + 分钟级扫描；agent 的 writeTimeouts 同值，
+	// trivy 自身 --timeout 14m 再短一截 —— 逐层「先到先解释」）。
+	{agentproto.DockerActionImageScan, permission.PermDockerManage, 15 * time.Minute, false},
 	{agentproto.DockerActionVolumeRemove, permission.PermDockerDelete, 60 * time.Second, false},
 	{agentproto.DockerActionVolumePrune, permission.PermDockerDelete, 120 * time.Second, false},
 	{agentproto.DockerActionNetworkRemove, permission.PermDockerDelete, 60 * time.Second, false},

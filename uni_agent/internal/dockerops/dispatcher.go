@@ -45,6 +45,7 @@ var implementedActions = map[string]bool{
 	agentproto.DockerActionImageLoad:        true,
 	agentproto.DockerActionImageBuild:       true, // P2·分发面：构建（上下文 tar + 进度流）
 	agentproto.DockerActionImagePush:        true, // P2·分发面：推送（4c 凭据 + 进度流）
+	agentproto.DockerActionImageScan:        true, // P3·安全面：trivy 扫描（image_scan.go）
 	agentproto.DockerActionVolumeRemove:     true,
 	agentproto.DockerActionVolumePrune:      true,
 	agentproto.DockerActionNetworkRemove:    true,
@@ -113,6 +114,11 @@ var writeTimeouts = map[string]time.Duration{
 	// 对齐的守卫在 write_test.go）；推送与拉取同档 15 分钟（同为网络长传输）。
 	agentproto.DockerActionImageBuild: 30 * time.Minute,
 	agentproto.DockerActionImagePush:  15 * time.Minute,
+	// P3·安全面：扫描归 15 分钟档（与 pull/save/load 同族 —— trivy 首扫要下载
+	// 漏洞库，是网络+本地 IO 的分钟级操作；core 的 dockerpolicy 行同值，逐行
+	// 对齐守卫在 write_test.go）。trivy 自身的 --timeout（14 分钟）比它再短一截，
+	// 让 trivy 自报的超时带原因先到（见 image_scan.go 的 trivyExecTimeout）。
+	agentproto.DockerActionImageScan: 15 * time.Minute,
 
 	agentproto.DockerActionVolumeRemove: 60 * time.Second,
 	agentproto.DockerActionVolumePrune:  120 * time.Second,

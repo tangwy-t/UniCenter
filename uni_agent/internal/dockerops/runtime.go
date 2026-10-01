@@ -65,6 +65,9 @@ type Runtime struct {
 	// write 是二期写执行器：dispatcher 只认识 r.exec 这个单一入口，但配置更新
 	//（保护清单/产物目录/flavor）要送进写执行器，故这里保留一份具体引用。
 	write *WriteExecutor
+	// upload 是构建上下文上传的接收器（v1.3）：分片组装/终验/中止清理，
+	// transferDir 事实源与写执行器同一个（write.transferDirValue）。
+	upload *buildCtxReceiver
 	// stream 是流会话执行器（三期 + 5a 聚合日志）：保留具体引用是为了把 compose
 	// flavor 查询函数注进去（SetComposeCLI —— flavor 由此成为唯一事实源，
 	// probeComposeOnce 探测到新形态不需要「记得通知第二个执行器」）。
@@ -125,6 +128,8 @@ func New(deps Deps) *Runtime {
 	// 各执行器加字段，是为了让两条解析路径在构造处一并拿到，不留漏注入的暗角。
 	api := withProjectIndex(deps.API, r.projects)
 	r.write = NewWriteExecutor(api, r.protected, r.transferDir, r.flavor, exec.CommandContext)
+	// v1.3 上传接收器：共享写执行器的 transferDir 事实源（配置热更后同一把尺）。
+	r.upload = newBuildCtxReceiver(r.write, r.log, r.deps.Now)
 	// 挂钟沿用 Deps.Now：四期的备份令牌取它，测试因此能确定性地产出同秒连续保存。
 	r.write.SetNow(deps.Now)
 	// 流会话管理器（三期）：出口由 transport 注入；未注入时给一个「发不出去」的
@@ -420,6 +425,48 @@ func (r *Runtime) OnFrame(f *agentproto.CoreDockerFrame) {
 		return
 	}
 	r.sessions.OnFrame(f)
+}
+
+// OnBinaryFrame 收到一帧构建上下文分片（v1.3）：投给接收器组装。
+//
+// 与 OnFrame 同一取向 —— 单次调用的工作量有界（≤256KB 页缓存写 + 递增哈希，
+// 见 build_ctx_receive.go 的并发模型说明），不另开队列；会话作废（乱序/魔数/
+// 超限）只记日志、**不断连**（分片是连接上的旁路载荷，指标主链路不陪葬）。
+func (r *Runtime) OnBinaryFrame(f agentproto.BinaryFrame) {
+	if err := r.upload.Chunk(f.SessionID, f.Seq, f.Final, f.Payload); err != nil {
+		r.log.Warn("构建上下文分片会话作废",
+			"session", f.SessionID, "seq", f.Seq, "err", err.Error())
+	}
+}
+
+// OnBuildCtxFinish 收到完成控制帧：终验（名字/尺寸/sha256 三对照）。
+// 失败 = 删除产物 + 日志（v1 无回执通道 —— core 的 HTTP 响应已发完，
+// 失败在用户侧表现为下一次 image:build 找不到产物，见接收器的 Finish 注释）。
+func (r *Runtime) OnBuildCtxFinish(m *agentproto.CoreDockerBuildCtxFinish) {
+	if m == nil {
+		return
+	}
+	if err := r.upload.Finish(m.SessionID, m.SHA256Hex, m.SizeBytes, m.Name); err != nil {
+		r.log.Warn("构建上下文终验失败", "session", m.SessionID, "err", err.Error())
+		return
+	}
+	r.log.Info("构建上下文已受理",
+		"session", m.SessionID, "name", m.Name, "size_bytes", m.SizeBytes)
+}
+
+// OnBuildCtxAbort 收到中止控制帧：丢弃半成品（未知会话静默 —— core 的中止
+// 帧与本地自弃竞态是正常时序）。
+func (r *Runtime) OnBuildCtxAbort(m *agentproto.CoreDockerBuildCtxAbort) {
+	if m == nil {
+		return
+	}
+	r.upload.Abort(m.SessionID)
+}
+
+// OnDisconnected 连接结束：收掉全部进行中的上传半成品 —— 通道断了，完成/
+// 中止帧都不会再来，挂着等只会把半成品留给 24h 清扫兜底。
+func (r *Runtime) OnDisconnected() {
+	r.upload.AbortAll()
 }
 
 // currentInterval 返回当前快照周期（每次采集后重读，配置变更下一轮即生效）。

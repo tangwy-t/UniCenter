@@ -82,7 +82,7 @@ export interface DockerActionOptions {
   [key: string]: unknown
 }
 
-/** 写动作全集（24 条，顺序 = spec §4.3.1 书写顺序）。 */
+/** 写动作全集（25 条，顺序 = spec §4.3.1 书写顺序）。 */
 export const WRITE_ACTIONS = [
   'container:create',
   'container:start',
@@ -98,6 +98,8 @@ export const WRITE_ACTIONS = [
   // P2·分发闭环（build/push）与 load 相邻 —— 协议 dockerActionSpecs 的书写顺序。
   'image:build',
   'image:push',
+  // P3·安全面（scan）紧随分发家族 —— 协议 dockerActionSpecs 的书写顺序。
+  'image:scan',
   'volume:remove',
   'volume:prune',
   'network:remove',
@@ -132,7 +134,7 @@ export interface DockerActionEntry {
   conclusion: string
 }
 
-/** 注册表（24 条，逐条对照 spec §4.3.1 的「二」档）。 */
+/** 注册表（25 条，逐条对照 spec §4.3.1 的「二」档）。 */
 export const DOCKER_ACTION_REGISTRY: readonly DockerActionEntry[] = [
   {
     // 创建面（4a）：**没有 target**（动作对象是将要诞生的容器，语义都在 image/name ——
@@ -312,6 +314,27 @@ export const DOCKER_ACTION_REGISTRY: readonly DockerActionEntry[] = [
     action: 'image:push',
     label: '推送镜像',
     icon: 'ri:upload-2-line',
+    perm: PermDockerManage,
+    danger: 'normal',
+    needsTarget: true,
+    confirm: 'none',
+    guarded: false,
+    conclusion: ''
+  },
+  {
+    // P3·安全面（扫描）：target 是镜像引用（与 pull 同一字段）。它**读操作语义**
+    // （不改主机上任何 Docker 资源），但住在写注册表而不是 utils/cmd 的只读清单，
+    // 理由是交互形态而不是读写之分：一次真扫描要跑数分钟（trivy 首扫还要下载
+    // 漏洞库），30 秒档的 runRead 轮询闭环装不下它；「pending 期间任务中心可见」
+    // 的长任务通道 + 行内就近触发正是 pull 家族的形态。权限档 docker:manage
+    //（协议裁决：扫描要在主机上执行外部二进制并下载漏洞库，与「让外部内容落到
+    // 这台主机上执行」的 pull 同档，与只看 daemon 已有东西的 inspect 不同档）。
+    // 确认档无（扫描无破坏性，抄一遍 target 只会把确认训练成例行公事）；
+    // 进度流刻意不建（协议口径：trivy json 模式结束才出完整报告，中途没有可
+    // 增量的结构化进度）—— 进行中的可见性由任务中心承担。
+    action: 'image:scan',
+    label: '扫描镜像',
+    icon: 'ri:shield-check-line',
     perm: PermDockerManage,
     danger: 'normal',
     needsTarget: true,

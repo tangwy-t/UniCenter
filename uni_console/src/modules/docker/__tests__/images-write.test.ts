@@ -38,6 +38,8 @@ const api = vi.hoisted(() => ({
   // 拉取/构建进度对话框与凭据对话框挂载（不打开）需要的 import 面。
   openDockerPullStream: vi.fn(),
   openDockerBuildStream: vi.fn(),
+  // P3 构建上下文上传（构建对话框的上传形态；本文件不触发，import 面补齐）。
+  uploadDockerBuildContext: vi.fn(),
   fetchDockerRegistries: vi.fn(),
   // 主机上下文（host-context）import 面；本文件不触发 reload，不会真调。
   fetchDockerHosts: vi.fn(),
