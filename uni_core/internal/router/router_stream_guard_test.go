@@ -37,7 +37,7 @@ func TestExecStreamRouteIsRegisteredOutsideAuthGroup(t *testing.T) {
 	}
 
 	// 日志流相反：它走 fetch + ReadableStream，**能**带 Authorization 头，故留在 auth 组。
-	const logStreamOnAuth = `docker.GET("/hosts/:id/cmds/:ref/stream", deps.Docker.Hdl.LogStream)`
+	const logStreamOnAuth = `docker.GET("/hosts/:id/cmds/:ref/stream", longLived, deps.Docker.Hdl.LogStream)`
 	if !strings.Contains(text, logStreamOnAuth) {
 		t.Fatalf("日志流应留在 auth 组上（%s）", logStreamOnAuth)
 	}
@@ -58,7 +58,7 @@ func TestEventsStreamRouteMountedWithPerm(t *testing.T) {
 	}
 	text := string(src)
 
-	const want = `docker.GET("/events", perm(permission.PermDockerList), deps.Docker.Hdl.EventsStream)`
+	const want = `docker.GET("/events", longLived, perm(permission.PermDockerList), deps.Docker.Hdl.EventsStream)`
 	if !strings.Contains(text, want) {
 		t.Fatalf("事件聚合流必须以 %s 挂在 auth 组并带静态 perm(docker:list)（当前缺失）", want)
 	}
@@ -135,8 +135,8 @@ func TestBuildPushStreamRoutesStayOnAuthGroup(t *testing.T) {
 	}
 	text := string(src)
 
-	const buildOnAuth = `docker.GET("/hosts/:id/cmds/:ref/build", deps.Docker.Hdl.BuildStream)`
-	const pushOnAuth = `docker.GET("/hosts/:id/cmds/:ref/push", deps.Docker.Hdl.PushStream)`
+	const buildOnAuth = `docker.GET("/hosts/:id/cmds/:ref/build", longLived, deps.Docker.Hdl.BuildStream)`
+	const pushOnAuth = `docker.GET("/hosts/:id/cmds/:ref/push", longLived, deps.Docker.Hdl.PushStream)`
 	if !strings.Contains(text, buildOnAuth) {
 		t.Fatalf("构建进度流应留在 auth 组上（%s）", buildOnAuth)
 	}
@@ -166,7 +166,7 @@ func TestBuildContextUploadRouteMountedWithManagePerm(t *testing.T) {
 	}
 	text := string(src)
 
-	const want = `docker.POST("/hosts/:id/build-context", perm(permission.PermDockerManage), deps.Docker.Hdl.BuildContextUpload)`
+	const want = `docker.POST("/hosts/:id/build-context", longLived, perm(permission.PermDockerManage), deps.Docker.Hdl.BuildContextUpload)`
 	if !strings.Contains(text, want) {
 		t.Fatalf("上传端点必须以 %s 挂在 auth 组并带静态 perm(docker:manage)（当前缺失）", want)
 	}

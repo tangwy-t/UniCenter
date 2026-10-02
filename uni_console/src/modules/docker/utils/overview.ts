@@ -382,5 +382,5 @@ export function diskRowModels(hosts: DockerHostItem[]): DiskRowModel[] {
  */
 export function diskPanelSubtitle(hosts: DockerHostItem[]): string {
   const reported = hosts.filter((h) => h.disk).length
-  return `共 ${hosts.length} 台 · ${reported} 台已上报磁盘账 · 清理入口在每行右侧`
+  return `共 ${hosts.length} 台 · ${reported} 台已上报磁盘账`
 }

@@ -244,14 +244,16 @@ func (a *sdkAdapter) VolumesAndDf(ctx context.Context) ([]VolumeInfo, *DiskUsage
 		}
 		out := make([]VolumeInfo, 0, len(res.Volumes))
 		for _, v := range res.Volumes {
-			out = append(out, VolumeInfo{Name: v.Name, Driver: v.Driver})
+			out = append(out, VolumeInfo{Name: v.Name, Driver: v.Driver, Labels: v.Labels})
 		}
 		return out, nil, nil
 	}
 	out := make([]VolumeInfo, 0, len(du.Volumes))
 	var volumesTotal int64
 	for _, v := range du.Volumes {
-		vi := VolumeInfo{Name: v.Name, Driver: v.Driver}
+		// Labels 一并带出（项目归纳用，见 VolumeInfo.Labels 的说明）：df 与 volume ls
+		// 两条路径都带它，标签面不会因 df 可用性而时有时无。
+		vi := VolumeInfo{Name: v.Name, Driver: v.Driver, Labels: v.Labels}
 		// Size>=0 才是已知体积：daemon 对非 local 驱动给 -1（「未知」哨兵），放进
 		// SizeBytes 会被快照折成 0 MB —— 「未知」被渲染成「零占用」，正是卷体积
 		// 字段自己注释里反对的事。未知保持 nil（页面「—」），求和也只加已知项。
@@ -265,15 +267,7 @@ func (a *sdkAdapter) VolumesAndDf(ctx context.Context) ([]VolumeInfo, *DiskUsage
 	// df 的镜像与缓存明细只在 df 响应里有（镜像清单来自另一趟 /images/json）——
 	// 汇总从**这一帧**的 df 算，三类数字出自同一时刻，不会被两次调用的时差弄出
 	//「面板一个数、列表另一个数」的永久疑问。
-	var imagesTotal, imagesDangling int64
-	for _, im := range du.Images {
-		imagesTotal += im.Size
-		// 悬空判据 = 无标签：与 daemon 的悬空过滤器、image:prune 的目标集合同一口径
-		//（见快照 isDanglingImage 的实测论证；CLI 的 dangling=false 展示口径相反，不采）。
-		if len(im.RepoTags) == 0 {
-			imagesDangling += im.Size
-		}
-	}
+	imagesTotal, imagesDangling := summarizeDfImages(du.LayersSize, dfImageRows(du.Images))
 	var buildCache int64
 	for _, c := range du.BuildCache {
 		buildCache += c.Size
@@ -286,6 +280,68 @@ func (a *sdkAdapter) VolumesAndDf(ctx context.Context) ([]VolumeInfo, *DiskUsage
 	}, nil
 }
 
+// ── df 汇总：纯函数（SDK 明细 → 两个数）─────────────────────────────────
+//
+// 为什么把求和从 SDK 调用里剥出来：daemon 的逐项明细只有 CI 里那台机器才有，
+// 而「合计怎么算」正是六期对账（面板 vs `docker system df`）唯一的争议点 ——
+// 剥成纯函数后这条口径可以被用例逐条钉住，不必依赖真 daemon。
+
+// dfImageRow 是 df 的一行镜像明细里汇总需要的三样（SDK 类型不出 adapter）。
+type dfImageRow struct {
+	SizeBytes int64
+	// SharedBytes 是该镜像的层里**被其他镜像也引用**的那部分（daemon 按链 ID 的引用
+	// 计数算好，见 daemon/images/image_list.go 的 SharedSize）。daemon 只在客户端
+	// 明确要求时报它（默认 -1 = 没算），df 响应属于要求了的那一类。
+	SharedBytes int64
+	// Dangling = 无标签：与 daemon 的悬空过滤器、image:prune 的默认目标集合同一口径
+	//（见快照 isDanglingImage 的实测论证；CLI 的 dangling=false 展示口径相反，不采）。
+	Dangling bool
+}
+
+// dfImageRows 把 daemon 的镜像明细折成本域的汇总行。
+func dfImageRows(imgs []*image.Summary) []dfImageRow {
+	rows := make([]dfImageRow, 0, len(imgs))
+	for _, im := range imgs {
+		rows = append(rows, dfImageRow{
+			SizeBytes:   im.Size,
+			SharedBytes: im.SharedSize,
+			Dangling:    len(im.RepoTags) == 0,
+		})
+	}
+	return rows
+}
+
+// summarizeDfImages 从 df 明细算出「镜像合计」与「悬空镜像可回收」两个字节数。
+//
+// 口径逐条对齐 daemon（`docker system df` 的数据源就在同一趟 /system/df）：
+//
+//	合计   = layersSize（层存储的合计，每个层只算一次）—— daemon 的
+//	         SystemDiskUsage 给 Images/TotalSize 的就是它，即 CLI 的 Images/SIZE
+//	         列。**不是** Σ 各行 Size：那样共享层会按引用它的镜像个数重复计入，
+//	         实测比 df 高出两成（六期对账的偏差来源）。
+//	可回收 = Σ_{悬空} (Size − Shared) = 这些镜像的**独占层**之和 ——
+//	         image:prune（默认只清悬空）真会释放的字节。共享层不计：它们还被
+//	         别的镜像引用着，删了也不会释放（6a 的承诺曾是 Σ Size，实测 3.04GB
+//	         的承诺只兑出 2052 字节 —— 那是「从没存在过的空间」）。
+//
+// 两处刻意的保守（宁可少报，不多报）：
+//   - Shared < 0（daemon 没算共享体积，老 API 的 -1 哨兵）时**整条跳过**：
+//     没有共享数据就无法区分独占与共享，拿「全部 Size」当可回收正是在多报；
+//   - 多个悬空镜像彼此共享的层不计入：那部分清理时同样会释放，但列表接口没有
+//     逐层引用计数，算不出精确值 —— 这个数是「必然释放」的下界，不是拍脑袋的估算。
+func summarizeDfImages(layersSize int64, rows []dfImageRow) (total, dangling int64) {
+	total = layersSize
+	for _, r := range rows {
+		if !r.Dangling || r.SharedBytes < 0 {
+			continue
+		}
+		if exclusive := r.SizeBytes - r.SharedBytes; exclusive > 0 {
+			dangling += exclusive
+		}
+	}
+	return total, dangling
+}
+
 func (a *sdkAdapter) Networks(ctx context.Context) ([]NetworkInfo, error) {
 	list, err := a.cli.NetworkList(ctx, network.ListOptions{})
 	if err != nil {
@@ -296,6 +352,8 @@ func (a *sdkAdapter) Networks(ctx context.Context) ([]NetworkInfo, error) {
 		out = append(out, NetworkInfo{
 			Name: n.Name, Driver: n.Driver, Scope: n.Scope,
 			Internal: n.Internal, ContainersCount: len(n.Containers),
+			// Labels 一并带出（项目归纳用，见 NetworkInfo.Labels 的说明）。
+			Labels: n.Labels,
 		})
 	}
 	return out, nil
@@ -402,6 +460,26 @@ func (a *sdkAdapter) ContainerLogs(ctx context.Context, name string, tail int, s
 //
 // v28 的镜像 config 是 dockerspec.DockerOCIImageConfig（内嵌 ocispec.ImageConfig），
 // 字段名与容器的 container.Config 不完全一致，故逐字段显式搬。
+// ImageRefID 把一个镜像引用折成本机镜像 ID（"" = 本机没有这个引用）。
+//
+// 走 inspect 而不是列表：列表要为每个镜像算体积（daemon 侧重活），而这里只要
+// 「引用 → ID」一个答案。404 折成空串而不是错误 —— 在调用方（拉取的完成判据）
+// 那一侧「本机没有」是事实，「查不了」才不是（契约见 DockerAPI.ImageRefID）。
+//
+// 引用形态（tag / name@digest / ID 前缀）原样交给 daemon 解析：解析口径只有它
+// 一个事实源，agent 不在本地复刻（协议侧补 :latest 的那套规则只服务于「按引用
+// 找条目」的快照查询，不在这里出现）。
+func (a *sdkAdapter) ImageRefID(ctx context.Context, ref string) (string, error) {
+	v, err := a.cli.ImageInspect(ctx, ref)
+	if err != nil {
+		if errdefs.IsNotFound(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	return v.ID, nil
+}
+
 func (a *sdkAdapter) ImageInspect(ctx context.Context, ref string) (ImageDetail, error) {
 	v, err := a.cli.ImageInspect(ctx, ref)
 	if err != nil {
@@ -569,12 +647,22 @@ func (a *sdkAdapter) ImageRemove(ctx context.Context, ref string, force bool) er
 	return err
 }
 
+// imagePruneFilters 把「清理范围」折成 daemon 的过滤器。
+//
+// 这一段独立成纯函数是为了**钉住语义**（可回收数字的诚实性靠它）：all=false 对应
+// `dangling=true` —— 即 `docker image prune` 的默认口径、也正是快照里「悬空镜像」
+// 与 df 汇总里「可回收」的同一个目标集合；all=true 才扩到全部未使用镜像。
+// 口径一旦漂移，面板承诺的字节与实际清理的集合就不是同一批镜像了。
+func imagePruneFilters(all bool) filters.Args {
+	return filters.NewArgs(filters.Arg("dangling", strconv.FormatBool(!all)))
+}
+
 // ImagePrune 清理镜像。
 //
 // 悬浮判定交给 daemon 的过滤器（dangling=!all）：`docker image prune`（默认）清的正是
 // 这个集合，而本地按 RepoTags 判悬空与 daemon 口径有实测差异（见快照的 digest-only 用例）。
 func (a *sdkAdapter) ImagePrune(ctx context.Context, all bool) (int64, error) {
-	report, err := a.cli.ImagesPrune(ctx, filters.NewArgs(filters.Arg("dangling", strconv.FormatBool(!all))))
+	report, err := a.cli.ImagesPrune(ctx, imagePruneFilters(all))
 	if err != nil {
 		return 0, err
 	}
@@ -1040,12 +1128,21 @@ func (a *sdkAdapter) VolumeRemove(ctx context.Context, name string, force bool) 
 	return a.cli.VolumeRemove(ctx, name, force)
 }
 
+// volumePruneFilters 是卷清理的过滤器：**空**。
+//
+// 空过滤器不是「没想清楚」，而是 daemon 的默认口径**就是**要求的口径：只清
+// **匿名且未使用**的卷（`docker volume prune` 的默认行为）。命名卷 —— 包括保护
+// 清单里的底座数据卷、compose 项目卷 —— 不在其中，这正是这条路不需要 guard 的原因，
+// 也是面板上「未用卷 N 个」**只给计数不给体积承诺**的原因（那个集合比 prune 的目标
+// 大得多：未用的命名卷要用户自己逐条删）。独立成函数是为让这条语义可被用例钉住。
+func volumePruneFilters() filters.Args { return filters.NewArgs() }
+
 // VolumePrune 清理卷。
 //
 // 空过滤器 = daemon 的默认口径（只清**匿名且未使用**的卷），与 spec §4.3.1 一致；
 // 命名卷（含保护清单里的底座数据卷）不在其中 —— 这正是这里不需要 guard 的原因。
 func (a *sdkAdapter) VolumePrune(ctx context.Context) (int64, error) {
-	report, err := a.cli.VolumesPrune(ctx, filters.NewArgs())
+	report, err := a.cli.VolumesPrune(ctx, volumePruneFilters())
 	if err != nil {
 		return 0, err
 	}

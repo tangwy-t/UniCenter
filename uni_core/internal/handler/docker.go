@@ -149,6 +149,123 @@ func (h *DockerHandler) Workloads(c *gin.Context) {
 	app.Success(c, resp)
 }
 
+// Images 返回跨主机镜像统一表（docker:list）。
+//
+// @Summary      跨主机镜像统一表
+// @Description  全部可管主机的镜像并成一张表（每行带 hostId/hostname 归属）；hostId 限定单主机、keyword 按 repoTag 子串匹配（大小写不敏感）、dangling/unused 三值过滤（缺省=不过滤）；上限 500 条、total 如实报截断前全量；单台快照读失败跳过该主机（其故障在总览页如实呈现）
+// @Tags         Docker 管理
+// @Produce      json
+// @Param        hostId    query  uint64  false  "限定单主机(缺省=全部可管主机)"
+// @Param        keyword   query  string  false  "repoTag 子串(大小写不敏感)"
+// @Param        dangling  query  bool    false  "悬空过滤(true=仅悬空，false=仅非悬空，缺省=不过滤)"
+// @Param        unused    query  bool    false  "未使用过滤(true=仅未使用，false=仅在使用，缺省=不过滤)"
+// @Security     BearerAuth
+// @Success      200  {object}  app.Response{data=response.DockerImageListResp}  "查询成功"
+// @Failure      400  {object}  app.Response  "参数错误"
+// @Failure      401  {object}  app.Response  "未登录"
+// @Failure      403  {object}  app.Response  "无权限"
+// @Router       /docker/images [get]
+func (h *DockerHandler) Images(c *gin.Context) {
+	var q request.DockerImageQuery
+	if err := c.ShouldBindQuery(&q); err != nil {
+		app.Error(c, apperror.BadRequest("请求参数不合法"))
+		return
+	}
+	resp, err := h.svc.Images(c.Request.Context(), &q)
+	if err != nil {
+		app.Error(c, err)
+		return
+	}
+	app.Success(c, resp)
+}
+
+// Volumes 返回跨主机卷统一表（docker:list）。
+//
+// @Summary      跨主机卷统一表
+// @Description  全部可管主机的数据卷并成一张表（每行带 hostId/hostname 归属）；hostId 限定单主机、keyword 按卷名子串匹配（大小写不敏感）、unused 三值过滤（缺省=不过滤）；上限 500 条、total 如实报截断前全量；单台快照读失败跳过该主机（其故障在总览页如实呈现）
+// @Tags         Docker 管理
+// @Produce      json
+// @Param        hostId   query  uint64  false  "限定单主机(缺省=全部可管主机)"
+// @Param        keyword  query  string  false  "卷名子串(大小写不敏感)"
+// @Param        unused   query  bool    false  "未使用过滤(true=仅未使用，false=仅在使用，缺省=不过滤)"
+// @Security     BearerAuth
+// @Success      200  {object}  app.Response{data=response.DockerVolumeListResp}  "查询成功"
+// @Failure      400  {object}  app.Response  "参数错误"
+// @Failure      401  {object}  app.Response  "未登录"
+// @Failure      403  {object}  app.Response  "无权限"
+// @Router       /docker/volumes [get]
+func (h *DockerHandler) Volumes(c *gin.Context) {
+	var q request.DockerVolumeQuery
+	if err := c.ShouldBindQuery(&q); err != nil {
+		app.Error(c, apperror.BadRequest("请求参数不合法"))
+		return
+	}
+	resp, err := h.svc.Volumes(c.Request.Context(), &q)
+	if err != nil {
+		app.Error(c, err)
+		return
+	}
+	app.Success(c, resp)
+}
+
+// Networks 返回跨主机网络统一表（docker:list）。
+//
+// @Summary      跨主机网络统一表
+// @Description  全部可管主机的网络并成一张表（每行带 hostId/hostname 归属）；hostId 限定单主机、keyword 按网络名子串匹配（大小写不敏感）、internal 三值过滤（缺省=不过滤）；上限 500 条、total 如实报截断前全量；单台快照读失败跳过该主机（其故障在总览页如实呈现）
+// @Tags         Docker 管理
+// @Produce      json
+// @Param        hostId    query  uint64  false  "限定单主机(缺省=全部可管主机)"
+// @Param        keyword   query  string  false  "网络名子串(大小写不敏感)"
+// @Param        internal  query  bool    false  "隔离网络过滤(true=仅 internal，false=仅非 internal，缺省=不过滤)"
+// @Security     BearerAuth
+// @Success      200  {object}  app.Response{data=response.DockerNetworkListResp}  "查询成功"
+// @Failure      400  {object}  app.Response  "参数错误"
+// @Failure      401  {object}  app.Response  "未登录"
+// @Failure      403  {object}  app.Response  "无权限"
+// @Router       /docker/networks [get]
+func (h *DockerHandler) Networks(c *gin.Context) {
+	var q request.DockerNetworkQuery
+	if err := c.ShouldBindQuery(&q); err != nil {
+		app.Error(c, apperror.BadRequest("请求参数不合法"))
+		return
+	}
+	resp, err := h.svc.Networks(c.Request.Context(), &q)
+	if err != nil {
+		app.Error(c, err)
+		return
+	}
+	app.Success(c, resp)
+}
+
+// Projects 返回跨主机项目统一表（docker:list）。
+//
+// @Summary      跨主机项目统一表
+// @Description  全部可管主机的编排项目并成一张表（每行带 hostId/hostname 归属）；hostId 限定单主机、keyword 按项目名子串匹配（大小写不敏感）、state 过滤项目态（running/stopped，stopped=一切非 running，与容器表同口径）；上限 500 条、total 如实报截断前全量；单台快照读失败跳过该主机（其故障在总览页如实呈现）
+// @Tags         Docker 管理
+// @Produce      json
+// @Param        hostId   query  uint64  false  "限定单主机(缺省=全部可管主机)"
+// @Param        keyword  query  string  false  "项目名子串(大小写不敏感)"
+// @Param        state    query  string  false  "项目态过滤(running/stopped)"
+// @Security     BearerAuth
+// @Success      200  {object}  app.Response{data=response.DockerProjectListResp}  "查询成功"
+// @Failure      400  {object}  app.Response  "参数错误(state 非 running/stopped)"
+// @Failure      401  {object}  app.Response  "未登录"
+// @Failure      403  {object}  app.Response  "无权限"
+// @Router       /docker/projects [get]
+func (h *DockerHandler) Projects(c *gin.Context) {
+	var q request.DockerProjectQuery
+	if err := c.ShouldBindQuery(&q); err != nil {
+		app.Error(c, apperror.BadRequest("请求参数不合法"))
+		return
+	}
+	resp, err := h.svc.Projects(c.Request.Context(), &q)
+	if err != nil {
+		app.Error(c, err)
+		return
+	}
+	app.Success(c, resp)
+}
+
 // State 返回一台主机的快照（docker:list）。
 //
 // @Summary      主机资源快照
@@ -218,6 +335,8 @@ func (h *DockerHandler) StatsHistory(c *gin.Context) {
 //
 // 本切片不做取消动作（见 service/docker_tasks.go 的取消纪律）：前端对拉取类任务
 // 复用既有进度流 Abort（断开 /cmds/:ref/pull 即下发 cancel）；非流任务无取消入口。
+// 断流是 best-effort 的，与「daemon 恰好干完活」存在竞态 —— 终态由 agent 按拉取的
+// 实际结局结算（完成即成功，迟到的 cancel 是 no-op），本端点只如实投影结果。
 //
 // @Summary      最近任务
 // @Description  最近受理的 docker 指令（≤100 条、受理时刻降序、跨主机聚合）；hostId 限定单主机、status 过滤 pending/done、action 过滤动作码；条目含 ref/主机/动作/目标/发起人用户名/受理时刻/终态（pending/succeeded/failed/timeout）/终态结论句；拉取类任务前端凭 action 复用 /cmds/:ref/pull 打开进度流（取消=断开进度流）

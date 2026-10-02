@@ -15,6 +15,7 @@ import (
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockerpolicy"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockerstate"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/permission"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/repository"
 )
 
@@ -32,6 +33,11 @@ import (
 // **非流任务本切片不做取消**：CLI/daemon 侧的 kill 面大（compose up 的中断点、
 // 超时上下文、半态回滚都要重新论证），硬做只会出一个半吊子的「取消按钮」，
 // 留后续位（接口形态已在任务条目里备好）。
+//
+// 取消与完成的竞态（B4 裁决）：断流触发的 cancel 是 best-effort 动作，与「daemon
+// 恰好干完活」只差毫秒 —— 终态以 agent 侧拉取的**实际结局**为准（完成即成功，
+// 迟到的 cancel 是 no-op，不得改写成「拉取已取消」），本服务只如实投影结果，
+// 不在 core 侧二次推断（推断会把 agent 的事实覆盖掉，与 sweep 的超时同一纪律）。
 type DockerTaskService struct {
 	cmds    *dockerstate.CmdStore
 	devices DockerDeviceReader
@@ -61,6 +67,13 @@ func NewDockerTaskService(cmds *dockerstate.CmdStore, devices DockerDeviceReader
 // 的 Total 语义不同：那边枚举是完整的，Total 是诚实的全量数）。
 //
 // 逐条读取的取舍：
+//   - **读面不进列表**（QA 路 1 P2 的裁定）：只读动作（inspect 档的「只看不碰」
+//     家族：container:inspect/logs/stats、image:inspect、compose:logs、
+//     compose.file:read）从任务列表剔除 —— 「任务」的语义是变更/长任务，而这些
+//     动作会在页面浏览时被**自动受理**（容器详情页每打开一次就为日志与统计各留
+//     一条记录，项目配置页就位即拉 compose.file:read），列表会被它们刷屏、把真正
+//     要追的变更挤出视野。记录本身与审计面照旧（CmdStore 不动），这里只决定
+//     「什么算任务」；
 //   - 记录已过期（TTL 到）→ 跳过并顺手剔除报名（索引是加速器，判定以记录为准 ——
 //     与 Inflight 的陈旧索引自愈同一纪律）；
 //   - 单条读失败（键损坏/Redis 抖动）→ 告警并跳过：少一行好过整页 500（读面
@@ -107,6 +120,9 @@ func (s *DockerTaskService) Tasks(ctx context.Context, q *request.DockerTasksQue
 			// docker:events 的常驻订阅记录不是用户任务（无发起人），任务中心不列它
 			// —— 它们的存在形态在事件聚合流自己的页面里。
 			continue
+		}
+		if dockerTaskReadOnly(rec.Action) {
+			continue // 读面剔除，理由见 Tasks 头注释（「任务」的语义是变更）
 		}
 		if q.HostID != 0 && rec.DeviceID != q.HostID {
 			continue
@@ -159,6 +175,22 @@ func (s *DockerTaskService) Tasks(ctx context.Context, q *request.DockerTasksQue
 		items = append(items, m.entry)
 	}
 	return &response.DockerTaskListResp{Items: items}, nil
+}
+
+// dockerTaskReadOnly 判定一条动作是否属于「读面」：任务列表对 inspect 档收口。
+//
+// 判定依据是**策略表的权限列而不是一份并列的动作清单**：inspect 档就是「只看不碰」
+// 的语义档（dockerpolicy 里 container:logs/stats/inspect、image:inspect、compose:logs、
+// compose.file:read 同档的书写口径），将来新增只读动作会自动继承这份剔除，不会漏；
+// 而 image:scan 这类「读语义但长任务」的动作在 manage 档，照旧留在列表里（扫描的
+// 任务中心留痕是 P3 的既有设计，见 scanFastPath）。
+//
+// 策略表查不到的动作**不剔除**（放行）：记录只会经受理路径产生，而受理路径要求
+// 动作在策略表里；万一将来表里删了某个动作，把历史记录当任务显示出来（多一行）
+// 比静默吞掉它（丢一行）安全。
+func dockerTaskReadOnly(action string) bool {
+	perm, ok := dockerpolicy.RequiredPerm(action)
+	return ok && perm == permission.PermDockerInspect
 }
 
 // hostnameOf 带记忆的联查：同一台主机多个任务只查一次设备表；未命中（设备已删）

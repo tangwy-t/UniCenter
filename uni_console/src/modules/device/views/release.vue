@@ -210,8 +210,15 @@
     <!-- ============ 全站目标对话框（写明影响面）============ -->
     <ElDialog v-model="globalVisible" title="设置全站目标版本" width="440px">
       <div class="dr-gdialog">
+        <!--
+          修复：模板文本节点按字面渲染，`**` 是 markdown 残留 —— 会把星号直接印在
+          对话框里（本处无任何 markdown 渲染链路）。强调改回本对话框已有的 <b>
+          （同下方「预计下发」行）。
+          此句保留：它是危险拉杆的影响面结论（只有跟随者被波及），属「页面只留
+          结论」范畴，不是实现原理文案。
+        -->
         <div class="dr-gdialog__hint">
-          只影响**跟随全站**的设备；已单独指定版本的设备不会被动。
+          只影响<b>跟随全站</b>的设备；已单独指定版本的设备不会被动。
         </div>
         <ElSelect v-model="globalVersion" class="w-full" placeholder="选择已发布版本">
           <ElOption v-for="v in releaseOptions" :key="v" :label="v" :value="v" />

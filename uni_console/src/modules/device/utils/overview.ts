@@ -154,7 +154,7 @@ export const CHART_BLOCKS: ChartBlockSpec[] = [
     columns: [COL.swapPercent, COL.swapUsedMB],
     type: 'line',
     span: 'half',
-    purpose: '换页活动是内存饱和的**前兆**，单独成块以便在内存告警前发现',
+    purpose: '换页活动是内存饱和的前兆，单独成块以便在内存告警前发现',
     rationale: '时间序列 → 折线；量纲混杂时优先画百分比（唯一可跨设备比较的量纲）'
   },
   {

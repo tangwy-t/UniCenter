@@ -1,8 +1,9 @@
 <template>
   <!-- 单根（single-root 守卫在库：布局的 Transition 只支持单根，双根切页白屏）。
-       本组件是 resources 页「镜像」tab 的内容（7a 由原 views/images.vue 平移）：
-       页面级的主机条/快照/四态在 views/resources.vue，这里只持有镜像表自己的
-       筛选、勾选、底栏写操作与三个对话框。 -->
+       本组件是 resources 页「镜像」tab 的内容（9b 起为跨主机聚合表）：主机清单
+       经 props 由页面下发（页面级一份，三 tab 共用），清单数据走自己的聚合端点
+       （GET /docker/images，服务端过滤）；本组件只持有镜像表自己的筛选、勾选、
+       底栏写操作与三个对话框。 -->
   <div class="docker-images-tab">
     <ArtSearchBar
       v-show="showSearchBar"
@@ -12,79 +13,133 @@
       @reset="onReset"
     />
 
-    <!-- 结构对齐 DockerPage 的单列表形态：搜索栏在卡片外，表格与页脚在卡片内
-         （平移前的页面走 DockerPage 的 search/table/footer 插槽，形态一致）。 -->
+    <!-- 结构沿用收敛页范式：搜索栏在卡片外，表格与页脚在卡片内。 -->
     <ElCard class="art-table-card" shadow="never">
-      <ArtTableHeader v-model:showSearchBar="showSearchBar" :loading="loading" @refresh="refresh" />
+      <ArtTableHeader v-model:showSearchBar="showSearchBar" :loading="loading" @refresh="refresh">
+        <template #left>
+          <!-- total 如实报全量、items 截 500：截断必须说出口，否则用户以为
+               「筛选完了就这么多」而漏看排在 500 名之后的行。 -->
+          <span class="docker-count">
+            共 {{ total }} 个镜像<template v-if="truncated">
+              · 列表显示前 {{ rows.length }} 条</template
+            >
+          </span>
+          <!-- 静默刷新失败：保留最后已知清单并说出口（与容器页副标题同一口径）。 -->
+          <span v-if="refreshError" class="docker-refresh-note">刷新失败，正在显示上次结果</span>
+        </template>
+      </ArtTableHeader>
 
-      <!-- 两种空态分开：主机上没有镜像 vs 筛选没命中（后者给「清除筛选」）。
-           纪律与容器页一致（「没有」与「筛没了」说成一句会让人以为机器空了）；
-           空态渲染在本组件、不写进 ArtTable 的 `#empty` 插槽：ArtTable 不转发该插槽
-           （内部把 ElTable 的空态写死成「暂无数据」），写进去会被静默丢弃。
-           清单还没到时也不喊「没有镜像」（那时还不知道有没有主机），故 v-if 把
-           主机清单的加载态一并算进来。 -->
-      <ArtTable
-        v-if="showTable"
-        :loading="listLoading"
-        :data="filtered"
-        :columns="columns"
-        @selection-change="onSelectionChange"
-      />
-      <!-- host-context.ts 的 reload 注释承诺：清单拉不到时页面显示「没有可管理的主机」 -->
-      <ElEmpty v-else-if="!ctx.hosts.length" class="docker-empty" description="没有可管理的主机" />
-      <ElEmpty v-else-if="hasFilter" class="docker-empty" description="没有符合筛选条件的镜像">
-        <ElButton size="small" @click="onReset">清除筛选</ElButton>
-      </ElEmpty>
-      <ElEmpty v-else class="docker-empty" description="该主机上还没有镜像" />
-
-      <!-- 底部合计是这一页的入口数字（「空间去哪了」）：总大小与可回收大小并列。
-           合计跟着筛选走 —— 底栏与表格里的行必须自洽，否则「合计」会被当成
-           与眼前行数无关的另一个数。 -->
-      <div class="docker-total">
-        <span>合计 {{ totals.count }} 个 · {{ formatByUnit('MB', totals.totalMB) }}</span>
-        <span class="docker-total__sub">
-          {{ totals.danglingCount }} 个可回收 · {{ formatByUnit('MB', totals.danglingMB) }}
-        </span>
+      <!-- 首拉失败（还没有任何行可给）：结论句 + 重试，不显示旧数据。 -->
+      <div v-if="pageState === 'error'" class="docker-tab-error">
+        <ElResult icon="error" title="镜像清单获取失败" sub-title="统一清单接口暂时不可用">
+          <template #extra>
+            <ElButton type="primary" @click="reloadAll">重试</ElButton>
+          </template>
+        </ElResult>
       </div>
 
-      <!-- 底栏写操作（spec §11.3）：清理悬空 / 仓库凭据 / 拉取 / 打标签 / 导出 tar / 载入 /
-           构建镜像（P2 分发闭环）。打标签与导出 tar 的输入是**选中的那一行**：未选中
-           一行时按钮禁用，结论句（要选一行）写在按钮旁。仓库凭据（4c）与镜像写动作
-           不同档（docker:config）：它有自己的权限门槛，不能被 canWrite 顺带挡掉 ——
-           只有 config 权限的账号也要进得了这条入口，故底栏的渲染条件把它并进来。 -->
-      <div v-if="canWrite || canConfig" class="docker-bar">
-        <ElButton
-          v-if="canDelete"
-          size="small"
-          type="danger"
-          plain
-          :disabled="busy"
-          @click="openPrune"
-        >
-          清理悬空镜像…
-        </ElButton>
-        <ElButton v-if="canConfig" size="small" @click="registryVisible = true">
-          仓库凭据…
-        </ElButton>
-        <ElButton v-if="canManage" size="small" :disabled="busy" @click="askPull">
-          拉取镜像…
-        </ElButton>
-        <ElButton v-if="canManage" size="small" :disabled="tagSaveDisabled" @click="onTagSelected">
-          打标签…
-        </ElButton>
-        <ElButton v-if="canManage" size="small" :disabled="tagSaveDisabled" @click="onSaveSelected">
-          导出 tar…
-        </ElButton>
-        <ElButton v-if="canManage" size="small" :disabled="busy" @click="askLoad">
-          载入镜像…
-        </ElButton>
-        <ElButton v-if="canManage" size="small" :disabled="busy" @click="askBuild">
-          构建镜像…
-        </ElButton>
-        <span v-if="canManage && !singleSelected" class="docker-bar__hint">
-          打标签与导出 tar 需先在列表中选中一行镜像
-        </span>
-      </div>
+      <template v-else>
+        <!-- 两种空态分开：没有可管主机 vs 筛选没命中（后者给「清除筛选」）。
+             纪律与容器页一致（「没有」与「筛没了」说成一句会让人以为机器空了）；
+             空态渲染在本组件、不写进 ArtTable 的 `#empty` 插槽：ArtTable 不转发该插槽
+             （内部把 ElTable 的空态写死成「暂无数据」），写进去会被静默丢弃。 -->
+        <ArtTable
+          v-if="showTable"
+          :loading="listLoading"
+          :data="rows"
+          :columns="columns"
+          @selection-change="onSelectionChange"
+        />
+        <ElEmpty
+          v-else-if="pageState === 'empty'"
+          class="docker-empty"
+          description="尚无可管主机"
+        />
+        <ElEmpty v-else-if="hasFilter" class="docker-empty" description="没有符合筛选条件的镜像">
+          <ElButton size="small" @click="onReset">清除筛选</ElButton>
+        </ElEmpty>
+        <ElEmpty v-else class="docker-empty" description="还没有镜像" />
+
+        <!-- 底部合计是这一页的入口数字（「空间去哪了」），主/副两行是两种口径的分工：
+             主行（合计）跟着**当前清单**走（服务端过滤后的这批；截断时 header 已另行
+             说明），与表格里的行自洽；副行（可回收）读**后端的主机级账目**（本响应
+             的 disk 数组），与可见行无关 —— prune 回收的就是主机上那批悬空镜像的
+             独占层，keyword/开关过滤与 500 条截断都影响不到它（账目只随主机筛选
+             收窄；旧实现 Σ 可见悬空行 SizeMB 在截断时少算、还把共享层算了进去）。
+             没有任何主机报账（无 df 数据/无可管主机）时如实说「不可用」，不折算成 0。 -->
+        <div class="docker-total">
+          <span>合计 {{ totals.count }} 个 · {{ formatByUnit('MB', totals.totalMB) }}</span>
+          <span class="docker-total__sub">
+            <template v-if="reclaim">
+              {{ reclaim.count }} 个可回收 · {{ formatByUnit('MB', reclaim.mb) }}
+            </template>
+            <template v-else>可回收账目不可用</template>
+          </span>
+        </div>
+
+        <!-- 底栏写操作（spec §11.3）：清理悬空 / 仓库凭据 / 拉取 / 打标签 / 导出 tar / 载入 /
+             构建镜像（P2 分发闭环）。**主机来源分两类**（跨主机表没有「当前主机」）：
+             行目标动作（打标签/导出/删除/扫描）按**行主机**派发；无行目标的整体动作
+             （清理/拉取/构建/载入）面向**主机筛选选定的那台**（没选且全场只有一台
+             可管主机时就是它；否则按钮禁用并在旁边给出结论句）。仓库凭据（4c）与
+             镜像写动作不同档（docker:config），不被 canWrite 顺带挡掉。 -->
+        <div v-if="canWrite || canConfig" class="docker-bar">
+          <ElButton
+            v-if="canDelete"
+            size="small"
+            type="danger"
+            plain
+            :disabled="busy || !targetHostId"
+            @click="openPrune"
+          >
+            清理悬空镜像…
+          </ElButton>
+          <ElButton v-if="canConfig" size="small" @click="registryVisible = true">
+            仓库凭据…
+          </ElButton>
+          <ElButton
+            v-if="canManage"
+            size="small"
+            :disabled="busy || !targetHostId"
+            @click="askPull"
+          >
+            拉取镜像…
+          </ElButton>
+          <ElButton
+            v-if="canManage"
+            size="small"
+            :disabled="tagSaveDisabled"
+            @click="onTagSelected"
+          >
+            打标签…
+          </ElButton>
+          <ElButton
+            v-if="canManage"
+            size="small"
+            :disabled="tagSaveDisabled"
+            @click="onSaveSelected"
+          >
+            导出 tar…
+          </ElButton>
+          <ElButton
+            v-if="canManage"
+            size="small"
+            :disabled="busy || !targetHostId"
+            @click="askLoad"
+          >
+            载入镜像…
+          </ElButton>
+          <ElButton
+            v-if="canManage"
+            size="small"
+            :disabled="busy || !targetHostId"
+            @click="askBuild"
+          >
+            构建镜像…
+          </ElButton>
+          <span v-if="barHint" class="docker-bar__hint">{{ barHint }}</span>
+        </div>
+      </template>
     </ElCard>
 
     <!-- 确认弹窗覆盖五种入口：清理悬空（强档逐字 DELETE）、单删（标准档）、打标签
@@ -107,37 +162,39 @@
     </DockerActionConfirm>
 
     <!-- 拉取进度对话框（4b）：底栏「拉取镜像…」的黑盒等待换成逐层实时进度。
-         hostId 跟当前主机走（对话框在受理时钉死）、成功关闭后双次重拉本页快照。 -->
-    <PullProgressDialog v-model="pullVisible" :host-id="ctx.hostId" :refresh="refresh" />
+         hostId 在受理时钉死（targetHostId = 发起时锁定的一台），成功关闭后重拉本 tab 清单。 -->
+    <PullProgressDialog v-model="pullVisible" :host-id="targetHostId" :refresh="refreshSilent" />
 
-    <!-- 构建进度对话框（P2 分发闭环）：底栏「构建镜像…」的表单（tag/上下文/
-         Dockerfile/参数）+ 逐行构建播报 + 取消。hostId 与重拉口径同拉取对话框
-        （成功后新镜像要进列表）。 -->
-    <BuildProgressDialog v-model="buildVisible" :host-id="ctx.hostId" :refresh="refresh" />
+    <!-- 构建进度对话框（P2 分发闭环）：底栏「构建镜像…」的表单 + 逐行构建播报 + 取消。
+         hostId 与重拉口径同拉取对话框（成功后新镜像要进列表）。 -->
+    <BuildProgressDialog v-model="buildVisible" :host-id="targetHostId" :refresh="refreshSilent" />
 
     <!-- 仓库凭据管理对话框（4c）：入口按钮只对 docker:config 渲染（不渲染 ≠ 禁用）。
-         凭据是**全局**的（不属于任何一台主机 —— 服务端按仓库地址解析注入），故
-         主机切换不需要像拉取对话框那样把它关掉。 -->
+         凭据是**全局**的（不属于任何一台主机 —— 服务端按仓库地址解析注入），
+         与主机筛选无关。 -->
     <RegistryCredentialsDialog v-model="registryVisible" />
   </div>
 </template>
 
 <script setup lang="ts">
   /**
-   * 镜像 tab（7a 平移自 views/images.vue，逻辑零改动）：
+   * 镜像 tab（9b：跨主机化，同容器统一表范式）。
    *
-   * 数据源从「本组件自己拉快照（useDockerHostState）」换成页面级共享上下文 ——
-   * props.state / props.loading / props.refresh 由 views/resources.vue 下发（一份快照
-   * 三 tab 共用，切 tab 不重拉）；主机上下文仍是模块的 provide/inject（页面是提供者），
-   * 本组件经 useDockerHost() 注入后取 ctx.hosts / ctx.hostId。
+   * 数据源从「页面级共享的单主机快照 + 本地过滤」换成 GET /docker/images
+   * （跨主机聚合、服务端过滤，三项 query 全部透传）—— 跨主机的表没法在单主机
+   * 快照上筛。主机维度从页面级上下文降为**筛选下拉**的一项；行归属由新增的
+   * 主机列给出。`/docker/resources?host=` 深链照旧有效（进入时作为主机筛选
+   * 初始值 —— 总览磁盘面板与镜像详情返回链路的既有链路不动）。
    *
-   * 主机切换的重置纪律（清勾选、清筛选、关拉取对话框）**没有**留在本组件监听 ——
-   * 三 tab 各写一份 watch 会在收敛页上三处漂移，故收拢为页面级一份
-   * （resources.vue 的 onHostSwitch 调用本组件暴露的 resetForHostSwitch）。
+   * 写操作按**行主机/筛选主机**派发：行目标动作的指令通道 hostId 绑定该行
+   * （useDockerCmds 给了 hostId 就不碰 provide 上下文）；无行目标的整体动作
+   * 面向主机筛选选定的那台（没选且只有一台可管主机时就是它，否则禁用 + 结论句）。
+   * 下钻语义保持：详情仍是单主机窗口 —— `/docker/image-detail/:id?host=` 的
+   * host 取**行主机**。
    */
-  import { computed, h, ref } from 'vue'
-  import { useRouter } from 'vue-router'
-  import { ElButton, ElCard, ElCheckbox, ElEmpty, ElMessage } from 'element-plus'
+  import { computed, h, ref, watch } from 'vue'
+  import { useRoute, useRouter } from 'vue-router'
+  import { ElButton, ElCard, ElCheckbox, ElEmpty, ElMessage, ElResult } from 'element-plus'
   import { formatByUnit } from '@/modules/device/utils/display'
   import { useAuth } from '@/hooks/core/useAuth'
   import {
@@ -156,42 +213,50 @@
   import PullProgressDialog from '../pull-progress-dialog.vue'
   import RegistryCredentialsDialog from '../registry-credentials-dialog.vue'
   import type { ColumnOption } from '@/types/component'
-  import { sendDockerCmd, type DockerImageItem, type DockerStateResp } from '../../api'
+  import {
+    fetchDockerImages,
+    sendDockerCmd,
+    type DockerHostItem,
+    type DockerImageListItem,
+    type DockerImageListResp
+  } from '../../api'
   import {
     classifyAcceptError,
     runErrorMessage,
     useDockerCmds,
     type DockerCmdRunResult
   } from '../../composables/useDockerCmds'
+  import { useResourceList } from '../../composables/useResourceList'
   import { lookupDockerAction } from '../../utils/actions'
-  import { filterImages, imageTotals } from '../../utils/snapshot'
+  import { imageReclaimTotals, imageTotals } from '../../utils/snapshot'
   import { formatRelativeTime, imageRefText, inUseText } from '../../utils/display'
-  import { useDockerHost } from '../../utils/host-context'
+  import { hostLabel } from '../../utils/host'
 
   defineOptions({ name: 'DockerImagesTab' })
 
   const props = defineProps<{
-    /** 页面级共享快照（resources.vue 的 useDockerHostState.state，三 tab 同源）。 */
-    state: DockerStateResp | null
-    /** 快照拉取在途（页面级一份；本 tab 的表格加载态还叠加主机清单加载）。 */
-    loading: boolean
-    /** 重拉共享快照（页面级 refresh：写指令成功后、表头刷新按钮都走它）。 */
-    refresh: () => void | Promise<void>
+    /** 页面级主机清单（resources.vue 的 useHostList，三 tab 共用）。 */
+    hosts: DockerHostItem[]
+    /** 主机清单在拉：首拉期间不能先喊「没有」（那时还不知道有没有主机）。 */
+    hostsLoading: boolean
   }>()
 
-  // 主机上下文经 provide/inject 注入（页面 resources.vue 是提供者）。
-  // 不要解构：上下文字段是 getter，解构会把 hostId 定格成 inject 那一刻的值。
-  const ctx = useDockerHost()
+  const route = useRoute()
   const router = useRouter()
   const { hasAuth } = useAuth()
 
   const showSearchBar = ref(false)
-  const searchForm = ref<{ keyword?: string; danglingOnly?: boolean; unusedOnly?: boolean }>({})
+  const searchForm = ref<{
+    keyword?: string
+    danglingOnly?: boolean
+    unusedOnly?: boolean
+    host?: string
+  }>({})
   /** 当前勾选的行：底栏「打标签 / 导出 tar」一次只作用于选中的那一行。 */
-  const selected = ref<DockerImageItem[]>([])
-  /** 拉取进度对话框的开关（4b）：开在「当前主机」上，切换主机时关掉（resetForHostSwitch）。 */
+  const selected = ref<DockerImageListItem[]>([])
+  /** 拉取进度对话框的开关（4b）：hostId 取发起时的 targetHostId（受理时钉死）。 */
   const pullVisible = ref(false)
-  /** 构建进度对话框的开关（P2）：同拉取 —— 一场构建属于受理它的那台主机。 */
+  /** 构建进度对话框的开关（P2）：同拉取。 */
   const buildVisible = ref(false)
   /** 仓库凭据对话框的开关（4c）：入口按钮受 canConfig 门控（模板里的 v-if）。 */
   const registryVisible = ref(false)
@@ -203,24 +268,77 @@
   /** 至少有一个写权限（或凭据权限）才渲染底栏操作区（没有可执行的动作就不占版面）。 */
   const canWrite = computed(() => canManage.value || canDelete.value)
 
-  /** 表格的加载态：快照在拉，或主机清单还没到（后者尚不知有没有主机，不能先喊「没有」）。 */
-  const listLoading = computed(() => props.loading || ctx.loading)
+  // ── 数据源（跨主机聚合端点；服务端过滤，参数从筛选表单现取）──────────
 
-  /** 主机切换的重置纪律（原页面 onHostSwitch 的正文，平移零改动）：
-   *  清空勾选 + 清空筛选 + 关掉拉取/构建进度对话框（一场操作属于受理它的那台
-   *  主机，对话框把 hostId 在受理时钉死，切机后让它继续跑只会让进度与结论挂在
-   *  错误的主机名下；关掉即断流，服务端随之取消那场操作——断开 = 取消是端点契约）。 */
-  function resetForHostSwitch() {
-    selected.value = []
-    searchForm.value = {}
-    pullVisible.value = false
-    buildVisible.value = false
-  }
-  defineExpose({ resetForHostSwitch })
+  /**
+   * 可回收账目（后端 disk 数组，口径见 DockerImageListResp.Disk）：底栏副行的
+   * 数据面。它与 rows 同一响应 —— 但 useResourceList 的 seq 守卫只守着 rows/total，
+   * 这条走自己的 seq（同一「最新发起者胜出」纪律）：否则并发重拉时旧响应晚到，
+   * 账目会跟当前行换批，底栏两个数字从此对不上。
+   */
+  const imageDisk = ref<DockerImageListResp['disk']>([])
+  let diskSeq = 0
 
-  // 写指令通道：受理 + 轮询 + 成功后重拉（重拉就是页面级共享的 refresh）。
-  // 主机来源走 inject（本组件是页面级 provide 的后代，setup 期注入合法）。
-  const { run, pendingId, busy } = useDockerCmds({ refresh: () => props.refresh() })
+  const {
+    rows,
+    total,
+    loading,
+    refreshError,
+    truncated,
+    pageState,
+    load,
+    refresh,
+    refreshSilent,
+    reloadAll
+  } = useResourceList<DockerImageListItem>({
+    fetcher: async (p) => {
+      const seq = ++diskSeq
+      const resp = await fetchDockerImages({
+        hostId: p.hostId || undefined,
+        keyword: p.keyword || undefined,
+        // 开关只发 true（「仅悬空/未被使用」是单侧开关）；false 侧语义留给端点。
+        dangling: p.dangling ? true : undefined,
+        unused: p.unused ? true : undefined
+      })
+      if (seq === diskSeq) imageDisk.value = resp.disk ?? []
+      return resp
+    },
+    // UI 的 key（danglingOnly/unusedOnly）在这里映射成端点参数（dangling/unused）——
+    // 不让筛选项的 key 泄漏进数据层（与容器页同一句分工）。
+    params: () => ({
+      hostId: searchForm.value.host,
+      keyword: searchForm.value.keyword,
+      dangling: searchForm.value.danglingOnly === true ? true : undefined,
+      unused: searchForm.value.unusedOnly === true ? true : undefined
+    }),
+    hosts: () => props.hosts,
+    hostsLoading: () => props.hostsLoading
+  })
+
+  /** 表格的加载态：清单在拉，或主机清单还没到（后者尚不知有没有主机，不能先喊「没有」）。 */
+  const listLoading = computed(() => loading.value || props.hostsLoading)
+
+  /** 有命中行就渲染表格；纯加载中也用表格的 loading 遮罩，空态只在加载结束后判断。 */
+  const showTable = computed(() => listLoading.value || rows.value.length > 0)
+
+  // `/docker/resources?host=` 深链兼容（总览磁盘面板的既有链路）：query 里的主机
+  // 作为**主机筛选初始值** —— 单向（用户改筛选不回写 query，host 从此是筛选状态
+  // 而不是页面状态）。watch 同时兜住 worktab 缓存实例的「带 host 返回」场景
+  // （镜像详情返回链路会回到带 host 的本页，缓存实例经它跟上新 host）。
+  watch(
+    () => route.query.host,
+    (raw, old) => {
+      const id = raw ? String(raw) : ''
+      const had = searchForm.value.host ?? ''
+      searchForm.value.host = id
+      // immediate 首跑（old 为 undefined）必拉一次；此后仅 query 真的变化时重拉 ——
+      // 没 host 深链时 id 与 had 都是 ''，靠 old 区分「首次进入」与「同值重复」。
+      if (id !== had || old === undefined) void load()
+    },
+    { immediate: true }
+  )
+
+  const hostOptions = computed(() => props.hosts.map((h) => ({ label: hostLabel(h), value: h.id })))
 
   const searchItems = computed(() => [
     {
@@ -231,23 +349,44 @@
       clearable: true
     },
     { key: 'danglingOnly', label: '仅悬空', type: 'switch' },
-    { key: 'unusedOnly', label: '未被使用', type: 'switch' }
+    { key: 'unusedOnly', label: '未被使用', type: 'switch' },
+    {
+      // 主机维度从页面级上下文（HostSwitcher）降为筛选项：全部主机 + 各台。
+      // filterable：主机多了要能敲名字找（QA 实测不可搜），与容器/卷/网络/项目页同款。
+      key: 'host',
+      label: '主机',
+      type: 'select',
+      placeholder: '全部主机',
+      clearable: true,
+      filterable: true,
+      options: hostOptions.value
+    }
   ])
 
   const hasFilter = computed(
     () =>
       Boolean(searchForm.value.keyword) ||
       Boolean(searchForm.value.danglingOnly) ||
-      Boolean(searchForm.value.unusedOnly)
+      Boolean(searchForm.value.unusedOnly) ||
+      Boolean(searchForm.value.host)
   )
 
-  const filtered = computed(() => filterImages(props.state?.images ?? [], searchForm.value))
+  /** 底栏合计主行：与表格里的行同源（服务端过滤后的这批；截断口径见 header 计数）。 */
+  const totals = computed(() => imageTotals(rows.value))
 
-  /** 底栏合计：与表格里的行同源（筛选后合计的是筛出来的这批）。 */
-  const totals = computed(() => imageTotals(filtered.value))
+  /** 底栏可回收副行：后端主机级账目的求和（null = 没有任何主机报账 → 说「不可用」）。 */
+  const reclaim = computed(() => imageReclaimTotals(imageDisk.value))
 
-  /** 有命中行就渲染表格；纯加载中也用表格的 loading 遮罩，空态只在加载结束后判断。 */
-  const showTable = computed(() => listLoading.value || filtered.value.length > 0)
+  function onSearch() {
+    // 服务端过滤：搜索按钮即重拉（无分页可重置）。
+    showSearchBar.value = true
+    void load()
+  }
+
+  function onReset() {
+    searchForm.value = {}
+    void load()
+  }
 
   // ── 底栏写操作的输入 ──
 
@@ -255,24 +394,58 @@
   /** 打标签/导出 tar 的门槛：指令不在途，且恰好选中一行（结论句在按钮旁给出）。 */
   const tagSaveDisabled = computed(() => busy.value || !singleSelected.value)
 
-  function onSelectionChange(rows: DockerImageItem[]) {
-    selected.value = rows
+  // ── 主机来源（跨主机表的写操作按发起时锁定的主机派发）───────────────
+
+  /**
+   * 无行目标的整体动作（清理/拉取/构建/载入）面向哪台主机：主机筛选选定的那台；
+   * 没选且全场只有一台可管主机时就是它（不让人先做无意义的单选）；否则留空 ——
+   * 按钮禁用，结论句（先在主机筛选中选定一台）由 barHint 给出。
+   */
+  const targetHostId = computed(() => {
+    if (searchForm.value.host) return searchForm.value.host
+    return props.hosts.length === 1 ? props.hosts[0]!.id : ''
+  })
+
+  /** 底栏提示：优先说「整体动作缺主机」（按钮在禁用中），其次说选中行的要求。 */
+  const barHint = computed(() => {
+    if (!targetHostId.value) return '清理 / 拉取 / 构建 / 载入需先在「主机」筛选中选定一台主机'
+    if (canManage.value && !singleSelected.value) {
+      return '打标签与导出 tar 需先在列表中选中一行镜像'
+    }
+    return ''
+  })
+
+  /**
+   * 指令通道的主机来源：行目标动作在**入口处锁定到该行的 hostId**（useDockerCmds
+   * 在 run 入口求值，换 ref 即切主机）；同表不同机的行各发各的主机，不再有
+   * 「页面当前主机」的概念。一次操作属于发起时锁定的那台主机。
+   */
+  const cmdHostId = ref('')
+  const { run, pendingId, busy } = useDockerCmds({
+    hostId: () => cmdHostId.value,
+    refresh: refreshSilent
+  })
+
+  // ── 勾选与底栏选择入口 ──
+
+  function onSelectionChange(rowsSel: DockerImageListItem[]) {
+    selected.value = rowsSel
   }
 
   /** 底栏打标签/导出 tar：输入是选中的那一行（未选中时按钮已禁用，这里再兜一道）。 */
   function onTagSelected() {
     if (selected.value.length !== 1) return
-    askTag(selected.value[0])
+    askTag(selected.value[0]!)
   }
   function onSaveSelected() {
     if (selected.value.length !== 1) return
-    askSave(selected.value[0])
+    askSave(selected.value[0]!)
   }
 
   // ── 指令引用与结果回执 ──
 
   /** 该行的指令引用：有仓库标签用它；无标签的镜像退回镜像 id（两者都是协议认的引用）。 */
-  function actionRef(image: DockerImageItem): string {
+  function actionRef(image: DockerImageListItem): string {
     return image.repoTags?.[0] || image.id
   }
 
@@ -297,6 +470,8 @@
 
   /** 清理悬空镜像：强档（组件按注册表给逐字 DELETE 形态），勾选项决定是否连带清理未使用镜像。 */
   function openPrune() {
+    // 整体动作：主机在发起时锁定为筛选选定的那台（受理后不再随筛选变化）。
+    cmdHostId.value = targetHostId.value
     pruneIncludeAll.value = false
     confirmState.value = {
       visible: true,
@@ -325,7 +500,8 @@
    * src 在打开时定住（选中那行的引用）；dst 由弹窗带回（payload.value）。
    * 协议对打标签不要求 confirm 值，target 也不发（主参数就是 src/dst）。
    */
-  function askTag(image: DockerImageItem) {
+  function askTag(image: DockerImageListItem) {
+    cmdHostId.value = image.hostId
     confirmState.value = {
       visible: true,
       kind: 'tag',
@@ -341,7 +517,8 @@
    *   2) 结果 alreadyExists=true 时弹窗**就地**切到逐字档（照抄文件名确认覆盖），
    *      用户照抄后带 overwrite=true 重发（提交分支见 onConfirmSubmit 的 save 路径）。
    */
-  function askSave(image: DockerImageItem) {
+  function askSave(image: DockerImageListItem) {
+    cmdHostId.value = image.hostId
     confirmState.value = {
       visible: true,
       kind: 'save',
@@ -356,6 +533,7 @@
    * 在输入档的 hint 里，注册表条目给的）；主参数是文件名，无 target。
    */
   function askLoad() {
+    cmdHostId.value = targetHostId.value
     confirmState.value = {
       visible: true,
       kind: 'load',
@@ -366,11 +544,12 @@
   }
 
   /** 删除镜像：标准档确认；使用中的镜像不发指令（服务端也会拒绝），只给结论。 */
-  function openRemove(image: DockerImageItem) {
+  function openRemove(image: DockerImageListItem) {
     if (image.inUse) {
       ElMessage.warning('镜像正被容器使用，需先删除相关容器后再删除镜像')
       return
     }
+    cmdHostId.value = image.hostId
     confirmState.value = {
       visible: true,
       kind: 'remove',
@@ -462,13 +641,16 @@
    * 只读的「详情」走 action-menu 的 extraItems（写动作的权限/禁用/🔒 规则都在它里面对，
    * 页面另拼一份等于两处各维护一遍）；写动作（扫描/打标签/导出/删除）走 actions，标签、
    * 权限、危险色全部取自动作注册表。扫描（P3·安全面）也走注册表条目：行内就近触发，
-   * 分钟级的进行态由任务中心呈现（见 onScanImage 的取舍注释）。
+   * 分钟级的进行态由任务页呈现（见 onScanImage 的取舍注释）。
    *
    * 「使用中」的镜像不把删除放进 actions：action-menu 的 disabled 是**整组**禁用，表达不了
    * 「只禁删除」（打标签/导出/扫描对在用镜像依然合法），故删除改为 extraItems 里的**禁用条目**，
    * 结论写在条目上（禁用的条目点不动，结论只能在看得见的地方给）。这是基础设施的缺口。
    */
-  function rowMenuItems(row: DockerImageItem): { actions: string[]; extraItems: RowMenuItem[] } {
+  function rowMenuItems(row: DockerImageListItem): {
+    actions: string[]
+    extraItems: RowMenuItem[]
+  } {
     const extraItems: RowMenuItem[] = [
       { key: 'detail', label: '详情', icon: 'ri:eye-line', auth: PermDockerInspect }
     ]
@@ -489,7 +671,7 @@
     return { actions, extraItems }
   }
 
-  function onRowMenu(row: DockerImageItem, item: { action: string }) {
+  function onRowMenu(row: DockerImageListItem, item: { action: string }) {
     switch (item.action) {
       case 'detail':
         openDetail(row)
@@ -509,18 +691,19 @@
   }
 
   /**
-   * 安全扫描（P3·安全面）：行内触发 + 任务中心看进度 —— **只受理、不轮询**。
+   * 安全扫描（P3·安全面）：行内触发 + 任务页看进度 —— **只受理、不轮询**。
    *
    * 为什么不像其它行内动作那样走 runWrite（受理 + 轮询到终态）：useDockerCmds 的
    * 在途伴随 busy（全局禁用操作栏），而真扫描以分钟计（trivy 首扫还要下载漏洞库）——
-   * 把整页锁十几分钟换不来任何新信息；「pending 期间任务中心可见」正是长任务的
-   * 可见性要求（受理即留痕，终态结论句也落在任务中心）。报告本体在镜像详情页的
+   * 把整页锁十几分钟换不来任何新信息；「pending 期间任务页可见」正是长任务的
+   * 可见性要求（受理即留痕，终态结论句也落在任务页）。报告本体在镜像详情页的
    * 「安全」Tab 读取：再点一次扫描会命中服务端 24h 缓存秒回最近一次结果。
    */
-  async function onScanImage(image: DockerImageItem): Promise<void> {
+  async function onScanImage(image: DockerImageListItem): Promise<void> {
     try {
-      await sendDockerCmd(ctx.hostId, { action: 'image:scan', target: actionRef(image) })
-      ElMessage.success('已发起安全扫描，进度可在任务中心查看')
+      // 主机是**行主机**：跨主机表里扫描对象是「那台机器上的那个镜像」。
+      await sendDockerCmd(image.hostId, { action: 'image:scan', target: actionRef(image) })
+      ElMessage.success('已发起安全扫描，进度可在任务页查看')
     } catch (e) {
       // 受理期结论（离线/同目标已在执行/无权限）分类后给出：行内动作没有就地
       // 结论的容器，toast 是这条入口唯一的反馈位。
@@ -528,18 +711,19 @@
     }
   }
 
-  function openDetail(row: DockerImageItem) {
+  /** 详情：单主机窗口语义不变 —— host 取**行主机**（镜像属于那台机器）。 */
+  function openDetail(row: DockerImageListItem) {
     void router.push({
       name: 'DockerImageDetail',
       // 镜像 id 带 `sha256:` 冒号，作为路由参数必须编码（详情页解码后回显短 id）。
       params: { id: encodeURIComponent(row.id) },
-      query: { host: ctx.hostId }
+      query: { host: row.hostId }
     })
   }
 
   // ── 表格列 ──
 
-  const columns = computed<ColumnOption<DockerImageItem>[]>(() => {
+  const columns = computed<ColumnOption<DockerImageListItem>[]>(() => {
     // 显式建立依赖：行内菜单的禁用态与权限显隐来自这些信号，而 formatter 要到表格
     // 渲染时才执行 —— 不在这里读一次，列配置就不会随它们变化而重算（表格会停在旧状态）。
     void pendingId.value
@@ -547,9 +731,10 @@
     void canManage.value
     void canDelete.value
     // 列优先级：手机横屏（<768）只留「仓库:标签 / 使用 / 操作」与勾选列（「使用」是
-    // 镜像的状态与回收决策依据）；序号在平板竖屏起出现；大小、创建时间是元数据，
-    // 低于桌面隐藏（底栏已给出合计，精确时刻在详情页）。数据列一律 minWidth，
-    // 固定宽度只留给 selection/index/操作这类结构性列，见 responsive-columns.ts 的约定。
+    // 镜像的状态与回收决策依据）；序号与主机在平板竖屏起出现（跨主机表的行归属是
+    // 排查第一线索）；大小、创建时间是元数据，低于桌面隐藏（底栏已给出合计，
+    // 精确时刻在详情页）。数据列一律 minWidth，固定宽度只留给 selection/index/操作
+    // 这类结构性列，见 responsive-columns.ts 的约定。
     return [
       // 勾选列只在有管理权限时出现：只有底栏的打标签/导出 tar 用得上它。
       ...(canManage.value ? [{ type: 'selection' as const, width: 46 }] : []),
@@ -559,7 +744,17 @@
         label: '仓库:标签',
         minWidth: 240,
         showOverflowTooltip: true,
-        formatter: (row: DockerImageItem) => imageRefText(row)
+        formatter: (row: DockerImageListItem) => imageRefText(row)
+      },
+      {
+        // 主机列是跨主机表的核心新增：同名镜像可能散在多台机器，排查时
+        // 「先定位在哪台」是第一句（与容器统一表同一档：平板竖屏起可见）。
+        prop: 'hostname',
+        label: '主机',
+        minWidth: 120,
+        showOverflowTooltip: true,
+        hideBelow: 'tablet',
+        formatter: (row: DockerImageListItem) => row.hostname || row.hostId
       },
       {
         prop: 'sizeMb',
@@ -567,7 +762,7 @@
         minWidth: 110,
         // 大小是元数据（底栏合计里已有），低于桌面隐藏。
         hideBelow: 'desktop',
-        formatter: (row: DockerImageItem) => formatByUnit('MB', row.sizeMb)
+        formatter: (row: DockerImageListItem) => formatByUnit('MB', row.sizeMb)
       },
       {
         prop: 'created',
@@ -575,21 +770,22 @@
         minWidth: 140,
         // 相对时间是元数据，精确时刻在详情页给。
         hideBelow: 'desktop',
-        formatter: (row: DockerImageItem) => (row.created ? formatRelativeTime(row.created) : '—')
+        formatter: (row: DockerImageListItem) =>
+          row.created ? formatRelativeTime(row.created) : '—'
       },
       {
         prop: 'inUse',
         label: '使用',
         minWidth: 150,
         showOverflowTooltip: true,
-        formatter: (row: DockerImageItem) => inUseText(row)
+        formatter: (row: DockerImageListItem) => inUseText(row)
       },
       {
         prop: 'operation',
         label: '操作',
         width: 100,
         fixed: 'right' as const,
-        formatter: (row: DockerImageItem) => {
+        formatter: (row: DockerImageListItem) => {
           const buttons: ReturnType<typeof h>[] = []
           if (hasAuth(PermDockerInspect)) {
             // 主操作「详情」常驻图标按钮，次要操作收进 ⋯（spec §11.0：不把详情埋进下拉）。
@@ -616,22 +812,46 @@
     ]
   })
 
-  function onSearch() {
-    // 搜索是**本地筛选**（快照已在手）：不打接口，故不需要分页重置。
-    showSearchBar.value = true
-  }
-  function onReset() {
-    searchForm.value = {}
-  }
+  // 页面级刷新入口（resources.vue 的 hero 刷新按钮对当前 tab 调它）。
+  defineExpose({ refresh, reloadAll })
 </script>
 
 <style lang="scss" scoped>
+  @use '../../views/overview-tokens' as t;
+
+  // 「清理悬空镜像…」等 plain danger 按钮的对比度 AA（浅色实测 2.87:1）：
+  // EP 默认配色的病灶与处方见 overview-tokens 的 danger-plain-aa。
+  @include t.danger-plain-aa;
+
+  // 底栏默认档按钮（仓库凭据/拉取/载入/构建…，主色蓝字）与「清除筛选」的主色文字
+  // 对比度 AA：病灶与处方见 overview-tokens 的 primary-text-aa
+  //（终审 QA D2·浅色实测 3.68:1/hover 3.27:1）。
+  @include t.primary-text-aa;
+
   // 空态渲染在本组件（ArtTable 不转发 `#empty`）：给它接近表格空态的留白。
   .docker-empty {
     padding: 56px 0;
   }
 
-  // 底栏合计：主数字（总量）与副行（可回收量）同一行、副行弱化。
+  // 首拉失败的错误块：ElResult 自带留白，这里只补卡片内边距。
+  .docker-tab-error {
+    padding: 12px 0;
+  }
+
+  // 表头计数：辅助信息，小号次要色（与容器页的 docker-count 同款）。
+  .docker-count {
+    font-size: 12px;
+    color: var(--el-text-color-secondary);
+  }
+
+  // 静默刷新失败标注：琥珀即「需要注意」（与模块内陈旧/离线标注同一套颜色语言）。
+  .docker-refresh-note {
+    margin-left: 10px;
+    font-size: 12px;
+    color: var(--el-color-warning);
+  }
+
+  // 底栏合计：主行（可见清单的合计）与副行（后端账目的可回收量）同一行、副行弱化。
   .docker-total {
     display: flex;
     align-items: baseline;

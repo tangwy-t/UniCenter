@@ -20,7 +20,8 @@ const api = vi.hoisted(() => ({
   fetchDockerState: vi.fn(),
   sendDockerCmd: vi.fn(),
   fetchDockerCmdResult: vi.fn(),
-  // 6b 任务中心抽屉（hero 入口）挂载但不开 —— import 面必须齐全。
+  // 任务中心入口（8c 整页路由）只 push path，不拉列表 —— 列表属于任务页自己的
+  // 生命周期；mock 面保持齐全（页面一旦真的读它，测试环境里也得有个函数）。
   fetchDockerTasks: vi.fn(),
   openDockerPullStream: vi.fn()
 }))
@@ -28,8 +29,13 @@ vi.mock('../api', () => ({ ...api }))
 
 // overview.vue 的 hero 入口（6b）按 docker:list 门控 —— 挂载真 useAuth 需要 pinia，
 // 与 page-render 同款替身绕开（门控行为的用例在 task-center.test.ts）。
+// docker:delete 的门单独留一个可变开关：磁盘面板清理入口的门控用例要把它关上。
+const authGate = vi.hoisted(() => ({ delete: true }))
 vi.mock('@/hooks/core/useAuth', () => ({
-  useAuth: () => ({ hasAuth: () => true, hasAnyAuth: () => true })
+  useAuth: () => ({
+    hasAuth: (perm: string) => (perm === 'docker:delete' ? authGate.delete : true),
+    hasAnyAuth: () => true
+  })
 }))
 
 import Overview from '../views/overview.vue'
@@ -388,7 +394,7 @@ describe('总览纯函数（口径错了只表现为页面说错话，必须钉�
 
     it('diskPanelSubtitle：N 台里 M 台已上报，缺报数如实分开（不折算成零）', () => {
       expect(diskPanelSubtitle(makeOverview().hosts)).toBe(
-        '共 3 台 · 2 台已上报磁盘账 · 清理入口在每行右侧'
+        '共 3 台 · 2 台已上报磁盘账'
       )
     })
   })
@@ -417,6 +423,7 @@ const STUBS = {
 const mounted: VueWrapper[] = []
 afterEach(() => {
   for (const w of mounted.splice(0)) w.unmount()
+  authGate.delete = true // 权限开关复位，防止用例间串门
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
   vi.useRealTimers()
@@ -434,6 +441,8 @@ async function makeRouter(): Promise<Router> {
         meta: { title: 'Docker 总览', icon: 'ri:ship-line' }
       },
       { path: '/docker/containers', component: { template: '<div />' } },
+      // 8a：容器详情是整页路由（异常行下钻的目标），param 段单独登记。
+      { path: '/docker/containers/:id', component: { template: '<div />' } },
       { path: '/docker/resources', component: { template: '<div />' } }
     ]
   })
@@ -527,7 +536,7 @@ describe('渲染冒烟：挂载成功 + KPI 数值来自 mock fleet', () => {
     const section = w.find('#dov-disk')
     expect(section.exists()).toBe(true)
     expect(section.find('.dov-section__sub').text()).toBe(
-      '共 3 台 · 2 台已上报磁盘账 · 清理入口在每行右侧'
+      '共 3 台 · 2 台已上报磁盘账'
     )
     const rows = w.findAll('.dov-disk__row')
     expect(rows).toHaveLength(3)
@@ -546,6 +555,27 @@ describe('渲染冒烟：挂载成功 + KPI 数值来自 mock fleet', () => {
     expect(h2.find('.dov-disk__na').text()).toContain('磁盘数据不可用')
     expect(h2.findAll('.dov-disk__bar')).toHaveLength(0)
     expect(h2.findAll('.dov-disk__go')).toHaveLength(2)
+  })
+
+  it('磁盘面板：无 docker:delete 权限时清理入口不渲染（不渲染 ≠ 禁用）', async () => {
+    authGate.delete = false
+    const { w } = await mountOverview()
+
+    // 行与结论是只读事实，照常渲染；只有两个清理入口整块缺席
+    // （QA 实测此前对无权限者照常渲染，点进去只会撞列表页的权限墙）。
+    expect(w.findAll('.dov-disk__row')).toHaveLength(3)
+    expect(w.findAll('.dov-disk__go')).toHaveLength(0)
+    expect(w.find('.dov-disk__reclaim').exists()).toBe(true)
+  })
+
+  it('异常表保护列：锁图标 + 「受保护」，不再是 🔒 emoji', async () => {
+    const { w } = await mountOverview()
+
+    // 夹具第一行 protected: true —— 锁走 ArtSvgIcon 替身（data-icon=stub）+ 文字；
+    // emoji 在无 emoji 字体的环境里是豆腐块，HTML 里不得再出现。
+    expect(w.find('.dov-anoms__lock').exists()).toBe(true)
+    expect(w.find('.dov-anoms__lock').text()).toContain('受保护')
+    expect(w.find('.dov-anoms').html()).not.toContain('🔒')
   })
 
   it('异常表：收到 2 行数据；表尾给截断口径（total=3 > items=2）', async () => {
@@ -650,7 +680,7 @@ describe('下钻（控制塔的本职：把人交棒给列表页 / 详情页）'
     expect(router.currentRoute.value.fullPath).toBe('/docker/containers?host=h1')
   })
 
-  it('异常行打开 → 容器列表页 ?host=&id=（7b：深链改指统一表抽屉，旧详情路由已删）', async () => {
+  it('异常行打开 → 容器详情页 /docker/containers/:id（8a：深链改指详情页，host 随行）', async () => {
     const { w, router } = await mountOverview()
 
     // jsdom 里 ElTable 不渲染行单元格：从组件面发 open（与列表页 onRowMenu 同口径）
@@ -666,10 +696,11 @@ describe('下钻（控制塔的本职：把人交棒给列表页 / 详情页）'
       protected: true
     })
     await flush()
-    // 跳的是 path + query 形态：统一表页读 ?host 作主机筛选初始值、?id 打开抽屉。
-    expect(router.currentRoute.value.path).toBe('/docker/containers')
+    // 8a：容器详情是一条整页路由（host 随行 —— 详情页据此还原到同一台机器）；
+    // 7b 的「列表页 + ?id 开抽屉」形态已随抽屉一起删除，query 里不该再有 id。
+    expect(router.currentRoute.value.path).toBe('/docker/containers/c1')
     expect(router.currentRoute.value.query.host).toBe('h1')
-    expect(router.currentRoute.value.query.id).toBe('c1')
+    expect(router.currentRoute.value.query.id).toBeUndefined()
   })
 })
 

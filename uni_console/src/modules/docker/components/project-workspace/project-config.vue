@@ -6,7 +6,6 @@
            旧版 compose 不上报路径时把「未知」的原因一并说出来。 -->
       <span class="pwc__files" :title="configFilesTitle">{{ configFileText() }}</span>
       <span class="pwc__spacer"></span>
-      <ElButton v-if="canInspect" size="small" text @click="viewComposeFile">查看配置</ElButton>
       <ElButton v-if="canConfig" size="small" text @click="openEditor(false)">编辑</ElButton>
       <ElButton v-if="canConfig" size="small" text @click="openEditor(true)">＋添加服务</ElButton>
       <BackupHistory
@@ -23,27 +22,21 @@
       />
     </div>
 
-    <!-- 配置查看器（一期只读流程，平移自 projects.vue）：失败原因直接显示服务端/agent
-         给的结论句 —— 这里再包一层「操作失败」只会把「设备离线」「路径没记录」「文件
-         被删」说成同一句话。 -->
-    <ElDialog
-      v-model="configDialog.visible"
-      :title="`配置 · ${configDialog.project}`"
-      width="760px"
-    >
-      <div v-loading="configDialog.loading" class="pwc__yml">
-        <ElAlert
-          v-if="configDialog.error"
-          type="warning"
-          :title="configDialog.error"
-          :closable="false"
-        />
-        <pre v-else class="pwc__yml-body">{{ configDialog.content }}</pre>
-      </div>
-      <template #footer>
-        <ElButton @click="configDialog.visible = false">关闭</ElButton>
+    <!-- 只读内容主体：等宽直显当前配置文件，宽度吃满内容区（展示面整块优先 ——
+         旧版「查看配置」窄弹层已删，内容就是这一区的主体，不再要点开才见）。
+         数据源与备份列表同一条 compose.file:read（就位即拉）：加载骨架 / 失败结论
+         + 重试 / 正文三态；失败原因直接显示服务端/agent 给的结论句 —— 这里再包
+         一层「操作失败」只会把「设备离线」「路径没记录」「文件被删」说成同一句话。 -->
+    <div class="pwc__view">
+      <ElSkeleton v-if="viewLoading" :rows="6" animated />
+      <template v-else-if="backupError">
+        <ElAlert type="warning" :title="backupError" :closable="false" />
+        <div class="pwc__view-retry">
+          <ElButton size="small" @click="loadBackups()">重新加载</ElButton>
+        </div>
       </template>
-    </ElDialog>
+      <pre v-else class="pwc__yml-body">{{ backupContent }}</pre>
+    </div>
 
     <!-- 四期配置编辑器：双模式编辑 + 保存收尾 + 独立「应用」；载入/保存/回滚都在它里面。
          集成代码平移自 projects.vue，语义零改动（编辑器内部的指令通道仍是它自己的）。 -->
@@ -72,18 +65,20 @@
 
 <script setup lang="ts">
   /**
-   * 配置区（5b 工作台）：compose-editor 四件套的宿主 —— 编辑/校验/保存（diff 预览 +
-   * 强确认 + patch/write）/应用/备份/回滚全部在 ComposeEditor 里，本组件只做三件事：
+   * 配置区（5b 工作台；布局族统一后为工作台「配置」页签的宿主）：compose-editor 四件套的
+   * 宿主 —— 编辑/校验/保存（diff 预览 + 强确认 + patch/write）/应用/备份/回滚全部在
+   * ComposeEditor 里，本组件只做三件事：
    *   ① 打开它（「编辑」/「＋添加服务」两个入口）；
    *   ② 备份历史的懒加载与回滚确认（平移自 projects.vue，语义零改动）；
-   *   ③ 一期只读的「查看配置」对话框（同上平移）。
+   *   ③ 只读内容主体：当前配置文件等宽直显（与备份列表同一条 compose.file:read
+   *     载荷 —— 旧版「查看配置」窄弹层已删，内容直接吃满页签宽度）。
    * 指令通道（run）由父页传入：与列表页「同一 composable 服务全部动作」等价，
    * 备份读/回滚写都过同一条受理 + 轮询 + 重拉通道。
    */
   import { computed, ref, watch } from 'vue'
-  import { ElAlert, ElButton, ElDialog, ElMessage } from 'element-plus'
+  import { ElAlert, ElButton, ElMessage, ElSkeleton } from 'element-plus'
   import { useAuth } from '@/hooks/core/useAuth'
-  import { PermDockerConfig, PermDockerInspect } from '@/enums/permission'
+  import { PermDockerConfig } from '@/enums/permission'
   import BackupHistory from '../compose-editor/backup-history.vue'
   import ComposeEditor from '../compose-editor/compose-editor.vue'
   import DockerActionConfirm from '../action-confirm.vue'
@@ -124,22 +119,11 @@
   const ctx = useDockerHost()
   const { hasAuth } = useAuth()
 
-  const canInspect = computed(() => hasAuth(PermDockerInspect))
   /** 四期配置编辑的权限门：编辑/添加服务/回滚三个入口都由它决定渲染。 */
   const canConfig = computed(() => hasAuth(PermDockerConfig))
 
   /** 当前项目名（指令 target 与编辑器都用它；快照未到时为空串 → 入口不动作）。 */
   const projectName = computed(() => props.project?.name ?? '')
-
-  /** 配置对话框的状态（一个对象而不是四个 ref：它们总是同时被写，分开只会漏更新）。 */
-  const configDialog = ref({
-    visible: false,
-    project: '',
-    loading: false,
-    content: '',
-    error: '',
-    hash: ''
-  })
 
   const editor = ref({ visible: false, project: '', addService: false, protected: false })
 
@@ -182,11 +166,21 @@
        不变）。 */
   const backupState = ref<ProjectBackups | null>(null)
 
+  /** 读取失败的结论句（只读内容区就地呈现；成功即清）。失败时 backupState 归
+   *  null —— 「已加载 0 份」的假象与「读失败」是两种事实。 */
+  const backupError = ref('')
+
   const backups = computed(() => backupState.value?.backups ?? [])
   const backupLoaded = computed(() => backupState.value !== null)
   const backupLoading = computed(() => backupState.value?.loading === true)
   const backupHash = computed(() => backupState.value?.hash ?? '')
   const backupContent = computed(() => backupState.value?.content ?? '')
+
+  /** 只读内容区加载态：拉取在途，或从未拿到过且还没有失败结论（失败即切结论态，
+   *  不无限转骨架）。 */
+  const viewLoading = computed(
+    () => backupLoading.value || (backupState.value === null && backupError.value === '')
+  )
 
   async function loadBackups(force = false): Promise<void> {
     const name = projectName.value
@@ -194,6 +188,7 @@
     const cur = backupState.value
     if (cur?.loading) return
     if (cur && !force) return
+    backupError.value = ''
     backupState.value = {
       loading: true,
       backups: cur?.backups ?? [],
@@ -206,9 +201,10 @@
       key: `backups:${name}`
     })
     if (!res.ok) {
-      ElMessage.error(runErrorMessage(res, '读取备份列表失败'))
-      // 读失败不留下「已加载（0 份）」的假象：清掉条目，入口回到可重试的按钮。
+      // 读失败不留下「已加载（0 份）」的假象：清掉条目，结论句就地给在内容区
+      //（服务端/agent 给的原文优先），「重新加载」即重试。
       backupState.value = null
+      backupError.value = runErrorMessage(res, '读取配置失败')
       return
     }
     const view = parseComposeFilePayload(res.payload)
@@ -218,6 +214,8 @@
       hash: view.hash,
       content: view.content
     }
+    // 动作成功但正文为空：如实说「未取到」，不展示一块空 pre。
+    if (!view.content) backupError.value = '未取到配置文件内容'
     emit('backupsCount', view.backups.length)
   }
 
@@ -282,37 +280,6 @@
     }
   }
 
-  // ── 查看配置（一期只读流程，平移自 projects.vue）──
-
-  /** 「查看配置」：受理 → 轮询 → 展示；结论句与写操作同一口径（服务端给的优先）。 */
-  async function viewComposeFile(): Promise<void> {
-    const name = projectName.value
-    if (!name) return
-    configDialog.value = {
-      visible: true,
-      project: name,
-      loading: true,
-      content: '',
-      error: '',
-      hash: ''
-    }
-    const res = await props.run({
-      action: COMPOSE_ACTIONS.read,
-      target: name,
-      key: `read:${name}`
-    })
-    if (res.ok) {
-      const p = res.payload as { content?: string; hash?: string } | undefined
-      configDialog.value.content = p?.content ?? ''
-      configDialog.value.hash = p?.hash ?? ''
-      if (!configDialog.value.content) configDialog.value.error = '未取到配置文件内容'
-    } else {
-      // 失败原因由服务端/agent 给的**结论句**承载（不再包一层「操作失败」）。
-      configDialog.value.error = runErrorMessage(res, '读取配置文件失败')
-    }
-    configDialog.value.loading = false
-  }
-
   /** 取路径的 basename（条目里只放文件名，全路径放悬浮）。 */
   function baseName(path: string): string {
     const parts = path.split('/')
@@ -339,8 +306,8 @@
     () => {
       editor.value = { visible: false, project: '', addService: false, protected: false }
       rollbackConfirm.value = { ...rollbackConfirm.value, visible: false, backup: null }
-      configDialog.value.visible = false
       backupState.value = null
+      backupError.value = ''
       emit('backupsCount', 0)
       if (ctx.hostId && projectName.value) void loadBackups()
     },
@@ -349,6 +316,12 @@
 </script>
 
 <style lang="scss" scoped>
+  @use '../../views/overview-tokens' as t;
+
+  // 「编辑 / ＋添加服务」（text 变体）与「重新加载」等默认档按钮的主色文字对比度 AA：
+  // 病灶与处方见 overview-tokens 的 primary-text-aa（终审 QA D2·浅色实测 3.68:1）。
+  @include t.primary-text-aa;
+
   .pwc__bar {
     display: flex;
     flex-wrap: wrap;
@@ -367,12 +340,17 @@
     flex: 1 1 auto;
   }
 
-  // 配置文本：等宽字体 + 保留原始换行；长行折行（yml 里可能有很长的 environment）。
-  .pwc__yml {
-    max-height: 60vh;
-    overflow: auto;
+  // 只读内容主体：与工具条拉开一点距离；**不再限高**（旧窄弹层的 60vh 约束随弹层
+  // 一起删除）—— 内容在页签里自然生长，滚动交给页面自身。
+  .pwc__view {
+    margin-top: 10px;
   }
 
+  .pwc__view-retry {
+    margin-top: 8px;
+  }
+
+  // 配置文本：等宽字体 + 保留原始换行；长行折行（yml 里可能有很长的 environment）。
   .pwc__yml-body {
     margin: 0;
     font-family: var(--art-font-family-mono, monospace);

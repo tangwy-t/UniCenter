@@ -5,8 +5,8 @@
  *
  * 布局把页面放进 `<Transition mode="out-in">`
  *（`src/components/core/layouts/art-page-content/index.vue`），而 Vue 的 Transition
- * **只支持单根元素**。实测故障（2026-09-28，生产）：项目页当时是
- * `<DockerPage>` 与 `<ElDialog>` 两个兄弟根节点，它作为「离场方」参与一次 out-in
+ * **只支持单根元素**。实测故障（2026-09-28，生产）：项目页当时是页面根与
+ * `<ElDialog>` 两个兄弟根节点，它作为「离场方」参与一次 out-in
  * 切换后，过渡内部的元素记账坏掉 —— **从该页切到任何其它页面都白屏，必须刷新**，
  * 且此后本模块所有页面都切不出来（其它模块不受影响，因为它们都是单根）。
  * 连带的可见迹象：出口区给组件根节点加的 `.art-page-view` 类在 fragment 根上落不下来。
@@ -158,7 +158,7 @@ describe('docker 模块：模板必须单根（否则切页后白屏，必须刷
     // 传的是 templateOf 的产物（已剥掉外层 <template> 包裹），故这里也只给内部内容
     expect(rootCount('<div>a</div>').count).toBe(1)
     // 这正是修复前 projects.vue 的形态：两个兄弟根（页面 + 对话框）
-    expect(rootCount('<DockerPage>a</DockerPage><ElDialog>b</ElDialog>').count).toBe(2)
+    expect(rootCount('<PageRoot>a</PageRoot><ElDialog>b</ElDialog>').count).toBe(2)
     expect(rootCount('<!-- c --><div />').count).toBe(1)
     expect(rootCount('<div><br><img src="x"></div>').count).toBe(1)
     expect(rootCount('<div :t="a > b">x</div>').count).toBe(1)

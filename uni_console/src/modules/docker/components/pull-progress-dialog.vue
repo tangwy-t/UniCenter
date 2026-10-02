@@ -115,8 +115,10 @@
           开始拉取
         </ElButton>
       </template>
-      <!-- 拉取在途只有一条出路：取消（断流 → 服务端终止拉取）。ESC 与遮罩点击此时
-           都被关掉（action-confirm 的 loading 纪律）：误触不该杀掉一场进行中的拉取。 -->
+      <!-- 拉取在途只有一条出路：取消（断流 → 服务端 best-effort cancel；是否真被
+           截止按拉取的实际结局结算，见后端 pull_progress.go 的竞态注释 —— 措辞
+           不承诺因果）。ESC 与遮罩点击此时都被关掉（action-confirm 的 loading
+           纪律）：误触不该杀掉一场进行中的拉取。 -->
       <ElButton v-else-if="phase === 'pulling'" :disabled="canceled" @click="cancelPull">
         {{ canceled ? '已取消' : '取消拉取' }}
       </ElButton>
@@ -244,7 +246,7 @@
   })
   const canceled = ref(false)
   const streamEnded = ref(false)
-  /** '' = 流还连着；'open' = 接入失败（拉取仍在服务端跑）；'broken' = 连上后断开（断开即取消）。 */
+  /** '' = 流还连着；'open' = 接入失败（拉取仍在服务端跑）；'broken' = 连上后断开（不承诺因果：是否被截止按实际结局结算）。 */
   const streamFailed = ref<'' | 'open' | 'broken'>('')
   const streamFailText = ref('')
   const resultState = ref<ResultState | null>(null)
@@ -303,8 +305,8 @@
     }
     if (streamFailed.value === 'broken') {
       return streamFailText.value
-        ? `进度流已断开（${streamFailText.value}），断开即取消拉取，正在等待收尾…`
-        : '进度流已断开，断开即取消拉取，正在等待收尾…'
+        ? `进度流已断开（${streamFailText.value}），正在等待收尾…`
+        : '进度流已断开，正在等待收尾…'
     }
     if (streamEnded.value) return '进度已全部到达，正在等待指令结果…'
     return ''
@@ -421,7 +423,8 @@
         streamTerminal = feed.terminal
         streamEnded.value = true
       } else {
-        // 读尽但没见 eof：网络层收口、应用层没收官 —— 视同断流（断开即取消）。
+        // 读尽但没见 eof：网络层收口、应用层没收官 —— 视同断流（不再观看；
+        // 是否被截止按拉取的实际结局结算）。
         streamFailed.value = 'broken'
         streamFailText.value = ''
       }
@@ -619,6 +622,11 @@
 
 <style lang="scss" scoped>
   @use '@styles/core/breakpoints.scss' as *;
+  @use '../views/overview-tokens' as t;
+
+  // 「关闭 / 取消拉取」等默认档按钮的主色文字对比度 AA：病灶与处方见 overview-tokens
+  // 的 primary-text-aa（终审 QA D2·浅色实测 3.68:1）。
+  @include t.primary-text-aa;
 
   // 输入态：错误句与提示句都是对话框内的就地结论（对话框开着，结论不放 toast）。
   .pp-input {

@@ -16,14 +16,15 @@
  *   - 漂移守卫：源码扫描钉住「不再自建 prompt」（ElMessageBox / promptText 不回潮）。
  *
  * 纯函数层（输入档描述/校验/形态推导）在 action-confirm.test.ts；页面级收敛不变量
- * （tab 切换/共享快照/主机切换重置）在 resources.test.ts。
+ * （tab 切换/聚合数据源/主机筛选）在 resources.test.ts。
  *
  * ElDialog 默认**原地**渲染（append-to-body 未开，与 action-confirm/registry
  * 同挂法），断言走 wrapper 查询。表格行勾选走真 ElTable 的 toggleRowSelection
- *（底栏按钮的启用以「恰选中一行」为前提）。
+ *（底栏按钮的启用以「恰选中一行」为前提）——需传**与表数据同一个对象引用**
+ *（ElTable 按引用比对；选中的是 fetchDockerImages 返回的那一行）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { defineComponent, h, nextTick, type Component } from 'vue'
+import { defineComponent, h, nextTick } from 'vue'
 import { ElTable, ElTableColumn } from 'element-plus'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
@@ -33,6 +34,7 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 import tabSrc from '../components/resources/images-tab.vue?raw'
 
 const api = vi.hoisted(() => ({
+  fetchDockerImages: vi.fn(),
   sendDockerCmd: vi.fn(),
   fetchDockerCmdResult: vi.fn(),
   // 拉取/构建进度对话框与凭据对话框挂载（不打开）需要的 import 面。
@@ -40,10 +42,7 @@ const api = vi.hoisted(() => ({
   openDockerBuildStream: vi.fn(),
   // P3 构建上下文上传（构建对话框的上传形态；本文件不触发，import 面补齐）。
   uploadDockerBuildContext: vi.fn(),
-  fetchDockerRegistries: vi.fn(),
-  // 主机上下文（host-context）import 面；本文件不触发 reload，不会真调。
-  fetchDockerHosts: vi.fn(),
-  fetchDockerState: vi.fn()
+  fetchDockerRegistries: vi.fn()
 }))
 vi.mock('../api', () => ({ ...api, default: undefined }))
 vi.mock('@/hooks/core/useAuth', () => ({
@@ -51,25 +50,35 @@ vi.mock('@/hooks/core/useAuth', () => ({
 }))
 
 import ImagesTab from '../components/resources/images-tab.vue'
-import { provideDockerHost } from '../utils/host-context'
+import type { DockerHostItem, DockerImageListItem } from '../api'
 
-const IMAGE = {
+/** 页面级主机清单（resources.vue 下发的 props；单主机让整体动作的 host 落定）。 */
+const HOSTS: DockerHostItem[] = [
+  {
+    id: 'h1',
+    hostname: 'bogon',
+    primaryIp: '192.168.12.105',
+    online: true,
+    dockerOk: true,
+    containers: 0,
+    images: 1,
+    stale: false
+  }
+]
+
+/** 跨主机镜像条目（宿主经 props 下发；行带归属两列 —— 写操作按行主机派发）。 */
+const IMAGE: DockerImageListItem = {
   id: 'sha256:aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff66667777888899990000',
   repoTags: ['mysql:8.0'],
   sizeMb: 596.2,
   inUse: false,
-  dangling: false
+  dangling: false,
+  hostId: 'h1',
+  hostname: 'bogon'
 }
 
-/** 页面级共享快照的最小形态（resources.vue 下发的 state；本 tab 只读 images）。 */
-const STATE = {
-  lastSync: 1790600000,
-  stale: false,
-  ageSeconds: 3,
-  neverReported: false,
-  dockerOk: true,
-  images: [IMAGE]
-}
+/** 聚合端点（GET /docker/images）的响应形态：total 全量 + items。 */
+const IMAGES = { items: [IMAGE], total: 1 }
 
 /** Art* 全局组件替身（真组件靠 unplugin 注册，测试环境里没有；保住 slot）。 */
 const passthrough = (name: string) =>
@@ -127,9 +136,10 @@ const flush = async () => {
 }
 
 /**
- * 挂镜像 tab：替身宿主提供主机上下文（页面 resources.vue 的职责 —— provideDockerHost
- * 在祖先组件里调用，tab 经 useDockerHost 注入；同组件自查表救不了子组件，故必须
- * 由独立宿主 provide）。主机清单不 reload（hostId 为空串即可 —— 指令替身不挑主机）。
+ * 挂镜像 tab（9b 起为跨主机聚合表）：主机清单经 props 由页面下发（单主机让
+ * 「整体动作」的 host 落定 —— 载入/清理这类无行目标动作面向筛选主机）；
+ * 行数据来自 fetchDockerImages（替身）。指令替身不挑主机，但断言仍看 hostId
+ * 是否按**行主机/整体主机**派发。
  */
 async function mountTab() {
   const router = createRouter({
@@ -138,22 +148,17 @@ async function mountTab() {
   })
   await router.push('/')
   await router.isReady()
-  const Host = defineComponent({
-    name: 'DockerHostProvider',
-    setup() {
-      provideDockerHost()
-      return () => h(ImagesTab, { state: STATE as never, loading: false, refresh: () => {} })
-    }
-  })
-  const wrapper = mount(Host as unknown as Component, {
+  const wrapper = mount(ImagesTab, {
+    props: { hosts: HOSTS, hostsLoading: false },
     global: { plugins: [router], stubs: STUBS }
   })
-  mounted.push(wrapper)
+  mounted.push(wrapper as VueWrapper)
   await flush()
-  return wrapper
+  return wrapper as VueWrapper
 }
 
-/** 勾选镜像表的第一行（底栏「打标签 / 导出 tar」以恰选中一行为前提）。 */
+/** 勾选镜像表的第一行（底栏「打标签 / 导出 tar」以恰选中一行为前提）。
+ *  传的是 fetchDockerImages 返回的同一个对象引用 —— ElTable 按引用比对。 */
 async function selectFirstImage(w: VueWrapper) {
   const table = w.findComponent(ElTable)
   expect(table.exists(), '镜像表未挂载').toBe(true)
@@ -202,6 +207,8 @@ beforeEach(() => {
   api.fetchDockerCmdResult.mockReset()
   api.sendDockerCmd.mockResolvedValue({ ref: 'r1' })
   api.fetchDockerCmdResult.mockResolvedValue({ status: 'succeeded', detail: '操作已完成' })
+  // 聚合端点替身：行数据经它进表（勾选/指令都从这一行出发）。
+  api.fetchDockerImages.mockResolvedValue(IMAGES)
 })
 
 describe('打标签：输入档收集新引用（校验挡提交）', () => {
@@ -233,7 +240,7 @@ describe('打标签：输入档收集新引用（校验挡提交）', () => {
     await flush()
 
     expect(api.sendDockerCmd).toHaveBeenCalledTimes(1)
-    expect(api.sendDockerCmd).toHaveBeenCalledWith(expect.any(String), {
+    expect(api.sendDockerCmd).toHaveBeenCalledWith('h1', {
       action: 'image:tag',
       target: undefined,
       options: { src: 'mysql:8.0', dst: 'uni-center/core:v2' },
@@ -279,7 +286,7 @@ describe('载入镜像：输入档收集文件名（必填，格式不前端拦�
     await flush()
 
     expect(api.sendDockerCmd).toHaveBeenCalledTimes(1)
-    expect(api.sendDockerCmd).toHaveBeenCalledWith(expect.any(String), {
+    expect(api.sendDockerCmd).toHaveBeenCalledWith('h1', {
       action: 'image:load',
       target: undefined,
       options: { filename: 'my backup.tar.gz' },
@@ -312,7 +319,7 @@ describe('导出 tar：alreadyExists 两段式（同一只弹窗内切档）', (
 
     // 第一段载荷：不带覆盖标记、不带 confirm（协议只在覆盖重发时要求照抄）。
     expect(api.sendDockerCmd).toHaveBeenCalledTimes(1)
-    expect(api.sendDockerCmd).toHaveBeenCalledWith(expect.any(String), {
+    expect(api.sendDockerCmd).toHaveBeenCalledWith('h1', {
       action: 'image:save',
       target: 'mysql:8.0',
       options: { filename: 'mysql.tar' },
@@ -340,7 +347,7 @@ describe('导出 tar：alreadyExists 两段式（同一只弹窗内切档）', (
 
     // 第二段载荷：overwrite=true + confirm=照抄的文件名（服务端逐字校验后才覆盖）。
     expect(api.sendDockerCmd).toHaveBeenCalledTimes(2)
-    expect(api.sendDockerCmd).toHaveBeenLastCalledWith(expect.any(String), {
+    expect(api.sendDockerCmd).toHaveBeenLastCalledWith('h1', {
       action: 'image:save',
       target: 'mysql:8.0',
       options: { filename: 'mysql.tar', overwrite: true },

@@ -18,16 +18,16 @@
           </p>
         </div>
         <div class="ml-auto flex items-center gap-1">
-          <!-- 任务中心入口（6b）：hero 与四个列表页的主机条是同一双眼睛 —— 总览盯
-               「舰队健康吗」，任务中心盯「刚才受理的操作都怎么样了」。权限与
-               GET /docker/tasks 同档（docker:list），无权限不渲染。不挂 pending
-               徽标：计数要为它单独拉列表且必是过期数字，进行中的数量进抽屉里看。 -->
+          <!-- 任务中心入口（6b 抽屉 → 8c 整页）：hero 与容器页 hero 两条入口是同一双
+               眼睛 —— 总览盯「舰队健康吗」，任务中心盯「刚才受理的操作都怎么样了」。
+               权限与 GET /docker/tasks 同档（docker:list），无权限不渲染。不挂 pending
+               徽标：计数要为它单独拉列表且必是过期数字，进行中的数量进任务页里看。 -->
           <ArtButtonTable
             v-if="canList"
             icon="ri:task-line"
             iconClass="bg-theme/12 text-theme"
             title="任务中心"
-            @click="tasksVisible = true"
+            @click="goTasks"
           />
           <!-- 自动刷新：盯控制塔的核心姿势是「开着不动」，手动刷会让人看过期数据而不自知；
                默认关 —— 10 秒一次的全量聚合不便宜，让用户自己决定开（与设备总览同一取舍）。 -->
@@ -39,8 +39,9 @@
           />
           <ArtButtonTable
             icon="ri:refresh-line"
-            iconClass="bg-theme/12 text-theme"
-            title="刷新"
+            :iconClass="`bg-theme/12 text-theme${loading ? ' dov-hero-refresh--loading' : ''}`"
+            :title="loading ? '刷新中…' : '刷新'"
+            :disabled="loading"
             @click="reload"
           />
         </div>
@@ -101,9 +102,7 @@
         <section id="dov-hosts" class="dov-section">
           <div class="dov-section__head">
             <span class="dov-section__title">主机</span>
-            <span class="dov-section__sub">
-              共 {{ hosts.length }} 台 · 点击卡片查看该主机的容器列表
-            </span>
+            <span class="dov-section__sub"> 共 {{ hosts.length }} 台 </span>
           </div>
           <div
             class="dov-hosts grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4"
@@ -131,9 +130,6 @@
         <section class="dov-section">
           <div class="dov-section__head">
             <span class="dov-section__title">异常容器</span>
-            <span class="dov-section__sub">
-              非运行态容器的抽查清单 · 按主机排序 · 点击行进入容器详情
-            </span>
           </div>
           <OverviewAnomalyTable :anomalies="anomalies" @open="goContainerDetail" />
         </section>
@@ -145,19 +141,16 @@
         <section class="dov-section">
           <div class="dov-section__head">
             <span class="dov-section__title">活动流</span>
+            <!-- 「回放…后进入实时」是防误读口径句（旧事件先出现），按①/②纪律留在
+               待裁清单里不擅删；「连接随页面激活期」是机制解释，已删。 -->
             <span class="dov-section__sub">
-              跨主机 docker 事件 · 回放各主机最近 50 条后进入实时 · 连接随页面激活期
+              跨主机 docker 事件 · 回放各主机最近 50 条后进入实时
             </span>
           </div>
           <OverviewEventsFeed />
         </section>
       </template>
     </div>
-
-    <!-- 任务中心抽屉（6b）：挂在根节点内（四态分区之外 —— 错误/空态也有任务史可看）。
-         抽屉状态随页走（hero 按钮开、路由切走即回到关闭态），与列表页主机条的入口
-         各挂一份实例、互不共享 —— 两处入口消费的是同一份跨主机读面。 -->
-    <TaskCenterDrawer v-if="canList" v-model="tasksVisible" />
   </div>
 </template>
 
@@ -183,7 +176,6 @@
   import OverviewEventsFeed from '../components/overview-events-feed.vue'
   import OverviewHostCard from '../components/overview-host-card.vue'
   import OverviewKpiTile from '../components/overview-kpi-tile.vue'
-  import TaskCenterDrawer from '../components/task-center-drawer.vue'
   import { fetchDockerOverview, type DockerHostItem } from '../api'
   import {
     buildOverviewKpis,
@@ -201,12 +193,11 @@
 
   const router = useRouter()
 
-  // ── 任务中心入口（6b） ─────────────────────────────────────────
-  // 权限与任务列表端点同档（docker:list，本页路由 authMark 同码）；入口与抽屉共用
-  // 同一判定 —— 无权限时抽屉实例也不挂。
+  // ── 任务中心入口（6b → 8c 整页路由） ────────────────────────────
+  // 权限与任务列表端点同档（docker:list，本页路由 authMark 同码）；入口是 navigation
+  // —— 任务中心自己有 URL（页面态、可刷新），不再是本页的一个就地抽屉。
   const { hasAuth } = useAuth()
   const canList = computed(() => hasAuth(PermDockerList))
-  const tasksVisible = ref(false)
 
   // ── 数据与四态 ──────────────────────────────────────────
   const meta = ref<Api.Docker.DockerOverviewResp | null>(null)
@@ -342,13 +333,18 @@
     })
   }
 
-  /** 异常行 → 容器详情抽屉（7b：深链统一指 /docker/containers?host=&id=，统一表页
-   *  用行桩打开抽屉 —— 目标容器不必在该页当前过滤视图里；host 同时还原主机筛选）。 */
+  /** 异常行 → 容器详情页（8a：深链统一指 /docker/containers/:id，host 随行 ——
+   *  目标容器不必在该页的任何筛选视图里，详情页自己有 inspect）。 */
   function goContainerDetail(row: Api.Docker.DockerOverviewAnomalyItem) {
     void router.push({
-      path: '/docker/containers',
-      query: { host: row.hostId, id: row.id }
+      path: `/docker/containers/${row.id}`,
+      query: { host: row.hostId }
     })
+  }
+
+  /** 任务中心（8c 整页）：跨主机长任务收口页，入口在总览 hero 与容器页 hero 上。 */
+  function goTasks() {
+    void router.push({ path: '/docker/tasks' })
   }
 </script>
 
@@ -366,6 +362,29 @@
     display: flex;
     flex-direction: column;
     gap: 16px;
+  }
+
+  /* ---------- 次要文字对比度 AA（P2 打磨批） ----------
+     EP 默认 --el-text-color-secondary(#909399) 对白底/浅底只有 3.08/2.97:1（QA 实测
+     2.97–3.08），低于 AA 正文线。在页面范围内把它升到 regular 档（浅色 6.1:1、暗色
+     随主题同样达标）—— 只重定义变量值，页面内所有消费该变量的元素（分区副标题、
+     KPI 副行、主机卡同步行、磁盘条标签、表格表头…）一起达标，不碰任何元素样式与布局。 */
+  .docker-overview {
+    --el-text-color-secondary: var(--el-text-color-regular);
+
+    /* hero 副标题/g-600 辅助字的对比度 AA（终审 QA D2·浅色实测 3.5:1）：
+       text-g-600 的工具变量指向 --art-gray-600(#7987a1) —— 对页底 #fafbfc 3.5:1，
+       低于 AA 正文线。页面范围内抬一档到 g-700（浅色 #4d5875 对页底 ≈6.8:1；
+       暗色 #ababba 对暗底 ≈8.9:1，随主题自适应）。只重定义工具变量值，页面内
+       所有 text-g-600 文字（hero 副标题、加载提示）一起达标，页面外无副作用。 */
+    --color-g-600: var(--art-gray-700);
+  }
+
+  /* 刷新钮 loading 态：唯一既有线索是 live-dot 变琥珀（359ms 一闪而过），刷新本身
+     没有进行中反馈 —— 图标自转 + 禁点 + 标题换「刷新中…」，三件同时给。
+     ArtButtonTable 的 svg 在其内部渲染（本页 scoped 贴不上），:deep 穿透。 */
+  .dov-hero-refresh--loading :deep(svg) {
+    animation: dov-spin 1.1s linear infinite;
   }
 
   /* ---------- 基础卡片 ---------- */

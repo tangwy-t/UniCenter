@@ -662,6 +662,11 @@
 
 <style lang="scss" scoped>
   @use '@styles/core/breakpoints.scss' as *;
+  @use '../views/overview-tokens' as t;
+
+  // 「关闭 / 取消推送」等默认档按钮的主色文字对比度 AA：病灶与处方见 overview-tokens
+  // 的 primary-text-aa（终审 QA D2·浅色实测 3.68:1）。
+  @include t.primary-text-aa;
 
   // 输入态：错误句与提示句都是对话框内的就地结论（对话框开着，结论不放 toast）。
   .sp-input {

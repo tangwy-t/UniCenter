@@ -141,20 +141,36 @@ describe('groupBatchWaves · 按主机分波', () => {
   })
 })
 
-describe('waveConclusion · 波级结论句', () => {
-  it('全成：主机名 + 计数（「bogon：12/12 成功」形态）', () => {
+describe('waveConclusion · 波级结论句（点名到目标）', () => {
+  it('全成：计数 + 成功项波级列名', () => {
     const wave = groupBatchWaves(mixedSelection())[0]!
-    expect(waveConclusion(wave, 2)).toBe('bogon：2/2 成功')
+    expect(waveConclusion(wave, ['web', 'cache'])).toBe('bogon：2/2 成功（web、cache）')
   })
 
-  it('有失败：如实分开（只报计数，明细走批末汇总）', () => {
+  it('有失败：失败项逐一可读（名 + 原因），成功项照常列名', () => {
     const wave = groupBatchWaves(mixedSelection())[0]!
-    expect(waveConclusion(wave, 1)).toBe('bogon：1/2 成功，1 项失败')
+    expect(waveConclusion(wave, ['web'], [{ name: 'cache', message: '容器处于运行状态' }])).toBe(
+      'bogon：1/2 成功（web）；失败：cache（容器处于运行状态）'
+    )
+  })
+
+  it('全失败：不给空括号，失败名单照常逐一可读', () => {
+    const wave = groupBatchWaves([row({ name: 'web' }), row({ name: 'cache' })])[0]!
+    expect(
+      waveConclusion(
+        wave,
+        [],
+        [
+          { name: 'web', message: '受保护，未发送' },
+          { name: 'cache', message: '执行超时' }
+        ]
+      )
+    ).toBe('bogon：0/2 成功；失败：web（受保护，未发送）、cache（执行超时）')
   })
 
   it('主机名为空（设备已删）回退 hostId 展示', () => {
     const wave = groupBatchWaves([row({ name: 'a', hostname: '' })])[0]!
-    expect(waveConclusion(wave, 1)).toBe('h1：1/1 成功')
+    expect(waveConclusion(wave, ['a'])).toBe('h1：1/1 成功（a）')
   })
 })
 
@@ -173,10 +189,10 @@ describe('workload-batch-bar · 波次推进与波级反馈', () => {
     // 每条指令都发给行主机（波的主机）。
     expect(api.sendDockerCmd.mock.calls.map((c) => c[0])).toEqual(['h1', 'h1', 'h2', 'h2'])
 
-    // 波级反馈：两行结论（「主机：n/n 成功」形态），批末成功 toast 一次。
+    // 波级反馈：两行结论（「主机：n/n 成功（点名）」形态），批末成功 toast 一次。
     const waveTexts = Array.from(w.findAll('.wkl-batch__wave')).map((e) => e.text())
-    expect(waveTexts).toContain('bogon：2/2 成功')
-    expect(waveTexts).toContain('nas：2/2 成功')
+    expect(waveTexts).toContain('bogon：2/2 成功（web、cache）')
+    expect(waveTexts).toContain('nas：2/2 成功（db、queue）')
     expect(elMessage.success).toHaveBeenCalledTimes(1)
     expect(elMessage.success.mock.calls[0]![0]).toBe('已执行 4 项')
 
@@ -205,10 +221,11 @@ describe('workload-batch-bar · 波次推进与波级反馈', () => {
       duration: 5000,
       message: expect.stringContaining('已执行 3 项，1 项失败：cache')
     })
-    // 波级行如实分开：bogon 波带失败旗，nas 波不受牵连。
+    // 波级行如实分开且点名到目标：bogon 波带失败旗（失败项含原因逐一可读），
+    // nas 波不受牵连。
     const failLine = w.findAll('.wkl-batch__wave.is-failed').map((e) => e.text())
-    expect(failLine).toEqual(['bogon：1/2 成功，1 项失败'])
-    expect(w.text()).toContain('nas：2/2 成功')
+    expect(failLine).toEqual(['bogon：1/2 成功（web）；失败：cache（容器处于运行状态）'])
+    expect(w.text()).toContain('nas：2/2 成功（db、queue）')
   })
 
   it('受保护目标不发送（计入失败）；成功的行照旧触发列表重拉', async () => {
@@ -225,8 +242,9 @@ describe('workload-batch-bar · 波次推进与波级反馈', () => {
     expect(api.sendDockerCmd.mock.calls[0]![1]).toMatchObject({ target: 'db' })
     expect(elMessage).toHaveBeenCalledTimes(1)
     expect(elMessage.mock.calls[0]![0].message).toContain('受保护')
-    expect(w.text()).toContain('bogon：0/1 成功，1 项失败')
-    expect(w.text()).toContain('nas：1/1 成功')
+    // 波级行点名：受保护未发送的行逐一可读（名 + 结论句），成功行照常列名。
+    expect(w.text()).toContain('bogon：0/1 成功；失败：web（')
+    expect(w.text()).toContain('nas：1/1 成功（db）')
     // 成功行触发重拉（useDockerCmds 的成功重拉纪律；落定重拉在 1.5s 后，微任务
     // 冲刷内不会到 —— 这里只钉立即那次）。
     expect(refresh).toHaveBeenCalledTimes(1)
@@ -255,6 +273,6 @@ describe('workload-batch-bar · 波次推进与波级反馈', () => {
         (c) => (c[1] as { action: string }).action === 'container:remove'
       )
     ).toBe(true)
-    expect(w.text()).toContain('bogon：2/2 成功')
+    expect(w.text()).toContain('bogon：2/2 成功（web、cache）')
   })
 })

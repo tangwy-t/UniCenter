@@ -269,6 +269,156 @@ func TestPullImageCancelStops(t *testing.T) {
 	}
 }
 
+// ── 取消/完成的竞态（B4 守卫）──────────────────────────────────────────────
+//
+// 背景（QA 实测）：用户在拉取进行中切页/关对话框 → 前端断流 → core 按取消纪律
+// 下发 cancel 帧；若 daemon 恰在同时把活干完，旧实现按「ctx 被中断」把这场**已经
+// 成功**的拉取记成「失败·拉取已取消」（任务中心红字，而 `docker images` 里镜像
+// 已经落地）。四条用例把结算规则钉死：完成的事实优先于迟到的取消，且**只有**
+// 「完成」的两条独立证据能翻案（防止顺手把真取消也放行）。
+
+// 证据一：daemon 的收尾行已经到达读循环（"Status: …" = 镜像已写进本地存储、
+// 引用已更新）—— 此后到达的 cancel 是 no-op，终态按完成结算。
+func TestPullImageCancelAfterDaemonCompletedStaysSucceeded(t *testing.T) {
+	ch := make(chan PullProgress, 8)
+	api := &stubAPI{pullCh: ch}
+	w, m, clk, sink := newPullFixture(api)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Do(context.Background(), pullCmd())
+		done <- err
+	}()
+
+	ch <- PullProgress{ID: "aaa", Status: "Pull complete"}
+	ch <- PullProgress{Status: "Status: Downloaded newer image for nginx:latest"}
+	advanceUntil(t, clk, 50*time.Millisecond, 400*time.Millisecond, func() bool { return sink.count() >= 1 })
+
+	// 用户切页/关对话框 → core 下发 cancel → 会话收摊 → 拉取用的 ctx 被中断，
+	// ImagePull 以 ctx 错误返回（替身与 SDK 同款）。
+	m.OnFrame(&agentproto.CoreDockerFrame{
+		SessionID: agentproto.DockerPullSessionID(pullRef),
+		Op:        agentproto.DockerFrameOpCancel,
+	})
+
+	if err := pullResultOf(t, done); err != nil {
+		t.Fatalf("daemon 已完成的拉取在迟到 cancel 后必须按成功结算，实际: %v", err)
+	}
+	if got := m.count(); got != 0 {
+		t.Fatalf("取消必须立刻释放槽位: %d", got)
+	}
+}
+
+// 证据二：收尾行随中断的连接一起丢了（ctx 取消直接关连接，缓冲里的尾数据不复存在）
+// —— 用独立于流的事实补判：拉取前本机没有这个引用、现在有了 = 镜像落地 = 完成。
+func TestPullImageCancelAfterImageLandedStaysSucceeded(t *testing.T) {
+	ch := make(chan PullProgress, 8)
+	// 观测序列：拉取前（第一问）= 本机没有；取消结算时（第二问）= 已经落地。
+	api := &stubAPI{pullCh: ch, imageRefIDs: []string{"", "sha256:landed"}}
+	w, m, clk, sink := newPullFixture(api)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Do(context.Background(), pullCmd())
+		done <- err
+	}()
+
+	ch <- PullProgress{ID: "aaa", Status: "Extracting", Current: 90, Total: 100}
+	advanceUntil(t, clk, 50*time.Millisecond, 400*time.Millisecond, func() bool { return sink.count() >= 1 })
+
+	m.OnFrame(&agentproto.CoreDockerFrame{
+		SessionID: agentproto.DockerPullSessionID(pullRef),
+		Op:        agentproto.DockerFrameOpCancel,
+	})
+
+	if err := pullResultOf(t, done); err != nil {
+		t.Fatalf("镜像已落地（引用从无到有）必须按成功结算，实际: %v", err)
+	}
+	if len(api.imageRefCalls) != 2 {
+		t.Fatalf("完成判据必须做拉取前后两次对照，实际 %d 次: %v", len(api.imageRefCalls), api.imageRefCalls)
+	}
+}
+
+// 反向守卫：重拉一个**本机已有**的镜像、被取消且 ID 没变 —— 不得因为「现在本机有
+// 这个镜像」就说成功（那是反向的不诚实：重拉的更新意图并没有兑现）。
+func TestPullImageCancelWithPreexistingImageStaysCanceled(t *testing.T) {
+	ch := make(chan PullProgress, 8)
+	api := &stubAPI{pullCh: ch, imageRefIDs: []string{"sha256:old1", "sha256:old1"}}
+	w, m, clk, sink := newPullFixture(api)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Do(context.Background(), pullCmd())
+		done <- err
+	}()
+
+	ch <- PullProgress{ID: "aaa", Status: "Downloading", Current: 10, Total: 100}
+	advanceUntil(t, clk, 50*time.Millisecond, 400*time.Millisecond, func() bool { return sink.count() >= 1 })
+
+	m.OnFrame(&agentproto.CoreDockerFrame{
+		SessionID: agentproto.DockerPullSessionID(pullRef),
+		Op:        agentproto.DockerFrameOpCancel,
+	})
+
+	var ee *ExecError
+	if err := pullResultOf(t, done); !errors.As(err, &ee) || ee.Msg != "拉取已取消" {
+		t.Fatalf("引用没变（旧镜像仍在）时必须记取消，实际: %v", err)
+	}
+}
+
+// 反向守卫：拉取前查不了（daemon 抖动）= 没有对照基线 —— 单看「现在有镜像」不可作
+// 判据（那可能是本来就有的），落回「取消」而不是编一条完成。
+func TestPullImageCancelWithUnknownBaselineStaysCanceled(t *testing.T) {
+	ch := make(chan PullProgress, 8)
+	api := &stubAPI{pullCh: ch, imageRefErr: errors.New("daemon busy"), imageRefIDs: []string{"sha256:any"}}
+	w, m, clk, sink := newPullFixture(api)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Do(context.Background(), pullCmd())
+		done <- err
+	}()
+
+	ch <- PullProgress{ID: "aaa", Status: "Downloading", Current: 10, Total: 100}
+	advanceUntil(t, clk, 50*time.Millisecond, 400*time.Millisecond, func() bool { return sink.count() >= 1 })
+
+	m.OnFrame(&agentproto.CoreDockerFrame{
+		SessionID: agentproto.DockerPullSessionID(pullRef),
+		Op:        agentproto.DockerFrameOpCancel,
+	})
+
+	var ee *ExecError
+	if err := pullResultOf(t, done); !errors.As(err, &ee) || ee.Msg != "拉取已取消" {
+		t.Fatalf("没有拉取前基线时不得凭「现在有镜像」判完成，实际: %v", err)
+	}
+}
+
+// isPullCompletionLine 是完成判据的**唯一**解析口（纯函数，逐条钉住形态）：
+// 只认无层 id 的 "Status: …" 消息行 —— 带 id 的层行（"Pull complete" 也是层行）
+// 与 daemon 的其它消息行都不算完成，Digest 行也刻意不算（它在引用更新之前发出，
+// 那一小段窗口由 pullLanded 兜底）。
+func TestIsPullCompletionLine(t *testing.T) {
+	cases := []struct {
+		name string
+		in   PullProgress
+		want bool
+	}{
+		{"下载完成的新镜像", PullProgress{Status: "Status: Downloaded newer image for nginx:latest"}, true},
+		{"引用已是最新", PullProgress{Status: "Status: Image is up to date for nginx:latest"}, true},
+		{"层行的 Pull complete 不算", PullProgress{ID: "aaa", Status: "Pull complete"}, false},
+		{"Digest 行不算（在引用更新之前发）", PullProgress{Status: "Digest: sha256:abc"}, false},
+		{"起手消息行不算", PullProgress{Status: "Pulling from library/nginx"}, false},
+		{"层行状态与收尾同形也不算（有 id）", PullProgress{ID: "aaa", Status: "Status: x"}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isPullCompletionLine(c.in); got != c.want {
+				t.Fatalf("isPullCompletionLine(%+v) = %v, want %v", c.in, got, c.want)
+			}
+		})
+	}
+}
+
 // TestSetSessionsNilFailsFast：会话管理器的构造契约 —— SetSessions(nil) 与
 // 「从未注入」都必须 panic（fail fast）。
 //

@@ -11,8 +11,10 @@ import (
 
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/request"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/entity"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockerpolicy"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockerstate"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/permission"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/repository"
 	agentproto "github.com/tangwy-t/UniCenter/uni_protocol"
 )
@@ -122,8 +124,10 @@ func TestTasksCrossHostOrderAndCap(t *testing.T) {
 	}
 
 	// 上限：补到超过 100 条，端点只回最新 100（索引容量 300 内）。
+	// 用 image:pull 播种（可见动作）—— container:inspect 是读面，从 P2 打磨批起
+	// 不进任务列表（守卫见 TestTasksHidesReadOnlyActions）。
 	for i := 0; i < 120; i++ {
-		seedTask(t, cs, taskRec(fmt.Sprintf("cap%03d", i), 7, 1, agentproto.DockerActionContainerInspect, "x", int64(5000+i)), true, "")
+		seedTask(t, cs, taskRec(fmt.Sprintf("cap%03d", i), 7, 1, agentproto.DockerActionImagePull, "x", int64(5000+i)), true, "")
 	}
 	resp, err = svc.Tasks(context.Background(), &request.DockerTasksQuery{})
 	if err != nil {
@@ -286,5 +290,104 @@ func TestTasksTimeoutStatusReported(t *testing.T) {
 	}
 	if got, _ := svc.Tasks(context.Background(), &request.DockerTasksQuery{Status: "done"}); len(got.Items) != 1 {
 		t.Fatalf("timeout 是终态：done 过滤必须命中, got %+v", got.Items)
+	}
+}
+
+// TestTasksHidesReadOnlyActions 钉住 P2 打磨批的读面剔除（QA 路 1 P2）：只读动作
+// 不进任务列表（「任务」的语义是变更/长任务），判定依据 = 策略表的 inspect 档。
+//
+// 守卫同时钉住「读面 == inspect 档」这条不变量：写死名单与策略表现状互为对照 ——
+// 将来给某个动作换档位（或新增 inspect 档动作）时这里必有一边红灯，逼一次
+// 「它还算不算任务」的重新裁定，而不是让列表被悄悄刷屏或悄悄吞掉一条变更。
+func TestTasksHidesReadOnlyActions(t *testing.T) {
+	// 实现单元直检：inspect 档剔除、manage 档的 image:scan 放行（长任务）、
+	// 未知动作放行（fail-open：多显示一行好过静默吞掉历史记录）。
+	if !dockerTaskReadOnly(agentproto.DockerActionContainerLogs) {
+		t.Fatal("container:logs 属于读面，必须剔除")
+	}
+	if dockerTaskReadOnly(agentproto.DockerActionImageScan) {
+		t.Fatal("image:scan 是长任务（manage 档），必须留在任务列表")
+	}
+	if dockerTaskReadOnly("not:an:action") {
+		t.Fatal("策略表查不到的动作不得静默剔除")
+	}
+
+	// 读面名单（写死）与策略表 inspect 档（现状）必须恰好相等。
+	readOnly := []string{
+		agentproto.DockerActionContainerInspect,
+		agentproto.DockerActionContainerLogs,
+		agentproto.DockerActionContainerStats,
+		agentproto.DockerActionImageInspect,
+		agentproto.DockerActionComposeLogs,
+		agentproto.DockerActionComposeFileRead,
+	}
+	inspectInPolicy := []string{}
+	for _, p := range dockerpolicy.All() {
+		if p.Perm == permission.PermDockerInspect {
+			inspectInPolicy = append(inspectInPolicy, p.Action)
+		}
+	}
+	inspectSet := map[string]struct{}{}
+	for _, a := range inspectInPolicy {
+		inspectSet[a] = struct{}{}
+	}
+	if len(inspectInPolicy) != len(readOnly) {
+		t.Fatalf("读面名单与策略表 inspect 档条数不一致: 名单 %v, 策略表 %v", readOnly, inspectInPolicy)
+	}
+	for _, a := range readOnly {
+		if _, ok := inspectSet[a]; !ok {
+			t.Fatalf("动作 %s 不在策略表 inspect 档（名单与实现已漂移）: %v", a, inspectInPolicy)
+		}
+	}
+
+	dev7 := &entity.Device{Hostname: "h7"}
+	dev7.ID = 7
+	svc, cs, _, _ := newTaskSvc(t, taskDeviceLookup{devs: map[uint64]*entity.Device{7: dev7}}, taskUserLookup{})
+
+	created := int64(1000)
+	for _, a := range readOnly {
+		seedTask(t, cs, taskRec("ro-"+a, 7, 1, a, "x", created), true, "")
+		created++
+	}
+	// 变更/长任务代表：pull（长任务）、restart（变更）、scan（读语义但 manage 档，
+	// P3 设计要求它在任务中心留痕）、compose.file:write（配置编辑）。
+	wantOrder := []string{
+		agentproto.DockerActionComposeFileWrite,
+		agentproto.DockerActionImageScan,
+		agentproto.DockerActionContainerRestart,
+		agentproto.DockerActionImagePull,
+	}
+	for _, a := range []string{
+		agentproto.DockerActionImagePull,
+		agentproto.DockerActionContainerRestart,
+		agentproto.DockerActionImageScan,
+		agentproto.DockerActionComposeFileWrite,
+	} {
+		seedTask(t, cs, taskRec("vi-"+a, 7, 1, a, "x", created), true, "")
+		created++
+	}
+
+	resp, err := svc.Tasks(context.Background(), &request.DockerTasksQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Items) != len(wantOrder) {
+		t.Fatalf("任务列表应只含变更/长任务 %d 条, got %d (%+v)",
+			len(wantOrder), len(resp.Items), resp.Items)
+	}
+	for i, want := range wantOrder {
+		if resp.Items[i].Action != want {
+			t.Fatalf("可见动作[%d] = %s, want %s（读面剔除 + 降序）", i, resp.Items[i].Action, want)
+		}
+	}
+	// action 过滤对读面同样收口：显式查只读动作得空列表，而不是把它漏出来。
+	for _, a := range readOnly {
+		got, err := svc.Tasks(context.Background(), &request.DockerTasksQuery{Action: a})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got.Items) != 0 {
+			t.Fatalf("action=%s 必须被读面剔除, got %+v", a, got.Items)
+		}
 	}
 }

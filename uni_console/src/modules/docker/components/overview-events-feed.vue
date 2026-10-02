@@ -32,7 +32,11 @@
           <span class="dov-feed__action">{{ r.action }}</span>
           <span class="dov-feed__actor dov-mono" :title="r.actor">{{ r.actor }}</span>
           <span class="dov-feed__host" :title="`主机 ${r.host}`">{{ r.host }}</span>
-          <span class="dov-feed__time">{{ eventRelativeTime(r.item.t, nowSec) }}</span>
+          <!-- 相对时间随 1 秒心跳走；悬停给绝对时刻（title，最小侵入 —— 不加列）。
+               两个时间同源（r.tSec 由条目毫秒戳除千得来，见行模型）。 -->
+          <span class="dov-feed__time" :title="r.clock">{{
+            eventRelativeTime(r.tSec, nowSec)
+          }}</span>
         </li>
       </ul>
       <!-- 零条目时的说明：连接中 / 已断开 / 舰队安静各有其句，不给一块空框让人猜。 -->
@@ -56,7 +60,10 @@
    *      的同款语义：暂停只停自动滚动，不停流 —— 暂停期间到达的事件照常进窗口，
    *      只是不顶走阅读位置）；
    *   3. 相对时间的 1 秒节流刷新（tick 只动一个 nowSec ref，百行文本重算是
-   *      可忽略的成本，换掉的是「09:41:23」这类要心算的绝对时刻）。
+   *      可忽略的成本，换掉的是「09:41:23」这类要心算的绝对时刻）；悬停时间列
+   *      给绝对时刻（title）——「多久之前」与「哪一刻」两个问题都要有答案，
+   *      后者是排障对账的引用钥匙。注意条目 t 是**毫秒**戳（core 透传 agent 的
+   *      UnixMilli），相对文案前必须除千（行模型的 tSec），否则恒「刚刚」。
    */
   import {
     computed,
@@ -73,6 +80,7 @@
   import {
     createEventsFeed,
     eventActionText,
+    eventClockTime,
     eventFeedHint,
     eventRelativeTime,
     eventTypeMeta,
@@ -119,6 +127,10 @@
     action: string
     actor: string
     host: string
+    /** 相对时间的秒值（条目 t 是毫秒戳，这里除千 —— 曾按秒直减，「多久之前」恒「刚刚」）。 */
+    tSec: number
+    /** 绝对时刻（悬停 title）：随条目定型，不随 1 秒心跳重算。 */
+    clock: string
   }
   const rows = computed<EventRow[]>(() =>
     entries.value.map((e) => {
@@ -130,7 +142,9 @@
         action: eventActionText(e.action),
         // 名字优先，其次短 id（sha256 前缀剥掉，容器 id 与镜像摘要同一形态）
         actor: e.actorName || e.actorId.replace(/^sha256:/, '').slice(0, 12) || '—',
-        host: e.hostname || `主机 ${e.hostId}`
+        host: e.hostname || `主机 ${e.hostId}`,
+        tSec: e.t / 1000,
+        clock: eventClockTime(e.t)
       }
     })
   )
@@ -352,6 +366,10 @@
   @use '../views/overview-tokens' as t;
   @use '@styles/core/breakpoints.scss' as *;
 
+  // 「重试」等默认档按钮的主色文字对比度 AA：病灶与处方见 overview-tokens
+  // 的 primary-text-aa（终审 QA D2·浅色实测 3.68:1）。
+  @include t.primary-text-aa;
+
   @include t.pulse-keyframes;
 
   .dov-feed {
@@ -418,7 +436,10 @@
 
   .dov-feed__meta {
     margin-left: auto;
-    color: var(--el-text-color-placeholder);
+    // 账目口径句的对比度：placeholder 档（#a8abb2）在浅色主题下于白卡实测
+    // 2.3:1，远低于 AA 4.5:1 —— 升到 regular 档（#606266 于白卡约 6.1:1；暗色
+    // 主题的 regular 是 85% 白，同样只升不降）。只换色值，形态不动。
+    color: var(--el-text-color-regular);
     font-size: 12px;
     white-space: nowrap;
   }

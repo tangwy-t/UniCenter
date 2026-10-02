@@ -38,7 +38,7 @@ const FORBIDDEN = [
   'HTTP', // 状态码是排障线索，不进页面
   'exit code',
   'stale', // 协议字段名（页面文案是「数据陈旧」）
-  'compose.file:read', // 动作名（页面只说「查看配置」）
+  'compose.file:read', // 动作名（页面只说「配置」/「编辑」）
   'container:logs',
   'container:inspect',
   'image:inspect'
@@ -76,7 +76,7 @@ describe('docker 模块页面文案：不得把实现细节写给用户看', () 
   it('扫描不是空转：确实扫到了模板文件', () => {
     const files = viewFiles(ROOT)
     expect(files.length).toBeGreaterThan(0)
-    expect(files.some((f) => f.endsWith('components/docker-page.vue'))).toBe(true)
+    expect(files.some((f) => f.endsWith('components/workload-table.vue'))).toBe(true)
   })
 
   it('属性名、类名、插值与注释都不算页面文字（分层口径的自检）', () => {
@@ -99,6 +99,17 @@ describe('docker 模块页面文案：不得把实现细节写给用户看', () 
     const text = renderedText(templateOf(readFileSync(file, 'utf8')))
     for (const term of FORBIDDEN) {
       expect(text, `${file} 的页面文案出现了内部术语「${term}」`).not.toContain(term)
+    }
+  })
+
+  it('模板渲染文本不得残留 markdown 强调记号（**）', () => {
+    // 插值（{{ }}）吃不了 HTML 标签：文案里残留的 `**` 会原样显示在页面上
+    // （同类漏网在设备模块的图卡「用途」提示里出现过一次）。这里只查模板静态
+    // 文本 —— 插值取值的来源是模块 .ts 纯函数，不在本文件「只扫模板渲染文本」
+    // 的作用面内（见文件头分层说明），那类字符串的回归由各自的行为测试承担。
+    for (const file of viewFiles(ROOT)) {
+      const text = renderedText(templateOf(readFileSync(file, 'utf8')))
+      expect(text, `${file} 的模板文本残留了 markdown 星号（**）`).not.toContain('**')
     }
   })
 })

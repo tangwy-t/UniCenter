@@ -153,6 +153,13 @@ type VolumeInfo struct {
 	Driver string
 	// SizeBytes 为 nil 表示**用量未知**（部分驱动不提供），页面显示「—」而不是 0。
 	SizeBytes *int64
+	// Labels 是卷标签（df 与 volume ls 两条路径都带）。
+	//
+	// 为什么快照要读它：compose 给自建卷打 `com.docker.compose.project` —— 容器全被
+	// 摘掉（scale 0）之后，卷标签是「这个项目还在本机」的独立痕迹之一（见
+	// projectsFrom 的项目归纳）。它不进协议（快照的卷条目用不上标签，项目归纳在
+	// agent 侧一次做完），故只是本域类型上的一个字段。
+	Labels map[string]string
 }
 
 // DiskUsageSummary 是 system df 的磁盘占用汇总（六期 6a：磁盘治理）。
@@ -162,12 +169,28 @@ type VolumeInfo struct {
 // 预聚合的 TotalSize/Reclaimable 类型已废弃）—— 汇总求和发生在 adapter，字段就是
 // 快照需要的四样。单位是字节（daemon 的原单位）；折 MB 发生在快照组装处
 // （与镜像条目 SizeBytes→SizeMB 同一条边界）。
+//
+// **口径 = `docker system df`**（六期对账：面板与 CLI 必须能对上，见 adapter 的
+// dfImageRows/summarizeDfImages）：镜像合计取层存储的合计（共享层只算一次），
+// 可回收取「执行对应 prune 后真会释放的字节」—— 逐项明细上不再自己发明求和口径。
 type DiskUsageSummary struct {
-	// ImagesTotalBytes 是全部镜像占用合计（含共享层的重复计入，docker CLI 同口径）。
+	// ImagesTotalBytes 是**层存储**的占用合计（daemon 的 LayersSize：每个层只算一次，
+	// 共享层不重复计入）—— 与 `docker system df` 的 Images/SIZE 列同源同值。
+	//
+	// 为什么不是 Σ 镜像条目的 Size：那会把共享层按引用它的镜像个数重复计一遍，
+	// 实测能比 df 高出两成（QA 对账发现的口径差），而「镜像吃了多少磁盘」问的正是
+	// 层存储的大小。
 	ImagesTotalBytes int64
-	// ImagesDanglingBytes 是悬空镜像（无标签 = image:prune 默认目标）占用合计。
+	// ImagesDanglingBytes 是**悬空镜像（无标签 = image:prune 默认目标）被清理时
+	// 真会释放的字节**：逐镜像只算它的独占层（Size − SharedSize，daemon 在 df 里
+	// 按层引用计数算好的），共享给他人的层不计 —— 那些层删了也不会释放。
+	//
+	// 为什么不是 Σ 悬空镜像的 Size：悬空镜像多是「重建后留下的旧镜像」，它们几乎
+	// 全部层都与仍在用的镜像共享（实测：承诺 3.04GB、prune 实际只回收 2052 字节 ——
+	// 2052 字节正是它独占的配置/清单），Σ Size 报的是「从没存在过的空间」。
 	ImagesDanglingBytes int64
 	// VolumesTotalBytes 是已知体积卷的求和（非 local 驱动 -1 未知哨兵排除在外，下界）。
+	// 与 `docker system df` 的 Local Volumes/SIZE 同口径（daemon 也只加已知项）。
 	VolumesTotalBytes int64
 	// BuildCacheBytes 是构建缓存占用合计（协议没有对应的 prune 动作，纯账面事实）。
 	BuildCacheBytes int64
@@ -180,6 +203,10 @@ type NetworkInfo struct {
 	Scope           string
 	Internal        bool
 	ContainersCount int
+	// Labels 是网络标签（与 VolumeInfo.Labels 同一用途与同一条理由）：compose 自建
+	// 网络带 `com.docker.compose.project`，是 scale 0 之后项目仍在的痕迹 ——
+	// 项目归纳（projectsFrom）靠容器标签 ∪ 网络/卷标签，不再漏掉没有容器的项目。
+	Labels map[string]string
 }
 
 // ── P2·分发面（image:build / image:push）的本域参数 ────────────────────────
@@ -303,6 +330,13 @@ type DockerAPI interface {
 	// ContainerLogs 取尾部日志；truncated 表示因尺寸上限被截断。
 	ContainerLogs(ctx context.Context, name string, tail int, since int64) (lines string, truncated bool, err error)
 	ImageInspect(ctx context.Context, ref string) (ImageDetail, error)
+	// ImageRefID 把一个镜像引用（tag / digest / ID 形态，daemon 的解析口径）折成
+	// 本机镜像 ID。
+	//
+	// 返回 ("", nil) = **本机没有这个引用**（不是错误）—— 与「查询本身失败」
+	// （err != nil）严格分开：拉取的完成判据（pull_progress.go 的 pullLanded）拿它
+	// 做「拉取前后镜像有没有变」的对照，「没有」是事实，「查不了」不可作判据。
+	ImageRefID(ctx context.Context, ref string) (string, error)
 	// ComposeVersion 探测 compose 形态与版本（单一 flavor 纪律：只在进程内第一次调用时真正执行）。
 	ComposeVersion(ctx context.Context) (flavor, version string, err error)
 

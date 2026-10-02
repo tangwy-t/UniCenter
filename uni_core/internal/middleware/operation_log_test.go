@@ -1,7 +1,10 @@
 package middleware
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -322,8 +325,95 @@ func TestOperationLogRegistryOptionIsNotMasked(t *testing.T) {
 	}
 }
 
+// TestOperationLogMiddlewareBuildContextBodyExempt 是 P0-3 回归：构建上下文上传
+// 的 gzip 字节绝不进 sys_operation_log.request_params —— 落的是「二进制构建
+// 上下文 N 字节」占位。两条断言各钉一半事实：
+//   - handler 读到**完整**原文字节（豁免路径零接触 body —— 上传通道是流式
+//     水管，审计采样不得预读/截断）；
+//   - 审计里只有占位，二进制正文（可辨认的哨兵串）一个字节都不在。
+func TestOperationLogMiddlewareBuildContextBodyExempt(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := &captureOpLogService{logs: make(chan *entity.SysOperationLog, 1)}
+	r := gin.New()
+	r.Use(OperationLogMiddleware(svc, logger.NewNop()))
+
+	var handlerBodyLen int
+	r.POST("/api/v1/docker/hosts/:id/build-context", func(c *gin.Context) {
+		b, err := io.ReadAll(c.Request.Body)
+		if err != nil {
+			t.Errorf("handler 读 body 失败: %v", err)
+		}
+		handlerBodyLen = len(b)
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{"filename": "build-ctx-1.tar.gz"}})
+	})
+
+	// gzip 魔数开头的二进制正文：嵌入可辨认哨兵串（若泄漏，断言当场抓到）。
+	body := append([]byte{0x1f, 0x8b}, bytes.Repeat([]byte("SECRET-BUILD-SRC"), 256)...)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/docker/hosts/7/build-context", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/octet-stream")
+	r.ServeHTTP(w, req)
+
+	if handlerBodyLen != len(body) {
+		t.Fatalf("handler 应收到完整原文字节（%d），实际 %d —— 豁免路径不得预读/截断 body", len(body), handlerBodyLen)
+	}
+	entry := waitLog(t, svc)
+	if entry.RequestParams == nil {
+		t.Fatal("占位文案必须落 request_params（这次上传发生过，审计要看得见）")
+	}
+	got := *entry.RequestParams
+	if want := fmt.Sprintf("二进制构建上下文 %d 字节", len(body)); got != want {
+		t.Fatalf("request_params = %q, want 占位 %q", got, want)
+	}
+	if strings.Contains(got, "SECRET-BUILD-SRC") {
+		t.Fatal("二进制正文不得进审计")
+	}
+}
+
+// TestOperationLogMiddlewareOctetStreamAutoExempt 是豁免规则的普适腿：
+// **未声明**的端点只要按惯例声明 octet-stream 就自动豁免 body 捕获（泛化
+// 占位文案）—— 「今后任何流式端点都不进 body 捕获」的落点：新端点忘了登记
+// 也不会把二进制正文漏进审计。chunked（无 Content-Length）时说「长度未知」。
+func TestOperationLogMiddlewareOctetStreamAutoExempt(t *testing.T) {
+	cases := []struct {
+		name       string
+		contentLen int64
+		wantSuffix string
+	}{
+		{"带长度", 1024, "二进制请求体 1024 字节"},
+		{"chunked 无长度", -1, "二进制请求体（长度未知）"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			svc := &captureOpLogService{logs: make(chan *entity.SysOperationLog, 1)}
+			r := gin.New()
+			r.Use(OperationLogMiddleware(svc, logger.NewNop()))
+			r.POST("/api/v1/uploads/future-binary", func(c *gin.Context) {
+				_, _ = io.Copy(io.Discard, c.Request.Body)
+				c.JSON(http.StatusOK, gin.H{"code": 0})
+			})
+
+			body := bytes.Repeat([]byte{0x1f, 0x8b}, 512)
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/uploads/future-binary", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/octet-stream")
+			req.ContentLength = tc.contentLen
+			r.ServeHTTP(w, req)
+
+			entry := waitLog(t, svc)
+			if entry.RequestParams == nil {
+				t.Fatal("占位文案必须落 request_params")
+			}
+			if got := *entry.RequestParams; got != tc.wantSuffix {
+				t.Fatalf("request_params = %q, want %q", got, tc.wantSuffix)
+			}
+		})
+	}
+}
+
 // captureHookSvc 是 OperationLogServiceInterface 的最小钩子替身
-//（只关心 RequestParams 就到了,与 captureOpLogService 同形态但用通道)。
+// （只关心 RequestParams 就到了,与 captureOpLogService 同形态但用通道)。
 type captureHookSvc struct {
 	logs chan *entity.SysOperationLog
 }

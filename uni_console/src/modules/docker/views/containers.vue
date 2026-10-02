@@ -19,16 +19,31 @@
         </div>
         <div class="ml-auto flex items-center gap-1">
           <!-- 创建容器（4a 创建面）：从本地镜像到运行容器的入口；与启停同级
-               docker:manage 门控（无权限不渲染 —— 分期控件矩阵的取向）。 -->
-          <ElButton
+               docker:manage 门控（无权限不渲染 —— 分期控件矩阵的取向）。
+               形态收进 ArtButtonTable 家族（布局族统一）：此前是 primary small 的
+               ElButton —— 24px 高/基础圆角 vs 两枚圆钮的 32px/6px，高度、圆角与
+               视觉重量都异族（投诉截图）；本模块列表页 hero 的按钮簇只有一个家族
+               （对齐总览 hero 的三枚图标钮）。语义不变：仍是创建入口、同一门控、
+               同一 openCreate（带当前筛选主机）。 -->
+          <ArtButtonTable
             v-if="canManage"
-            size="small"
-            type="primary"
+            type="add"
+            title="创建容器"
             :disabled="busy || batchBusy"
             @click="openCreate"
-          >
-            创建容器…
-          </ElButton>
+          />
+          <!-- 任务中心入口（移栽自被删的 docker-page 主机条，8c 整页路由）：长任务的
+               跨主机收口页，与总览 hero 的入口同一形态、同一权限档（docker:list ——
+               GET /docker/tasks 与 /docker/tasks 路由 authMark 同码），无权限不渲染。
+               不挂 pending 徽标：计数要为它单独拉列表且必是过期数字，进行中的数量进
+               任务页里看（与总览 hero 同一口径）。 -->
+          <ArtButtonTable
+            v-if="canList"
+            icon="ri:task-line"
+            iconClass="bg-theme/12 text-theme"
+            title="任务中心"
+            @click="goTasks"
+          />
           <!-- 自动刷新：容器表是轻量清单（不是总览的全量聚合），盯表的核心姿势仍是
                「开着不动」；默认关、开着时每 10 秒静默重拉（对齐 overview / 设备总览）。 -->
           <ArtButtonTable
@@ -37,10 +52,13 @@
             :title="autoRefresh ? '关闭自动刷新（每 10 秒）' : '开启自动刷新（每 10 秒）'"
             @click="autoRefresh = !autoRefresh"
           />
+          <!-- 刷新：loading 态与总览 hero 同款（图标自转 + 禁点 + 标题换「刷新中…」——
+               手动刷新期间按钮自己就是进行中反馈，不再只靠 live-dot 一闪）。 -->
           <ArtButtonTable
             icon="ri:refresh-line"
-            iconClass="bg-theme/12 text-theme"
-            title="刷新"
+            :iconClass="`bg-theme/12 text-theme${loading ? ' wkl-hero-refresh--loading' : ''}`"
+            :title="loading ? '刷新中…' : '刷新'"
+            :disabled="loading"
             @click="refresh"
           />
         </div>
@@ -104,7 +122,9 @@
             </template>
           </ArtTableHeader>
 
-          <!-- 表格 + 空态 + 行菜单在子组件（列集合守卫测试照旧从 ArtTable 断言）。 -->
+          <!-- 表格 + 空态 + 行菜单在子组件（列集合守卫测试照旧从 ArtTable 断言）。
+               行「详情 / 日志」是 navigation（8a 页面化）：本页只 emit，跳转由页面做
+               —— 表格不认识路由。 -->
           <WorkloadTable
             :rows="rows"
             :loading="loading"
@@ -112,7 +132,7 @@
             :pending-id="pendingId"
             :batch-busy="batchBusy"
             @menu-select="onMenuSelect"
-            @open-detail="(row) => openDrawer(row, 'overview')"
+            @open-detail="(row) => openDetail(row)"
             @selection-change="onSelectionChange"
             @reset-filter="onReset"
           />
@@ -140,26 +160,6 @@
       :loading="confirmLoading"
       @confirm="onConfirmSubmit"
     />
-
-    <!-- 详情抽屉：行「详情 / 日志」的原地入口（概览 + 日志 + 终端 + 环境，host 取行
-         主机）。7b 起它也是容器详情深链（?host=&id=）的落点 —— 目标行不必在当前
-         过滤视图里，用行桩打开、inspect 兜底填充（见脚本尾的深链 watch）。 -->
-    <WorkloadDrawer
-      v-model="drawerVisible"
-      :row="drawerRow"
-      :initial-tab="drawerTab"
-      :refresh="refreshSilent"
-    />
-
-    <!-- 创建抽屉（4a 创建面）：跨主机表没有「当前主机」的概念 —— 主机维度交给抽屉
-         自己的下拉（打开时预选筛选里的那台主机）；成功后的表重拉走 refreshSilent
-         （useDockerCmds 内部：立即一次 + 落定一次，双次重拉纪律）。 -->
-    <CreateContainerDrawer
-      v-model="createVisible"
-      :hosts="hosts"
-      :initial-host-id="createHostId"
-      :refresh="refreshSilent"
-    />
   </div>
 </template>
 
@@ -174,8 +174,10 @@
    * 的既有链路不动）。写操作按**行主机**派发：指令通道的 hostId 绑定
    * 当前操作行（useDockerCmds 给了 hostId 就不碰 provide 上下文）。路由、菜单零变更。
    *
-   * 7b 新增：`?id=<容器 id>` 深链在**本页**打开详情抽屉（container-detail 页删除后，
-   * 总览异常表 / 项目工作台容器行 / 镜像详情关联容器的深链统一改指这里）。
+   * 8a 页面化：容器详情与创建都成了整页路由（展示面一律整页，不用抽屉）—— 本页只剩
+   * 「统一的表」这一件事：`?id=` 深链与行桩（7b 的抽屉外部打开模式）**整体删除**，
+   * 行「详情 / 日志」与 hero 的创建钮一律走 router.push（详情页/创建页自己有
+   * inspect 兜底与主机下拉，本页不必替它们兜底）。
    */
   import { computed, ref, watch } from 'vue'
   import { useRoute, useRouter } from 'vue-router'
@@ -185,11 +187,9 @@
   import ArtTableHeader from '@/components/core/tables/art-table-header/index.vue'
   import { usePageIcon } from '@/hooks/core/usePageIcon'
   import { useAuth } from '@/hooks/core/useAuth'
-  import { PermDockerInspect, PermDockerManage } from '@/enums/permission'
+  import { PermDockerList, PermDockerManage } from '@/enums/permission'
   import DockerActionConfirm from '../components/action-confirm.vue'
-  import CreateContainerDrawer from '../components/create-container-drawer.vue'
   import WorkloadBatchBar from '../components/workload-batch-bar.vue'
-  import WorkloadDrawer from '../components/workload-drawer.vue'
   import WorkloadTable from '../components/workload-table.vue'
   import type { DockerWorkloadItem } from '../api'
   import { runErrorMessage, useDockerCmds } from '../composables/useDockerCmds'
@@ -263,11 +263,13 @@
     },
     {
       // 主机维度从页面级上下文（HostSwitcher）降为筛选项：全部主机 + 各台。
+      // filterable：主机多了要能敲名字找（QA 实测不可搜），与镜像/卷/网络/项目页同款。
       key: 'host',
       label: '主机',
       type: 'select',
       placeholder: '全部主机',
       clearable: true,
+      filterable: true,
       options: hostOptions.value
     }
   ])
@@ -285,7 +287,7 @@
 
   // `/docker/containers?host=` 深链兼容（总览主机卡片的既有链路）：query 里的主机
   // 作为**主机筛选初始值** —— 单向（用户改筛选不回写 query，host 从此是筛选状态
-  // 而不是页面状态）。7b 起 ?host 常与 ?id 结伴出现（详情深链形态），host 语义不变。
+  // 而不是页面状态）。8a 起 ?host 不再与 ?id 结伴（详情已是独立页），host 语义不变。
   watch(
     () => route.query.host,
     (raw, old) => {
@@ -333,8 +335,10 @@
 
   function onMenuSelect(payload: { row: DockerWorkloadItem; key: string }) {
     const { row, key } = payload
+    // 「日志」是只读入口（权限门在表格的菜单条目上，auth=docker:inspect）：8a 起它
+    // 也是 navigation —— 详情页读 ?tab=logs 直接落在日志 Tab（能力没丢，只是换页）。
     if (key === 'logs') {
-      openDrawer(row, 'logs')
+      openDetail(row, 'logs')
       return
     }
     if (!lookupDockerAction(key)) return
@@ -395,107 +399,41 @@
     selected.value = rows
   }
 
-  // ── 详情抽屉 ─────────────────────────────────────────────
-  const drawerVisible = ref(false)
-  const drawerRow = ref<DockerWorkloadItem | null>(null)
-  const drawerTab = ref<'overview' | 'logs' | 'pty' | 'env'>('overview')
-
-  /** 打开抽屉（行「详情」按钮落概览，行菜单「日志」落日志 Tab；四个 Tab 见抽屉本体）。 */
-  function openDrawer(row: DockerWorkloadItem, tab: 'overview' | 'logs' | 'pty' | 'env') {
-    drawerRow.value = row
-    drawerTab.value = tab
-    drawerVisible.value = true
-  }
-
-  // ── 创建容器（4a 创建面）────────────────────────────────────
-  // 权限与 container:start 同档（docker:manage —— 创建不删不停任何现存目标）。
-  const { hasAuth } = useAuth()
-  const canManage = computed(() => hasAuth(PermDockerManage))
-  /** 详情深链的权限门（与被删 container-detail 路由的 authMark 同档）。 */
-  const canInspect = computed(() => hasAuth(PermDockerInspect))
-
-  // ── ?id= 深链 → 抽屉外部打开（7b：container-detail 页删除后的详情深链形态）──
+  // ── 详情 / 创建：整页路由（8a/8b 页面化）─────────────────────────
+  // 本页不再为它们兜底：详情页自己有 inspect（名称/状态/镜像由它给出，7b 的「行桩 +
+  // inspect 兜底」随页面化自然消解 —— 路由参数里就有容器 id），创建页自己有主机下拉
+  // 与镜像清单。深链一律带 host：容器/创建都是主机作用域的事实。
   const router = useRouter()
 
-  /**
-   * 行桩（外部深链的目标行不在当前过滤视图里时用）：只有 id/hostId/hostname
-   * 三个硬事实 —— hostname 从主机清单还原（清单是筛选下拉的数据源，页面本就持有）。
-   * 名称/状态/镜像等由抽屉里的 container:inspect 兜底填充，保护标记行桩上不可知
-   * （快照才有这个事实；受保护目标的写指令会被 agent 保护档拒回结论句，不静默丢能力）。
-   */
-  function stubRow(id: string, hostId: string): DockerWorkloadItem {
-    return {
-      id,
-      name: '',
-      image: '',
-      state: '',
-      cpuPercent: 0,
-      memUsageMb: 0,
-      memLimitMb: 0,
-      netRxBytesSec: 0,
-      netTxBytesSec: 0,
-      protected: false,
-      hostId,
-      hostname: hosts.value.find((h) => h.id === hostId)?.hostname ?? ''
-    }
+  /** 详情页入口：行「详情」落概览，行菜单「日志」落日志 Tab（?tab=）。 */
+  function openDetail(row: DockerWorkloadItem, tab: 'overview' | 'logs' = 'overview') {
+    const query: Record<string, string> = { host: row.hostId }
+    if (tab !== 'overview') query.tab = tab
+    void router.push({ path: `/docker/containers/${row.id}`, query })
   }
 
-  /** 深链打开时记下的容器 id：关抽屉时据此清 query（只清自己那一条，见下方 watch）。 */
-  let deepLinkId = ''
-
-  // 等首个「就绪」再开：rows 属于带 host 过滤的首拉结果 —— 目标行在视图里就给全行
-  // （含保护标记与原生状态句），不在（被筛掉/截断之外）才退化到行桩（行桩的
-  // hostname 归属要等主机清单到，故 hosts 未到也不开）。没有 inspect 权限时不开
-  // 抽屉（开了也只剩一句 403 结论）而把原因说出口。
-  watch(
-    () => [String(route.query.id ?? ''), pageState.value, hosts.value.length > 0] as const,
-    ([id, st, hostsReady]) => {
-      if (!id || st !== 'ready' || !hostsReady) return
-      if (drawerVisible.value && drawerRow.value?.id === id) return // 已打开同一行
-      if (!canInspect.value) {
-        ElMessage.warning('缺少容器详情的查看权限，无法打开深链')
-        return
-      }
-      deepLinkId = id
-      const hostId = String(route.query.host ?? '')
-      const found = rows.value.find((r) => r.id === id && (hostId ? r.hostId === hostId : true))
-      if (found) {
-        openDrawer(found, 'overview')
-        return
-      }
-      if (!hostId) {
-        ElMessage.warning('该深链缺少主机参数，无法定位容器')
-        deepLinkId = ''
-        return
-      }
-      openDrawer(stubRow(id, hostId), 'overview')
-    },
-    { immediate: true }
-  )
-
-  // 关抽屉时清掉深链 id（host 留着 —— 它同时是主机筛选初始值）：不清的话刷新会
-  // 把抽屉再开一次，与「用户已经关掉它」的意图相反。replace 不留历史记录。
-  watch(drawerVisible, (visible) => {
-    if (visible || !deepLinkId) return
-    const currentId = String(route.query.id ?? '')
-    if (currentId !== deepLinkId) {
-      // 新深链已接管 query，不动它
-      deepLinkId = currentId
-      return
-    }
-    deepLinkId = ''
-    const rest = { ...route.query }
-    delete rest.id
-    void router.replace({ query: rest })
-  })
-
-  const createVisible = ref(false)
-  /** 打开抽屉时预选的主机（= 当前筛选的那台；没筛选则抽屉自己落到第一台可用主机）。 */
-  const createHostId = ref('')
+  // ── 创建容器（4a 创建面 → 8b 整页路由）────────────────────────
+  // 权限与 container:start 同档（docker:manage —— 创建不删不停任何现存目标）；
+  // 入口预选当前筛选里的那台主机（跨主机表没有「当前主机」的概念，筛选就是最近的
+  // 意图；没筛选时创建页自己落到第一台可用主机）。
+  const { hasAuth } = useAuth()
+  const canManage = computed(() => hasAuth(PermDockerManage))
 
   function openCreate() {
-    createHostId.value = searchForm.value.host ?? ''
-    createVisible.value = true
+    const host = searchForm.value.host
+    void router.push({
+      path: '/docker/containers/create',
+      query: host ? { host } : {}
+    })
+  }
+
+  // ── 任务中心（移栽自被删的 docker-page 主机条；8c 整页路由）────────────
+  // 权限与 /docker/tasks 路由 authMark 及 GET /docker/tasks 同档（docker:list）；
+  // 入口是 navigation（任务页自己有页面态，跨主机任务史不随本页筛选收窄）。
+  const canList = computed(() => hasAuth(PermDockerList))
+
+  function goTasks() {
+    void router.push({ path: '/docker/tasks' })
   }
 </script>
 
@@ -503,4 +441,25 @@
   /* 页面骨架（hero/三态/动效降级）下沉在 views/wkl-shell.scss（本模块两页共用的
    * 范式样式）；这里只留本页特有的布局。令牌出处见 overview-tokens.scss 文件头。 */
   @use './wkl-shell';
+
+  /* 次要文字对比度 AA（P2 打磨批，与总览页同款处置）：EP 默认
+     --el-text-color-secondary(#909399) 对白底只有 3.08:1（QA 实测 2.97–3.08），低于
+     AA 正文线 → 页面范围内把它升到 regular 档（浅色 6.1:1、暗色随主题同样达标）。
+     只重定义变量值，页面内所有消费该变量的元素一起达标，不碰元素样式与布局。 */
+  .docker-containers-page {
+    --el-text-color-secondary: var(--el-text-color-regular);
+
+    /* hero 副标题/g-600 辅助字的对比度 AA（终审 QA D2·浅色实测 3.5:1）：
+       text-g-600 的工具变量指向 --art-gray-600(#7987a1) —— 对页底 #fafbfc 3.5:1，
+       低于 AA 正文线。页面范围内抬一档到 g-700（浅色 #4d5875 对页底 ≈6.8:1；
+       暗色 #ababba 对暗底 ≈8.9:1，随主题自适应）。只重定义工具变量值，页面内
+       所有 text-g-600 文字（hero 副标题、加载提示）一起达标，页面外无副作用。 */
+    --color-g-600: var(--art-gray-700);
+  }
+
+  /* 刷新钮 loading 态：图标自转（复用 wkl-shell 的 wkl-spin 关键帧 —— 同块内定义与
+     引用会被 scoped 一致重命名；svg 在 ArtButtonTable 内部渲染，:deep 穿透）。 */
+  .wkl-hero-refresh--loading :deep(svg) {
+    animation: wkl-spin 1.1s linear infinite;
+  }
 </style>

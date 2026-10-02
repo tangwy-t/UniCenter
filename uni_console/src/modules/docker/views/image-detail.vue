@@ -21,8 +21,9 @@
           <!-- 二期写操作（spec §11.4）：打标签/导出 tar 无确认档，删除是标准档（经弹窗）。
                使用中的镜像不能删除：按钮禁用并把结论句放在旁边（服务端也会拒绝，不该发出去）。
                指令在途时一并禁用。 -->
-          <!-- 用此镜像创建（4a 创建面）：消灭「拉了镜像跑不起来」的镜像侧入口 ——
-               预填本镜像与本页主机（抽屉里主机可换），权限与启停同级。 -->
+          <!-- 用此镜像创建（4a 创建面 → 8b 整页路由）：消灭「拉了镜像跑不起来」的镜像侧
+               入口 —— 本镜像与本页主机预填进创建页的 query（创建页里主机仍可换），
+               权限与启停同级。 -->
           <ElButton
             v-if="canManage"
             size="small"
@@ -180,17 +181,6 @@
       @confirm="onConfirmSubmit"
     />
 
-    <!-- 创建抽屉（4a）：预填本页主机与本镜像（actionTarget 的口径：仓库标签优先，
-         无标签退回镜像 id —— 抽屉会拿它在快照里核对本地存在性）。成功后重读本页
-         两份事实（inspect 与快照：新容器会改变「使用」与关联容器）。 -->
-    <CreateContainerDrawer
-      v-model="createVisible"
-      :hosts="ctx.hosts"
-      :initial-host-id="ctx.hostId"
-      :initial-image="actionTarget"
-      :refresh="reloadDetail"
-    />
-
     <!-- 推送进度对话框（P2 分发闭环）：预填 actionTarget、镜像清单来自本页快照
         （选择项的数据源已在手，对话框不另拉一份）。**不传 refresh**：推送不改变
          本地任何事实（镜像/使用/关联容器都不动 —— 推的是副本），重拉无物可读；
@@ -226,7 +216,6 @@
   import ArtTable from '@/components/core/tables/art-table/index.vue'
   import { formatByUnit, formatUnixSeconds } from '@/modules/device/utils/display'
   import DockerActionConfirm from '../components/action-confirm.vue'
-  import CreateContainerDrawer from '../components/create-container-drawer.vue'
   import ImageScanPanel from '../components/image-scan-panel.vue'
   import PushProgressDialog from '../components/push-progress-dialog.vue'
   import {
@@ -535,12 +524,12 @@
     router.push({ name: 'DockerResources', query: { host: ctx.hostId, tab: 'images' } })
   }
 
-  /** 跳关联容器的详情抽屉（7b：深链指 /docker/containers?host=&id=，统一表页用行桩
-   *  打开抽屉；容器 id 与列表同一口径，host 同样随行）。 */
+  /** 跳关联容器的详情页（8a：深链指 /docker/containers/:id，host 随行；容器 id 与
+   *  列表同一口径 —— 详情页自己有 inspect，不需要本页替它兜底任何事实）。 */
   function openContainer(id: string) {
     void router.push({
-      path: '/docker/containers',
-      query: { host: ctx.hostId, id }
+      path: `/docker/containers/${id}`,
+      query: { host: ctx.hostId }
     })
   }
 
@@ -566,17 +555,15 @@
     () => snapshotImage.value?.repoTags?.[0] || view.value?.repoTags?.[0] || imageId.value
   )
 
-  // ── 创建容器（4a 创建面）──────────────────────────────────────────
-  const createVisible = ref(false)
-
+  // ── 创建容器（4a 创建面 → 8b 整页路由）──────────────────────────────
+  // 预填走 query（主机 + 本镜像引用）：创建页据此落定主机、预填镜像并拉该主机的
+  // 镜像清单；创建成功后由创建页自己接管（跳新建容器的详情页），本页不再有
+  // 「创建成功后重读本页两份事实」这件事 —— 页面间的交接靠路由，不靠回调。
   function openCreate() {
-    createVisible.value = true
-  }
-
-  /** 创建成功后的重读本页两份事实（抽屉经 useDockerCmds 双次调用它）。 */
-  function reloadDetail() {
-    void loadInspect()
-    void loadSnapshot()
+    void router.push({
+      path: '/docker/containers/create',
+      query: { host: ctx.hostId, image: actionTarget.value }
+    })
   }
 
   // ── 推送到仓库（P2 分发闭环）──────────────────────────────────────────
@@ -743,6 +730,25 @@
 
 <style lang="scss" scoped>
   @use '@styles/core/breakpoints.scss' as *;
+  @use './overview-tokens' as t;
+
+  // hero 的「删除…」是 plain danger：对比度 AA 的病灶与处方见 overview-tokens
+  // 的 danger-plain-aa（浅色 QA 实测 2.87:1）。
+  @include t.danger-plain-aa;
+
+  // hero 的普通动作（打标签/导出/推送）与「重试」等默认档按钮主色蓝字：
+  // 对比度 AA 的病灶与处方见 overview-tokens 的 primary-text-aa
+  //（终审 QA D2·浅色实测 3.68:1）。
+  @include t.primary-text-aa;
+
+  /* 次要文字对比度 AA（终审 QA D2 同源盘点 · 六页批漏网页补齐）：EP 默认
+     --el-text-color-secondary(#909399) 对白底只有 3.08:1，低于 AA 正文线 —— 本页
+     hero 短 id、元信息标签、镜像摘要等 12–14px 次要文字全吃它。页面范围内升到
+     regular 档（浅色 6.1:1、暗色随主题同样达标；与其余 docker 页同款处置）。
+     只重定义变量值，不碰元素样式与布局。 */
+  .imd {
+    --el-text-color-secondary: var(--el-text-color-regular);
+  }
 
   // 实体头（与容器详情的 hero 同一骨架：左身份、右动作）。
   .imd-hero {

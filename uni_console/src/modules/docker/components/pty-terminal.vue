@@ -314,6 +314,11 @@
 
 <style lang="scss" scoped>
   @use '@styles/core/breakpoints.scss' as *;
+  @use '../views/overview-tokens' as t;
+
+  // 「重试」默认档按钮的主色文字对比度 AA：病灶与处方见 overview-tokens
+  // 的 primary-text-aa（终审 QA D2·浅色实测 3.68:1）。
+  @include t.primary-text-aa;
 
   .pty-terminal {
     position: relative;

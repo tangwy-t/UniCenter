@@ -240,11 +240,12 @@ describe('分类控件矩阵：action 字面量全在白名单内', () => {
     expect(editorSrc).toContain('v-if="canConfig"')
   })
 
-  it('监控面已接线：抽屉概览挂 stats 组件，组件发 container:stats 并接流', () => {
-    // 抽屉层：概览 Tab 挂 ContainerStats（v-if 懒挂载纪律与终端 Tab 同款）。
-    const drawerSrc = readFileSync(join(ROOT, 'components/workload-drawer.vue'), 'utf8')
-    expect(drawerSrc).toContain('ContainerStats')
-    expect(drawerSrc).toContain("activeTab === 'overview'")
+  it('监控面已接线：详情页概览 Tab 挂 stats 组件，组件发 container:stats 并接流', () => {
+    // 页面层：概览 Tab 挂 ContainerStats（8a 页面化 —— 宿主从被删的 workload-drawer
+    // 换成 views/container-detail/index.vue；v-if 懒挂载纪律与终端 Tab 同款）。
+    const detailSrc = readFileSync(join(ROOT, 'views/container-detail/index.vue'), 'utf8')
+    expect(detailSrc).toContain('ContainerStats')
+    expect(detailSrc).toContain("activeTab === 'overview'")
     // 组件层：走指令通道发 container:stats，并接 NDJSON 统计流。
     const statsSrc = readFileSync(join(ROOT, 'components/container-stats.vue'), 'utf8')
     expect(statsSrc).toContain("action: 'container:stats'")
@@ -252,26 +253,48 @@ describe('分类控件矩阵：action 字面量全在白名单内', () => {
     expect(statsSrc).toContain('createStatsFeed')
   })
 
-  it('创建面（4a）已接线：两个入口受 docker:manage 门控，抽屉发 container:create', () => {
-    // 容器页入口：工具栏按钮 v-if canManage（hasAuth(PermDockerManage)），挂创建抽屉。
+  it('创建面（4a/8b）已接线：两个入口受 docker:manage 门控，创建页发 container:create', () => {
+    // 容器页入口：hero 的创建钮 v-if canManage（hasAuth(PermDockerManage)），
+    // 8b 起是 router.push 到创建页（不是挂抽屉）；布局族统一后收进 ArtButtonTable
+    // 家族（type=add 图标钮，title 即入口语义 —— 异族混排的文本钮已删）。
     const containersSrc = readFileSync(join(ROOT, 'views/containers.vue'), 'utf8')
-    expect(containersSrc).toContain('CreateContainerDrawer')
+    expect(containersSrc).toContain('/docker/containers/create')
     expect(containersSrc).toContain('PermDockerManage')
     expect(containersSrc).toMatch(
       /canManage\s*=\s*computed\(\s*\(\)\s*=>\s*hasAuth\(PermDockerManage\)\s*\)/
     )
     expect(containersSrc).toContain('v-if="canManage"')
-    expect(containersSrc).toContain('创建容器…')
-    // 镜像详情入口：同一权限档，预填镜像与主机（initialImage/initialHostId）。
+    expect(containersSrc).toContain('title="创建容器"')
+    expect(containersSrc).toContain('type="add"')
+    // 镜像详情入口：同一权限档，预填走 query（主机 + 本镜像引用），8b 起也是整页路由。
     const imageDetailSrc = readFileSync(join(ROOT, 'views/image-detail.vue'), 'utf8')
-    expect(imageDetailSrc).toContain('CreateContainerDrawer')
     expect(imageDetailSrc).toContain('用此镜像创建…')
-    expect(imageDetailSrc).toContain(':initial-image="actionTarget"')
-    // 组件层：走指令通道发 container:create（注册表标准档确认在 action-confirm 之间）。
-    const createSrc = readFileSync(join(ROOT, 'components/create-container-drawer.vue'), 'utf8')
+    expect(imageDetailSrc).toContain('/docker/containers/create')
+    expect(imageDetailSrc).toContain('image: actionTarget.value')
+    // 页面层：创建页走指令通道发 container:create（注册表标准档确认在 action-confirm
+    // 之间）、读 query 预填、运行预览由 buildRunPreview 生成（与被删抽屉同一套纯函数）。
+    const createSrc = readFileSync(join(ROOT, 'views/container-create.vue'), 'utf8')
     expect(createSrc).toContain("action: 'container:create'")
     expect(createSrc).toContain('DockerActionConfirm')
     expect(createSrc).toContain('buildRunPreview')
+    expect(createSrc).toContain('route.query.image')
+  })
+
+  it('任务中心（8c）已接线：容器页 hero 与总览 hero 两个入口都指向 /docker/tasks，页面自带 5 秒轮询', () => {
+    // 入口层：容器页 hero（原 docker-page 主机条上的入口随该组件删除后移栽）与
+    // 总览 hero 都 push 这个 path —— 8c 前它是就地抽屉（没有 URL），页面化后入口
+    // 是两个 hero 的图标钮（不挂侧边栏菜单）。
+    const containersSrc = readFileSync(join(ROOT, 'views/containers.vue'), 'utf8')
+    expect(containersSrc).toContain("'/docker/tasks'")
+    expect(containersSrc).toContain('PermDockerList')
+    const overviewSrc = readFileSync(join(ROOT, 'views/overview.vue'), 'utf8')
+    expect(overviewSrc).toContain("'/docker/tasks'")
+    // 页面层：列表读 GET /docker/tasks、可见期间 5 秒轮询、拉取进度内联复用进度组件
+    //（被删 task-center-drawer 的三块内容原样平移）。
+    const tasksSrc = readFileSync(join(ROOT, 'views/tasks.vue'), 'utf8')
+    expect(tasksSrc).toContain('fetchDockerTasks')
+    expect(tasksSrc).toContain('POLL_MS = 5000')
+    expect(tasksSrc).toContain('TaskPullProgress')
   })
 
   it('P2 分发面已接线：构建入口在镜像 tab 底栏（manage 门控），推送入口在镜像详情页头（manage 门控、预填镜像）', () => {
@@ -281,7 +304,9 @@ describe('分类控件矩阵：action 字面量全在白名单内', () => {
     expect(tabSrc).toContain('BuildProgressDialog')
     expect(tabSrc).toContain('构建镜像…')
     expect(tabSrc).toMatch(/v-if="canManage"/)
-    expect(tabSrc).toContain('buildVisible.value = false') // resetForHostSwitch 的关对话框
+    // 对话框的主机是**受理时锁定的那台**（targetHostId）：跨主机表没有「当前主机」，
+    // 一场构建属于发起它的机器，不随列表筛选漂移。
+    expect(tabSrc).toContain(':host-id="targetHostId"')
     // 详情页层：头部「推送到仓库…」同一权限档，预填 actionTarget（仓库标签优先）、
     // 镜像清单来自本页快照（选择项数据源已在手，不另拉）；**不传 refresh** ——
     // 推送不改本地任何事实（推的是副本），重拉无物可读（与拉取/构建的口径差）。
@@ -353,10 +378,11 @@ describe('分类控件矩阵：action 字面量全在白名单内', () => {
     expect(logsSrc).toContain('openDockerLogStream')
     expect(logsSrc).toContain('createLogFeed')
     expect(logsSrc).toContain('filterComposeLogLines')
-    // 索引页入口：薄索引的行动作「打开工作台」（host 随行 —— 7b 起列表页只有这一条路）。
+    // 索引页入口：薄索引的行动作「打开工作台」（host 随行 —— 7b 起列表页只有这一条路；
+    // 跨主机索引后 host 取**行主机**，页面级主机上下文已随 9b 收敛掉）。
     const projectsSrc = readFileSync(join(ROOT, 'views/projects.vue'), 'utf8')
     expect(projectsSrc).toContain('DockerProjectWorkspace')
     expect(projectsSrc).toContain('打开工作台')
-    expect(projectsSrc).toContain('query: { host: ctx.hostId }')
+    expect(projectsSrc).toContain('query: { host: project.hostId }')
   })
 })

@@ -31,7 +31,8 @@
     </div>
 
     <!-- 波次推进（6d）：跨主机批量按主机分波、逐波推进 —— 当前波给「正在执行 主机 B
-         （3/12）」的节奏行，完成的波逐行给波级结论（「主机 A：12/12 成功」）。
+         （3/12）」的节奏行，完成的波逐行给波级结论（「主机 A：12/12 成功（web、…）」，
+         成功项列名、失败项带原因；拼装见 utils/batch 的 waveConclusion）。
          渲染不依赖勾选：批量期间列表重拉会让勾选闪空（行对象被换掉），反馈行跟着
          勾选消失的话恰好在最该看的时候看不见。下一轮批量开始时清空重记。 -->
     <div v-if="waveCurrent || waveNotes.length" class="wkl-batch__waves">
@@ -59,7 +60,12 @@
           <li v-for="row in remove.rows" :key="`${row.hostId}:${row.id}`">
             <span>{{ row.name }}</span>
             <span class="wkl-batch-del__host">@ {{ row.hostname }}</span>
-            <span v-if="row.protected" class="wkl-batch-del__lock">🔒</span>
+            <!-- 受保护行标锁（锁图标 + 受保护）：不用 🔒 emoji —— 无 emoji 字体的
+                 环境里会渲染成豆腐块；锁走 ArtSvgIcon 的图标范式。 -->
+            <span v-if="row.protected" class="wkl-batch-del__lock">
+              <ArtSvgIcon icon="ri:lock-2-line" />
+              受保护
+            </span>
           </li>
         </ul>
         <div class="wkl-batch-del__line">此操作不可恢复。输入 DELETE 以确认：</div>
@@ -98,9 +104,15 @@
   import { ElButton, ElDialog, ElInput, ElMessage } from 'element-plus'
   import { PermDockerDelete, PermDockerExec, PermDockerManage } from '@/enums/permission'
   import { useAuth } from '@/hooks/core/useAuth'
+  import ArtSvgIcon from '@/components/core/base/art-svg-icon/index.vue'
   import type { DockerWorkloadItem } from '../api'
   import { runErrorMessage, useDockerCmds } from '../composables/useDockerCmds'
-  import { groupBatchWaves, waveConclusion, type BatchWave } from '../utils/batch'
+  import {
+    groupBatchWaves,
+    waveConclusion,
+    type BatchFailure,
+    type BatchWave
+  } from '../utils/batch'
   import { protectedGate } from '../utils/actions'
 
   defineOptions({ name: 'DockerWorkloadBatchBar' })
@@ -161,11 +173,6 @@
     void dispatch(action, [...props.selected])
   }
 
-  interface BatchFailure {
-    name: string
-    message: string
-  }
-
   /** 一条波级反馈（text = 结论句；failed = 该波有无失败，行级配色用）。 */
   interface WaveNote {
     text: string
@@ -183,10 +190,12 @@
    * 批量从此有按主机可读的部分进度；波内逐行照旧**串行**（一次一条、轮询到终态再发
    * 下一条 —— 现状语义原样保留，波次只改分组与节奏，不引入波内并发）。
    *
-   * 失败收集口径不变：跨全批累计、批末统一汇总（波级结论句只报计数，明细仍在批末
-   * 汇总里）；单条失败不中断（含波内与波间 ——「3 项成功、1 项失败」是可解释的结果，
-   * 中途放弃会让剩下的项处于说不清的状态）。固定行键 'batch'：批量期间 pendingId
-   * 不属于任何一行，界面用 batchRunning 禁用整条栏防重复提交。
+   * 失败收集口径不变：跨全批累计、批末统一汇总（波级结论句点名到目标 —— 成功项
+   * 波级列名、失败项含原因逐一可读，见 utils/batch 的 waveConclusion；批末汇总
+   * 仍只报前三条原因，两处不重复也不遗漏）；单条失败不中断（含波内与波间 ——
+   * 「3 项成功、1 项失败」是可解释的结果，中途放弃会让剩下的项处于说不清的状态）。
+   * 固定行键 'batch'：批量期间 pendingId 不属于任何一行，界面用 batchRunning
+   * 禁用整条栏防重复提交。
    *
    * 受保护的目标批量不发送：批量没有「强制操作」开关可勾，发出去必被拒 ——
    * 直接按保护档的结论句计入失败，不浪费一条指令，也让原因可读（波级计数里
@@ -222,6 +231,11 @@
    * 波级结论。返回该波成功行数（受保护未发送与失败行不算 —— 批末汇总另有明细）。
    * hostId 在每行派发前置为该行的 hostId（波内同值，但保持逐行赋值的既有形态 ——
    * useDockerCmds 在 run 入口处求值，这一步是它切换主机的唯一钩子）。
+   *
+   * 波级结论点名到目标：成功的行名与失败的（行名 + 结论句）在这里就地收集 ——
+   * 结论句的拼装是 utils/batch 的纯函数（那里的注释有「为什么点名」），本函数
+   * 只负责把「哪行成了、哪行败了、为什么」如实递过去。失败同时并入跨全批的
+   * failures（批末汇总仍只报前三条原因，克制口径不变）。
    */
   async function runWave(
     wave: BatchWave,
@@ -230,26 +244,28 @@
   ): Promise<number> {
     const host = wave.hostname !== '' ? wave.hostname : wave.hostId
     waveCurrent.value = { host, done: 0, total: wave.rows.length }
-    let waveDone = 0
+    const okNames: string[] = []
+    const waveFails: BatchFailure[] = []
     let walked = 0
     for (const row of wave.rows) {
       rowHostId.value = row.hostId
       const gate = protectedGate({ protected: row.protected }, canExec.value)
       if (gate.protected) {
-        failures.push({ name: row.name, message: gate.conclusion })
+        waveFails.push({ name: row.name, message: gate.conclusion })
       } else {
         const res = await runCmd({ action, target: row.name, key: 'batch' })
-        if (res.ok) waveDone += 1
-        else failures.push({ name: row.name, message: runErrorMessage(res, '操作未完成') })
+        if (res.ok) okNames.push(row.name)
+        else waveFails.push({ name: row.name, message: runErrorMessage(res, '操作未完成') })
       }
       walked += 1
       waveCurrent.value = { host, done: walked, total: wave.rows.length }
     }
+    failures.push(...waveFails)
     waveNotes.value = [
       ...waveNotes.value,
-      { text: waveConclusion(wave, waveDone), failed: waveDone < wave.rows.length }
+      { text: waveConclusion(wave, okNames, waveFails), failed: waveFails.length > 0 }
     ]
-    return waveDone
+    return okNames.length
   }
 
   /** 结论句汇总：成功数 + 失败数 + 前三条失败原因（再多也读不完，余下只计数）。 */
@@ -263,6 +279,12 @@
 </script>
 
 <style lang="scss" scoped>
+  @use '../views/overview-tokens' as t;
+
+  // 「启动 / 停止 / 重启 / 取消」等默认档按钮的主色文字对比度 AA：病灶与处方见
+  // overview-tokens 的 primary-text-aa（终审 QA D2·浅色实测 3.68:1）。
+  @include t.primary-text-aa;
+
   // 单根包装层：只为通过 single-root 守卫，不参与布局（display: contents 不产生盒）。
   .wkl-batch-root {
     display: contents;
@@ -330,6 +352,9 @@
     }
 
     &__lock {
+      display: inline-flex;
+      gap: 4px;
+      align-items: center;
       margin-left: 6px;
     }
 

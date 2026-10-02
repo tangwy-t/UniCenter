@@ -103,3 +103,56 @@ type DockerTasksQuery struct {
 	// Action 过滤动作码（如 image:pull、compose:up）。
 	Action string `form:"action"`
 }
+
+// ── 跨主机资源清单（9a：GET /docker/images|volumes|networks|projects）──────
+
+// DockerImageQuery 是跨主机镜像清单（GET /docker/images）的查询参数。
+//
+// 四个过滤都**可选**且相互独立（先主机、再开关、再关键字，逐层收窄）。
+// dangling/unused 用**指针**布尔而不是值类型：三值语义与设备列表的 Online
+// 过滤同一句 —— nil=不过滤、true=取该侧、false=取其反侧（前端「仅悬空/未使用」
+// 开关只发 true，但 false 侧保留完整语义：值类型会把「显式 false」和「没传」
+// 压成同一个零值，等于让 API 失去一半表达力）。
+type DockerImageQuery struct {
+	// HostID 限定单主机。0 = 不过滤（雪花 id 永不为 0，无需指针区分）。
+	HostID uint64 `form:"hostId"`
+	// Keyword 是 repoTag 的子串匹配（大小写不敏感）：多个标签以空格连成一串再
+	// 匹配，与前端 filterImages 的 join(' ') 逐字同句。
+	Keyword string `form:"keyword"`
+	// Dangling 过滤悬空镜像（<none>:<none>，prune 的主目标）。
+	Dangling *bool `form:"dangling"`
+	// Unused 过滤未被任何容器使用的镜像。
+	Unused *bool `form:"unused"`
+}
+
+// DockerVolumeQuery 是跨主机卷清单（GET /docker/volumes）的查询参数。
+type DockerVolumeQuery struct {
+	// HostID 限定单主机。0 = 不过滤。
+	HostID uint64 `form:"hostId"`
+	// Keyword 是卷名的子串匹配（大小写不敏感）。
+	Keyword string `form:"keyword"`
+	// Unused 过滤未被任何容器挂载的卷。
+	Unused *bool `form:"unused"`
+}
+
+// DockerNetworkQuery 是跨主机网络清单（GET /docker/networks）的查询参数。
+type DockerNetworkQuery struct {
+	// HostID 限定单主机。0 = 不过滤。
+	HostID uint64 `form:"hostId"`
+	// Keyword 是网络名的子串匹配（大小写不敏感）。
+	Keyword string `form:"keyword"`
+	// Internal 过滤 internal 网络（不接外网的隔离网络）。
+	Internal *bool `form:"internal"`
+}
+
+// DockerProjectQuery 是跨主机项目清单（GET /docker/projects）的查询参数。
+type DockerProjectQuery struct {
+	// HostID 限定单主机。0 = 不过滤。
+	HostID uint64 `form:"hostId"`
+	// Keyword 是项目名的子串匹配（大小写不敏感）。
+	Keyword string `form:"keyword"`
+	// State 过滤项目态：running / stopped。stopped 是「一切非 running」的统称
+	// （partial 归入 stopped，与容器表同一句口径），合法值在 service 校验
+	// （那里给出 400 结论句）。项目态的细分由条目上的 state 字段承载。
+	State string `form:"state"`
+}

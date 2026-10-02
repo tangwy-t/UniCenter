@@ -1,13 +1,13 @@
 // @vitest-environment jsdom
 /**
  * 跨主机统一工作负载表（切片 2）的页面行为：多主机渲染、服务端筛选参数、
- * 行操作按行主机派发、?host= 深链兼容、D-3 权限门控、抽屉入口，以及 7b 的
- * ?id= 深链抽屉外部打开模式（行桩 + inspect 兜底）。
+ * 行操作按行主机派发、?host= 深链兼容、D-3 权限门控，以及 8a/8b 页面化之后的
+ * 详情/创建入口（一律整页路由）与 `?id=` 深链语义的删除（零兼容）。
  *
  * 挂载方式沿用 page-render.test.ts 的口径（mock ../api 与 useAuth，Art* 用
  * 轻量替身保留 slot）；行操作不走 DOM 点击 —— jsdom 里 ElTable 不渲染
  * formatter 单元格，故对 WorkloadTable 组件实例 emit menu-select / open-detail
- * （页面 handler 链路照常走到指令通道），列与菜单条目层面的事实从 columns
+ * （页面 handler 链路照常走到路由与指令通道），列与菜单条目层面的事实从 columns
  * 的 formatter vnode 断言。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -113,7 +113,7 @@ beforeEach(() => {
   api.fetchDockerCmdResult.mockResolvedValue({ status: 'succeeded' })
 })
 
-/** 最近一次 mountPage 用的路由（?id 深链关抽屉清 query 的断言读它）。 */
+/** 最近一次 mountPage 用的路由（详情/创建入口 push 的目标从它断言）。 */
 let currentRouter: ReturnType<typeof createRouter> | null = null
 
 async function mountPage(query: Record<string, string> = {}): Promise<VueWrapper> {
@@ -121,7 +121,13 @@ async function mountPage(query: Record<string, string> = {}): Promise<VueWrapper
     history: createMemoryHistory(),
     routes: [
       { path: '/', component: { template: '<div />' } },
-      { path: '/docker/containers', component: Containers }
+      { path: '/docker/containers', component: Containers },
+      // 8a/8b 的目标页（本页只负责把 path + query 交出去，目标页自身的行为在
+      // container-detail-page.test.ts / page-transition.test.ts 里钉）。
+      { path: '/docker/containers/create', component: { template: '<div />' } },
+      { path: '/docker/containers/:id', component: { template: '<div />' } },
+      // 8c 任务中心（容器页 hero 入口移栽后的目标页）。
+      { path: '/docker/tasks', component: { template: '<div />' } }
     ]
   })
   currentRouter = router
@@ -134,19 +140,23 @@ async function mountPage(query: Record<string, string> = {}): Promise<VueWrapper
   return w
 }
 
-/** 深链抽屉的落定：首拉 ready 后 watch 才开抽屉，多等一轮宏任务 + 渲染。 */
-async function flushDeepLink() {
-  await new Promise((r) => setTimeout(r, 0))
+/** navigation 的落定：router.push 是异步的（内存历史也要过导航管线），
+ *  nextTick 不够 —— 多给一轮宏任务。 */
+async function flushNav() {
   await nextTick()
   await new Promise((r) => setTimeout(r, 0))
-  await nextTick()
 }
 
-/** 页面 hero 的刷新按钮（ArtButtonTable 替身，title 经 attrs fallthrough 到根 div）。 */
-function findRefreshButton(w: VueWrapper) {
-  const btn = w
+/** hero 簇里的图标钮（ArtButtonTable 替身，title 经 attrs fallthrough 到根 div）。 */
+function findHeroButton(w: VueWrapper, title: string) {
+  return w
     .findAllComponents({ name: 'ArtButtonTable' })
-    .find((b) => b.attributes('title') === '刷新')
+    .find((b) => b.attributes('title') === title)
+}
+
+/** 页面 hero 的刷新按钮。 */
+function findRefreshButton(w: VueWrapper) {
+  const btn = findHeroButton(w, '刷新')
   expect(btn, 'hero 上应有一个「刷新」按钮').toBeTruthy()
   return btn!
 }
@@ -238,6 +248,40 @@ describe('?host= 深链兼容（总览主机卡片 / 详情页返回的既有链
       expect.objectContaining({ hostId: undefined })
     )
   })
+
+  it('主机筛选项可搜（filterable：主机多了敲名字找）', async () => {
+    const w = await mountPage()
+    // ArtSearchBar 是替身，items 落在 $attrs（与 tableRows 同一读法）。
+    const bar = w.findComponent({ name: 'ArtSearchBar' })
+    const items = ((bar.vm as unknown as { $attrs: Record<string, unknown> }).$attrs.items ??
+      []) as { key: string; filterable?: boolean }[]
+    expect(items.find((i) => i.key === 'host')?.filterable).toBe(true)
+  })
+})
+
+describe('表格列（保护标记走图标，不用 emoji）', () => {
+  it('保护列：受保护给锁图标 vnode + 「受保护」，未受保护给「—」', async () => {
+    const w = await mountPage()
+    const table = w.findComponent({ name: 'ArtTable' })
+    const columns = ((table.vm as unknown as { $attrs: Record<string, unknown> }).$attrs.columns ??
+      []) as { prop?: string; formatter?: (row: never) => unknown }[]
+    const col = columns.find((c) => c.prop === 'protected')
+    expect(col?.formatter, '表格没有把保护列 formatter 传给 ArtTable').toBeTruthy()
+
+    const vnode = col!.formatter!({ protected: true } as never) as {
+      props?: Record<string, unknown>
+      children?: unknown[]
+    }
+    expect(vnode.props?.class).toBe('wkl-lock')
+    const kids = (Array.isArray(vnode.children) ? vnode.children : []) as unknown[]
+    expect(kids.some((k) => typeof k === 'string' && k.includes('受保护'))).toBe(true)
+    // 图标是组件 vnode（ArtSvgIcon + ri:lock-2-line），不再是 🔒 文本
+    const icon = kids[0] as { type?: { name?: string }; props?: Record<string, unknown> }
+    expect(icon?.type?.name).toBe('ArtSvgIcon')
+    expect(icon?.props?.icon).toBe('ri:lock-2-line')
+
+    expect(col!.formatter!({ protected: false } as never)).toBe('—')
+  })
 })
 
 describe('行操作按行主机派发', () => {
@@ -255,28 +299,25 @@ describe('行操作按行主机派发', () => {
     )
   })
 
-  it('行菜单「日志」不再跳详情页：原地打开抽屉（落在日志 Tab）', async () => {
+  it('行菜单「日志」→ 详情页 path + ?host + ?tab=logs（8a：能力搬到详情页的日志 Tab）', async () => {
     const w = await mountPage()
     const table = w.findComponent({ name: 'DockerWorkloadTable' })
     table.vm.$emit('menu-select', { row: ALL.items[1], key: 'logs' })
-    await nextTick()
+    await flushNav()
 
-    const drawer = w.findComponent({ name: 'DockerWorkloadDrawer' })
-    expect(drawer.exists()).toBe(true)
-    expect((drawer.props() as { modelValue: boolean }).modelValue).toBe(true)
-    expect((drawer.props() as { initialTab: string }).initialTab).toBe('logs')
-    expect((drawer.props() as { row: { hostId: string } }).row.hostId).toBe('h2')
+    // navigation 语义：本页只把目标行交给路由（表格不认识路由，跳转在页面里做）。
+    expect(currentRouter!.currentRoute.value.path).toBe('/docker/containers/c2')
+    expect(currentRouter!.currentRoute.value.query).toEqual({ host: 'h2', tab: 'logs' })
   })
 
-  it('详情按钮打开抽屉落概览 Tab', async () => {
+  it('行「详情」→ 详情页 path + ?host（概览是默认屏，不带 tab）', async () => {
     const w = await mountPage()
     const table = w.findComponent({ name: 'DockerWorkloadTable' })
     table.vm.$emit('open-detail', ALL.items[0])
-    await nextTick()
+    await flushNav()
 
-    const drawer = w.findComponent({ name: 'DockerWorkloadDrawer' })
-    expect((drawer.props() as { modelValue: boolean }).modelValue).toBe(true)
-    expect((drawer.props() as { initialTab: string }).initialTab).toBe('overview')
+    expect(currentRouter!.currentRoute.value.path).toBe('/docker/containers/c1')
+    expect(currentRouter!.currentRoute.value.query).toEqual({ host: 'h1' })
   })
 })
 
@@ -332,77 +373,52 @@ describe('首拉失败的口径（统一表自己的 D-1 对应面）', () => {
   })
 })
 
-/* ── ?id= 深链 → 抽屉外部打开（7b：被删 container-detail 路由的替代形态）──────
- * overview 异常表 / 工作台容器行 / 镜像详情关联容器的深链统一改指本页 + query。
- * 两条路径都要钉住：目标行在视图里给全行（保护标记/状态句都在），不在就退到
- * 行桩（id/hostId/hostname 三个事实），其余由抽屉里的 inspect 兜底填充。
+/* ── 详情/创建入口：一律整页路由（8a/8b）；?id= 深链语义已删（零兼容）───────
+ * 7b 的「本页读 ?id 打开详情抽屉」是 ?id= 唯一的落点，抽屉与语义一起删。文字层的
+ * 锚在 routes.test.ts（本页源码不得再出现 query.id），这里钉行为层：带着 ?id= 进来
+ * 不打开任何东西、也不清 query —— 一条过期的站外深链不该静默变成另一种界面。
+ * 创建入口（8b）则相反，是要**跳走**的那一类：hero 的创建钮把当前筛选主机随行
+ * 交给创建页（跨主机表没有「当前主机」的概念，筛选就是最近的意图）；任务中心
+ * （8c）入口同属跳走的那一类（移栽自被删的 docker-page 主机条）。
  */
-describe('?id= 深链：统一表页打开详情抽屉（外部打开模式）', () => {
-  it('目标行在视图里 → 抽屉拿全行（含主机筛选与保护标记）', async () => {
-    await mountPage({ host: 'h2', id: 'c2' })
-    await flushDeepLink()
+describe('详情/创建入口：一律整页路由（8a/8b）', () => {
+  it('?id= 已无落点：带了也不开详情面、不清 query，页面照常是统一表', async () => {
+    const w = await mountPage({ host: 'h2', id: 'c2' })
+    // 多给一轮宏任务 + 渲染：防「稍后才开」这类迟到的落点。
+    await new Promise((r) => setTimeout(r, 0))
+    await nextTick()
 
-    const drawer = w0().findComponent({ name: 'DockerWorkloadDrawer' })
-    expect((drawer.props() as { modelValue: boolean }).modelValue).toBe(true)
-    expect((drawer.props() as { initialTab: string }).initialTab).toBe('overview')
-    const row = (drawer.props() as { row: DockerWorkloadItem }).row
-    expect(row.id).toBe('c2')
-    expect(row.hostId).toBe('h2')
-    expect(row.name).toBe('mysql')
+    expect(currentRouter!.currentRoute.value.path).toBe('/docker/containers')
+    expect(currentRouter!.currentRoute.value.query.id).toBe('c2') // 页面不消费也不清
+    expect(tableRows(w)).toHaveLength(2)
+    // 没有任何详情面被拉起来：本页从不发指令（指令通道的入口是行菜单与详情页）。
+    expect(api.sendDockerCmd).not.toHaveBeenCalled()
   })
 
-  it('目标行不在视图里 → 行桩打开，inspect 兜底填充名称与状态', async () => {
-    // cZ 不在首拉结果里（被筛掉/截断之外的形态）：行桩只有 id/hostId/hostname。
-    api.fetchDockerCmdResult.mockResolvedValue({
-      status: 'succeeded',
-      payload: { name: 'redis', image: 'redis:7', state: 'running' }
-    })
-    await mountPage({ host: 'h2', id: 'cZ' })
-    await flushDeepLink()
+  it('hero 的创建钮 → 创建页 path，host 取当前筛选（没筛选就不带）', async () => {
+    const withHost = await mountPage({ host: 'h2' })
+    const btn = findHeroButton(withHost, '创建容器')
+    expect(btn, 'hero 上应有「创建容器」入口').toBeTruthy()
+    await btn!.trigger('click')
+    await flushNav()
+    expect(currentRouter!.currentRoute.value.path).toBe('/docker/containers/create')
+    expect(currentRouter!.currentRoute.value.query).toEqual({ host: 'h2' })
 
-    const drawer = w0().findComponent({ name: 'DockerWorkloadDrawer' })
-    expect((drawer.props() as { modelValue: boolean }).modelValue).toBe(true)
-    const row = (drawer.props() as { row: DockerWorkloadItem }).row
-    expect(row).toMatchObject({ id: 'cZ', hostId: 'h2', hostname: 'nas', name: '' })
-
-    // 抽屉按行桩发 inspect（host = 行主机），并把返回的名称/状态展示出来。
-    expect(api.sendDockerCmd).toHaveBeenCalledWith('h2', {
-      action: 'container:inspect',
-      target: 'cZ',
-      options: {}
-    })
-    // 抽屉 append-to-body：内容 teleport 到 body（workload-drawer.test 同款口径）。
-    expect(document.body.innerHTML).toContain('redis')
-    expect(document.body.innerHTML).toContain('运行中')
+    const noHost = await mountPage()
+    const btn2 = findHeroButton(noHost, '创建容器')
+    expect(btn2, 'hero 上应有「创建容器」入口').toBeTruthy()
+    await btn2!.trigger('click')
+    await flushNav()
+    expect(currentRouter!.currentRoute.value.path).toBe('/docker/containers/create')
+    expect(currentRouter!.currentRoute.value.query).toEqual({})
   })
 
-  it('没有 docker:inspect 权限时不开抽屉（与被删路由的 authMark 同档）', async () => {
-    auth.allow = new Set(['docker:list', 'docker:manage', 'docker:delete'])
-    const w = await mountPage({ host: 'h1', id: 'c1' })
-    await flushDeepLink()
-
-    const drawer = w.findComponent({ name: 'DockerWorkloadDrawer' })
-    expect((drawer.props() as { modelValue: boolean }).modelValue).toBe(false)
-  })
-
-  it('关抽屉清掉深链 id（host 留作筛选初始值）：刷新不再重开抽屉', async () => {
-    await mountPage({ host: 'h2', id: 'c2' })
-    await flushDeepLink()
-
-    const drawer = w0().findComponent({ name: 'DockerWorkloadDrawer' })
-    drawer.vm.$emit('update:modelValue', false)
-    await flushDeepLink()
-
-    expect(currentRouter!.currentRoute.value.query.id).toBeUndefined()
-    expect(currentRouter!.currentRoute.value.query.host).toBe('h2')
-    // 关掉后模型值也回到关闭态（v-model 的另一半）。
-    expect((drawer.props() as { modelValue: boolean }).modelValue).toBe(false)
+  it('hero 的任务中心钮 → /docker/tasks（入口移栽自被删的 docker-page 主机条）', async () => {
+    const w = await mountPage()
+    const btn = findHeroButton(w, '任务中心')
+    expect(btn, 'hero 上应有任务中心入口').toBeTruthy()
+    await btn!.trigger('click')
+    await flushNav()
+    expect(currentRouter!.currentRoute.value.path).toBe('/docker/tasks')
   })
 })
-
-/** 深链用例里挂着抽屉的页面（mountPage 只返回 w，收口一个小取值器）。 */
-function w0(): VueWrapper {
-  const w = mounted[mounted.length - 1]
-  expect(w, '深链用例应已挂载页面').toBeTruthy()
-  return w!
-}

@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	agentproto "github.com/tangwy-t/UniCenter/uni_protocol"
 )
 
@@ -199,7 +201,8 @@ func (s *Snapshotter) Collect(ctx context.Context) *agentproto.DockerState {
 	}
 	// 项目归纳读的是**本域**类型而不是 st.Containers：config_files 只存在于容器标签里，
 	// 而 proto 的 DockerContainer 不带 Labels（把它塞进协议会让每帧多背一份标签）。
-	st.Projects = projectsFromContainers(containers)
+	// 归纳面 = 容器标签 ∪ 网络/卷标签（见 projectsFrom 的两条修复说明）。
+	st.Projects = projectsFrom(containers, networks, volumes, projects)
 	// 项目条目的 protected 按 `project:<名>` **项目粒度**填（服务粒度已由成员容器条目的
 	// Protected 承载，见 ContainerProtected）；结论只在 agent 算一次，前端不重算。
 	for i := range st.Projects {
@@ -299,12 +302,31 @@ type containerMetrics struct {
 	rxBytesSec, txBytesSec             float64
 }
 
-// projectsFromContainers 从容器标签归纳 compose 项目。
+// projectsFrom 归纳 compose 项目：容器标签 ∪ 网络/卷标签，服务数取「声明 ∪ 有容器」。
 //
 // 不调 compose CLI 发现（§6.1：项目发现读 SDK 标签，config_files 也来自标签）——
-// 少一次进程调用、少一种 flavor 差异；老版本 compose 无 config_files 标签时该字段为空，
-// 页面显示「未知(旧版)」而不是编造路径。
-func projectsFromContainers(cs []ContainerInfo) []agentproto.DockerProject {
+// 少一次进程调用、少一种 flavor 差异。
+//
+// ── 修复一：归纳面是容器标签 ∪ 网络/卷标签（scale 0 之后项目不再失联）────────
+// 「项目在不在」不能只由容器回答：scale → 0 之后容器全没了，项目却没消失 —— 它的
+// 默认网络与数据卷还留在本机，而 compose 给它们都打了 `com.docker.compose.project`
+// 标签。只看容器会让这个项目从快照里整条消失：页面没有行、工作台进不去、也就无从
+// Up 回来。故：
+//   - 容器：全量事实（服务名、配置文件路径、容器计数、运行态）；
+//   - 网络/卷：只补「项目存在」这一条事实（它们给不出服务与容器数，也不编造）——
+//     一条痕迹就够让项目行留下，如实显示 0 容器、0 运行。
+//
+// ── 修复二：Services = 声明网元 ∪ 有容器的网元（缺服务数不再恒 0）────────────
+// 容器标签只能给出「有容器的服务」，拿它与页面列出的服务行相减，差恒等于 0（同一
+// 份数据相减），「另有 N 个网元没有容器」因此永远不可达。项目声明了几个服务只有
+// compose 配置文件写着，故 Services 取「文件声明的集合 ∪ 容器观察到的集合」的大小
+// （多文件取并集 —— 与 compose 的 merge 语义同向）：与页面上「有容器的网元行」
+// 相减，差恰好是「有声明、没容器」的那部分（服务停掉或缩到 0、配置改了还没 up）。
+// 一个文件都读不到时退回容器标签归纳的已知网元数（宁可小、不编造：读不到 ≠ 零个网元）。
+//
+// 顺带把**配置文件路径**也在没有容器时从项目索引补上（见下）：没有它，工作台的
+// 配置区与 Up 都无从下手，而索引里记的正是上次从容器标签学到的同一个事实。
+func projectsFrom(cs []ContainerInfo, ns []NetworkInfo, vs []VolumeInfo, idx *projectIndex) []agentproto.DockerProject {
 	type acc struct {
 		services map[string]bool
 		files    map[string]bool
@@ -312,16 +334,20 @@ func projectsFromContainers(cs []ContainerInfo) []agentproto.DockerProject {
 		running  int
 	}
 	byName := map[string]*acc{}
-	for _, c := range cs {
-		project := c.Labels[composeProjectLabel]
-		if project == "" {
-			continue
-		}
+	touch := func(project string) *acc {
 		a := byName[project]
 		if a == nil {
 			a = &acc{services: map[string]bool{}, files: map[string]bool{}}
 			byName[project] = a
 		}
+		return a
+	}
+	for _, c := range cs {
+		project := c.Labels[composeProjectLabel]
+		if project == "" {
+			continue
+		}
+		a := touch(project)
 		if svc := c.Labels[composeServiceLabel]; svc != "" {
 			a.services[svc] = true
 		}
@@ -337,6 +363,17 @@ func projectsFromContainers(cs []ContainerInfo) []agentproto.DockerProject {
 			a.running++
 		}
 	}
+	// 网络/卷只说明「项目还有痕迹」：不产服务名、不产配置文件、不计容器数。
+	for _, n := range ns {
+		if project := n.Labels[composeProjectLabel]; project != "" {
+			touch(project)
+		}
+	}
+	for _, v := range vs {
+		if project := v.Labels[composeProjectLabel]; project != "" {
+			touch(project)
+		}
+	}
 	names := make([]string, 0, len(byName))
 	for name := range byName {
 		names = append(names, name)
@@ -347,12 +384,76 @@ func projectsFromContainers(cs []ContainerInfo) []agentproto.DockerProject {
 	out := make([]agentproto.DockerProject, 0, len(names))
 	for _, name := range names {
 		a := byName[name]
+		files := sortedKeys(a.files)
+		if len(files) == 0 {
+			// 没有容器 = 没有标签可看：回落到项目索引里记着的上次已知主配置文件。
+			// 索引也没有该项时保持空列表（页面显示「未知」而不是编一条路径）。
+			if p, ok := idx.Lookup(name); ok {
+				files = []string{p}
+			}
+		}
+		services := len(a.services)
+		// Services = 声明集合 ∪ 容器观察集合 的大小。为什么是并集：页面拿它与「有容器的
+		// 网元行」相减，差恰好是「有声明、没容器」的那部分（服务停掉或缩到 0、配置改了
+		// 还没 up）。只取声明数会在「容器比文件新」（改过文件、还是旧容器）时把在跑的
+		// 网元数说小；只取观察数则恒等于行数、差永远为 0。
+		if declared, ok := declaredServiceNames(files); ok {
+			for name := range declared {
+				a.services[name] = true
+			}
+			services = len(a.services)
+		}
 		out = append(out, agentproto.DockerProject{
-			Name: name, ConfigFiles: sortedKeys(a.files), State: projectState(a.running, a.total),
-			Services: len(a.services), ContainersCount: a.total,
+			Name: name, ConfigFiles: files, State: projectState(a.running, a.total),
+			Services: services, ContainersCount: a.total,
 		})
 	}
 	return out
+}
+
+// declaredServiceNames 取一个项目在配置文件里**声明**的网元名集合（多文件取并集，
+// 与 compose 的 merge 语义同向：override 里的新服务同样是这个项目的服务）。
+//
+// ok=false = 一个文件都没读到（没有路径 / 全部不存在 / 全部解不开）—— 调用方据此
+// 只报容器标签归纳的已知网元，而不是把「读不到」当成「零个网元」（那是两个相反的
+// 结论，与 SizeMB=nil 不折成 0 同一条纪律）。读到了但一个网元也没有（文件里没有
+// services 键）时 ok=true、集合为空 —— 那是「文件说了没有」，同样如实。
+//
+// 三条口径：
+//   - 路径只来自本机事实（容器标签 / 项目索引），协议上从不出现路径 —— 与配置编辑
+//     路径同一把尺（§8），上限也复用同一个 1MB 闸（readComposeFileAt）；
+//   - 单文件读失败/解析失败**跳过**：这不是项目坏了（多文件里 override 先删掉、
+//     旧版 YAML 有怪语法都可能），快照不该因此少一行项目；
+//   - 只在**有文件可读**时给结论：一个都读不到时返回 ok=false，不猜。
+//
+// 刻意不记日志：它在 30s 一拍的快照路径上，文件长期不可读会变成每拍一条的告警噪音，
+// 而「读不到配置」在同一快照的配置区/Up 路径上有可操作的结论句（那里才知道用户要干什么）。
+func declaredServiceNames(files []string) (map[string]bool, bool) {
+	if len(files) == 0 {
+		return nil, false
+	}
+	names := map[string]bool{}
+	readable := false
+	for _, f := range files {
+		b, err := readComposeFileAt(f)
+		if err != nil {
+			continue
+		}
+		var doc struct {
+			Services map[string]any `yaml:"services"`
+		}
+		if err := yaml.Unmarshal(b, &doc); err != nil {
+			continue
+		}
+		readable = true
+		for name := range doc.Services {
+			names[name] = true
+		}
+	}
+	if !readable {
+		return nil, false
+	}
+	return names, true
 }
 
 // projectState 由成员容器的运行态归纳项目状态。

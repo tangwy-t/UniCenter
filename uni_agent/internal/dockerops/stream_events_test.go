@@ -119,6 +119,91 @@ func TestStreamExecutorEventsDropsInvalid(t *testing.T) {
 	})
 }
 
+// exec 族整族不上行（P0-2）：本地动作对活动流零信息量，且 exec_create/
+// exec_start 后缀带命令原文（含凭据的命令行 = 不可控泄漏面）。断言按**事件行**
+// 做而不是按帧数（泵允许合帧，一帧多行是时序，帧数不是契约）：exec 三连
+// 一条行都不产、生命周期事件照常保序上行、命令原文不出现在任何帧里。
+func TestStreamExecutorEventsDropsExecFamily(t *testing.T) {
+	ch := make(chan EventItem, 8)
+	api := &stubAPI{eventsStream: ch}
+
+	sink := &frameSink{}
+	m, _ := newTestSessions(sink, streamIdleTimeout)
+	e := NewStreamExecutor(api, m)
+	if _, err := e.Do(context.Background(), &agentproto.DockerCmd{Ref: "1",
+		Action: agentproto.DockerActionEvents}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 健康检查探针的 exec 三连：命令原文里塞个密码形态的串 —— 顺带钉住
+	// 「命令原文不出现在任何上行帧里」。
+	execCmd := "mysqladmin ping -ppassword s3cret"
+	ch <- EventItem{Type: "container", Action: "exec_create: " + execCmd, ActorName: "mysql", ActorID: "ab12"}
+	ch <- EventItem{Type: "container", Action: "exec_start: " + execCmd, ActorName: "mysql", ActorID: "ab12"}
+	ch <- EventItem{Type: "container", Action: "exec_die", ActorName: "mysql", ActorID: "ab12"}
+	time.Sleep(50 * time.Millisecond)
+	if got := eventLines(sink.data()); len(got) != 0 {
+		t.Fatalf("exec 族事件不得成帧，实际 %d 行", len(got))
+	}
+
+	// 容器生命周期照常：start、健康态翻转、die（exit≠0 的通知联动事实源）。
+	exit := int32(1)
+	ch <- EventItem{Type: "container", Action: "start", ActorName: "mysql", ActorID: "ab12"}
+	ch <- EventItem{Type: "container", Action: "health_status: unhealthy", ActorName: "mysql", ActorID: "ab12"}
+	ch <- EventItem{Type: "container", Action: "die", ActorName: "mysql", ActorID: "ab12", ExitCode: &exit}
+	waitFor(t, "生命周期事件成帧", func() bool { return len(eventLines(sink.data())) >= 3 })
+
+	// 被过滤的 exec 事件不占帧号账目：帧序号仍从 1 起严格 +1（合帧也不乱序）。
+	frames := sink.all()
+	for i, f := range frames {
+		if f.Seq != uint64(i+1) {
+			t.Fatalf("帧 %d seq = %d, want %d（过滤不占账目）", i, f.Seq, i+1)
+		}
+	}
+
+	lines := eventLines(sink.data())
+	if len(lines) != 3 {
+		t.Fatalf("恰应三条事件行（exec 一条都不许混入），实际 %d: %q", len(lines), sink.data())
+	}
+	wantActions := []string{"start", "health_status: unhealthy", "die"}
+	for i, ln := range lines {
+		var item agentproto.DockerEventItem
+		if err := json.Unmarshal([]byte(ln), &item); err != nil {
+			t.Fatalf("行不是合法事件 JSON: %v (%q)", err, ln)
+		}
+		if err := item.Validate(); err != nil {
+			t.Fatalf("事件行必须过协议校验: %v", err)
+		}
+		if item.Action != wantActions[i] {
+			t.Fatalf("事件 %d 动作 = %q, want %q（保序上行）", i, item.Action, wantActions[i])
+		}
+	}
+	if d := sink.data(); strings.Contains(d, "mysqladmin") || strings.Contains(d, "s3cret") || strings.Contains(d, "exec_") {
+		t.Fatalf("exec 命令原文泄漏进上行帧: %q", d)
+	}
+	// die 的退出码是通知联动的事实源：合帧不吞字段。
+	if !strings.Contains(sink.data(), `"exit_code":1`) {
+		t.Fatalf("die 的 exit_code 必须在帧里: %q", sink.data())
+	}
+
+	close(ch)
+	waitFor(t, "槽位释放", func() bool {
+		fs := sink.all()
+		return len(fs) > 0 && fs[len(fs)-1].EOF && m.count() == 0
+	})
+}
+
+// eventLines 把帧数据拆成非空事件行 —— 泵允许合帧（多行一帧），事件单位是行。
+func eventLines(data string) []string {
+	var out []string
+	for _, ln := range strings.Split(data, "\n") {
+		if strings.TrimSpace(ln) != "" {
+			out = append(out, ln)
+		}
+	}
+	return out
+}
+
 // 取消即停：cancel 控制帧 → 上游关闭、槽位立刻释放、随后到达的事件不再成帧 ——
 // 「客户端断开清理」的纪律照 stats。
 func TestStreamExecutorEventsCancelStops(t *testing.T) {

@@ -89,22 +89,33 @@ type DockerFleetDisk struct {
 	// 0 占用，是不知道；计数如实标注而不是把缺报主机折算成零。
 	Hosts int `json:"hosts"`
 	// ImagesTotalMB / VolumesTotalMB / BuildCacheMB 是三类占用合计（MB）。
+	//
+	// ImagesTotalMB 是**层存储**的合计（共享层只算一次）= `docker system df` 的
+	// Images/SIZE 列 —— 面板与 CLI 必须对得上；Σ 镜像条目 SizeMB 会把共享层按
+	// 引用它的镜像个数重复计入（实测比 df 高出两成，六期对账修掉了这个口径）。
 	ImagesTotalMB  float64 `json:"imagesTotalMb"`
 	VolumesTotalMB float64 `json:"volumesTotalMb"`
 	BuildCacheMB   float64 `json:"buildCacheMb"`
-	// ImagesDanglingMB 是悬空镜像占用合计（image:prune 默认目标的体积：
-	//「能安全收回多少」的镜像半边）。卷的可回收数不在此列 —— volume:prune 只回收
-	// 匿名未用卷，合计口径在协议上拿不到（df 不区分匿名），入口在卷页的清理流。
+	// ImagesDanglingMB 是**执行 image:prune（默认口径，只清悬空）后真会释放的字节**
+	// —— 逐镜像只算独占层（共享给他人的层删了也不会释放）。
+	//
+	// 为什么不是 Σ 悬空镜像的 Size：那是「从没存在过的空间」（实测承诺 3.04GB、
+	// prune 只回收 2052 字节）。卷的可回收数不在此列 —— volume:prune 只回收匿名
+	// 未用卷，合计口径在协议上拿不到（df 不区分匿名），入口在卷页的清理流，
+	// 面板只给未用卷的**计数**、不给体积承诺。
 	ImagesDanglingMB float64 `json:"imagesDanglingMb"`
 }
 
 // DockerHostDiskItem 是一台主机的磁盘占用账目（总览磁盘面板一行的数据面）。
 type DockerHostDiskItem struct {
 	// ImagesMB / VolumesMB / BuildCacheMB 是三类占用（MB；system df 的同帧口径）。
+	// ImagesMB 是**层存储**的合计（共享层只算一次）—— 与 `docker system df` 的
+	// Images/SIZE 逐字对得上，不是 Σ 镜像条目的 SizeMB（那会把共享层重复计入）。
 	ImagesMB     float64 `json:"imagesMb"`
 	VolumesMB    float64 `json:"volumesMb"`
 	BuildCacheMB float64 `json:"buildCacheMb"`
-	// ImagesDanglingMB 是悬空镜像占用（image:prune 默认目标的体积）。
+	// ImagesDanglingMB 是执行 image:prune（默认只清悬空）后**真会释放**的字节：
+	// 悬空镜像的独占层之和（共享层删了也不会释放，故不计）。
 	ImagesDanglingMB float64 `json:"imagesDanglingMb"`
 	// DanglingImages 是悬空镜像计数（与镜像页「可回收」计数同一判据：agent 的
 	// Dangling 结论，前端不重算）。
@@ -216,6 +227,108 @@ type DockerWorkloadItem struct {
 	Hostname string `json:"hostname"`
 }
 
+// ── 跨主机资源清单（9a：GET /docker/images|volumes|networks|projects）──────
+//
+// 四个端点把「容器统一表」（DockerWorkloadItem）的跨主机模式推广到资源页：
+// 条目 = 单主机快照条目**内嵌** + 归属两列（hostId/hostname）。为什么内嵌
+// 而不是平行造一套字段：与 DockerWorkloadItem 同一句话 —— 清单条目下次加列时，
+// 平行造的那份会静默漏掉这一侧（页面上少一列，没人报错）。四个响应的
+// total/items 截断口径也与统一工作负载表逐字同句（截断前全量 + 至多 500 条）。
+//
+// 过滤/排序/跳过/截断的**行为**口径在服务端一处实现（service/docker.go 的
+// aggregateResourceRows），这份 DTO 只锁形状。
+
+// DockerImageListResp 是跨主机镜像清单响应。
+type DockerImageListResp struct {
+	Items []DockerImageListItem `json:"items"`
+	// Total 是**截断前**的过滤后全量数；Items 至多 500 条（两者不等即
+	//「截断了」的显式信号，口径与统一工作负载表同一句）。
+	Total int `json:"total"`
+	// Disk 是**主机范围**内的可回收镜像账目（镜像页底栏「N 个可回收 · X」的数据面）：
+	// 每台主机一行，前端按行求和。与 Items 的分工是这一页两种口径的分工：
+	//
+	//   - Items 是**筛选后的行**（keyword/dangling/unused + 500 条截断都作用其上），
+	//     底栏「合计」跟着它走；
+	//   - Disk 是**主机范围的账**：keyword/dangling/unused 过筛**不影响**它 ——
+	//     prune 回收的就是这台主机当下的可回收批，与「此刻在看哪些行」无关；
+	//     hostId 过滤影响它（账目必须跟着主机范围收窄）。500 条截断同样影响不到它
+	//     （账目在截断之前按主机整机收）—— 旧前端口径 Σ 可见悬空行 SizeMB 会因
+	//     截断少算、也会把 prune 释放不了的共享层算进去，这里是唯一的修正口径。
+	//
+	// 口径与总览的磁盘账同一句话：可回收 = 执行 image:prune（默认只清悬空）真会
+	// 释放的字节（悬空镜像的独占层之和，agent 的 df 对账口径）。
+	//
+	// **只收录账目完整的主机**（快照可读且该帧有 df 数据）：读失败 / 从未上报 /
+	// 无 df 数据（旧版 agent）的主机一律缺席 ——「缺席 = 不知道」，不是零；前端对
+	// 数组为空（没有任何主机报账）如实说「不可用」而不是折算成 0（与总览磁盘
+	// KPI「—/数据不可用」、主机行 disk=nil 同一条纪律）。空数组而非 null（与其它
+	// 清单同一约定，前端少一层判空）。
+	Disk []DockerImageHostDiskItem `json:"disk"`
+}
+
+// DockerImageHostDiskItem 是一台主机的可回收镜像账目（镜像页底栏
+//「N 个可回收 · X」的一行）。
+type DockerImageHostDiskItem struct {
+	// HostID 是主机设备 ID（与清单条目的归属列同源）。
+	HostID uint64 `json:"hostId,string"`
+	// DanglingCount 是这台主机上悬空（无标签）镜像的计数：agent 的 Dangling 结论，
+	// 与总览 DanglingImages、镜像表「使用」列的「可回收（无标签）」同一判据，前端
+	// 不重算。计数本身来自清单事实（不依赖 df），但它只随账目一起给出 ——「N 个」
+	// 与「X MB」必须同主机口径（一个数字覆盖另一批主机会让两个数互相打架）。
+	DanglingCount int `json:"danglingCount"`
+	// DanglingMB 是执行 image:prune（默认只清悬空）后**真会释放**的字节（MB）：
+	// 悬空镜像的独占层之和（共享层删了也不会释放，故不计）—— agent 的 df 对账后
+	// 口径，与总览 disk.imagesDanglingMb 同一句话。不是 Σ 悬空条目的 SizeMB
+	//（实测那是「从没存在过的空间」：承诺 3.04GB、prune 只回收 2052 字节）。
+	DanglingMB float64 `json:"danglingMb"`
+}
+
+// DockerImageListItem 是跨主机镜像清单的一行（一台主机上的一个镜像）。
+type DockerImageListItem struct {
+	DockerImageItem
+	HostID   uint64 `json:"hostId,string"`
+	Hostname string `json:"hostname"`
+}
+
+// DockerVolumeListResp 是跨主机卷清单响应。
+type DockerVolumeListResp struct {
+	Items []DockerVolumeListItem `json:"items"`
+	Total int                    `json:"total"`
+}
+
+// DockerVolumeListItem 是跨主机卷清单的一行（一台主机上的一个数据卷）。
+type DockerVolumeListItem struct {
+	DockerVolumeItem
+	HostID   uint64 `json:"hostId,string"`
+	Hostname string `json:"hostname"`
+}
+
+// DockerNetworkListResp 是跨主机网络清单响应。
+type DockerNetworkListResp struct {
+	Items []DockerNetworkListItem `json:"items"`
+	Total int                     `json:"total"`
+}
+
+// DockerNetworkListItem 是跨主机网络清单的一行（一台主机上的一个网络）。
+type DockerNetworkListItem struct {
+	DockerNetworkItem
+	HostID   uint64 `json:"hostId,string"`
+	Hostname string `json:"hostname"`
+}
+
+// DockerProjectListResp 是跨主机项目清单响应。
+type DockerProjectListResp struct {
+	Items []DockerProjectListItem `json:"items"`
+	Total int                     `json:"total"`
+}
+
+// DockerProjectListItem 是跨主机项目清单的一行（一台主机上的一个编排项目）。
+type DockerProjectListItem struct {
+	DockerProjectItem
+	HostID   uint64 `json:"hostId,string"`
+	Hostname string `json:"hostname"`
+}
+
 // DockerStateResp 是一台主机的完整快照。
 type DockerStateResp struct {
 	LastSync int64 `json:"lastSync,omitempty"`
@@ -302,11 +415,15 @@ type DockerNetworkItem struct {
 
 // DockerProjectItem 是一个 compose 项目。
 type DockerProjectItem struct {
-	Name            string   `json:"name"`
-	ConfigFiles     []string `json:"configFiles,omitempty"`
-	State           string   `json:"state,omitempty"`
-	Services        int      `json:"services"`
-	ContainersCount int      `json:"containersCount"`
+	Name        string   `json:"name"`
+	ConfigFiles []string `json:"configFiles,omitempty"`
+	State       string   `json:"state,omitempty"`
+	// Services 是项目**声明**的网元数（agent 读项目的 compose 配置文件；文件读不到
+	// 时退回容器标签归纳的已知网元数）。它与「有容器的网元」是两个不同的量：相减
+	// 得到的正是「有声明、没容器」的那部分（scale → 0 的项目、停掉的服务），
+	// 用容器归纳的服务数相减则恒等于 0（同一份数据相减，永远不可达）。
+	Services        int `json:"services"`
+	ContainersCount int `json:"containersCount"`
 	// Protected 来自 agent 的结论（project:<名>）；服务粒度由容器条目承载。
 	Protected bool `json:"protected"`
 }
@@ -373,12 +490,17 @@ type DockerRegistryListResp struct {
 // Status 的取值集合是**指令记录状态的照实投影**：pending/succeeded/failed/timeout。
 // 为什么没有 cancelled —— 盘点结论（6b 查现状、零行为改动纪律下的裁决）：
 // 指令记录没有「取消」生产者：流取消（三期）作用在**流会话**上、与指令记录
-// 分家（会话建立后记录已终结）；pull 被用户取消时 agent 以 failed + 结论句
+// 分家（会话建立后记录已终结）；pull 真被截止时 agent 以 failed + 结论句
 // 「拉取已取消」回写，取消语义由 Summary 这一句承载。本切片不造新状态 ——
 // 那要改状态机与 agent（协议/agent 侧皆不在本切片边界内，且违反
 // 「既有受理/轮询/流零行为改动」的纪律）。timeout 照实暴露：它是 sweep 的
 // 服务端推断（与「执行失败」是两类事实），冒充 failed 会让排障的人去查一个
 // 不存在的执行错误。
+//
+// **「拉取已取消」只在 pull 真被截止时出现**（取消/完成竞态的裁决，B4）：core 的
+// cancel 是客户端断流触发的 best-effort 动作，可能恰好在 daemon 干完活之后到达 ——
+// 那一侧由 agent 按**拉取的实际结局**结算（完成即成功，迟到的 cancel 是 no-op），
+// 于是这里的 succeeded / failed 各自说的是事实，而不是「谁先到」。
 type DockerTaskItem struct {
 	// Ref 是指令号（轮询 /cmds/:ref 与拉取进度流 /cmds/:ref/pull 的钥匙）。
 	Ref string `json:"ref"`

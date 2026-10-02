@@ -1024,6 +1024,77 @@ declare namespace Api {
       hostname: string
     }
 
+    interface DockerImageListResp {
+      items: Api.Docker.DockerImageListItem[]
+      total: number
+      disk: Api.Docker.DockerImageHostDiskItem[]
+    }
+
+    interface DockerImageHostDiskItem {
+      hostId: string
+      danglingCount: number
+      danglingMb: number
+    }
+
+    interface DockerImageListItem {
+      id: string
+      repoTags?: string[]
+      sizeMb: number
+      created?: number
+      inUse: boolean
+      dangling: boolean
+      inUseBy?: string[]
+      hostId: string
+      hostname: string
+    }
+
+    interface DockerVolumeListResp {
+      items: Api.Docker.DockerVolumeListItem[]
+      total: number
+    }
+
+    interface DockerVolumeListItem {
+      name: string
+      driver?: string
+      sizeMb?: number | null
+      inUse: boolean
+      mountedBy?: string[]
+      protected: boolean
+      hostId: string
+      hostname: string
+    }
+
+    interface DockerNetworkListResp {
+      items: Api.Docker.DockerNetworkListItem[]
+      total: number
+    }
+
+    interface DockerNetworkListItem {
+      name: string
+      driver?: string
+      scope?: string
+      internal: boolean
+      containersCount: number
+      hostId: string
+      hostname: string
+    }
+
+    interface DockerProjectListResp {
+      items: Api.Docker.DockerProjectListItem[]
+      total: number
+    }
+
+    interface DockerProjectListItem {
+      name: string
+      configFiles?: string[]
+      state?: string
+      services: number
+      containersCount: number
+      protected: boolean
+      hostId: string
+      hostname: string
+    }
+
     interface DockerStateResp {
       lastSync?: number
       stale: boolean

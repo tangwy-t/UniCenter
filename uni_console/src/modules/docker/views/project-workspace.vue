@@ -31,7 +31,7 @@
         <ElButton size="small" @click="back">返回项目列表</ElButton>
       </ElEmpty>
 
-      <!-- ============ 正常态：hero → 网元卡片区 → 聚合日志 → 配置 ============ -->
+      <!-- ============ 正常态：hero → 网元卡片区 → 日志/配置页签 ============ -->
       <template v-else>
         <ProjectHero
           :project="project"
@@ -52,9 +52,6 @@
         <section class="pw-section">
           <div class="pw-section__head">
             <span class="pw-section__title">网元</span>
-            <span class="pw-section__sub">
-              每张卡是一个网元 · 启停/重启按该网元的容器逐个发 · 点击容器行进容器详情
-            </span>
           </div>
           <ProjectServices
             :project="projectName"
@@ -66,37 +63,35 @@
           />
         </section>
 
-        <!-- 聚合日志：compose:logs 是只读流，权限与 container:logs 同档（docker:inspect）。 -->
-        <section v-if="canInspect" class="pw-section">
-          <div class="pw-section__head">
-            <span class="pw-section__title">聚合日志</span>
-            <span class="pw-section__sub">
-              项目全部网元的日志合流 · 行首是网元名 · 可按网元过滤
-            </span>
-          </div>
-          <div class="pw-card">
-            <ProjectLogs :project="projectName" :services="serviceNames" :followable="canInspect" />
-          </div>
-        </section>
-
-        <section v-if="canInspect || canConfig" class="pw-section">
-          <div class="pw-section__head">
-            <span class="pw-section__title">配置</span>
-            <span class="pw-section__sub">
-              表单/YML 双模式编辑 · 保存先校验与备份 · 应用是独立的动作 · 历史可回滚
-            </span>
-          </div>
-          <div class="pw-card">
-            <ProjectConfig
-              :project="project"
-              :run="run"
-              :busy="busy"
-              :loading="listLoading"
-              :refresh="refresh"
-              @backups-count="backupCount = $event"
-            />
-          </div>
-        </section>
+        <!-- 聚合日志 / 配置收进 Tab 结构（展示面整块优先）：两个页签吃满内容区
+             宽度，各自的工具条与内容都在页签内。页签**不懒挂载** —— 备份计数与
+             日志首拉在进入页面即就位（现状语义：hero 的「备份 N 份」依赖配置区
+             的读取），与资源页三个重清单 tab 的懒挂载需求不同。 -->
+        <ElTabs v-if="canInspect || canConfig" v-model="activeTab" class="pw-tabs">
+          <!-- 聚合日志：compose:logs 是只读流，权限与 container:logs 同档
+               （docker:inspect），无权限的页签不渲染。 -->
+          <ElTabPane v-if="canInspect" label="聚合日志" name="logs">
+            <div class="pw-card">
+              <ProjectLogs
+                :project="projectName"
+                :services="serviceNames"
+                :followable="canInspect"
+              />
+            </div>
+          </ElTabPane>
+          <ElTabPane label="配置" name="config">
+            <div class="pw-card">
+              <ProjectConfig
+                :project="project"
+                :run="run"
+                :busy="busy"
+                :loading="listLoading"
+                :refresh="refresh"
+                @backups-count="backupCount = $event"
+              />
+            </div>
+          </ElTabPane>
+        </ElTabs>
       </template>
     </div>
 
@@ -138,8 +133,8 @@
    * 状态、动作、日志、配置在同一屏围着**这一个项目**组织。本页是纯编排：
    *   - hero（实体头 + 生命周期动作条 + 主机行）在 components/project-workspace/project-hero；
    *   - 网元卡片区（服务级动作 + 容器行入口）在 project-services；
-   *   - 聚合日志（compose:logs 消费 + 服务过滤）在 project-logs；
-   *   - 配置区（compose-editor 四件套宿主 + 备份/回滚）在 project-config。
+   *   - 聚合日志（compose:logs 消费 + 服务过滤）与配置区（compose-editor 四件套
+   *     宿主 + 备份/回滚 + 等宽只读内容）收进下方「聚合日志 | 配置」页签。
    * 业务语义全部平移自 views/projects.vue（确认档/保护档/循环/备份/回滚零改动），
    * 列表页保留不动；服务行归纳的派生口径在 utils/projects.ts（两处同步改的提醒
    * 写在那份文件头）。
@@ -151,7 +146,15 @@
    */
   import { computed, ref } from 'vue'
   import { useRoute, useRouter } from 'vue-router'
-  import { ElButton, ElCheckbox, ElEmpty, ElMessage, ElSkeleton } from 'element-plus'
+  import {
+    ElButton,
+    ElCheckbox,
+    ElEmpty,
+    ElMessage,
+    ElSkeleton,
+    ElTabPane,
+    ElTabs
+  } from 'element-plus'
   import { useAuth } from '@/hooks/core/useAuth'
   import { PermDockerConfig, PermDockerExec, PermDockerInspect } from '@/enums/permission'
   import DockerActionConfirm from '../components/action-confirm.vue'
@@ -182,6 +185,9 @@
 
   /** 路由参数里的项目名（列表页入口传的就是快照里的项目名，同一口径）。 */
   const projectName = computed(() => String(route.params.name ?? ''))
+
+  /** 下方页签：默认「聚合日志」（与旧版首屏一致 —— 进场就能看日志的那块）。 */
+  const activeTab = ref('logs')
 
   // 快照与四态收口在 composable（hosts 清单、seq 守卫、主机切换后的重拉都在它里面）。
   // 主机切换 = 换一台机器：收掉上一台主机的确认弹窗（它属于上一台机器）并重拉快照；
@@ -339,7 +345,19 @@
 <style lang="scss" scoped>
   @use './overview-tokens' as t;
 
+  // 「重新检测 / 重试 / 返回项目列表」等默认档按钮的主色文字对比度 AA：
+  // 病灶与处方见 overview-tokens 的 primary-text-aa（终审 QA D2·浅色实测 3.68:1）。
+  @include t.primary-text-aa;
+
   @include t.rise-keyframes;
+
+  /* 次要文字对比度 AA（P2 打磨批，与总览页同款处置）：EP 默认
+     --el-text-color-secondary(#909399) 对白底只有 3.08:1（QA 实测 2.97–3.08），低于
+     AA 正文线 → 页面范围内把它升到 regular 档（浅色 6.1:1、暗色随主题同样达标）。
+     只重定义变量值，不碰元素样式与布局。 */
+  .project-workspace {
+    --el-text-color-secondary: var(--el-text-color-regular);
+  }
 
   .pw-inner {
     display: flex;
@@ -367,7 +385,8 @@
     padding: 56px 0;
   }
 
-  // 分区头：标题 + 一句说明（说清这一区「是什么、能做什么」，不写实现细节）。
+  // 分区头：只剩标题 —— 「这一区是什么、能做什么」的说明句属解释性文案，
+  // 已按「零解释文案」纪律删除（页面只展示硬性数据；原 .pw-section__sub 一并清掉）。
   .pw-section__head {
     display: flex;
     flex-wrap: wrap;
@@ -379,11 +398,6 @@
   .pw-section__title {
     font-size: 14px;
     font-weight: 600;
-  }
-
-  .pw-section__sub {
-    color: var(--el-text-color-secondary);
-    font-size: 12px;
   }
 
   // 确认弹窗里的补充勾选项：与结论行拉开一点距离。

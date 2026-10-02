@@ -916,6 +916,11 @@
 
 <style lang="scss" scoped>
   @use '@styles/core/breakpoints.scss' as *;
+  @use '../views/overview-tokens' as t;
+
+  // 「取消」等默认档按钮的主色文字对比度 AA：病灶与处方见 overview-tokens
+  // 的 primary-text-aa（终审 QA D2·浅色实测 3.68:1）。
+  @include t.primary-text-aa;
 
   // 输入态：一张四字段表单（标签在输入框上方 —— 字段多了，与拉取的单列无标签
   // 形态分道；就地结论（错误句/提示句）都是对话框内的结论，不放 toast）。

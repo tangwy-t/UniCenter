@@ -67,13 +67,14 @@
       // 注册表里没有的动作不进菜单：宁可少一项，也不生成一个没权限/没确认档的裸按钮。
       if (!entry) return []
       // 受保护目标 + 没有强制权限：受保护档约束的动作不可执行（勾了也没用），
-      // 条目禁用并带上锁标记（结论句由页面在行上给出）。
+      // 条目禁用并把结论写在条目上（与 workload-table 行菜单同一句；不用 🔒 emoji
+      // —— 无 emoji 字体的环境里是豆腐块，锁的表达归列表的保护列）。
       const blocked = props.protected && entry.guarded && !canForce.value
       const pending = props.pendingId != null && props.pendingId === props.target
       return [
         {
           key: action,
-          label: blocked ? `🔒 ${entry.label}` : entry.label,
+          label: blocked ? `${entry.label}（需要更高权限）` : entry.label,
           icon: entry.icon,
           auth: entry.perm,
           color: entry.danger === 'normal' ? undefined : props.dangerColor,

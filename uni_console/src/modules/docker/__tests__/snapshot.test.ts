@@ -4,6 +4,7 @@ import {
   filterImages,
   filterNetworks,
   filterVolumes,
+  imageReclaimTotals,
   imageTotals,
   volumeTotals
 } from '../utils/snapshot'
@@ -66,12 +67,26 @@ describe('镜像截图与筛选', () => {
     { id: 'sha256:c', repoTags: ['mysql:8.0.22'], sizeMb: 545, inUse: false, dangling: false }
   ]
 
-  it('合计是本页的入口数字（「空间去哪了」）', () => {
+  it('合计是本页的入口数字（「空间去哪了」）：总数与 Σ 条目 SizeMB', () => {
     const t = imageTotals(list)
     expect(t.count).toBe(3)
     expect(t.totalMB).toBeCloseTo(1836.8, 1)
-    expect(t.danglingCount).toBe(1)
-    expect(t.danglingMB).toBeCloseTo(1200, 1)
+  })
+
+  it('可回收合计读后端账目：逐主机求和，不是 Σ 悬空行 SizeMB（共享层不承诺）', () => {
+    // 两条账目故意与 list 的悬空行（1200MB）不同：账目是后端 df 对账的独占层
+    //（prune 真会释放的量），前端只做求和。
+    const t = imageReclaimTotals([
+      { hostId: 'h1', danglingCount: 1, danglingMb: 0.002 },
+      { hostId: 'h2', danglingCount: 2, danglingMb: 12.5 }
+    ])
+    expect(t?.count).toBe(3)
+    expect(t?.mb).toBeCloseTo(12.502, 3)
+  })
+
+  it('没有任何主机的账目（空数组/字段缺席）→ null：说「不可用」而不是折算成 0', () => {
+    expect(imageReclaimTotals([])).toBeNull()
+    expect(imageReclaimTotals(undefined)).toBeNull()
   })
 
   it('按仓库名搜、按悬空/未使用筛', () => {
@@ -81,11 +96,6 @@ describe('镜像截图与筛选', () => {
       'sha256:b',
       'sha256:c'
     ])
-  })
-
-  it('无标签镜像的展示名是「无标签」而不是空串', () => {
-    const t = imageTotals(list)
-    expect(t.danglingCount).toBe(1)
   })
 
   it('卷的合计把未知用量排除在大小之外（只计数）', () => {

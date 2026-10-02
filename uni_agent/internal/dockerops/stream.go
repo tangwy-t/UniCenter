@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"os/exec"
+	"strings"
 	"sync"
 
 	agentproto "github.com/tangwy-t/UniCenter/uni_protocol"
@@ -259,15 +260,43 @@ func (e *StreamExecutor) startEvents(cmd *agentproto.DockerCmd) error {
 	return nil
 }
 
+// isDockerExecEvent 报告一条事件动作是否属于 exec 族（exec_create/exec_start/
+// exec_die/exec_detach，含 "exec_create: /bin/sh -c …" 的带命令后缀形态）。
+// 词元切分口径与协议 DockerEventItem.Validate 的 ": " 规则同一句 —— 那边是
+// 「这条动作合不合法」的契约，这里是「这条动作值不值得上行」的策展。
+func isDockerExecEvent(action string) bool {
+	token := action
+	if i := strings.Index(action, ": "); i >= 0 {
+		token = action[:i]
+	}
+	return strings.HasPrefix(token, "exec_")
+}
+
 // copyEvents 把事件流搬进会话：每事件编成一条 JSON 行（协议 DockerEventItem + 换行）
 // 写进会话缓冲 —— 帧的整形与限速仍在会话泵里（与 copyStats 同纪律：生产者不碰帧）。
 // 通道关闭（取消/daemon 断开）即 markEOF。
+//
+// exec 族事件（exec_create/exec_start/exec_die/exec_detach）在**这里**整族丢弃，
+// 两个理由（裁定记录，勿「顺手放开」）：
+//  1. 信噪比：exec 是容器内的**本地动作**（健康检查探针、一次性命令），不是
+//     资源生命周期 —— 对控制塔活动流零信息量；带健康检查的容器每个探针周期
+//     产出 exec_create/exec_start/exec_die 三连，QA 实测约占活动流 ~80%。
+//  2. 泄漏面：exec_create/exec_start 的动作后缀是**命令原文**
+//     （"exec_create: mysqladmin ping -ppassword …"）—— 命令行带凭据是常态，
+//     这是不可控的明文泄漏面；资源生命周期事件从不携带自由文本。
+//
+// 通知联动不受影响：dockernotify 的规则只认容器 die（exit ≠ 0）与
+// health_status: unhealthy —— 都不是 exec 族（exec_die 是 exec 实例的退出，
+// 不是容器退出）。
 //
 // 写会话前先过协议校验：类型/动作白名单是两端共同的理解，agent 是**最后一道** ——
 // daemon 版本更新冒出白名单外的动作时，在这里就把它拦下并留痕，而不是推一帧
 // core 必将拒掉的记录（core 侧的整行丢弃仍然存在，两道闸互不依赖）。
 func (e *StreamExecutor) copyEvents(sess *streamSession, ch <-chan EventItem) {
 	for ev := range ch {
+		if isDockerExecEvent(ev.Action) {
+			continue // 过滤理由见函数注释（信噪比 + 命令原文泄漏面）
+		}
 		item := agentproto.DockerEventItem{
 			T:         sess.mgr.cfg.now().UnixMilli(),
 			Type:      ev.Type,

@@ -21,22 +21,28 @@ export function cpuText(c: DockerContainerItem): string {
   return `${c.cpuPercent.toFixed(1)}%`
 }
 
-/** 网络文案：上/下行速率（B/s 由 formatByUnit 换算成 KB/s、MB/s）。 */
+/**
+ * 网络文案：上/下行速率。`formatByUnit('B/s', …)` 的产物**自带速率单位**
+ * （「10 B/s」「743.4 KB/s」），不再追加后缀 —— 旧实现补了第二个「/s」，
+ * 列表上就是「10 B/s/s」这个错字面（投诉截图里可见）。
+ */
 export function netText(c: DockerContainerItem): string {
   if (c.state !== 'running') return '—'
-  return `↑${formatByUnit('B/s', c.netTxBytesSec)}/s ↓${formatByUnit('B/s', c.netRxBytesSec)}/s`
+  return `↑${formatByUnit('B/s', c.netTxBytesSec)} ↓${formatByUnit('B/s', c.netRxBytesSec)}`
 }
 
-/** 端口映射：「20080 → 8088/tcp」，多行用「、」连接；无映射「—」。 */
+/**
+ * 端口映射（**单行折叠**）：「20080 → 8088/tcp」；多映射只留首条并标出余量
+ * （「… +2」）—— 行不再竖向堆高（列表列宽有限，第一段映射已是连通性排查的
+ * 第一线索）。无映射「—」。
+ */
 export function portsText(ports: DockerPortItem[] | undefined): string {
   if (!ports || ports.length === 0) return '—'
-  return ports
-    .map((p) =>
-      p.publicPort
-        ? `${p.publicPort} → ${p.privatePort}/${p.type ?? 'tcp'}`
-        : `${p.privatePort}/${p.type ?? 'tcp'}`
-    )
-    .join('、')
+  const first = ports[0]!
+  const text = first.publicPort
+    ? `${first.publicPort} → ${first.privatePort}/${first.type ?? 'tcp'}`
+    : `${first.privatePort}/${first.type ?? 'tcp'}`
+  return ports.length > 1 ? `${text} +${ports.length - 1}` : text
 }
 
 /** 镜像展示名：第一个仓库标签，无标签时用短 id（**页面不用「<none>」这种原始记号**）。 */

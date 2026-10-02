@@ -2,15 +2,13 @@
   <!-- 单根（single-root 守卫扫描全模块的 .vue）：与 image-detail 的其它 Tab 内容
        同为「一个语义块一个根」的挂法。 -->
   <div class="isc">
-    <!-- ── 扫描在途：加载态 + 「去哪看进度」的提示 ──
-         没有进度流（协议口径：trivy 的 json 模式结束才出完整报告，中途没有可增量
-         的结构化进度），pending 期间在任务中心的可见性就是「扫了没反应」的答案；
-         首扫还要下载漏洞库，几分钟是常态 —— 不说清这段时间，加载态会被读成卡死。 -->
+    <!-- ── 扫描在途：加载态（没有进度流 —— 协议口径：trivy 的 json 模式结束才出
+         完整报告，中途没有可增量的结构化进度）。首扫还要下载漏洞库，几分钟是
+         常态 —— 不说清这段时间，加载态会被读成卡死；去向说明句（如「进度可在
+         任务中心查看」）属解释性文案，按「零解释文案」纪律不写。 -->
     <template v-if="scanPhase === 'scanning'">
       <ElSkeleton :rows="6" animated />
-      <p class="isc-note">
-        正在扫描，可能需要几分钟（首次扫描还要先下载漏洞库）；进度可在任务中心查看。
-      </p>
+      <p class="isc-note">正在扫描，可能需要几分钟（首次扫描还要先下载漏洞库）。</p>
     </template>
 
     <template v-else>
@@ -215,6 +213,11 @@
 
 <style lang="scss" scoped>
   @use '@styles/core/breakpoints.scss' as *;
+  @use '../views/overview-tokens' as t;
+
+  // 「重新扫描 / 重试」等默认档按钮的主色文字对比度 AA：病灶与处方见 overview-tokens
+  // 的 primary-text-aa（终审 QA D2·浅色实测 3.68:1）。
+  @include t.primary-text-aa;
 
   // 空态/加载态下的说明行：结论弱化（它解释「为什么慢/为什么没有」，不是数据）。
   .isc-note {

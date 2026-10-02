@@ -182,11 +182,27 @@ function streamResponseOf(lines: string[]): { ok: boolean; status: number; body:
   return { ok: true, status: 200, body }
 }
 
-/** 聚合日志的样本（compose CLI 的行形：`服务名(对齐空白) | 正文`）。 */
+/**
+ * 聚合日志样本（工作台挂载用）：按 2026-10-02 真机实测的行形写 —— 前缀是
+ * **项目名剥离后的容器短名**（`core-1` / `web-1`，实测 argv 与样本见下面纯函数
+ * 块的说明），对齐空白到最长前缀 + 2 空格。旧夹具把前缀写成服务名
+ * （`core  | …`），正是 QA B2 里「守卫本身错了」的那一版：真栈的容器名前缀
+ * 在 `set.has(服务名)` 下恒不命中，过滤恒空而测试常绿。
+ */
 const LOG_TEXT = [
-  'core  | 2026-09-30T12:00:00Z core line 1',
-  'web   | 2026-09-30T12:00:01Z web line 1',
-  'core  | 2026-09-30T12:00:02Z core line 2'
+  'core-1  | 2026-10-02T12:00:00.000000000Z core line 1',
+  'web-1   | 2026-10-02T12:00:01.000000000Z web line 1',
+  'core-1  | 2026-10-02T12:00:02.000000000Z core line 2'
+].join('\n')
+
+/**
+ * 同一台真机、QA 真栈观察到的另一种前缀形态：**带项目前缀的容器全名**
+ * （`qa-svc2-1`）。用于钉住「解码要把 project 参与进来」的接线 —— 组件若不
+ * 把 props.project 传进过滤函数，全名形态整批归不了属（B2 恒空故障的根因）。
+ */
+const FULLNAME_LOG_TEXT = [
+  'uni-center-core-1  | 2026-10-02T12:00:00.000000000Z core line 1',
+  'uni-center-web-1   | 2026-10-02T12:00:01.000000000Z web line 1'
 ].join('\n')
 
 async function makeRouter(): Promise<Router> {
@@ -201,7 +217,9 @@ async function makeRouter(): Promise<Router> {
         component: ProjectWorkspace
       },
       // 容器行点击的目标路由（占位组件即可 —— 断言的是目标地址，不是那页的渲染）。
-      { path: '/docker/containers', component: { template: '<div />' } }
+      { path: '/docker/containers', component: { template: '<div />' } },
+      // 8a：容器详情是整页路由（容器行点击的直接目标）。
+      { path: '/docker/containers/:id', component: { template: '<div />' } }
     ]
   })
   await router.push('/')
@@ -260,34 +278,100 @@ afterEach(() => {
   for (const w of mounted.splice(0)) w.unmount()
 })
 
-describe('纯函数：聚合日志的服务过滤（行前缀匹配）', () => {
-  it('服务名 + 对齐空白 + | 是行前缀；前缀外（CLI 结论句）不归属任何服务', () => {
-    expect(composeLogLineService('core  | 2026-09-30T12:00:00Z core line 1')).toBe('core')
-    expect(composeLogLineService('web | x')).toBe('web')
-    expect(composeLogLineService('no such service: xxx')).toBe('')
-    // 服务名字符集与协议白名单同形（冒号/斜杠等不出现在前缀里）。
-    expect(composeLogLineService('a.b-c_1 | x')).toBe('a.b-c_1')
+/**
+ * 真机实测样本（2026-10-02，本机 docker compose v5.1.4，argv 与 agent 侧逐字一致：
+ * `docker compose -p qa -f <file> logs --timestamps --tail 100`；项目 `qa`，服务
+ * `svc2` / `svc20` / `svc2-extra`，`svc20` 缩到 2 副本）。以下五行为原样捕获，
+ * 未改一字：前缀是**项目名剥离后的容器短名** `服务-序号`（容器全名 `qa-svc2-1`
+ * 里的 `qa-` 被 CLI 显示时剥掉）；对齐空白到最长前缀 + 2 空格（同一批捕获里
+ * 出现过早行 pipe 列 10/15 混排，故匹配只可按「竖线前去空白段」—— 按列宽解析
+ * 会踩空）。旧夹具把前缀假定成服务名（`core  | …`），守卫因此对真栈恒绿，
+ * 正是 QA B2 抓到的错（过滤恒空而测试全绿）。
+ */
+const REAL_CAPTURED_LOG_TEXT = [
+  'svc20-1       | 2026-10-02T02:36:00.292396433Z svc20 line one',
+  'svc20-2       | 2026-10-02T02:35:59.694574699Z svc20 line one',
+  'svc2-1        | 2026-10-02T02:35:59.962206484Z svc2 line one',
+  'svc2-1        | 2026-10-02T02:35:59.962236327Z svc2 line two',
+  'svc2-extra-1  | 2026-10-02T02:35:59.826561244Z svc2-extra line one'
+].join('\n')
+
+describe('纯函数：聚合日志的服务过滤（行前缀匹配，真机实测形态）', () => {
+  const SERVICES = ['svc2', 'svc20', 'svc2-extra']
+
+  it('容器短名 `服务-序号` 归到服务；多副本的序号不参与归属', () => {
+    expect(composeLogLineService('svc2-1   | x', SERVICES, 'qa')).toBe('svc2')
+    expect(composeLogLineService('svc20-2 | x', SERVICES, 'qa')).toBe('svc20')
+    expect(composeLogLineService('svc2-extra-1 | x', SERVICES, 'qa')).toBe('svc2-extra')
+    // 对齐空白逐行不同（实测最窄 3 空格）不影响归属：取的是竖线前去空白段。
+    expect(composeLogLineService('svc2-1   | x', ['svc2'], 'qa')).toBe('svc2')
   })
 
-  it('过滤保留命中行，丢弃其余；未选服务 = 原文', () => {
-    expect(filterComposeLogLines(LOG_TEXT, ['core'])).toBe(
-      ['core  | 2026-09-30T12:00:00Z core line 1', 'core  | 2026-09-30T12:00:02Z core line 2'].join(
-        '\n'
-      )
+  it('邻名边界：段边界 + 纯数字序号才算命中（B2 的反面样本）', () => {
+    // svc20 的 `0` 黏在服务名后（不是段边界）；`extra` 不是数字段 —— 都不归 svc2。
+    expect(composeLogLineService('svc20-1 | x', ['svc2'], 'qa')).toBe('')
+    expect(composeLogLineService('svc20-2 | x', ['svc2'], 'qa')).toBe('')
+    expect(composeLogLineService('svc2-extra-1 | x', ['svc2'], 'qa')).toBe('')
+    // 但 svc2-extra 自己命中：`-1` 是它名后的完整序号段。
+    expect(composeLogLineService('svc2-extra-1 | x', ['svc2-extra'], 'qa')).toBe('svc2-extra')
+  })
+
+  it('带项目前缀的容器全名形态（QA 真栈观察：qa-svc2-1）剥一层项目名后解码', () => {
+    expect(composeLogLineService('qa-svc2-1 | x', ['svc2'], 'qa')).toBe('svc2')
+    // 剥离后仍守邻名边界：全名形态的 svc20 / svc2-extra 不归 svc2。
+    expect(composeLogLineService('qa-svc20-1 | x', ['svc2'], 'qa')).toBe('')
+    expect(composeLogLineService('qa-svc2-extra-1 | x', ['svc2'], 'qa')).toBe('')
+    // 项目名对不上时不硬剥（此时按短名直接解码，仍命中）；不传项目名则全名形态归不了属
+    // —— 这条钉住「project 必须随行」（组件漏传时正是 B2 的恒空形态）。
+    expect(composeLogLineService('svc2-1 | x', ['svc2'], 'other')).toBe('svc2')
+    expect(composeLogLineService('qa-svc2-1 | x', ['svc2'], '')).toBe('')
+  })
+
+  it('v1 形态（前缀即服务名）、字符集与 CLI 结论句（无前缀行）', () => {
+    expect(composeLogLineService('core  | x', ['core'], 'qa')).toBe('core')
+    // 服务名字符集与协议白名单同形（冒号/斜杠等不出现在前缀里）。
+    expect(composeLogLineService('a.b-c_1 | x', ['a.b-c_1'], 'qa')).toBe('a.b-c_1')
+    expect(composeLogLineService('no such service: xxx', ['core'], 'qa')).toBe('')
+    // 空候选集合/空串候选：没人可归属。
+    expect(composeLogLineService('core-1 | x', [], 'qa')).toBe('')
+    expect(composeLogLineService('core-1 | x', [''], 'qa')).toBe('')
+  })
+
+  it('过滤：真机样本按服务取行（同服务多行、多副本都保留），未选 = 原文', () => {
+    expect(filterComposeLogLines(REAL_CAPTURED_LOG_TEXT, ['svc2'], 'qa')).toBe(
+      [
+        'svc2-1        | 2026-10-02T02:35:59.962206484Z svc2 line one',
+        'svc2-1        | 2026-10-02T02:35:59.962236327Z svc2 line two'
+      ].join('\n')
     )
-    expect(filterComposeLogLines(LOG_TEXT, [])).toBe(LOG_TEXT)
-    expect(filterComposeLogLines(LOG_TEXT, ['core', 'web'])).toBe(LOG_TEXT)
-    // 前缀子串不算命中（we ≠ web）。
-    expect(filterComposeLogLines('web | x', ['we'])).toBe('')
+    expect(filterComposeLogLines(REAL_CAPTURED_LOG_TEXT, ['svc20'], 'qa')).toBe(
+      [
+        'svc20-1       | 2026-10-02T02:36:00.292396433Z svc20 line one',
+        'svc20-2       | 2026-10-02T02:35:59.694574699Z svc20 line one'
+      ].join('\n')
+    )
+    expect(filterComposeLogLines(REAL_CAPTURED_LOG_TEXT, ['svc2-extra'], 'qa')).toBe(
+      'svc2-extra-1  | 2026-10-02T02:35:59.826561244Z svc2-extra line one'
+    )
+    expect(filterComposeLogLines(REAL_CAPTURED_LOG_TEXT, [], 'qa')).toBe(REAL_CAPTURED_LOG_TEXT)
+    expect(filterComposeLogLines(REAL_CAPTURED_LOG_TEXT, SERVICES, 'qa')).toBe(
+      REAL_CAPTURED_LOG_TEXT
+    )
+    // 邻名边界在过滤口同样成立：只选 svc2 时 svc20/svc2-extra 的行走掉。
+    expect(filterComposeLogLines('svc20-1 | x\nsvc2-extra-1 | y\nsvc2-1 | z', ['svc2'], 'qa')).toBe(
+      'svc2-1 | z'
+    )
   })
 
   it('CRLF 行尾同样参与过滤（与拆行口径一致）', () => {
-    expect(filterComposeLogLines('core | a\r\nweb | b\r\n', ['core'])).toBe('core | a')
+    expect(filterComposeLogLines('svc2-1 | a\r\nsvc20-1 | b\r\n', ['svc2'], 'qa')).toBe(
+      'svc2-1 | a'
+    )
   })
 })
 
 describe('工作台渲染冒烟（挂载即验证，白屏类故障的守卫）', () => {
-  it('hero/网元卡/聚合日志/配置四区都在，元信息与状态结论正确', async () => {
+  it('hero/网元卡/「聚合日志 | 配置」页签都在，元信息与状态结论正确', async () => {
     const w = await mountWorkspace()
     expect(w.find('.project-workspace').exists()).toBe(true)
     // hero：项目名、状态（partial → 部分运行）、备份计数（配置区自动拉到的 1 份）、缺口提示。
@@ -302,8 +386,14 @@ describe('工作台渲染冒烟（挂载即验证，白屏类故障的守卫）'
     expect(w.find('.pws-card__replicas').text()).toBe('副本 1/1')
     expect(w.findAll('.pws-container')).toHaveLength(2)
     expect(w.find('.pws-container__name').text()).toBe('uni-center-core')
-    // 配置区：basename + 编辑器替身挂上（打开入口的往返在下面的配置区用例里验）。
+    // 下方是「聚合日志 | 配置」两个页签（布局族统一：section 头与解释副文案删除，
+    // 只留页签标签）；页签**不懒挂载** —— 配置内容在进入页面即就位（hero 的
+    // 备份计数依赖它，下面两条断言正是「未激活的页签内容也在 DOM 里」的证明）。
+    expect(w.findAll('.el-tabs__item').map((n) => n.text())).toEqual(['聚合日志', '配置'])
+    // 配置区：basename + 只读内容直显（等宽 pre，旧「查看配置」窄弹层已删）+
+    // 编辑器替身挂上（打开入口的往返在下面的配置区用例里验）。
     expect(w.find('.pwc__files').text()).toBe('docker-compose.yml')
+    expect(w.find('.pwc__yml-body').text()).toContain('uni-center-core:latest')
     expect(w.find('.stub-compose-editor').exists()).toBe(true)
   })
 
@@ -358,13 +448,15 @@ describe('服务卡动作派发（语义平移自列表页：按容器逐个发�
     expect(calls[0]![1]).toMatchObject({ action: 'container:start', target: 'uni-center-web' })
   })
 
-  it('点容器行 → 容器列表页 ?host=&id=（7b：深链改指统一表抽屉，旧详情路由已删）', async () => {
+  it('点容器行 → 容器详情页 /docker/containers/:id（8a：深链改指详情页，host 随行）', async () => {
     const w = await mountWorkspace()
     await w.findAll('.pws-container')[0]!.trigger('click')
     await flushPromises()
-    expect(currentRouter!.currentRoute.value.path).toBe('/docker/containers')
+    // 8a：详情是一条整页路由（host 随行 —— 详情页据此还原到同一台机器）；
+    // 7b 的「列表页 + ?id 开抽屉」形态已随抽屉一起删除。
+    expect(currentRouter!.currentRoute.value.path).toBe('/docker/containers/c1')
     expect(currentRouter!.currentRoute.value.query.host).toBe('h1')
-    expect(currentRouter!.currentRoute.value.query.id).toBe('c1')
+    expect(currentRouter!.currentRoute.value.query.id).toBeUndefined()
   })
 
   it('受保护网元的写动作先走确认弹窗（不直接发指令，弹窗里有「强制操作」开关）', async () => {
@@ -431,6 +523,27 @@ describe('聚合日志接线（compose:logs：指令载荷 + 流消费 + 服务�
     const body = w.find('.log-viewer__body').text()
     expect(body).toContain('core line 1')
     expect(body).toContain('core line 2')
+    expect(body).not.toContain('web line')
+  })
+
+  it('服务过滤兼容带项目前缀的容器全名（QA 真栈观察形态）：project 随行进解码', async () => {
+    // 全名形态（`uni-center-core-1`）只有把 props.project 传进过滤函数才归得了属 ——
+    // 组件的传参接线若断，这里整批为空（B2 恒空故障的组件级复现守卫）。
+    api.openDockerLogStream.mockResolvedValue(streamResponseOf(ndjsonOf(FULLNAME_LOG_TEXT)))
+    const w = await mountWorkspace()
+    await flushPromises()
+    expect(w.find('.log-viewer__body').text()).toContain('web line 1')
+
+    const selects = w.findAllComponents({ name: 'ElSelect' })
+    const filterSelect = selects[selects.length - 1]!
+    ;(filterSelect.vm as unknown as { $emit: (e: string, v: unknown) => void }).$emit(
+      'update:modelValue',
+      ['core']
+    )
+    await nextTick()
+
+    const body = w.find('.log-viewer__body').text()
+    expect(body).toContain('core line 1')
     expect(body).not.toContain('web line')
   })
 

@@ -5,6 +5,7 @@ import {
   inUseText,
   layersTotalMB,
   memText,
+  netText,
   portsText
 } from '../utils/display'
 import type { DockerContainerItem, DockerImageItem } from '../api'
@@ -48,6 +49,34 @@ describe('容器状态与用量文案', () => {
       '20080 → 8088/tcp'
     )
     expect(portsText([{ privatePort: 3306, type: 'tcp' }])).toBe('3306/tcp')
+  })
+
+  it('多端口折叠为单行：首条 + 其余计数（列表行不再竖向堆高）', () => {
+    expect(
+      portsText([
+        { privatePort: 80, publicPort: 8080, type: 'tcp' },
+        { privatePort: 443, publicPort: 8443, type: 'tcp' },
+        { privatePort: 53, type: 'udp' }
+      ])
+    ).toBe('8080 → 80/tcp +2')
+    expect(
+      portsText([
+        { privatePort: 80, publicPort: 8080, type: 'tcp' },
+        { privatePort: 443, type: 'tcp' }
+      ])
+    ).toBe('8080 → 80/tcp +1')
+    // 首条无宿主映射时同样只留首条（折叠不改变「宿主→容器」的取数口径）。
+    expect(
+      portsText([
+        { privatePort: 80, type: 'tcp' },
+        { privatePort: 443, publicPort: 8443, type: 'tcp' }
+      ])
+    ).toBe('80/tcp +1')
+  })
+
+  it('网络文案自带速率单位，不再出现 B/s/s 双重后缀（投诉截图里的错字面）', () => {
+    expect(netText(c({ netTxBytesSec: 10, netRxBytesSec: 2048 }))).toBe('↑10 B/s ↓2.0 KB/s')
+    expect(netText(c({ state: 'exited' }))).toBe('—')
   })
 })
 

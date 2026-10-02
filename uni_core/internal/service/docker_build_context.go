@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"sync/atomic"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -54,9 +56,9 @@ type DockerBuildContextChannel interface {
 
 // DockerBuildContextService 是构建上下文上传的中转服务。
 type DockerBuildContextService struct {
-	ch    DockerBuildContextChannel
-	log   logger.LoggerInterface
-	idGen func() string
+	ch         DockerBuildContextChannel
+	log        logger.LoggerInterface
+	sessionGen func() uint64
 	// online 是设备在线性的预检（吃请求体**之前**就给出 503 —— 一条 500MB 的
 	// 请求体不该为离线设备被白吃；nil = 跳过预检，由首帧发送时的
 	// ErrDeviceOffline 兜住 —— 与 dockerstream 的 WithDeviceOnline 同款接线）。
@@ -68,9 +70,13 @@ func NewDockerBuildContextService(ch DockerBuildContextChannel, log logger.Logge
 	return &DockerBuildContextService{
 		ch:  ch,
 		log: log,
-		// 会话号与指令 ref 共用同一个计数器（service.NewRequestID）：撞号窗口
-		// 不重开 —— 与 docker 事件常驻管理器共用计数器的理由同一句。
-		idGen: NewRequestID,
+		// 会话号用**专属的 uint64 生成器**，不沿用指令 ref 的 NewRequestID：
+		// 后者是「JS 侧不丢精度」的十进制字符串域（纳秒 + 自增，21~22 位
+		// ≈1.7e21），超出 uint64 值域 —— 而会话号的下游**全是数字形态**
+		// （帧头 8 字节定长 session 槽、控制帧 SessionID、build-ctx-<十进制>
+		// 推导名）。把它 ParseUint 塞回 uint64 就是 QA 撞上的恒 500
+		// （ErrRange）；两个值域各自用对生成器，见 newUploadSessionID。
+		sessionGen: newUploadSessionID,
 	}
 }
 
@@ -78,6 +84,40 @@ func NewDockerBuildContextService(ch DockerBuildContextChannel, log logger.Logge
 func (s *DockerBuildContextService) WithOnline(fn func(deviceID uint64) bool) *DockerBuildContextService {
 	s.online = fn
 	return s
+}
+
+// uploadSessionSeq 是会话号低位序号段的进程内自增。
+var uploadSessionSeq atomic.Uint64
+
+const (
+	// uploadSessionSeqBits 是会话号里序号段占的位数（21 bit = 每毫秒 200 万个
+	// 会话；上传是人触发的动作，取值域富余四个数量级）。
+	uploadSessionSeqBits = 21
+	// uploadSessionSeqMask 是序号段的掩码。
+	uploadSessionSeqMask = (uint64(1) << uploadSessionSeqBits) - 1
+)
+
+// newUploadSessionID 生成一个上传会话号（uint64，恒非 0）。
+//
+// 形态：UnixMilli 左移 21 位 | 自增序号低 21 位。为什么是这个形态 —— 会话号
+// 的下游**全是数字**（帧头 8 字节定长 session 槽、控制帧 SessionID、
+// build-ctx-<十进制> 推导名），所以它必须装得进 uint64：
+//   - 时间位保证跨毫秒互异（UnixMilli 到 2^43，即公元 2248 年，左移后仍 < 2^64）；
+//   - 序号位保证同毫秒内互异（原子自增，21 位回绕需要单毫秒 200 万次上传）。
+//
+// 重启后计数器归零：与重启前撞号需「同一毫秒 + 同序号」—— 重启耗时远超
+// 1ms，且真撞上也不过是 agent 侧同会话号首帧的 seq 校验作废旧半成品
+// （弃会话不断连），语义自愈，不留坏账。
+//
+// 为什么不是「全程 string」（把 22 位请求号原样当会话号）：那要把字符串塞进
+// 二进制帧头，定长 20 字节头就得变长 —— 动的是一份有意为之的线上格式
+// （见协议 build_context.go 头格式注释：「不含变长字段，头解析没有长度字段
+// 被截断的二义性」），而不是一处 bug。会话号本就自成一个数值域，给它一个
+// 装得下的生成器即同时保住协议形状与唯一性；降精度截串那条路（截前 19 位
+// 再 ParseUint）丢唯一性保证，不在选项里。
+func newUploadSessionID() uint64 {
+	return uint64(time.Now().UnixMilli())<<uploadSessionSeqBits |
+		(uploadSessionSeq.Add(1) & uploadSessionSeqMask)
 }
 
 // gzip 魔数：上传段「这像个 tar.gz」的判定就是它（深度校验在 image:build）。
@@ -113,13 +153,15 @@ func (s *DockerBuildContextService) Transfer(ctx context.Context, deviceID uint6
 	}
 
 	// ③ 会话号与产物名：名字由会话号唯一推导（agent 不接受客户端命名，
-	// 协议 Validate 把推导关系钉死 —— 这里只是把它算出来）。
-	sessionStr := s.idGen()
-	session, err := strconv.ParseUint(sessionStr, 10, 64)
-	if err != nil {
-		return "", apperror.Internal("内部错误", err)
-	}
+	// 协议 Validate 把推导关系钉死 —— 这里只是把它算出来）。会话号由专属
+	// uint64 生成器**直出** —— 不再有「字符串 id 塞回 uint64」的 ParseUint
+	// 环节（QA 恒 500 的根因，选型论证见 newUploadSessionID）。
+	session := s.sessionGen()
 	name := agentproto.DockerBuildCtxTransferName(session)
+	// 控制帧的信封 id 用会话号的十进制形态：信封 id 在两端都不参与关联
+	// （唯一的消费是 hello/ack 回显），控制帧的关联键是载荷里的 SessionID ——
+	// 同源只是让日志能按会话号一 grep 到底。
+	sessionStr := strconv.FormatUint(session, 10)
 
 	// ④ 魔数预读：恰 2 字节（gzip magic）。不足 2 字节的 body 不可能是合法
 	// 上下文 —— 在发出**任何**一帧之前拒绝（agent 侧零状态需要清理）。
@@ -255,10 +297,12 @@ func (s *DockerBuildContextService) oversize(err error, deviceID, session uint64
 // 呼救」：agent 侧还有断连清理与 24h 清扫两道兜底，中止帧是三保险里
 // 最先到的那一保。
 func (s *DockerBuildContextService) abort(deviceID, session uint64) {
-	msg, err := agentproto.NewMessage(s.idGen(), agentproto.TypeCoreDockerBuildCtxAbort,
+	// 信封 id 与完成帧同源（会话号十进制）：两帧至多一帧会真正进入语义
+	//（完成帧送不达才补中止），且信封 id 本就无人关联 —— 见 Transfer ③ 的说明。
+	msg, err := agentproto.NewMessage(strconv.FormatUint(session, 10), agentproto.TypeCoreDockerBuildCtxAbort,
 		&agentproto.CoreDockerBuildCtxAbort{SessionID: session})
 	if err != nil {
-		return // 构造失败 = 会话号 0？idGen 不会产出；防御性短路。
+		return // 构造失败 = 会话号 0？生成器不会产出；防御性短路。
 	}
 	if err := s.ch.SendToDevice(deviceID, msg); err != nil && s.log != nil {
 		s.log.Debug("构建上下文中止帧未送达",

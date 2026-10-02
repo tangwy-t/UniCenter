@@ -341,7 +341,9 @@
   function retryFailed() {
     if (!detail.value) return
     void router.push({
-      name: 'DeviceList',
+      // 用 path 跳转（不用 name）：后端菜单模式下列表页注册名是 `menu-<id>`，
+      // 按插件声明的 name（DeviceList）导航会解析失败；query 原样保留。
+      path: '/device/index',
       query: {
         retryIds: failedDeviceIds.value.join(','),
         retryVersion: detail.value.task.targetVersion

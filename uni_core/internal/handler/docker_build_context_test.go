@@ -56,8 +56,9 @@ var errOffline = offlineErr{}
 func newBuildCtxHandlerFunc(ch *fakeUploadChannel, online bool) gin.HandlerFunc {
 	svc := service.NewDockerBuildContextService(ch, logger.NewNop())
 	svc.WithOnline(func(uint64) bool { return online })
-	// 固定会话号：文件名由它推导，断言不靠运气。
-	//（idGen 由 service 包内部持有，这里经固定会话号只断言响应形状。）
+	// 会话号走 service 的默认生成器（生产形态），断言只锚推导名**形态**
+	//（build-ctx-<十进制>.tar.gz）—— 具体数值不是 handler 层契约。
+	//（P0-1 后默认生成器直出 uint64：这条用例顺带覆盖「默认路径不再恒 500」。）
 	hdl := NewDockerHandler(nil, nil, nil, nil, nil).WithBuildContext(svc)
 	return hdl.BuildContextUpload
 }

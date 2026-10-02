@@ -15,7 +15,12 @@
           <!-- 状态点（StateDot 口径：颜色即结论，绿=运行中/琥珀=部分运行/灰=其余） -->
           <span class="pwh__dot" :class="`is-${stateTone}`" aria-hidden="true" />
           <span class="pwh__state">{{ stateText }}</span>
-          <span v-if="project.protected" class="pwh__lock" title="受保护">🔒</span>
+          <!-- 锁语义与列表保护列同款（锁图标 + 受保护）：不用 🔒 emoji ——
+               无 emoji 字体的环境里会渲染成豆腐块；锁走 ArtSvgIcon 的图标范式。 -->
+          <span v-if="project.protected" class="pwh__lock">
+            <ArtSvgIcon icon="ri:lock-2-line" />
+            受保护
+          </span>
         </div>
         <!-- 元信息：容器/网元/配置文件/备份四件事一行说完（工作台的第一屏回答「这是什么」）。 -->
         <p class="pwh__meta">
@@ -71,6 +76,7 @@
   import { ElButton } from 'element-plus'
   import { useAuth } from '@/hooks/core/useAuth'
   import ArtButtonTable from '@/components/core/forms/art-button-table/index.vue'
+  import ArtSvgIcon from '@/components/core/base/art-svg-icon/index.vue'
   import HostSwitcher from '../host-switcher.vue'
   import { lookupDockerAction } from '../../utils/actions'
   import type { DockerProjectItem } from '../../api'
@@ -152,6 +158,14 @@
   @use '@styles/core/breakpoints.scss' as *;
   @use '../../views/overview-tokens' as t;
 
+  // hero 的 danger 动作（停止/下线…）按注册表渲染成 plain danger：对比度 AA 的
+  // 病灶与处方见 overview-tokens 的 danger-plain-aa（浅色 QA 实测 2.87:1）。
+  @include t.danger-plain-aa;
+
+  // hero 的普通动作（启动/重建…）与默认档按钮主色蓝字：对比度 AA 的病灶与处方见
+  // overview-tokens 的 primary-text-aa（终审 QA D2·浅色实测 3.68:1）。
+  @include t.primary-text-aa;
+
   .pwh {
     @include t.card;
     @include t.rise;
@@ -218,6 +232,9 @@
   }
 
   .pwh__lock {
+    display: inline-flex;
+    gap: 4px;
+    align-items: center;
     font-size: 13px;
   }
 

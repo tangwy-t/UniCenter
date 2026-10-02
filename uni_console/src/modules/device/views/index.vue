@@ -418,9 +418,11 @@
   }
 
   function openDetail(row: Api.Device.DeviceListItem) {
-    // 用路由 name 跳转，不拼路径：详情路由是插件的隐藏路由（isHide），
-    // 后端菜单里没有它，拼路径会在菜单模式切换时悄悄失效。
-    router.push({ name: 'DeviceDetail', params: { id: row.id } })
+    // 用 path 跳转（不用 name）：后端菜单模式下菜单托管路由注册名是
+    // `menu-<id>`（MenuProcessor.convert），插件声明的 name（DeviceDetail 等）
+    // 根本不存在，按 name 导航会报 `No match for {"name":"DeviceDetail"...}`。
+    // path 在两种菜单模式下都逐字一致（隐藏路由按原 path 追加注册），与注册形态解耦。
+    router.push({ path: `/device/detail/${row.id}` })
   }
 
   async function onToggleStatus(row: Api.Device.DeviceListItem) {

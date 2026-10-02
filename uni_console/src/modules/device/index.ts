@@ -42,10 +42,10 @@ const plugin: PluginManifest = {
       }
     },
     {
-      // 详情页**闭合** views/index.vue 的 openDetail 悬空引用：
-      // 那里 `router.push({ name: 'DeviceDetail', params: { id: row.id } })`，
-      // 而此前本模块只注册了 DeviceList —— 点「详情」会因 name 不存在而报错。
-      // 这里注册的 name 与之**逐字一致**（DeviceDetail）。
+      // 详情页供 views 里的 path 导航落点（`router.push({ path: '/device/detail/<id>' })`）。
+      // 注意：**不要**回退成按 name 导航 —— 后端菜单模式下菜单托管路由注册名是
+      // `menu-<id>`（MenuProcessor.convert），插件声明的 name 根本不注册，按 name
+      // 跳转会报 `No match for {"name":"DeviceDetail"...}`；path 在两种模式下都逐字一致。
       //
       // path 不取 `/device/index/:id` 而取 `/device/detail/:id`：前者会让
       // 列表页菜单的 path 前缀匹配出「子页面」（MenuProcessor 的菜单匹配以

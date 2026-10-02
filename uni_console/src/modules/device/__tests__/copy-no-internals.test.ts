@@ -41,6 +41,7 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { dataSourceLabel, rangeOptions } from '../utils/metrics'
+import { CHART_BLOCKS, COL, buildOverviewCharts } from '../utils/overview'
 
 /** 会被渲染成文字的模块文件。 */
 const VIEW_FILES = [
@@ -169,5 +170,36 @@ describe('设备模块页面文案：不得把实现原理写给用户看', () =
     const src = readSrc('../components/overview-chart-card.vue')
     // 只允许留在 utils/overview.ts 的数据里；页面一旦再引用它就红灯。
     expect(src, '选型理由又被渲染到图块提示里了').not.toContain('chart.rationale')
+  })
+
+  it('渲染文案（模板文本与插值取值）不得残留 markdown 强调记号（**）', () => {
+    // 为什么单立一条：插值（{{ }}）吃不了 HTML 标签，文案里残留的 `**` 会**原样
+    // 显示**在页面上 —— 交换分区图卡的「用途」提示这么漏过一次（purpose 字段）。
+    // 上半段按第 1 层口径查模板静态文本；下半段按第 2 层口径直接查插值取值：
+    // 「用途：{{ chart.purpose }}」与「{{ chart.title }}」的字符串来自
+    // CHART_BLOCKS，经 buildOverviewCharts 组装，故对该函数的返回值断言。
+    for (const rel of VIEW_FILES) {
+      const text = renderedText(templateOf(readSrc(rel)))
+      expect(text, `${rel} 的模板文本残留了 markdown 星号`).not.toContain('**')
+    }
+
+    // 带一个未知列，把兜底图块（purpose 的另一处字面量）也拉进断言范围。
+    const columns = [...Object.values(COL), '__unknown__']
+    const dev = {
+      id: '1',
+      hostname: 'a',
+      online: true,
+      stale: false,
+      series: columns.map((metric) => ({ metric, values: [1], present: 1, missing: 0 }))
+    }
+    const charts = buildOverviewCharts([1], columns, [dev])
+    // 先自证非空转：每个声明图块 + 兜底图块都在，否则下面是空循环。
+    expect(charts.length).toBe(CHART_BLOCKS.length + 1)
+    for (const c of charts) {
+      expect(c.title, `${c.key} 的标题残留 markdown 星号`).not.toContain('**')
+      expect(c.purpose, `${c.key} 的用途残留 markdown 星号`).not.toContain('**')
+    }
+    // rationale 刻意不在检查范围：它是维护者文案、不渲染（由上一条守卫保证），
+    // 允许保留 markdown 记号。
   })
 })

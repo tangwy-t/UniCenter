@@ -545,6 +545,15 @@
 
 <style lang="scss" scoped>
   @use '@styles/core/breakpoints.scss' as *;
+  @use '../../views/overview-tokens' as t;
+
+  // 「删除服务」等 plain danger：对比度 AA 的病灶与处方见 overview-tokens
+  // 的 danger-plain-aa（浅色 QA 实测 2.87:1）。
+  @include t.danger-plain-aa;
+
+  // 「从模板生成」是 plain 主色、其余默认档按钮主色蓝字：对比度 AA 的病灶与处方见
+  // overview-tokens 的 primary-text-aa（终审 QA D2·浅色实测 3.27:1/3.68:1）。
+  @include t.primary-text-aa;
 
   .form-mode {
     &__head {

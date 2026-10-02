@@ -148,3 +148,88 @@
   font-size: 12px;
   white-space: nowrap;
 }
+
+/// plain danger 按钮的对比度 AA（P2 打磨批·浅色 QA 实测 2.87:1）。
+///
+/// 病灶与处方（只重定义 EP 的按钮变量槽，不动任何元素样式与布局）：
+///   - rest：EP 默认文字 --el-color-danger(#ff4d4f) 对浅红底（light-9）仅 2.89:1 →
+///     文字取「danger 六成 + 主题正文色四成」的混色，随明暗主题自适应
+///     （浅色对浅红底实测 ≈5.1:1、暗色对深红底实测 ≈7.3:1）；
+///   - hover/active：EP 默认翻成实心基色底、白字（3.27:1）→ 保留 plain 的「悬停填色」
+///     反馈，但填充色加深为「danger 七成 + 黑三成」（白字 ≈6.0:1，两种主题同值）。
+///     ⚠ 黑端写字面 #000 而不是 var(--el-color-black)：本应用把它全局映射成了
+///     white（el-ui.scss 的 !important），当「加深」用会反向变浅（实栈抓到过）。
+/// 暗色 resting 本就达标（实测 5.08:1），本覆盖对它只带来 hover 的同步改善；
+/// 禁用态不走这些变量槽（EP 的 is-disabled 直接落属性），外观不变。
+/// 用法：在组件 scoped 样式顶层 @include（作用域 = 该组件内所有 plain danger 按钮）。
+@mixin danger-plain-aa {
+  :deep(.el-button--danger.is-plain) {
+    --el-button-text-color: color-mix(
+      in srgb,
+      var(--el-color-danger) 60%,
+      var(--el-text-color-primary)
+    );
+    --el-button-hover-text-color: var(--el-color-white);
+    --el-button-hover-bg-color: color-mix(in srgb, var(--el-color-danger) 70%, #000);
+    --el-button-hover-border-color: color-mix(in srgb, var(--el-color-danger) 70%, #000);
+    --el-button-active-text-color: var(--el-color-white);
+    --el-button-active-bg-color: color-mix(in srgb, var(--el-color-danger) 70%, #000);
+    --el-button-active-border-color: color-mix(in srgb, var(--el-color-danger) 70%, #000);
+  }
+}
+
+/// 主色文字按钮的对比度 AA（终审 QA D2·浅色实测：默认档蓝字 3.68:1、hover 3.27:1；
+/// plain 主色档 3.27:1、hover 实心底白字 3.68:1）。
+///
+/// 病灶（两族，同一条「文字吃 --el-color-primary」的根）：
+///   - 无 type 的默认档按钮：全局 $button 主题（el-light.scss）把它的文字槽点成了
+///     主色 #3b82f6 —— 对白底 3.68:1、hover 对 light-9 底 3.27:1（比 resting 更糟）；
+///   - plain 主色档（.el-button--primary.is-plain/is-text）：EP 槽把文字也设成主色，
+///     resting 对 light-9 底 3.27:1；hover/active 翻成实心主色底 + 白字 3.68:1。
+/// 处方（只重定义这两族的 EP 按钮变量槽，不动元素样式/布局/描边）：
+///   - 文字取「主色六成 + 主题正文色四成」的混色 —— 浅色对白底 ≈6.0:1、对 light-9
+///     底 ≈5.4:1；暗色正文色变浅、只升不降（对暗卡 ≈7.8:1，暗色 resting 原 4.91:1）；
+///   - plain 档的 hover/active 保留「悬停填色」反馈，但填充色加深为「主色七成 +
+///     黑三成」（白字 ≈6.6:1，两种主题同值）。黑端写字面 #000 的理由同 danger-plain-aa
+///     （--el-color-black 被全局映射成 white）。描边不属本批口径（非文本 3:1，主色描边
+///     对白底 3.68:1 已达标），原样保留。
+/// 禁用态不走这些变量槽（EP 的 is-disabled 直接落属性），外观不变。
+/// 用法：在组件 scoped 样式顶层 @include（作用域 = 该组件内所有这些按钮）。
+@mixin primary-text-aa {
+  // 默认档（无 type）：含 text 变体（它无类型 class，同样吃默认槽）。
+  // :not() 排除各 type 档 —— 主色档单独走下一段；danger/success 等档各有自己的
+  // 变量槽（danger plain 归 danger-plain-aa），本覆盖不得越权波及。
+  :deep(.el-button:not(.el-button--primary):not(.el-button--success):not(.el-button--warning):not(.el-button--danger):not(.el-button--info)) {
+    --el-button-text-color: color-mix(
+      in srgb,
+      var(--el-color-primary) 60%,
+      var(--el-text-color-primary)
+    );
+    --el-button-hover-text-color: color-mix(
+      in srgb,
+      var(--el-color-primary) 60%,
+      var(--el-text-color-primary)
+    );
+    --el-button-active-text-color: color-mix(
+      in srgb,
+      var(--el-color-primary) 60%,
+      var(--el-text-color-primary)
+    );
+  }
+
+  // plain 主色档（EP 把 is-plain 与 is-text 写进同一条槽规则，这里同步覆盖两态）。
+  :deep(.el-button--primary.is-plain),
+  :deep(.el-button--primary.is-text) {
+    --el-button-text-color: color-mix(
+      in srgb,
+      var(--el-color-primary) 60%,
+      var(--el-text-color-primary)
+    );
+    --el-button-hover-text-color: var(--el-color-white);
+    --el-button-hover-bg-color: color-mix(in srgb, var(--el-color-primary) 70%, #000);
+    --el-button-hover-border-color: color-mix(in srgb, var(--el-color-primary) 70%, #000);
+    --el-button-active-text-color: var(--el-color-white);
+    --el-button-active-bg-color: color-mix(in srgb, var(--el-color-primary) 70%, #000);
+    --el-button-active-border-color: color-mix(in srgb, var(--el-color-primary) 70%, #000);
+  }
+}

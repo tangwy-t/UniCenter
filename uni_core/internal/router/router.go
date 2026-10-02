@@ -5,6 +5,7 @@ import (
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/datascope"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/limiter"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	swaggerFiles "github.com/swaggo/files"
@@ -171,6 +172,18 @@ func Setup(deps Dependencies) *gin.Engine {
 	r.Use(middleware.RequestLogger(deps.Infra.Logger))
 
 	api := r.Group(deps.Infra.Cfg.Server.APIPrefix)
+
+	// 长活响应的写/读截止接管（P0：流式响应被服务端 WriteTimeout(30s) 掐断）：
+	// 一处构造、多处挂载（见 middleware.LongLived 的完整说明）。grace 取
+	// server.writeTimeout —— 对长活端点它被重新解释为「**单次写**最长阻塞时间」
+	// 而不是「整条响应预算」；空闲回收仍归各会话自己的机制（dockerstream 的
+	// 10min idle sweep 等），两者分工不重叠。挂载点即「哪些端点长活」的事实源，
+	// 遗漏由本包的源码级守卫测试拦住（TestLongLivedRoutesCarryDeadlineMiddleware）；
+	// 反代层（uni_console/nginx.conf 的长活 location 群）与本清单的跨层对齐由
+	// TestNginxLongLivedLocationsMatchRouterMounts 守卫 —— 两条守卫都读本文件，
+	// 新增长活端点必须两层同步，否则各红一处。
+	longLived := middleware.LongLived(deps.Infra.Logger,
+		time.Duration(deps.Infra.Cfg.Server.WriteTimeout)*time.Second)
 
 	// ── Public routes (no auth required) ───────────────────────────
 	{
@@ -416,7 +429,10 @@ func Setup(deps Dependencies) *gin.Engine {
 			}
 			pprofDebug := monitor.Group("/debug/pprof")
 			pprofDebug.Use(middleware.PprofGuard(deps.Infra.ConfigProv))
-			pprofDebug.GET("/*any", perm(permission.PermPprofList), handler.AdaptPprof())
+			// /*any 兜住 profile / trace 这两个**采集类**端点（?seconds=N 采 N 秒
+			// 再回写响应）：N ≥ 30 时响应必然写不完 —— 与流式端点同一类误杀，
+			// 故同样接管写截止（快照类端点无影响，只是多了个透明包装）。
+			pprofDebug.GET("/*any", longLived, perm(permission.PermPprofList), handler.AdaptPprof())
 
 			// 在线用户
 			online := monitor.Group("/online")
@@ -468,12 +484,15 @@ func Setup(deps Dependencies) *gin.Engine {
 		{
 			files.GET("", perm(permission.PermFileList), deps.File.FileHdl.List)
 			files.GET("/stats", perm(permission.PermFileList), deps.File.FileHdl.Stats)
-			files.POST("", perm(permission.PermFileUpload), deps.File.FileHdl.Upload)
+			files.POST("", longLived, perm(permission.PermFileUpload), deps.File.FileHdl.Upload)
 			files.PUT("/:id", perm(permission.PermFileEdit), deps.File.FileHdl.Rename)
 			files.DELETE("", perm(permission.PermFileDelete), deps.File.FileHdl.DeleteMany)
 			files.GET("/:id/thumbnail", perm(permission.PermFileList), deps.File.FileHdl.Thumbnail)
-			files.GET("/:id/download", perm(permission.PermFileDownload), deps.File.FileHdl.Download)
-			files.GET("/:id/preview", perm(permission.PermFileDownload), deps.File.FileHdl.Preview)
+			// download/preview 走 http.ServeContent 把文件本体流给客户端：大文件
+			// （视频、安装包）的传输时长天然超过 WriteTimeout 的 30s 绝对窗口，
+			// 故挂 longLived —— 否则下载会被拦腰截断（同为 P0 那一类误杀）。
+			files.GET("/:id/download", longLived, perm(permission.PermFileDownload), deps.File.FileHdl.Download)
+			files.GET("/:id/preview", longLived, perm(permission.PermFileDownload), deps.File.FileHdl.Preview)
 		}
 
 		// 设备管理
@@ -517,7 +536,7 @@ func Setup(deps Dependencies) *gin.Engine {
 			devices.GET("/:id/upgrade/records", perm(permission.PermDeviceQuery), deps.Device.UpgradeHdl.DeviceRecords)
 			// ── 发布物管理 ──────────────────────────────────────────────
 			devices.GET("/releases", perm(permission.PermDeviceReleaseList), deps.Device.ReleaseHdl.List)
-			devices.POST("/releases", perm(permission.PermDeviceReleaseUpload), deps.Device.ReleaseHdl.Upload)
+			devices.POST("/releases", longLived, perm(permission.PermDeviceReleaseUpload), deps.Device.ReleaseHdl.Upload)
 			devices.POST("/releases/:id/publish", perm(permission.PermDeviceReleasePublish), deps.Device.ReleaseHdl.Publish)
 			devices.POST("/releases/:id/unpublish", perm(permission.PermDeviceReleasePublish), deps.Device.ReleaseHdl.Unpublish)
 			devices.DELETE("/releases/:id", perm(permission.PermDeviceReleaseDelete), deps.Device.ReleaseHdl.Delete)
@@ -540,11 +559,19 @@ func Setup(deps Dependencies) *gin.Engine {
 			// auth 组 + fetch + ReadableStream（浏览器能带 Authorization）；服务端
 			// 常驻订阅由 core 自己维护（首个客户端建立、末个客户端取消），处理器
 			// 不做按指令的归属校验。
-			docker.GET("/events", perm(permission.PermDockerList), deps.Docker.Hdl.EventsStream)
+			docker.GET("/events", longLived, perm(permission.PermDockerList), deps.Docker.Hdl.EventsStream)
 			// 跨主机统一工作负载表：API 路径与前端 /docker/containers 页面同形
 			//（复用既有菜单与路由 path，本切片只换页面背后的数据源 —— 从
 			// 单主机快照换成跨主机聚合），权限与读面其余端点同档 docker:list。
 			docker.GET("/containers", perm(permission.PermDockerList), deps.Docker.Hdl.Workloads)
+			// 跨主机资源清单（9a）：镜像/卷/网络/项目四页沿用容器统一表的
+			// 跨主机模式（前端路径同形，页面背后的数据源从单主机快照换成跨主机
+			// 聚合），权限与读面其余端点同档 docker:list —— 四页与容器页是同一类
+			// 工作面板，权限档分家会让「能看容器不能看镜像」这种怪状态出现。
+			docker.GET("/images", perm(permission.PermDockerList), deps.Docker.Hdl.Images)
+			docker.GET("/volumes", perm(permission.PermDockerList), deps.Docker.Hdl.Volumes)
+			docker.GET("/networks", perm(permission.PermDockerList), deps.Docker.Hdl.Networks)
+			docker.GET("/projects", perm(permission.PermDockerList), deps.Docker.Hdl.Projects)
 			docker.GET("/hosts", perm(permission.PermDockerList), deps.Docker.Hdl.Hosts)
 			docker.GET("/hosts/:id/state", perm(permission.PermDockerList), deps.Docker.Hdl.State)
 			// 容器 stats 历史（P2 抽屉曲线的历史半边）：30 分钟环形留存（快照 ingest
@@ -566,22 +593,22 @@ func Setup(deps Dependencies) *gin.Engine {
 			//（也就没有 CmdResult 那套「按记录校验权限与发起人归属」）；docker:manage
 			// 与 image:build 受理同档 —— 上下文是「即将构建并留痕进镜像的代码」。
 			// 字节流由 core 中转（零落盘）成 WSS 二进制分片直达 agent 的 transferDir。
-			docker.POST("/hosts/:id/build-context", perm(permission.PermDockerManage), deps.Docker.Hdl.BuildContextUpload)
+			docker.POST("/hosts/:id/build-context", longLived, perm(permission.PermDockerManage), deps.Docker.Hdl.BuildContextUpload)
 			// 日志流（三期）：**留在 auth 组**——日志走 fetch + ReadableStream，
 			// 浏览器能给这条请求带 Authorization 头；权限码与归属在处理器内判定。
-			docker.GET("/hosts/:id/cmds/:ref/stream", deps.Docker.Hdl.LogStream)
+			docker.GET("/hosts/:id/cmds/:ref/stream", longLived, deps.Docker.Hdl.LogStream)
 			// stats 实时流（监控面）：与日志流同款形态 —— fetch + ReadableStream
 			// 走 auth 组带 Authorization；权限（docker:inspect）与归属在处理器内判定。
-			docker.GET("/hosts/:id/cmds/:ref/stats", deps.Docker.Hdl.StatsStream)
+			docker.GET("/hosts/:id/cmds/:ref/stats", longLived, deps.Docker.Hdl.StatsStream)
 			// 拉取进度流（4b）：同款 fetch 形态，权限（docker:manage，与 image:pull
 			// 受理同档）与归属在处理器内判定；唯一「指令 pending 期间即可接入」的流
 			//（会话由受理时预登记，句柄取协议派生的 pull_<ref>）。
-			docker.GET("/hosts/:id/cmds/:ref/pull", deps.Docker.Hdl.PullStream)
+			docker.GET("/hosts/:id/cmds/:ref/pull", longLived, deps.Docker.Hdl.PullStream)
 			// 构建/推送进度流（P2）：与拉取进度流同款 fetch 形态与接入纪律，
 			// 句柄取协议派生的 build_<ref>/push_<ref>（受理时预登记，pending 期间
 			// 即可接入）。
-			docker.GET("/hosts/:id/cmds/:ref/build", deps.Docker.Hdl.BuildStream)
-			docker.GET("/hosts/:id/cmds/:ref/push", deps.Docker.Hdl.PushStream)
+			docker.GET("/hosts/:id/cmds/:ref/build", longLived, deps.Docker.Hdl.BuildStream)
+			docker.GET("/hosts/:id/cmds/:ref/push", longLived, deps.Docker.Hdl.PushStream)
 			// 私有仓库凭据（4c）：静态 docker:config —— 凭据是「分发」支柱的密钥
 			// 材料，读（列表）与写（增/改/删）同档；密码任何读路径只回掩码，
 			// 解密只在 image:pull/image:push 的受理注入（service 侧唯一读口）。
@@ -616,8 +643,10 @@ func Setup(deps Dependencies) *gin.Engine {
 	// agent 下载通道：同样是**未鉴权升级**入口（凭据是请求头里的 agent token），
 	// 故与 /agent/ws 一样挂在 api 组 —— 挪进 auth 组会让所有 agent 收到 401。
 	// 鉴权在处理器内做（service.AuthenticateDownload），三种失败不可区分。
+	// 挂 longLived：发布物是几十 MB 的二进制，agent 侧常在内网/弱网链路上下载，
+	// 传输时长超过 WriteTimeout(30s) 是常态 —— 不接管写截止就会下到一半被截断。
 	if deps.Device.ReleaseHdl != nil {
-		api.GET("/agent/releases/:version/download", deps.Device.ReleaseHdl.Download)
+		api.GET("/agent/releases/:version/download", longLived, deps.Device.ReleaseHdl.Download)
 	}
 
 	return r

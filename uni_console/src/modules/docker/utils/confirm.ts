@@ -67,7 +67,7 @@ export interface ConfirmForm {
   /** 逐字比对的期望值（大小写敏感，一字不差；输入档恒空）。 */
   expected: string
   buttonText: string
-  /** 是否显示 🔒（目标受保护）。 */
+  /** 是否显示保护标记（锁图标 + 受保护；不用 🔒 emoji —— 见 action-confirm 的注释）。 */
   protected: boolean
   /** 是否渲染「强制操作」开关：受保护 **且** 有 docker:exec 级权限。 */
   showForce: boolean

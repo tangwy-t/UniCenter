@@ -30,6 +30,7 @@ vi.mock('@/hooks/core/useAuth', () => ({
 
 import OverviewEventsFeed from '../components/overview-events-feed.vue'
 import Overview from '../views/overview.vue'
+import { eventClockTime } from '../utils/events'
 
 /* ── 可控的假 NDJSON 流 ───────────────────────────────────────────
  * reader 队列：push 入队（有等待者直接唤醒）、end 收尾（done）、组件 abort 时
@@ -97,12 +98,12 @@ afterEach(() => {
 
 const mounted: VueWrapper[] = []
 
-/** 事件行（形状对齐 core 的 eventNDJSONLine；t 用 unix 秒）。 */
+/** 事件行（形状对齐 core 的 eventNDJSONLine；t 用 unix 毫秒 —— agent UnixMilli 透传）。 */
 function evLine(overrides: Record<string, unknown> = {}): string {
   return JSON.stringify({
     host_id: 1,
     hostname: 'bogon',
-    t: Math.floor(Date.now() / 1000) - 60,
+    t: Date.now() - 60_000,
     type: 'container',
     action: 'start',
     actor_name: 'uni-center-core',
@@ -148,14 +149,14 @@ describe('活动流：回放 + 实时 + 坏行', () => {
     expect(api.openDockerEventsStream).toHaveBeenCalledTimes(1)
     expect(w.find('.dov-feed__status').text()).toContain('实时')
 
-    const now = Math.floor(Date.now() / 1000)
+    const now = Date.now()
     streams[0].push(
       [
         // h1 先到（t 较新），h2 后到（t 较旧）—— 展示序必须按 t（旧在上）
-        evLine({ host_id: 1, hostname: 'bogon', t: now - 30, action: 'die' }),
-        evLine({ host_id: 2, hostname: 'nas', t: now - 50, action: 'pull', type: 'image' }),
+        evLine({ host_id: 1, hostname: 'bogon', t: now - 30_000, action: 'die' }),
+        evLine({ host_id: 2, hostname: 'nas', t: now - 50_000, action: 'pull', type: 'image' }),
         '{broken json',
-        evLine({ host_id: 1, hostname: 'bogon', t: now - 10, action: 'destroy' })
+        evLine({ host_id: 1, hostname: 'bogon', t: now - 10_000, action: 'destroy' })
       ].join('\n') + '\n'
     )
     await flush()
@@ -173,9 +174,9 @@ describe('活动流：回放 + 实时 + 坏行', () => {
   it('实时事件继续追加，action 未映射时原样透传', async () => {
     const w = mountFeed()
     await flush()
-    streams[0].push(evLine({ t: Math.floor(Date.now() / 1000) - 5 }) + '\n')
+    streams[0].push(evLine({ t: Date.now() - 5_000 }) + '\n')
     await flush()
-    streams[0].push(evLine({ t: Math.floor(Date.now() / 1000) - 1, action: 'frobnicate' }) + '\n')
+    streams[0].push(evLine({ t: Date.now() - 1_000, action: 'frobnicate' }) + '\n')
     await flush()
 
     const rows = w.findAll('.dov-feed__row')
@@ -209,19 +210,32 @@ describe('活动流：相对时间 1 秒节流刷新', () => {
     vi.useRealTimers()
   })
 
-  it('文案随 tick 前进（3 秒前 → 4 秒前），1 秒一跳', async () => {
+  it('文案随 tick 前进（3 秒前 → 4 秒前），1 秒一跳；悬停给绝对时刻（title）', async () => {
     const base = 1_790_600_000
     vi.setSystemTime(base * 1000)
     const w = mountFeed()
     await flush()
-    streams[0].push(evLine({ t: base - 3 }) + '\n')
+    // 真实线格式：t 是毫秒戳（agent UnixMilli）——组件须除千后再算相对时间。
+    streams[0].push(evLine({ t: base * 1000 - 3_000 }) + '\n')
     await flush()
     expect(w.find('.dov-feed__time').text()).toBe('3 秒前')
+    // 绝对时刻在 title（YYYY-MM-DD HH:mm:ss 本地时区），与相对时间同源同刻。
+    expect(w.find('.dov-feed__time').attributes('title')).toBe(eventClockTime(base * 1000 - 3_000))
 
     await vi.advanceTimersByTimeAsync(1_000)
     expect(w.find('.dov-feed__time').text()).toBe('4 秒前')
     await vi.advanceTimersByTimeAsync(2_000)
     expect(w.find('.dov-feed__time').text()).toBe('6 秒前')
+  })
+
+  it('毫秒戳换算（QA 路 1 P2 的回归钉）：两分钟前的事件显示分钟档，而不是恒「刚刚」', async () => {
+    const base = 1_790_600_000
+    vi.setSystemTime(base * 1000)
+    const w = mountFeed()
+    await flush()
+    streams[0].push(evLine({ t: base * 1000 - 120_000 }) + '\n')
+    await flush()
+    expect(w.find('.dov-feed__time').text()).toBe('2 分钟前')
   })
 })
 
@@ -305,11 +319,11 @@ describe('活动流：断流自动重连', () => {
   })
 
   it('对端收尾 → 「已断开 · 重连中」→ 退避到点重连，重放去重不重行', async () => {
-    const now = Math.floor(Date.now() / 1000)
+    const now = Date.now()
     const w = mountFeed()
     await flush()
     const replay =
-      [evLine({ t: now - 30 }), evLine({ t: now - 20, action: 'die' })].join('\n') + '\n'
+      [evLine({ t: now - 30_000 }), evLine({ t: now - 20_000, action: 'die' })].join('\n') + '\n'
     streams[0].push(replay)
     await flush()
     expect(w.findAll('.dov-feed__row')).toHaveLength(2)

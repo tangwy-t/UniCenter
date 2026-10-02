@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"math"
+	"strconv"
 	"sync"
 	"testing"
 
@@ -132,11 +134,11 @@ func lastControlOrNil(ch *fakeBuildCtxChannel, typ string) *agentproto.Message {
 func newTestBuildCtxService(ch *fakeBuildCtxChannel, online bool) *DockerBuildContextService {
 	svc := NewDockerBuildContextService(ch, logger.NewNop())
 	svc.online = func(uint64) bool { return online }
-	svc.idGen = func() string { return "4242424242424241" }
+	svc.sessionGen = func() uint64 { return testSessionID }
 	return svc
 }
 
-// 会话号常量必须与 newTestBuildCtxService 的 idGen 一致（测试内契约）。
+// 会话号常量必须与 newTestBuildCtxService 的 sessionGen 一致（测试内契约）。
 const testSessionID = uint64(4242424242424241)
 
 // gzipBody 造一段「以 gzip 魔数开头 + 确定填充」的伪 tar.gz 字节。
@@ -257,6 +259,104 @@ func TestTransferFrameCountAcrossSizes(t *testing.T) {
 				t.Fatal("末帧必须带 FINAL")
 			}
 		})
+	}
+}
+
+// ── 会话号生成（P0-1 回归）─────────────────────────────────────────────────
+
+// QA 实测的恒 500 复现面：旧实现把 NewRequestID 的十进制串（纳秒 + 自增，
+// 21~22 位 ≈1.7e21 > uint64 上限 1.8e19）ParseUint，ErrRange → 上传恒 500。
+// 溢出与计数器大小耦合（自增还在个位数时串 20 位、值恰好 < 2^64 侥幸可过；
+// 进两位数即 21 位必炸），单次上传测不出 —— 这里连跑 32 次**默认生成器**
+// 的完整上传（任一非 nil err 即回归），并断言产物名始终可回解。
+func TestTransferWithDefaultSessionGeneratorNeverFails(t *testing.T) {
+	body := gzipBody(300)
+	for i := 0; i < 32; i++ {
+		ch := &fakeBuildCtxChannel{}
+		svc := NewDockerBuildContextService(ch, logger.NewNop()) // 默认生成器 = 生产形态
+		name, err := svc.Transfer(context.Background(), 7, bytes.NewReader(body), int64(len(body)))
+		if err != nil {
+			t.Fatalf("第 %d 次上传失败（QA 恒 500 回归）: %v", i+1, err)
+		}
+		if !agentproto.IsDockerBuildContextFilename(name) {
+			t.Fatalf("第 %d 次产物名 %q 不是合法推导名形态", i+1, name)
+		}
+		if _, ok := agentproto.ParseDockerBuildCtxTransferName(name); !ok {
+			t.Fatalf("第 %d 次产物名 %q 不可回解", i+1, name)
+		}
+	}
+}
+
+// 大数值全链路：会话号顶到 uint64 上限时，帧头（8 字节大端）、控制帧
+// SessionID、信封 id（20 位十进制）与推导名必须原样往返 —— 修复不引入
+// 新的值域裂缝（旧实现恰是死在这个值域的溢出侧）。
+func TestTransferMaxUint64SessionFullChain(t *testing.T) {
+	ch := &fakeBuildCtxChannel{}
+	svc := NewDockerBuildContextService(ch, logger.NewNop())
+	svc.sessionGen = func() uint64 { return math.MaxUint64 }
+
+	body := gzipBody(2 + uploadChunkBytes + 77)
+	name, err := svc.Transfer(context.Background(), 7, bytes.NewReader(body), int64(len(body)))
+	if err != nil {
+		t.Fatalf("MaxUint64 会话号上传失败: %v", err)
+	}
+	want := agentproto.DockerBuildCtxTransferName(math.MaxUint64)
+	if name != want {
+		t.Fatalf("filename = %q, want %q", name, want)
+	}
+	if got, ok := agentproto.ParseDockerBuildCtxTransferName(name); !ok || got != math.MaxUint64 {
+		t.Fatalf("推导名回解 = (%d, %v), want (%d, true)", got, ok, uint64(math.MaxUint64))
+	}
+
+	frames, msgs := ch.snapshot()
+	for i, fr := range frames {
+		if fr.session != math.MaxUint64 {
+			t.Fatalf("帧 %d 会话号 = %d, want %d", i, fr.session, uint64(math.MaxUint64))
+		}
+	}
+	fin := lastControl(t, ch, agentproto.TypeCoreDockerBuildCtxFinish)
+	if fin.ID != strconv.FormatUint(math.MaxUint64, 10) {
+		t.Fatalf("完成帧信封 id = %q, want 会话号十进制形态", fin.ID)
+	}
+	var payload agentproto.CoreDockerBuildCtxFinish
+	if err := fin.DecodeData(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.SessionID != math.MaxUint64 || payload.Name != name {
+		t.Fatalf("完成帧载荷 = %+v, want session=%d name=%s", payload, uint64(math.MaxUint64), name)
+	}
+	for _, m := range msgs {
+		if err := m.Validate(); err != nil {
+			t.Fatalf("控制帧信封必须过协议校验（id 十进制形态）: %v", err)
+		}
+	}
+}
+
+// 生成器自身的性质：并发互异 + 恒非 0（0 是帧头哨兵，永不上线）。
+func TestNewUploadSessionIDProperties(t *testing.T) {
+	const n = 256
+	seen := make(map[uint64]struct{}, n)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			id := newUploadSessionID()
+			mu.Lock()
+			defer mu.Unlock()
+			if id == 0 {
+				t.Errorf("会话号不得为 0（帧头哨兵）")
+			}
+			if _, dup := seen[id]; dup {
+				t.Errorf("并发撞号: %d", id)
+			}
+			seen[id] = struct{}{}
+		}()
+	}
+	wg.Wait()
+	if len(seen) != n {
+		t.Fatalf("会话号互异失败: %d/%d 唯一", len(seen), n)
 	}
 }
 

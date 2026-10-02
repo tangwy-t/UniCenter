@@ -65,7 +65,7 @@ function makeCtx() {
   return { ctx, switchHost: (id: string) => (hostId.value = id) }
 }
 
-/** 页头会展示的结论句：把 composable 的五个口径喂给文案函数（与 docker-page 同一喂法）。 */
+/** 页头会展示的结论句：把 composable 的五个口径喂给文案函数（与各页 hero 同一喂法）。 */
 function conclusion(s: ReturnType<typeof useDockerHostState>): string {
   return syncTextWithError(
     s.loadError.value,

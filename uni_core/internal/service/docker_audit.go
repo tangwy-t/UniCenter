@@ -128,7 +128,9 @@ func (a *DockerCmdAuditor) buildEntry(rec *dockerstate.CmdRecord) *entity.SysOpe
 	if rec.Status != dockerstate.StatusSucceeded {
 		entry.Code = dockerCmdResultFailed
 		// 终态结论句（含「拉取已取消」这类取消句式）原文照录：取消没有独立状态码
-		//（盘点结论见 docker_tasks.go 的注释），它的语义由这句话承载。
+		//（盘点结论见 docker_tasks.go 的注释），它的语义由这句话承载。照录的前提是
+		// 这句话**说的事实**：agent 按拉取的实际结局结算（完成即成功，迟到的 cancel
+		// 是 no-op —— B4 裁决），故这里的「拉取已取消」只为真被截止的那场拉取出现。
 		s := middleware.TruncateString(middleware.DesensitizeJSON(summary), 1024)
 		entry.ErrorMsg = &s
 	}

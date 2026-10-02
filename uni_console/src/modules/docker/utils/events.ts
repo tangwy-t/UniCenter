@@ -9,8 +9,14 @@
  * （与 utils/stats.ts 单独成文的理由同一口径）。
  *
  * 行形状（core 的 docker_events.go 的 eventNDJSONLine，字段打平、归属由 core 注入）：
- *   {"host_id":n,"hostname":"s","t":unix秒,"type":"container","action":"start",
+ *   {"host_id":n,"hostname":"s","t":unix毫秒,"type":"container","action":"start",
  *    "actor_name":"s","actor_id":"s"}
+ *
+ * 「t 是毫秒」不是猜的：协议侧的 DockerEventItem.T 就是 UnixMilli（agent 在
+ * copyEvents 里给接收时刻打戳，口径与 stats 样本的 T 一致），core 只做归属
+ * 注入、原样透传。**下断言前先看这条** —— 曾经这里写的是「unix 秒」，于是活动流
+ * 把毫秒当秒减，「多久之前」恒显示「刚刚」（QA 路 1 P2 实测）；消费端要相对时间
+ * 时必须先除 1000（见 overview-events-feed 的行模型）。
  */
 import { createNdjsonParser } from './stream'
 
@@ -27,7 +33,7 @@ export interface DockerEventFields {
   hostId: string
   /** 归属主机名（core 注入，清单里叫什么就是什么）。 */
   hostname: string
-  /** 事件时刻（unix 秒，docker events 的 Time）。 */
+  /** 事件时刻（unix 毫秒，见文件头「t 是毫秒」；agent 打戳、core 透传）。 */
   t: number
   /** 资源类型：container / image / volume / network（其它值按未知兜底）。 */
   type: string
@@ -164,18 +170,44 @@ export function eventTypeMeta(type: string): DockerEventTypeMeta {
  * 「3 秒前」回答比「09:41:23」直接。分档比 utils/display 的 formatRelativeTime
  * 细（那里服务静态创建时间，四档够用；这里要区分「3 秒前 / 40 秒前」）。
  * 未来时刻（主机时钟偏差）夹到「刚刚」，不出现负数。
+ *
+ * 取整在**差值整段**上做（`floor(nowSec - t)`），不在各自入参上做：t 允许是
+ * 浮点秒 —— 调用方常拿毫秒时间戳直接除 1000（任务中心的 createdAt/1000、活动流
+ * 的 t/1000），那种 t 是 1759470000.441 形态的浮点。整段 floor 回答的是「实际
+ * 过去了几个整秒」，文案不会漏出「4.41100001335144 秒前」这种浮点（QA 路 1 B1
+ * 实测）；而先各自 floor 再相减会在 t 的秒内小数处多算一秒（4.4 秒前会被显示成
+ * 「5 秒前」）。nowSec 的小数（Date.now()/1000 直传）同样在这一步吃掉。
  */
 export function eventRelativeTime(
   t: number,
   nowSec: number = Math.floor(Date.now() / 1000)
 ): string {
-  const diff = Math.floor(nowSec) - t
+  const diff = Math.floor(nowSec - t)
   if (diff < 1) return '刚刚'
   if (diff < 60) return `${diff} 秒前`
   if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`
   if (diff < 86_400) return `${Math.floor(diff / 3600)} 小时前`
   if (diff < 2_592_000) return `${Math.floor(diff / 86_400)} 天前`
   return `${Math.floor(diff / 2_592_000)} 个月前`
+}
+
+/**
+ * 绝对时刻（本地时区，YYYY-MM-DD HH:mm:ss）：活动流时间列的 title 用。
+ *
+ * 为什么要有它：相对时间回答「多久之前」，但排障对账要问「哪一刻」——
+ * 「3 分钟前」换算不回事件序号，悬停给出精确挂钟才是可引用的账。载体选 title
+ * 而不是加列：最小侵入（不占版面、不动行结构），列本身不动。
+ *
+ * 入参 t 是 unix **毫秒**（与 feed 条目同源，见文件头）——正好是 Date 的原生单位。
+ * 不用 toLocaleString：其输出随运行环境的 locale 漂移，测试与截图都不稳定。
+ */
+export function eventClockTime(t: number): string {
+  const d = new Date(t)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return (
+    `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
+    `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+  )
 }
 
 export interface EventsFeed {
@@ -204,8 +236,10 @@ export interface EventsFeed {
  * 已在窗口里 —— 不设守卫，一次网络抖动就是 50N 条重复。守卫按主机记账两级：
  *   ① t 严格早于该主机已见最新 t 的，一定是重放旧事，丢弃；
  *   ② t 恰好等于已见最新 t 的（回放边界），按 (action, actorId) 精确去重 ——
- *     docker 事件只有秒粒度，同秒新事真实存在：同秒**不同**动作照常接受（宁
- *     重不漏的反面是不漏真事），同秒**同动作同对象**的重放才丢。
+ *     回放重发的同一批条目 t 逐位相同（帧里的值进环形缓冲后原样重放），边界
+ *     相等必然成立；同一 t 上真实存在多条不同事件（时刻戳细到毫秒也只缩小
+ *     碰撞概率，不构成排除）：同 t **不同**动作照常接受（宁重不漏的反面是不漏
+ *     真事），同 t **同动作同对象**的重放才丢。
  * 守卫只按 hostId 记账，不跨主机比较 —— 各主机时钟无对齐保证。
  */
 export function createEventsFeed(maxEntries = MAX_EVENT_ENTRIES): EventsFeed {

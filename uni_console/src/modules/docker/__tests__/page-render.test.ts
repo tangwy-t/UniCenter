@@ -26,6 +26,11 @@ const api = vi.hoisted(() => ({
   fetchDockerHosts: vi.fn(),
   fetchDockerState: vi.fn(),
   fetchDockerContainers: vi.fn(),
+  // 9b：资源三 tab 与项目索引的跨主机聚合端点。
+  fetchDockerImages: vi.fn(),
+  fetchDockerVolumes: vi.fn(),
+  fetchDockerNetworks: vi.fn(),
+  fetchDockerProjects: vi.fn(),
   sendDockerCmd: vi.fn(),
   fetchDockerCmdResult: vi.fn(),
   // 4b 拉取进度对话框（images 页挂载）与 P2 构建/推送对话框（镜像 tab / 镜像
@@ -37,7 +42,7 @@ const api = vi.hoisted(() => ({
   uploadDockerBuildContext: vi.fn(),
   // 4c 凭据面（pull 对话框的下拉与凭据管理对话框；页面冒烟里不会真调）。
   fetchDockerRegistries: vi.fn(),
-  // 6b 任务中心抽屉（docker-page 主机条入口）挂载但不开 —— import 面必须齐全。
+  // 6b 任务中心页（8c 整页；入口在容器页 hero 与总览 hero）不会在冒烟里被挂，import 面补齐。
   fetchDockerTasks: vi.fn()
 }))
 vi.mock('../api', () => ({
@@ -228,6 +233,29 @@ beforeEach(() => {
   api.fetchDockerHosts.mockResolvedValue(HOSTS)
   api.fetchDockerState.mockResolvedValue(STATE)
   api.fetchDockerContainers.mockResolvedValue(WORKLOADS)
+  // 9b：聚合端点替身（条目内嵌单主机字段 + 归属两列）。
+  api.fetchDockerImages.mockResolvedValue({
+    items: [
+      {
+        ...STATE.images[0],
+        hostId: 'h1',
+        hostname: 'bogon'
+      }
+    ],
+    total: 1
+  })
+  api.fetchDockerVolumes.mockResolvedValue({
+    items: [{ ...STATE.volumes[0], hostId: 'h1', hostname: 'bogon' }],
+    total: 1
+  })
+  api.fetchDockerNetworks.mockResolvedValue({
+    items: [{ ...STATE.networks[0], hostId: 'h1', hostname: 'bogon' }],
+    total: 1
+  })
+  api.fetchDockerProjects.mockResolvedValue({
+    items: [{ ...STATE.projects[0], hostId: 'h1', hostname: 'bogon' }],
+    total: 1
+  })
   api.sendDockerCmd.mockResolvedValue({ ref: 'r1' })
   api.fetchDockerCmdResult.mockResolvedValue({ status: 'succeeded' })
 })
@@ -279,11 +307,12 @@ describe('页面渲染冒烟（挂载即验证，白屏类故障的守卫）', (
     expect(w2.findComponent({ name: 'DockerNetworksTab' }).exists()).toBe(true)
   })
 
-  it('项目页（7b 薄索引）：挂载成功并渲染出页面与行数据', async () => {
+  it('项目页（7b 薄索引 → 9b 跨主机）：挂载成功并渲染出页面与行数据', async () => {
     const w = await mountPage(Projects)
     expect(w.find('.docker-projects-page').exists()).toBe(true)
-    // 索引页的行数据：STATE 快照里的 uni-center 项目进了 ArtTable（jsdom 里 ElTable
-    // 不渲染行单元格，从传给表格的 data 断言 —— workloads.test 同款口径）。
+    // 索引页的行数据来自聚合端点（fetchDockerProjects 的替身）：uni-center 进了
+    // ArtTable（jsdom 里 ElTable 不渲染行单元格，从传给表格的 data 断言 ——
+    // workloads.test 同款口径）。
     const table = w.findComponent({ name: 'ArtTable' })
     const rows = ((table.vm as unknown as { $attrs: Record<string, unknown> }).$attrs.data ??
       []) as { name?: string }[]
@@ -297,47 +326,47 @@ describe('页面渲染冒烟（挂载即验证，白屏类故障的守卫）', (
   })
 })
 
-/* ── 快照拉取失败的页头口径（D-1）─────────────────────────────────
+/* ── 失败不得伪装成新鲜（D-1 的 9b 落点）──────────────────────────
  * 修复前：loadState 失败把 state 清成 null，页头回落到「刚刚同步」——网络失败
- * 被渲染成最新鲜状态。这里从**真正挂起来的页面**上断言两条：
- *   ① 首拉失败 → 页头是「数据获取失败」，且不再是「刚刚同步」；
- *   ② 刷新失败（已握有快照）→ 页头保留「同步于 N 前」并标注本次刷新失败，
- *      表格数据不清空（最后已知数据仍可见）。
- *
- * 切片 2 起容器页的数据源换成统一表（fetchDockerContainers）。7a 起旧镜像页收敛为
- * resources 页的镜像 tab —— 快照链路（fetchDockerState + DockerPage 页头）由
- * **页面级**的 useDockerHostState 承载（三 tab 共享一份），守卫落到 resources 页。
- * 统一表自己的失败口径（首拉整页错误态 / 刷新失败保留数据）在 workloads.test.ts。
+ * 被渲染成最新鲜状态。9b 起 resources/projects 换跨主机聚合端点（单主机快照
+ * 页头退场），D-1 的精神（失败不得伪装成新鲜、刷新失败保留最后已知数据）落在
+ * 两个面：
+ *   - tab 层（镜像/卷/网络）：首拉失败 → 错误块 + 重试；刷新失败 → 保留行并标注
+ *     —— 行为守卫在 resources.test.ts；
+ *   - 页层（projects）：首拉失败 → 整页错误态；刷新失败 → 副标题标注且行不清空
+ *     —— 下面两条从**真正挂起来的页面**上钉住页层口径。
  */
-describe('快照拉取失败时的页头同步文案（D-1 守卫）', () => {
-  it('① 首拉失败：页头给失败结论句，不显示「刚刚同步」', async () => {
-    api.fetchDockerState.mockRejectedValue(new Error('network down'))
-    const w = await mountPage(Resources)
+describe('项目页的失败口径（D-1 在 9b 的页层落点）', () => {
+  it('① 首拉失败：整页错误态 + 重试入口，不显示旧数据', async () => {
+    api.fetchDockerProjects.mockRejectedValue(new Error('network down'))
+    const w = await mountPage(Projects)
 
-    const text = w.find('.docker-page__sync').text()
-    expect(text).toBe('数据获取失败')
-    expect(text).not.toContain('刚刚同步')
+    expect(w.text()).toContain('项目清单获取失败')
+    // 首拉失败没有任何行可给：不渲染表格（旧数据不存在，错误屏就是全部事实）。
+    expect(w.findComponent({ name: 'ArtTable' }).exists()).toBe(false)
   })
 
-  it('② 刷新失败：页头标注本次刷新失败，表格保留最后已知数据', async () => {
-    const w = await mountPage(Resources) // 首拉成功（beforeEach 的 STATE，ageSeconds=3）
-    expect(w.find('.docker-page__sync').text()).toBe('同步于 3 秒前')
+  it('② 刷新失败：副标题标注本次失败，表格保留最后已知数据', async () => {
+    const w = await mountPage(Projects) // 首拉成功（beforeEach 的聚合替身）
+    // hero 的刷新按钮（ArtButtonTable 替身；title 经 attrs fallthrough 到根节点）。
+    const refreshBtn = w
+      .findAllComponents({ name: 'ArtButtonTable' })
+      .find((b) => b.attributes('title') === '刷新')
+    expect(refreshBtn, 'hero 上应有刷新按钮').toBeTruthy()
 
-    api.fetchDockerState.mockRejectedValueOnce(new Error('network down'))
-    const refreshBtn = w.findAll('button').find((b) => b.text().includes('刷新'))
-    expect(refreshBtn).toBeTruthy()
+    api.fetchDockerProjects.mockRejectedValueOnce(new Error('network down'))
     await refreshBtn!.trigger('click')
     await new Promise((r) => setTimeout(r, 0))
     await nextTick()
 
-    expect(w.find('.docker-page__sync').text()).toBe('同步于 3 秒前，本次刷新失败')
-    // state 未被清空：喂给表格的仍是上一批数据（最后已知数据）。jsdom 里 ElTable
+    expect(w.text()).toContain('上次数据仍在，本次刷新失败')
+    // 清单未被清空：喂给表格的仍是上一批数据（最后已知数据）。jsdom 里 ElTable
     // 不渲染行单元格，故从页面传给 ArtTable 的 data 断言（labelsAt 同款口径）。
     const table = w.findComponent({ name: 'ArtTable' })
     const rows = ((table.vm as unknown as { $attrs: Record<string, unknown> }).$attrs.data ??
-      []) as { id?: string }[]
+      []) as { name?: string }[]
     expect(rows.length).toBe(1)
-    expect(rows[0]?.id).toBe('i1')
+    expect(rows[0]?.name).toBe('uni-center')
   })
 })
 

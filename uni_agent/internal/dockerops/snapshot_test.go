@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -58,9 +60,18 @@ type stubAPI struct {
 	// 一次性成功/失败（老用例的一期语义）。
 	pullCh  chan PullProgress
 	pullErr error
-	tagged  []tagCall
-	saved   []saveCall
-	loaded  []string
+	// imageRefIDs / imageRefErr 是 ImageRefID 的替身面（B4 完成判据的对照项）：
+	// imageRefIDs 是**逐次调用的观测序列**（用尽后沿用最后一项）—— 拉取路径会先问
+	// 「拉取前有没有」（第一项），结算时再问「现在有没有」（第二项），用序列而不是
+	// 固定值才能在一个用例里确定性地表达「拉取期间镜像落地了」。imageRefErr 注入
+	// 「查询本身失败」（不可作判据的那一档）。
+	imageRefIDs   []string
+	imageRefErr   error
+	imageRefN     int
+	imageRefCalls []string
+	tagged        []tagCall
+	saved         []saveCall
+	loaded        []string
 	// P2·分发面：build/push 的**定型记录 + 进度流替身**（与 pull 同款语义：
 	// buildCh/pushCh 非 nil 时逐条交给 emit，关闭返回 buildErr/pushErr；
 	// nil = 一次性成功/失败）。
@@ -317,6 +328,22 @@ func (s *stubAPI) ContainerLogs(context.Context, string, int, int64) (string, bo
 }
 func (s *stubAPI) ImageInspect(context.Context, string) (ImageDetail, error) {
 	return s.imageDetail, nil
+}
+
+// ImageRefID 按观测序列给答案（见 imageRefIDs 的说明）；序列用尽后沿用最后一项。
+func (s *stubAPI) ImageRefID(_ context.Context, ref string) (string, error) {
+	s.imageRefCalls = append(s.imageRefCalls, ref)
+	if s.imageRefErr != nil {
+		return "", s.imageRefErr
+	}
+	if len(s.imageRefIDs) == 0 {
+		return "", nil
+	}
+	id := s.imageRefIDs[s.imageRefN]
+	if s.imageRefN < len(s.imageRefIDs)-1 {
+		s.imageRefN++
+	}
+	return id, nil
 }
 func (s *stubAPI) ComposeVersion(context.Context) (string, string, error) {
 	return s.flavor, s.flavorVer, nil
@@ -763,6 +790,110 @@ func TestSnapshotLearnsProjectConfigIndex(t *testing.T) {
 	}
 	if _, ok := idx.Lookup("legacy"); ok {
 		t.Fatal("缺 config_files 标签的容器不得学习（不能编造路径）")
+	}
+}
+
+// scale → 0 之后项目必须仍在：容器没了，网络的 compose 标签还在 —— 归纳面是
+// 容器标签 ∪ 网络/卷标签，项目行如实留在这里（0 容器），配置文件路径从项目索引
+// 里补回来（没有它工作台的配置区与 Up 都无从下手）。
+func TestSnapshotProjectSurvivesScaleToZero(t *testing.T) {
+	api := &stubAPI{
+		// 容器清空 = scale 0 之后的那一帧。
+		networks: []NetworkInfo{{
+			Name: "shop_default", Driver: "bridge", Scope: "local",
+			Labels: map[string]string{composeProjectLabel: "shop"},
+		}},
+		volumes: []VolumeInfo{{
+			Name: "shop-data", Driver: "local",
+			Labels: map[string]string{composeProjectLabel: "shop"},
+		}},
+	}
+	idx := newProjectIndex(t.TempDir(), testLogger())
+	// 索引里记着上一次从容器标签学到的主配置文件（scale 0 之前学到的那个事实）。
+	idx.Learn("shop", "/data/shop/docker-compose.yml")
+	s := newTestSnapshotter(api, "", testLogger())
+	s.SetProjectIndex(idx)
+
+	st := s.Collect(context.Background())
+	if err := st.Validate(); err != nil {
+		t.Fatalf("采集结果必须能过协议校验: %v", err)
+	}
+	pr := findProject(t, st.Projects, "shop")
+	if pr.ContainersCount != 0 || pr.State != "stopped" {
+		t.Fatalf("scale 0 的项目必须如实显示 0 容器 / stopped: %+v", pr)
+	}
+	if len(pr.ConfigFiles) != 1 || pr.ConfigFiles[0] != "/data/shop/docker-compose.yml" {
+		t.Fatalf("没有容器时配置文件路径必须回落到项目索引: %+v", pr)
+	}
+	// 网络/卷给不出服务名：这里不编数（0 是「没有已知服务」，前端另有声明数可读）。
+	if pr.Services != 0 {
+		t.Fatalf("网络/卷标签不携带服务信息，不得凭空给出服务数: %+v", pr)
+	}
+}
+
+// Services 取「文件声明的网元 ∪ 有容器的网元」的大小（不是「有容器的网元数」）：
+// 文件声明 3 个、容器里出现其中 1 个 + 1 个文件没写的（改过文件、容器还是旧的），
+// Services=4 —— 页面据此才说得清「另有 N 个网元没有容器」。
+func TestSnapshotDeclaredServicesFromComposeFile(t *testing.T) {
+	dir := t.TempDir()
+	main := filepath.Join(dir, "compose.yml")
+	if err := os.WriteFile(main, []byte(strings.Join([]string{
+		"services:",
+		"  web:",
+		"    image: nginx:1",
+		"  db:",
+		"    image: postgres:16",
+		"  cache:",
+		"    image: redis:7",
+		"volumes:",
+		"  data: {}",
+		"",
+	}, "\n")), 0o600); err != nil {
+		t.Fatalf("写测试 compose 文件失败: %v", err)
+	}
+	api := &stubAPI{containers: []ContainerInfo{
+		{ID: "c1", Name: "shop-web-1", Image: "nginx:1", State: "running",
+			Labels: map[string]string{
+				composeProjectLabel: "shop", composeServiceLabel: "web", composeConfigFilesLabel: main,
+			}},
+		// 文件里没有这个网元（配置改过、容器还是旧的）：观察到的同样算数 ——
+		// 页面上它有一行卡片，就不该被「声明数」裁掉。
+		{ID: "c2", Name: "shop-extra-1", Image: "busybox:1", State: "running",
+			Labels: map[string]string{
+				composeProjectLabel: "shop", composeServiceLabel: "extra", composeConfigFilesLabel: main,
+			}},
+	}}
+	s := newTestSnapshotter(api, "", testLogger())
+
+	pr := findProject(t, s.Collect(context.Background()).Projects, "shop")
+	if pr.Services != 4 {
+		t.Fatalf("Services 必须是声明 ∪ 观察的大小（4），实际 %d: %+v", pr.Services, pr)
+	}
+	if pr.ContainersCount != 2 {
+		t.Fatalf("容器计数照旧只数容器: %+v", pr)
+	}
+}
+
+// 配置文件读不到（路径不存在 / 权限不足 / YAML 坏了）时退回容器标签归纳的已知服务数
+// —— 「读不到」不是「零个服务」，更不是编造声明数。
+func TestSnapshotServicesFallBackWhenComposeFileUnreadable(t *testing.T) {
+	api := &stubAPI{containers: []ContainerInfo{
+		{ID: "c1", Name: "shop-web-1", Image: "nginx:1", State: "running",
+			Labels: map[string]string{
+				composeProjectLabel: "shop", composeServiceLabel: "web",
+				composeConfigFilesLabel: filepath.Join(t.TempDir(), "no-such.yml"),
+			}},
+		{ID: "c2", Name: "shop-db-1", Image: "postgres:16", State: "stopped",
+			Labels: map[string]string{
+				composeProjectLabel: "shop", composeServiceLabel: "db",
+				composeConfigFilesLabel: filepath.Join(t.TempDir(), "no-such.yml"),
+			}},
+	}}
+	s := newTestSnapshotter(api, "", testLogger())
+
+	pr := findProject(t, s.Collect(context.Background()).Projects, "shop")
+	if pr.Services != 2 {
+		t.Fatalf("文件读不到时必须退回容器标签归纳的已知服务数（2），实际 %d: %+v", pr.Services, pr)
 	}
 }
 

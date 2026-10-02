@@ -80,7 +80,7 @@
   /**
    * 容器 stats 实时统计（五期监控面 · 前端半边）：读数行 + 三张曲线 + 流生命周期。
    *
-   * 流程与日志 Follow 同一条两步走（契约见 workload-drawer 的 startLogFollow 注释）：
+   * 流程与日志 Follow 同一条两步走（契约见 views/container-detail 的 startLogFollow 注释）：
    *   1. 发 container:stats（会话制 action）→ 轮询 cmds/:ref 到终态 —— 终态里的
    *      session_id 即「会话已建立」的信号（样本走流通道，不走结果载荷）；
    *   2. GET cmds/:ref/stats 接入 NDJSON 样本流（首帧即当前值，1 秒采样，eof 收尾）。
@@ -90,8 +90,8 @@
    * 有回看窗口。历史失败静默降级为纯实时（= 原行为）；两段数据按 t 去重衔接
    * 成一条序列，口径见 utils/stats 的 mergeStatsHistory。
    *
-   * 生命周期纪律照抄终端 Tab（pty-terminal）：本组件由抽屉 `v-if`（概览 Tab 激活 +
-   * 抽屉开着）+ `:key`（行主机:容器）挂载 —— 切 Tab / 关抽屉 / 换行都是**卸载**，
+   * 生命周期纪律照抄终端 Tab（pty-terminal）：本组件由容器详情页的 `v-if`（概览 Tab
+   * 激活）+ `:key`（主机:容器:运行态）挂载 —— 切 Tab / 离开页面 / 换容器都是**卸载**，
    * 卸载即 abort；AbortController 一断，服务端就向 agent 下发 cancel 释放会话。
    * 会话生命周期 = 组件生命周期，不为看不见的曲线留一条流。
    */
@@ -301,7 +301,7 @@
       }
     } catch (e) {
       if (seq !== statsSeq) return
-      // 主动断开（切 Tab / 关抽屉 / 换行）不是错误：不弹结论句。
+      // 主动断开（切 Tab / 离开页面 / 换容器）不是错误：不弹结论句。
       if ((e as { name?: string })?.name === 'AbortError') return
       streamAbort = null
       phase.value = 'error'
@@ -330,12 +330,17 @@
     if (props.running) void start()
   })
 
-  // 卸载即断流：本组件由抽屉 v-if/:key 控制挂载，切 Tab / 关抽屉 / 换行都到这里。
+  // 卸载即断流：本组件由详情页 v-if/:key 控制挂载，切 Tab / 离开页面 / 换容器都到这里。
   onBeforeUnmount(stop)
 </script>
 
 <style lang="scss" scoped>
   @use '@styles/core/breakpoints.scss' as *;
+  @use '../views/overview-tokens' as t;
+
+  // 「重试」等默认档按钮的主色文字对比度 AA：病灶与处方见 overview-tokens
+  // 的 primary-text-aa（终审 QA D2·浅色实测 3.68:1/hover 3.27:1）。
+  @include t.primary-text-aa;
 
   /*
    * 序列色 = EP 语义色按「分类槽」固定指派（dataviz 六项校验两模式全过，实测值见
@@ -376,7 +381,14 @@
     // 「实时」状态签：主色 plain（它是状态而不是序列，不该撞序列色）。
     --el-tag-bg-color: var(--el-color-primary-light-9);
     --el-tag-border-color: var(--el-color-primary-light-5);
-    --el-tag-text-color: var(--el-color-primary);
+    // 文字对比度 AA（终审 QA D2 同源 primary 蓝盘点）：EP 主色文字对 light-9 底
+    // 3.27:1 —— 取「主色六成 + 正文色四成」混色（浅色 ≈5.4:1、暗色随主题只升不降；
+    // 与 overview-tokens 的 primary-text-aa 同一处方）。只换变量槽值，形态不动。
+    --el-tag-text-color: color-mix(
+      in srgb,
+      var(--el-color-primary) 60%,
+      var(--el-text-color-primary)
+    );
   }
 
   .wkl-stats__note {
@@ -402,9 +414,11 @@
   }
 
   // 采样口径摘要：右对齐收尾，不与状态行抢注意力。
+  // 对比度 AA（终审 QA D2 同源 #a8abb2 盘点）：placeholder 档对白卡仅 2.3:1 ——
+  // 升到 regular 档（≈6.1:1；暗色只升不降，与 overview-events-feed 同款处置）。
   .wkl-stats__meta {
     margin-left: auto;
-    color: var(--el-text-color-placeholder);
+    color: var(--el-text-color-regular);
     font-size: 12px;
     white-space: nowrap;
   }
@@ -488,7 +502,7 @@
     }
   }
 
-  // 平板竖屏以下（抽屉全屏）：两列读数/曲线堆叠成单列，横向不再挤成窄缝。
+  // 平板竖屏以下（整页窄屏）：两列读数/曲线堆叠成单列，横向不再挤成窄缝。
   @include respond-below('tablet') {
     .wkl-stats__tiles,
     .wkl-stats__charts {

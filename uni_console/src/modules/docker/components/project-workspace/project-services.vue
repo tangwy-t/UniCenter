@@ -8,7 +8,12 @@
         <div class="pws-card__head">
           <span class="pws-card__name" :title="svc.name">{{ svc.name }}</span>
           <span class="pws-card__replicas">副本 {{ svc.running }}/{{ svc.total }}</span>
-          <span v-if="svc.protected" class="pws-card__lock" title="受保护">🔒</span>
+          <!-- 锁语义与列表保护列同款（锁图标 + 受保护）：不用 🔒 emoji ——
+               无 emoji 字体的环境里会渲染成豆腐块；锁走 ArtSvgIcon 的图标范式。 -->
+          <span v-if="svc.protected" class="pws-card__lock">
+            <ArtSvgIcon icon="ri:lock-2-line" />
+            受保护
+          </span>
           <span v-if="blockedConclusionOf(svc)" class="pws-card__blocked">
             {{ blockedConclusionOf(svc) }}
           </span>
@@ -103,6 +108,7 @@
   import { ElButton, ElMessage, ElMessageBox } from 'element-plus'
   import { useAuth } from '@/hooks/core/useAuth'
   import { PermDockerExec, PermDockerManage } from '@/enums/permission'
+  import ArtSvgIcon from '@/components/core/base/art-svg-icon/index.vue'
   import DockerActionConfirm from '../action-confirm.vue'
   import DockerActionMenu from '../action-menu.vue'
   import type { DockerContainerItem } from '../../api'
@@ -165,7 +171,7 @@
     return [
       {
         key: 'service:restart',
-        label: gate.protected && !gate.allowed ? '🔒 重启（需要更高权限）' : '重启',
+        label: gate.protected && !gate.allowed ? '重启（需要更高权限）' : '重启',
         icon: 'ri:refresh-line',
         auth: PermDockerManage,
         disabled: actionDisabledOf(svc)
@@ -378,12 +384,12 @@
     return `${head}，${failures.length} 项失败：${shown.join('；')}`
   }
 
-  // ── 容器行 → 容器详情抽屉（7b：深链指 /docker/containers?host=&id=，host 随行）──
+  // ── 容器行 → 容器详情页（8a：深链指 /docker/containers/:id，host 随行）──
 
   function openContainer(c: DockerContainerItem) {
     void router.push({
-      path: '/docker/containers',
-      query: { host: ctx.hostId, id: c.id }
+      path: `/docker/containers/${c.id}`,
+      query: { host: ctx.hostId }
     })
   }
 </script>
@@ -391,6 +397,10 @@
 <style lang="scss" scoped>
   @use '@styles/core/breakpoints.scss' as *;
   @use '../../views/overview-tokens' as t;
+
+  // 「停止 / 启动 / ⟳ 重启」等默认档按钮的主色文字对比度 AA：病灶与处方见
+  // overview-tokens 的 primary-text-aa（终审 QA D2·浅色实测 3.68:1）。
+  @include t.primary-text-aa;
 
   // 卡片网格：一列起步（手机横屏），平板两列，宽屏三列 —— 卡片是同质单元，
   // 栅格随宽度扩张；容器行多的卡不会被拉伸成不等高（align-items 起点对齐）。
@@ -445,6 +455,9 @@
   }
 
   .pws-card__lock {
+    display: inline-flex;
+    gap: 4px;
+    align-items: center;
     font-size: 13px;
   }
 

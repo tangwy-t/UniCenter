@@ -48,10 +48,11 @@
   /**
    * 聚合日志区（5b 工作台）：消费 compose:logs（5a）。
    *
-   * ── 与 workload-drawer 日志 Tab 的同与不同 ──────────────────────────
+   * ── 与容器详情页日志 Tab 的同与不同 ────────────────────────────────
    * 同一条流端点（`/cmds/:ref/stream`）与同一 NDJSON 行形（`{seq,data,eof}`），
-   * 建会话的两步（受理 + 轮询到会话句柄）也逐字同款（该契约的完整论证在被删的
-   * container-detail 时代即已定型，workload-drawer 的 startLogFollow 现持有同一份）。
+   * 建会话的两步（受理 + 轮询到会话句柄）也逐字同款（该契约的完整论证在更早的
+   * 详情页时代即已定型，容器详情页（views/container-detail）的 startLogFollow
+   * 现持有同一份）。
    * 不同的一点：compose:logs **没有一次性取回的形态**（agent 起的是 compose CLI
    * 进程，不传 --follow 时打完历史即退出、读到 eof 收摊）—— 故「拉取」也走
    * 建会话 + 读流的路径，区别只在 options 里带不带 follow。
@@ -106,8 +107,14 @@
 
   /** 服务过滤（纯前端：会话不分服务开流，勾选不重开会话、不打断跟随）。 */
   const serviceFilter = ref<string[]>([])
-  /** 过滤后的渲染文本（未选服务 = 原文；行前缀匹配在 utils/log 的纯函数里）。 */
-  const displayLines = computed(() => filterComposeLogLines(logLines.value, serviceFilter.value))
+  /**
+   * 过滤后的渲染文本（未选服务 = 原文；行前缀 → 归属服务名的解码在 utils/log
+   * 的纯函数里）。project 必须随行：前缀可能是「容器全名」形态（`项目-服务-序号`），
+   * 解码要先剥掉项目前缀 —— 拿不到项目名时那一形态整批归不了属（QA 实测的恒空故障）。
+   */
+  const displayLines = computed(() =>
+    filterComposeLogLines(logLines.value, serviceFilter.value, props.project)
+  )
   /** 「共 N 行」与暂停计数跟着**过滤后的文本**走：数字与眼前内容同源。 */
   const displayTotal = computed(() =>
     serviceFilter.value.length > 0 ? splitLogLines(displayLines.value).length : logTotal.value
@@ -273,3 +280,80 @@
     { immediate: true }
   )
 </script>
+
+<style lang="scss" scoped>
+  /* 本组件此前**没有样式块**：`.pwl__bar` 一排工具项没有布局声明，实栈里
+     select 吃满行宽、每项各占一行竖向堆叠（布局族 agent 实栈发现，本次补齐）。
+     节奏对齐同页的 log-viewer__bar（gap 8px、工具行横排换行）与服务卡范式。 */
+  @use '@styles/core/breakpoints.scss' as *;
+  @use '../../views/overview-tokens' as t;
+
+  // 日志工具行按钮的主色文字对比度 AA：病灶与处方见 overview-tokens
+  // 的 primary-text-aa（终审 QA D2·浅色实测 3.68:1）。
+  @include t.primary-text-aa;
+
+  .pwl {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  /* 工具条：行数选择 + 拉取 + 网元过滤 + 结论/错误 —— 横排一行、放不下换行。 */
+  .pwl__bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .pwl__label {
+    font-size: 13px;
+    color: var(--el-text-color-regular);
+  }
+
+  /* 两个下拉必须定宽/限宽：EP 的 select 默认吃满可用宽度，拉通整行会把工具条拆散
+     —— 这正是无样式块时的实栈症状。 */
+  .pwl__tail {
+    width: 140px;
+  }
+
+  .pwl__filter {
+    flex: 1 1 220px;
+    max-width: 420px;
+  }
+
+  /* 结论句（「日志已拉取完毕」）与错误句同排跟在工具项之后：次要文字不上色，
+     错误走 danger。 */
+  .pwl__note {
+    color: var(--el-text-color-secondary);
+    font-size: 13px;
+  }
+
+  .pwl__error {
+    color: var(--el-color-danger);
+    font-size: 13px;
+  }
+
+  /* ── 响应式（与 log-viewer 同口径）───────────────────── */
+
+  // 手机横屏（<768）：两个下拉改为可伸缩（不再定宽），结论/错误句挪到工具行之后
+  // 独占一行，不跟按钮抢宽度。
+  @include respond-below('tablet') {
+    .pwl__bar {
+      gap: 6px;
+    }
+
+    .pwl__tail,
+    .pwl__filter {
+      width: auto;
+      min-width: 0;
+      flex: 1 1 140px;
+      max-width: none;
+    }
+
+    .pwl__note,
+    .pwl__error {
+      flex: 1 1 100%;
+    }
+  }
+</style>

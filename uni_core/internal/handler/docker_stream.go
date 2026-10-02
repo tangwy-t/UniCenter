@@ -37,6 +37,12 @@ import (
 // service/docker_cmd.go 与协议 DockerPullSessionID / DockerBuildSessionID /
 // DockerPushSessionID），断开这条连接的 cancel 终止的是操作本身（与
 // stats/logs「断开即停流」同一条纪律）。
+//
+// 六条 NDJSON 端点全部挂 middleware.LongLived（挂载点在 router.go）：http.Server 的
+// WriteTimeout 是**整条响应**的绝对窗口，不接管写截止的话，任何 >30s 的流都会在
+// 30.0s 被写失败掐断 —— 而本波「断流 = best-effort cancel」会把这声掐断升级成
+// 「取消操作本身」（P0：>30s 的拉取必然失败）。机制说明见
+// internal/middleware/long_lived.go。
 
 const (
 	// execWriteTimeout 是单条 WS 消息的写超时：对端 TCP 卡死时写侧不能永久挂住

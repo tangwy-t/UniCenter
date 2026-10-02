@@ -1,21 +1,40 @@
 <template>
-  <!-- ⚠ 单根包装：页面**必须只有一个根节点**（布局把页面放进 `<Transition mode="out-in">`，
-       而 Transition 只支持单根元素）。三个 tab 的确认弹窗/对话框随各自的 tab 组件
-       收在它自己的单根里，页面级只剩 DockerPage 一个根（single-root.test.ts 扫描钉住）。 -->
-  <div class="docker-resources-page">
-    <DockerPage
-      :loading="loading"
-      :stale="stale"
-      :age-seconds="ageSeconds"
-      :never-reported="neverReported"
-      :load-error="loadError"
-      :has-state="hasState"
-      @refresh="refresh"
-    >
-      <!-- 内容区走 DockerPage 的**默认插槽**（7a 新增的内容形态）：三个 tab 各自带
-           搜索栏与表格卡片，DockerPage 不再替它们包 ElCard（卡片套卡片）。
-           主机条（切换器 + 同步文案 + 刷新）只有这一条 —— 三个 tab 共享同一台主机，
-           这是收敛的核心收益：切 tab 不换主机、不重拉快照。 -->
+  <!-- 单根（single-root 守卫在库：布局的 Transition 只支持单根，双根切页白屏）。
+       三个 tab 的确认弹窗/对话框随各自的 tab 组件收在它自己的单根里，
+       页面级只剩这一个根。 -->
+  <div class="docker-resources-page art-full-height overflow-y-auto">
+    <div class="wkl-page__inner p-4 pb-8 md:p-5">
+      <!-- ============ 页头：图标 + 标题 + 副标题 + 刷新（对齐容器页/总览）============ -->
+      <div class="wkl-hero mb-4 flex flex-wrap items-center gap-3">
+        <div class="wkl-hero__icon flex-cc">
+          <ArtSvgIcon :icon="pageIcon" />
+        </div>
+        <div class="min-w-0">
+          <h2 class="text-lg font-semibold text-[var(--el-text-color-primary)]">镜像与存储</h2>
+          <p class="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-g-600">
+            <span
+              class="live-dot inline-block h-1.5 w-1.5 rounded-full bg-success"
+              :class="{ 'is-loading': hostsLoading }"
+            />
+            <span>{{ subtitle }}</span>
+          </p>
+        </div>
+        <div class="ml-auto flex items-center gap-1">
+          <!-- 页面级刷新：当前 tab 的清单 + 主机清单一起重拉（数据源是各 tab 自己的
+               聚合端点，按钮的意义是「把眼前这页看新」，不是重拉某一份共享快照）。 -->
+          <ArtButtonTable
+            icon="ri:refresh-line"
+            iconClass="bg-theme/12 text-theme"
+            title="刷新"
+            @click="refreshAll"
+          />
+        </div>
+      </div>
+
+      <!-- ============ 三个 tab（跨主机聚合表）============
+           主机维度从页面级上下文（HostSwitcher）降为**每个 tab 筛选里的一项** ——
+           与容器统一表同一范式：主机列给归属、主机筛选给收窄，`?host=` 深链作
+           筛选初始值（总览磁盘面板与镜像详情返回链路的既有链路不动）。 -->
       <ElTabs v-model="activeTab" class="docker-resources-tabs">
         <ElTabPane name="images" lazy>
           <template #label>
@@ -24,7 +43,7 @@
               镜像
             </span>
           </template>
-          <ImagesTab ref="imagesTabRef" :state="state" :loading="loading" :refresh="refresh" />
+          <ImagesTab ref="imagesTabRef" :hosts="hosts" :hosts-loading="hostsLoading" />
         </ElTabPane>
         <ElTabPane name="volumes" lazy>
           <template #label>
@@ -33,7 +52,7 @@
               数据卷
             </span>
           </template>
-          <VolumesTab ref="volumesTabRef" :state="state" :loading="loading" :refresh="refresh" />
+          <VolumesTab ref="volumesTabRef" :hosts="hosts" :hosts-loading="hostsLoading" />
         </ElTabPane>
         <ElTabPane name="networks" lazy>
           <template #label>
@@ -42,53 +61,60 @@
               网络
             </span>
           </template>
-          <NetworksTab ref="networksTabRef" :state="state" :loading="loading" :refresh="refresh" />
+          <NetworksTab ref="networksTabRef" :hosts="hosts" :hosts-loading="hostsLoading" />
         </ElTabPane>
       </ElTabs>
-    </DockerPage>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
   /**
-   * 镜像与存储页（7a 旧页收敛）：镜像 / 数据卷 / 网络三张旧列表页收敛为一个
-   * tab 容器页。
+   * 镜像与存储页（9b：跨主机化，同容器统一表范式）。
    *
-   * 页面职责只有三件事（编排，不含业务）：
-   *   1. **页面级一个主机上下文**：provideDockerHost() 在这里提供，三 tab 经
-   *      useDockerHost() 注入共享 —— 切 tab 不换主机（旧三页各自一份上下文，
-   *      换 tab 等于换页，主机要重选一次）。
-   *   2. **一份快照**：useDockerHostState 只在本页调用一次，state/loading/refresh
-   *      作为 props 下发给三个 tab（快照本就是整份的：images/volumes/networks
-   *      同源）。切 tab 不重拉；写指令成功后的重拉（useDockerCmds 的双次重拉）
-   *      也只拉这一份。
-   *   3. **当前 tab 记在 URL query**（?tab=images|volumes|networks）：刷新与分享
-   *      链接都能还原现场；总览磁盘面板、镜像详情返回链路用 query.host + query.tab
-   *      直接落到「那台主机的那张表」。
+   * 数据源从「页面级一份单主机快照（useDockerHostState + HostSwitcher）」换成
+   * 各 tab 自己的跨主机聚合端点（GET /docker/images|volumes|networks，9a）；
+   * 主机从页面级上下文降为**筛选下拉**的一项（筛选形态对齐容器页），行归属由
+   * 新增的主机列给出。`?host=` 深链照旧有效：作为各 tab 的**主机筛选初始值**
+   * （总览磁盘面板的 goHostImages/goHostVolumes 与镜像详情的返回链路都不动）。
    *
-   * 主机切换的重置纪律（原三页各自 onHostSwitch 的正文）**合并到页面级一份**：
-   * onHostSwitch 里逐个调用已挂载 tab 的 resetForHostSwitch（清筛选/清勾选/关拉取
-   * 对话框 —— 逐项平移，见各 tab 组件）。未挂载的 tab（lazy：还没访问过）没有
-   * 任何状态需要重置，首次挂载天然是干净的。
+   * 页面职责只有两件事（编排，不含业务）：
+   *   1. **页面级一份主机清单**：useHostList 在这里调用一次，三个 tab 经 props
+   *      共用（切 tab 不重复拉 —— 7a 收敛收益在跨主机形态下的延续）；tab 自己
+   *      管自己那条聚合端点的拉取。
+   *   2. **当前 tab 记在 URL query**（?tab=images|volumes|networks）：刷新与分享
+   *      链接都能还原现场；切换只写 tab，不碰 host（host 从此是筛选状态）。
+   *
+   * 主机切换的重置纪律（原三页 onHostSwitch 的正文）随「页面级主机」概念一起
+   * 消失：写操作按**行主机/筛选主机**派发（一次操作属于发起时锁定的那台主机），
+   * 没有「切了主机要清什么」的问题。
    */
-  import { ref, watch } from 'vue'
+  import { computed, ref, watch } from 'vue'
   import { useRoute, useRouter } from 'vue-router'
   import { ElTabPane, ElTabs } from 'element-plus'
+  import ArtButtonTable from '@/components/core/forms/art-button-table/index.vue'
   import ArtSvgIcon from '@/components/core/base/art-svg-icon/index.vue'
-  import DockerPage from '../components/docker-page.vue'
+  import { usePageIcon } from '@/hooks/core/usePageIcon'
   import ImagesTab from '../components/resources/images-tab.vue'
   import VolumesTab from '../components/resources/volumes-tab.vue'
   import NetworksTab from '../components/resources/networks-tab.vue'
-  import { useDockerHostState } from '../composables/useDockerHostState'
-  import { provideDockerHost } from '../utils/host-context'
+  import { useHostList } from '../composables/useResourceList'
 
-  // 主机上下文是**页面级** provide/inject：DockerPage 与各 tab 都用 useDockerHost()
-  // 取它 —— 页面就是这一层的提供者，故在这里 provide 并直接用其返回值。
-  // 不要解构：上下文字段是 getter，解构会把 hostId 定格成进入页面时的 ''（主机清单尚未到达）。
-  provideDockerHost()
+  defineOptions({ name: 'DockerResources' })
 
   const route = useRoute()
   const router = useRouter()
+  // 页头图标与侧边栏/页签同源（取菜单图标，改「菜单管理」即同步；见 usePageIcon）。
+  const pageIcon = usePageIcon('ri:database-2-line')
+
+  // ── 页面级一份主机清单（三 tab 的筛选下拉与「尚无可管主机」判定）────────
+  const { hosts, hostsLoading, loadHosts } = useHostList()
+
+  const subtitle = computed(() =>
+    hostsLoading.value && hosts.value.length === 0
+      ? '正在拉取主机清单'
+      : `跨 ${hosts.value.length} 台主机`
+  )
 
   // ── 当前 tab：URL query 是唯一事实源（深链/刷新还原；与 host 同一取向）────
 
@@ -111,38 +137,57 @@
       if (tab !== activeTab.value) activeTab.value = tab
     }
   )
-  // tab → query：用户点 tab 时写回（replace 不进历史 —— tab 切换不该占用后退键，
-  // 与主机切换的 selectHost 同一取向）。
+  // tab → query：用户点 tab 时写回（replace 不进历史 —— tab 切换不该占用后退键）。
   watch(activeTab, (tab) => {
     if (String(route.query.tab ?? '') !== tab) {
       void router.replace({ query: { ...route.query, tab } })
     }
   })
 
-  // ── 页面级一份快照 + 主机切换重置（三 tab 的纪律合并处）──────────────────
+  // ── 页面级刷新 ───────────────────────────────────────────────
 
   const imagesTabRef = ref<InstanceType<typeof ImagesTab> | null>(null)
   const volumesTabRef = ref<InstanceType<typeof VolumesTab> | null>(null)
   const networksTabRef = ref<InstanceType<typeof NetworksTab> | null>(null)
 
-  const { state, loading, stale, ageSeconds, neverReported, loadError, hasState, refresh } =
-    useDockerHostState({
-      // 主机切换 = 换一台机器：原三页各自的重置纪律合并成这一份（清空各 tab 的
-      // 筛选/勾选，关掉镜像 tab 的拉取进度对话框 —— 一场拉取属于受理它的那台主机）。
-      onHostSwitch: () => {
-        imagesTabRef.value?.resetForHostSwitch()
-        volumesTabRef.value?.resetForHostSwitch()
-        networksTabRef.value?.resetForHostSwitch()
-      }
-    })
+  /** 刷新当前 tab 的清单（未挂载的 tab 无需刷新 —— lazy 首挂时天然是第一拉）。 */
+  function refreshActive() {
+    if (activeTab.value === 'images') void imagesTabRef.value?.refresh()
+    else if (activeTab.value === 'volumes') void volumesTabRef.value?.refresh()
+    else void networksTabRef.value?.refresh()
+  }
+
+  function refreshAll() {
+    // 主机清单可能已变化（新主机入库），与当前 tab 的清单一起重拉。
+    void loadHosts()
+    refreshActive()
+  }
 </script>
 
 <style lang="scss" scoped>
-  // tab 导航是本页唯一新增的结构元素（收敛的入口形态）：紧贴主机条之下，
-  // 三个 tab 的图标沿用被收敛的三条旧菜单的图标（box/硬盘/转发）—— 侧边栏里
-  // 消失的视觉词汇在页面内延续，用户按形状就能找到原来的那张表。
+  /* 页面骨架（hero/三态/动效降级）下沉在 views/wkl-shell.scss（本模块多页共用的
+   * 范式样式）；这里只留本页特有的结构。 */
+  @use './wkl-shell';
+
+  /* 次要文字对比度 AA（P2 打磨批，与总览页同款处置）：EP 默认
+     --el-text-color-secondary(#909399) 对白底只有 3.08:1（QA 实测 2.97–3.08），低于
+     AA 正文线 → 页面范围内把它升到 regular 档（浅色 6.1:1、暗色随主题同样达标）。
+     只重定义变量值，三个 tab（含各自表头/合计行）一起达标，不碰元素样式与布局。 */
+  .docker-resources-page {
+    --el-text-color-secondary: var(--el-text-color-regular);
+
+    /* hero 副标题/g-600 辅助字的对比度 AA（终审 QA D2·浅色实测 3.5:1）：
+       text-g-600 的工具变量指向 --art-gray-600(#7987a1) —— 对页底 #fafbfc 3.5:1，
+       低于 AA 正文线。页面范围内抬一档到 g-700（浅色 #4d5875 对页底 ≈6.8:1；
+       暗色 #ababba 对暗底 ≈8.9:1，随主题自适应）。只重定义工具变量值，页面内
+       所有 text-g-600 文字（hero 副标题、加载提示）一起达标，页面外无副作用。 */
+    --color-g-600: var(--art-gray-700);
+  }
+
+  // tab 导航：紧贴 hero 之下，三个 tab 的图标沿用被收敛的三条旧菜单的图标
+  // （box/硬盘/转发）—— 侧边栏里消失的视觉词汇在页面内延续。
   .docker-resources-tabs {
-    // ElTabs 默认头距内容 15px；对齐模块节奏（12px，与 docker-page__bar 同一拍）。
+    // ElTabs 默认头距内容 15px；对齐模块节奏（12px，与 hero 的下边距同一拍）。
     :deep(.el-tabs__header) {
       margin: 0 0 12px;
     }

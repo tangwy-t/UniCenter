@@ -636,7 +636,9 @@
   }
 
   const gotoDetail = (id: string) => {
-    router.push({ name: 'DeviceDetail', params: { id } })
+    // 用 path 跳转（不用 name）：后端菜单模式下隐藏路由虽按原 name 追加，
+    // 但与菜单托管路由并存的注册形态并不保证 name 可解析，path 两模式都逐字一致。
+    router.push({ path: `/device/detail/${id}` })
   }
 
   // ── 自动刷新计时器 ──────────────────────────────────────

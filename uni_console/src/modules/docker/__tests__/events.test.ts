@@ -1,7 +1,7 @@
 /**
  * utils/events 的纯逻辑钉子：行解析（回放/实时/坏行）、时间排序窗口与显示上限、
- * 重连回放的去重守卫、action 中文化映射（含未映射透传）、秒级相对时间、
- * 四类资源的图标/色槽、账目口径句。
+ * 重连回放的去重守卫、action 中文化映射（含未映射透传）、秒级相对时间（含毫秒除千
+ * 的浮点整段取整）、绝对时刻格式化、四类资源的图标/色槽、账目口径句。
  *
  * 与 log-viewer.test.ts 同一约定：组件不挂载（组件级行为在 events-feed.test.ts，
  * 那边是 jsdom + vi.mock 的流消费测试）。
@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest'
 import {
   createEventsFeed,
   eventActionText,
+  eventClockTime,
   eventFeedHint,
   eventRelativeTime,
   eventTypeMeta,
@@ -18,12 +19,12 @@ import {
   parseEventLine
 } from '../utils/events'
 
-/** 造一行事件的 JSON（字段形状对齐 core 的 eventNDJSONLine）。 */
+/** 造一行事件的 JSON（字段形状对齐 core 的 eventNDJSONLine；t 用 unix 毫秒）。 */
 function line(overrides: Record<string, unknown> = {}): string {
   return JSON.stringify({
     host_id: 1,
     hostname: 'bogon',
-    t: 1790600000,
+    t: 1790600000000,
     type: 'container',
     action: 'start',
     actor_name: 'uni-center-core',
@@ -35,12 +36,12 @@ function line(overrides: Record<string, unknown> = {}): string {
 describe('事件行解析', () => {
   it('好行：snake_case → camelCase 全字段映射，actor 缺省给空串（omitempty）', () => {
     const e = parseEventLine(
-      '{"host_id":1,"hostname":"bogon","t":1790600000,"type":"image","action":"pull"}'
+      '{"host_id":1,"hostname":"bogon","t":1790600000000,"type":"image","action":"pull"}'
     )
     expect(e).toEqual({
       hostId: '1',
       hostname: 'bogon',
-      t: 1790600000,
+      t: 1790600000000,
       type: 'image',
       action: 'pull',
       actorName: '',
@@ -48,12 +49,12 @@ describe('事件行解析', () => {
     })
   })
 
-  it('完整行：字段齐给全值（host_id 数字转字符串）', () => {
+  it('完整行：字段齐给全值（host_id 数字转字符串、t 原样透传毫秒）', () => {
     const e = parseEventLine(line())
     expect(e).toEqual({
       hostId: '1',
       hostname: 'bogon',
-      t: 1790600000,
+      t: 1790600000000,
       type: 'container',
       action: 'start',
       actorName: 'uni-center-core',
@@ -264,6 +265,31 @@ describe('相对时间（秒级粒度）', () => {
 
   it('nowSec 带小数也按整秒截断（调用方给的是 Date.now()/1000）', () => {
     expect(eventRelativeTime(NOW - 2, NOW + 0.9)).toBe('2 秒前')
+  })
+
+  it('浮点秒（毫秒戳除千的形态）整段取整：不出现 4.41100001335144 秒前（QA 路 1 B1）', () => {
+    // 任务中心/活动流的真实调用形态：毫秒时间戳除 1000 得到浮点秒。
+    expect(eventRelativeTime((NOW * 1000 - 4411) / 1000, NOW)).toBe('4 秒前')
+    expect(eventRelativeTime(NOW - 4.411, NOW)).toBe('4 秒前')
+    // floor 整段差值而不是各自入参：4.4 秒前是「4 秒前」，不是四舍五入或进位到 5。
+    expect(eventRelativeTime(NOW - 3.999, NOW)).toBe('3 秒前')
+    // 未来浮点（时钟偏差）仍然夹到「刚刚」，不出现负数档位。
+    expect(eventRelativeTime(NOW + 0.5, NOW)).toBe('刚刚')
+  })
+})
+
+describe('绝对时刻（悬停 title）', () => {
+  it('本地时区格式化为 YYYY-MM-DD HH:mm:ss（个位补零）', () => {
+    // 用本地时区构造再格式化：断言与环境 TZ 无关。
+    const t = new Date(2026, 0, 5, 3, 4, 5).getTime()
+    expect(eventClockTime(t)).toBe('2026-01-05 03:04:05')
+    const t2 = new Date(2026, 9, 2, 11, 41, 23).getTime()
+    expect(eventClockTime(t2)).toBe('2026-10-02 11:41:23')
+  })
+
+  it('毫秒部分舍去（秒级粒度，与相对时间同一精度）', () => {
+    const t = new Date(2026, 9, 2, 11, 41, 23, 987).getTime()
+    expect(eventClockTime(t)).toBe('2026-10-02 11:41:23')
   })
 })
 

@@ -404,6 +404,11 @@
 
 <style lang="scss" scoped>
   @use '@styles/core/breakpoints.scss' as *;
+  @use '../views/overview-tokens' as t;
+
+  // 「关闭 / 返回列表 / 编辑」等默认档按钮（含 text 变体）的主色文字对比度 AA：
+  // 病灶与处方见 overview-tokens 的 primary-text-aa（终审 QA D2·浅色实测 3.68:1）。
+  @include t.primary-text-aa;
 
   // 等宽字体（地址是「键」：要逐字对上，等宽才可对读与肉眼校对）。
   .rg-mono {

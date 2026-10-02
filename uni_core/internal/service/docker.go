@@ -297,6 +297,10 @@ func (s *DockerService) Overview(ctx context.Context) (*response.DockerOverviewR
 		// 求和（disk.hosts 如实计数「报了磁盘账的主机数」，缺报主机不折算成零）；
 		// 悬空镜像/未用卷的**计数**来自五类清单（与镜像页、卷页的判据同一源），
 		// df 只补「占用字节」这一半。
+		//
+		// 求和口径照抄 agent 给的数（六期对账后它已是 `docker system df` 的同口径：
+		// 镜像合计 = 层存储、悬空可回收 = 执行 image:prune 真会释放的字节）——
+		// 这里再算一遍会是第三份口径，而与 CLI 对不上时无从判断是哪一层算歪了。
 		var dangling, unusedVols int
 		if du := st.DiskUsage; du != nil {
 			fleet.Disk.Hosts++
@@ -459,6 +463,286 @@ func (s *DockerService) Workloads(ctx context.Context, q *request.DockerWorkload
 	}
 	out.Items = items
 	return out, nil
+}
+
+// ── 跨主机资源清单（9a）：镜像/卷/网络/项目四页与容器统一表同一副骨架 ──────
+
+// dockerResourceCap 是跨主机资源清单（四页）的条目上限。
+//
+// 与容器统一表的 dockerWorkloadCap 同值同理由（500 = 日常操作的工作集，截断
+// 先报全量 Total）；四页共用一条常量而不是各写一份：它们与容器页是同一类
+// 工作面板，各自为政时调一处就会让五张表的截断口径分家。
+const dockerResourceCap = 500
+
+// resourceRow 是跨主机聚合的中间行：最终条目 + 排序键。
+// 排序键不进 DTO：「名称」只是排序依据（镜像取第一个 repoTag、其余取 Name），
+// 不必出现在响应里；放在这里而不是另造四个带名字的结构体。
+type resourceRow[T any] struct {
+	hostID uint64
+	name   string
+	item   T
+}
+
+// aggregateResourceRows 跑完四页资源清单（镜像/卷/网络/项目）的公共骨架：
+// hostRecords 枚举 → hostId 过滤 → 单台读失败 warn 跳过 → 逐条过筛 → 排序
+// （hostId 升序、同主机按名称）→ 截断 500 但 total 如实报全量。
+//
+// 为什么抽出来而不是四个方法各抄一遍：这段骨架里全是**口径** —— 跳过政策
+// （读失败 = 少几行、不编造「零条目」的假象）、stale 照常计入、排序先于截断、
+// 截断报全量 —— 四份拷贝就是四次分岔机会（Workloads 已为「排序必须全序」写过
+// 一次注释；再抄四遍，改一处就会漏掉三处）。每条清单的差异全在闭包里：
+// 取哪类源（srcs）、怎么过筛（match）、排序取什么名字（name）、按主机的派生
+// 数据（onHost）、条目怎么装配（row）。
+//
+// onHost 给「按主机、与行筛选无关」的派生数据一条与清单行**同一趟枚举**的通道
+//（目前只有镜像页的可回收账目用它：disk 的覆盖范围必须与行的主机范围同源）。
+// 为什么必须同趟：账目与行要来自同一次快照读 —— 分两趟枚举（再跑一次 hostRecords）
+// 会在两次读之间漂移，行与账目就可能属于不同的主机集合；而且快照读是这条链上
+// 唯一的 I/O，白翻一倍的读不值得。为什么是回调不是第二个返回值：只有镜像页需要
+// 它，回吐全量 hostRecord 会诱导调用方自己再抄一遍跳过政策 —— 本函数抽出来正是
+// 为了让那份政策只有一份。回调在主机过滤后、读失败/从未上报跳过之后按台触发一次，
+// **不经 match 过筛**（派生账目说的是「这台主机有哪些可回收」，与「此刻在看哪些行」
+// 无关）；nil = 不收集（其余三页没有这类派生数据）。回调与行循环同循环执行，
+// 返回前不用额外对齐顺序 —— 但回调收集出来的切片顺序跟着枚举顺序走（Redis 集合
+// 无序），调用方自己负责排序（与行同一纪律）。
+//
+// 为什么是自由函数而不是方法：Go 的方法不能带类型参数（四个条目类型不同，
+// 泛型只能落在函数上）；s 只是被借来跑 hostRecords 枚举与读失败告警。
+//
+// 与 Workloads 的分工：容器统一表保留自己的专用方法（切片 2 已定稿，本切片
+// 零改动）；两者共用的是 hostRecords 枚举与同一套纪律，不是同一份代码。
+func aggregateResourceRows[T any, S any](
+	s *DockerService,
+	ctx context.Context,
+	hostID uint64,
+	srcs func(st *agentproto.DockerState) []S,
+	match func(src S) bool,
+	name func(src S) string,
+	onHost func(hostID uint64, st *agentproto.DockerState),
+	row func(hostID uint64, hostname string, src S) T,
+) ([]T, int, error) {
+	records, err := s.hostRecords(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	rows := []resourceRow[T]{}
+	for _, rec := range records {
+		if hostID != 0 && rec.id != hostID {
+			continue
+		}
+		if rec.readErr != nil {
+			// 单台读失败不拖垮整张表（少几行好过整页 500），文案与 Hosts/Workloads 同一句。
+			if s.log != nil {
+				s.log.Warn("docker state read failed", zap.Uint64("deviceId", rec.id), zap.Error(rec.readErr))
+			}
+			continue
+		}
+		if rec.env == nil {
+			// 从未上报：没有资源事实可列（主机行与结论在 hosts/总览页给出）。
+			continue
+		}
+		if onHost != nil {
+			onHost(rec.id, &rec.env.State)
+		}
+		for _, src := range srcs(&rec.env.State) {
+			if match != nil && !match(src) {
+				continue
+			}
+			rows = append(rows, resourceRow[T]{hostID: rec.id, name: name(src), item: row(rec.id, rec.dev.Hostname, src)})
+		}
+	}
+	// 排序在截断**之前**：截断砍掉的必须是排序后的尾部，否则砍谁取决于枚举
+	// 运气（同一份数据两次请求会给出不同的前 500 行）。hostId 升序、同主机按
+	// 名称 —— Redis 集合枚举顺序不保证，不排就是「按运气排序」（与 Workloads
+	// 及其总览异常清单同一纪律）；stale 主机的条目照常计入（陈旧是「最后已知
+	// 事实过期」，不是「事实不存在」，打折与否是读者的事）。
+	slices.SortFunc(rows, func(a, b resourceRow[T]) int {
+		if a.hostID != b.hostID {
+			return cmp.Compare(a.hostID, b.hostID)
+		}
+		return cmp.Compare(a.name, b.name)
+	})
+	// total 如实报全量数，items 截断（与统一工作负载表同一截断口径）。
+	total := len(rows)
+	if len(rows) > dockerResourceCap {
+		rows = rows[:dockerResourceCap]
+	}
+	// 空数组而非 null：与 Hosts/State/Overview/Workloads 的清单同一约定（前端少一层判空）。
+	items := make([]T, 0, len(rows))
+	for _, r := range rows {
+		items = append(items, r.item)
+	}
+	return items, total, nil
+}
+
+// imageResourceName 是镜像在统一表里的**排序名称**：第一个 repoTag（展示身份），
+// 无标签的悬空镜像回落 ID（sha256 是它唯一稳定的身份）。排序必须**全序**且确定：
+// 取的是与展示同一个值，读者看到的顺序就是服务端排的顺序。
+func imageResourceName(i agentproto.DockerImage) string {
+	if len(i.RepoTags) > 0 {
+		return i.RepoTags[0]
+	}
+	return i.ID
+}
+
+// Images 返回跨主机镜像统一表：全部可管主机的镜像并成一张表，每行带「在哪台主机」。
+//
+// 过滤语义与前端镜像页的开关同一句（utils/snapshot.ts 的 filterImages）：
+// keyword 对 repoTag 子串、大小写不敏感（多标签 join(" ") 后匹配）；dangling /
+// unused 是三值指针布尔（nil=不过滤、true=取该侧、false=取其反侧，与设备列表
+// Online 过滤同一句）。跨主机的跳过/排序/截断口径全在 aggregateResourceRows。
+//
+// 响应同时带 disk（主机范围内的可回收账目，供底栏「N 个可回收 · X」）—— 它与
+// Items 的筛选/截断口径**无关**（只跟 hostId 收窄），两种口径的分工见
+// response.DockerImageListResp.Disk 的注释。
+func (s *DockerService) Images(ctx context.Context, q *request.DockerImageQuery) (*response.DockerImageListResp, error) {
+	if q == nil {
+		// handler 永远传非 nil；这里对 nil 的防御语义与 Workloads 一致，
+		// 避免直接调用方的每个测试都先写一层判空。
+		q = &request.DockerImageQuery{}
+	}
+	kw := strings.ToLower(q.Keyword)
+	// disk 随主机的同趟枚举收集（见 aggregateResourceRows 的 onHost）：账目与行
+	// 必须来自同一次快照读。只收「账目完整」的主机：快照可读但没有 df 数据
+	//（旧版 agent / df 采集失败）的缺席而不是记零 ——「缺席 = 不知道」。
+	disk := []response.DockerImageHostDiskItem{}
+	items, total, err := aggregateResourceRows(s, ctx, q.HostID,
+		func(st *agentproto.DockerState) []agentproto.DockerImage { return st.Images },
+		func(i agentproto.DockerImage) bool {
+			if q.Dangling != nil && i.Dangling != *q.Dangling {
+				return false
+			}
+			if q.Unused != nil && i.InUse == *q.Unused {
+				// unused 与 InUse 是一对反义词：数据侧与请求侧相等即不匹配
+				//（unused=true 只要未被使用的、false 只要在用的）。
+				return false
+			}
+			return kw == "" || strings.Contains(strings.ToLower(strings.Join(i.RepoTags, " ")), kw)
+		},
+		imageResourceName,
+		func(hostID uint64, st *agentproto.DockerState) {
+			du := st.DiskUsage
+			if du == nil {
+				return
+			}
+			// 计数与总览 DanglingImages、镜像表「可回收（无标签）」同一判据
+			//（agent 的 Dangling 结论，前端不重算）；不经过 q 的过滤 ——
+			// prune 回收的就是这台的可回收批，与「此刻在看哪些行」无关。
+			n := 0
+			for _, i := range st.Images {
+				if i.Dangling {
+					n++
+				}
+			}
+			disk = append(disk, response.DockerImageHostDiskItem{
+				HostID: hostID, DanglingCount: n, DanglingMB: du.ImagesDanglingMB,
+			})
+		},
+		func(hostID uint64, hostname string, i agentproto.DockerImage) response.DockerImageListItem {
+			// 条目换算复用 toImageItem（字段列全是它自己的纪律），归属两列是唯一新增。
+			return response.DockerImageListItem{DockerImageItem: toImageItem(i), HostID: hostID, Hostname: hostname}
+		})
+	if err != nil {
+		return nil, err
+	}
+	// hostRecords 的枚举顺序不保证（Redis 集合无序）：disk 与行同一纪律排序
+	//（hostId 升序），否则同一份数据两次请求会给出不同的主机顺序。
+	slices.SortFunc(disk, func(a, b response.DockerImageHostDiskItem) int {
+		return cmp.Compare(a.HostID, b.HostID)
+	})
+	return &response.DockerImageListResp{Items: items, Total: total, Disk: disk}, nil
+}
+
+// Volumes 返回跨主机卷统一表：全部可管主机的数据卷并成一张表，每行带「在哪台主机」。
+//
+// 过滤语义与前端卷页的开关同一句（filterVolumes）：keyword 对卷名子串、
+// 大小写不敏感；unused 三值指针布尔（同 Images）。
+func (s *DockerService) Volumes(ctx context.Context, q *request.DockerVolumeQuery) (*response.DockerVolumeListResp, error) {
+	if q == nil {
+		q = &request.DockerVolumeQuery{}
+	}
+	kw := strings.ToLower(q.Keyword)
+	items, total, err := aggregateResourceRows(s, ctx, q.HostID,
+		func(st *agentproto.DockerState) []agentproto.DockerVolume { return st.Volumes },
+		func(v agentproto.DockerVolume) bool {
+			if q.Unused != nil && v.InUse == *q.Unused {
+				return false
+			}
+			return kw == "" || strings.Contains(strings.ToLower(v.Name), kw)
+		},
+		func(v agentproto.DockerVolume) string { return v.Name },
+		nil, // 卷页没有按主机的派生账目（onHost 的用途见 aggregateResourceRows）
+		func(hostID uint64, hostname string, v agentproto.DockerVolume) response.DockerVolumeListItem {
+			return response.DockerVolumeListItem{DockerVolumeItem: toVolumeItem(v), HostID: hostID, Hostname: hostname}
+		})
+	if err != nil {
+		return nil, err
+	}
+	return &response.DockerVolumeListResp{Items: items, Total: total}, nil
+}
+
+// Networks 返回跨主机网络统一表：全部可管主机的网络并成一张表，每行带「在哪台主机」。
+//
+// 过滤语义与前端网络页同一句（filterNetworks）：keyword 对网络名子串、
+// 大小写不敏感；internal 三值指针布尔（internal=true 只要隔离网络）。
+func (s *DockerService) Networks(ctx context.Context, q *request.DockerNetworkQuery) (*response.DockerNetworkListResp, error) {
+	if q == nil {
+		q = &request.DockerNetworkQuery{}
+	}
+	kw := strings.ToLower(q.Keyword)
+	items, total, err := aggregateResourceRows(s, ctx, q.HostID,
+		func(st *agentproto.DockerState) []agentproto.DockerNetwork { return st.Networks },
+		func(n agentproto.DockerNetwork) bool {
+			if q.Internal != nil && n.Internal != *q.Internal {
+				return false
+			}
+			return kw == "" || strings.Contains(strings.ToLower(n.Name), kw)
+		},
+		func(n agentproto.DockerNetwork) string { return n.Name },
+		nil, // 网络页没有按主机的派生账目（onHost 的用途见 aggregateResourceRows）
+		func(hostID uint64, hostname string, n agentproto.DockerNetwork) response.DockerNetworkListItem {
+			return response.DockerNetworkListItem{DockerNetworkItem: toNetworkItem(n), HostID: hostID, Hostname: hostname}
+		})
+	if err != nil {
+		return nil, err
+	}
+	return &response.DockerNetworkListResp{Items: items, Total: total}, nil
+}
+
+// Projects 返回跨主机项目统一表：全部可管主机的编排项目并成一张表，每行带「在哪台主机」。
+//
+// state 口径与容器统一表同一句：running / stopped，stopped = 一切非 running
+// （项目态的 partial 归入 stopped —— 过滤只做二分，细分由条目上的 state 字段
+// 承载，与总览 Projects.Running 的 KPI 口径同源）；非法值 400 结论句而不是
+// 静默当不过滤（与 Workloads 同一句纪律）。
+func (s *DockerService) Projects(ctx context.Context, q *request.DockerProjectQuery) (*response.DockerProjectListResp, error) {
+	if q == nil {
+		q = &request.DockerProjectQuery{}
+	}
+	if q.State != "" && q.State != "running" && q.State != "stopped" {
+		return nil, apperror.BadRequest("参数错误: state 仅支持 running 或 stopped")
+	}
+	kw := strings.ToLower(q.Keyword)
+	items, total, err := aggregateResourceRows(s, ctx, q.HostID,
+		func(st *agentproto.DockerState) []agentproto.DockerProject { return st.Projects },
+		func(p agentproto.DockerProject) bool {
+			if q.State == "running" && p.State != "running" {
+				return false
+			}
+			if q.State == "stopped" && p.State == "running" {
+				return false
+			}
+			return kw == "" || strings.Contains(strings.ToLower(p.Name), kw)
+		},
+		func(p agentproto.DockerProject) string { return p.Name },
+		nil, // 项目页没有按主机的派生账目（onHost 的用途见 aggregateResourceRows）
+		func(hostID uint64, hostname string, p agentproto.DockerProject) response.DockerProjectListItem {
+			return response.DockerProjectListItem{DockerProjectItem: toProjectItem(p), HostID: hostID, Hostname: hostname}
+		})
+	if err != nil {
+		return nil, err
+	}
+	return &response.DockerProjectListResp{Items: items, Total: total}, nil
 }
 
 // State 返回一台主机的完整快照（含陈旧结论）。

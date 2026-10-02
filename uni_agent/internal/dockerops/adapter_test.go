@@ -5,6 +5,7 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/mount"
 )
 
@@ -235,3 +236,84 @@ func TestToEventItemDieExitCode(t *testing.T) {
 }
 
 func int32p(v int32) *int32 { return &v }
+
+// ── df 汇总：与 `docker system df` 对账的两条口径（6a 对账 / 可回收诚实性）──────
+
+// 合计取层存储（每层只算一次），可回收取悬空镜像的独占层 —— 这组数就是 QA 实测的
+// 形状：重建后留下的悬空镜像与在用的镜像共享同一套基础层，面板曾按 Σ 各行 Size 报
+// 「镜像 3.04GB+ / 可回收 3.04GB」，而 docker system df 的 Images/SIZE 是层存储的
+// 大小、image:prune 实际只回收 2052 字节（悬空镜像独占的配置与清单）。
+func TestSummarizeDfImagesMatchesSystemDf(t *testing.T) {
+	const shared = int64(3040 << 20)
+	rows := []dfImageRow{
+		{SizeBytes: shared + 2048, SharedBytes: shared, Dangling: true}, // 悬空：独占 2048 字节
+		{SizeBytes: shared + 4, SharedBytes: shared},                    // 在用：独占 4 字节
+	}
+	total, dangling := summarizeDfImages(shared+4, rows)
+	if total != shared+4 {
+		t.Fatalf("镜像合计必须等于层存储（共享层只算一次），实际 %d", total)
+	}
+	if dangling != 2048 {
+		t.Fatalf("悬空可回收必须是独占层之和（2048），实际 %d", dangling)
+	}
+	// 反面对照：Σ 各行 Size 会是 2×shared+2052 —— 那正是被修掉的多报口径。
+	if sum := rows[0].SizeBytes + rows[1].SizeBytes; total >= sum {
+		t.Fatalf("合计不得退化成 Σ 各行 Size（%d vs %d）", total, sum)
+	}
+}
+
+// SharedSize = -1（daemon 没算共享体积，老 API 的哨兵）：无法区分独占与共享，
+// 整条跳过 —— 宁可少报，也不把整个 Size 当可回收（那是多报）。
+func TestSummarizeDfImagesSkipsUnknownShared(t *testing.T) {
+	rows := []dfImageRow{
+		{SizeBytes: 100, SharedBytes: -1, Dangling: true},
+		{SizeBytes: 50, SharedBytes: 10, Dangling: true}, // 独占 40，计入
+	}
+	_, dangling := summarizeDfImages(1000, rows)
+	if dangling != 40 {
+		t.Fatalf("未知共享体积的条目必须跳过，只计可证的独占层（40），实际 %d", dangling)
+	}
+}
+
+// 独占层算出来 ≤ 0（空层/尺寸异常）不得倒扣合计：可回收只加正数项。
+func TestSummarizeDfImagesNeverGoesNegative(t *testing.T) {
+	rows := []dfImageRow{{SizeBytes: 10, SharedBytes: 10, Dangling: true}}
+	if _, dangling := summarizeDfImages(100, rows); dangling != 0 {
+		t.Fatalf("独占层为 0 时不得产生可回收量: %d", dangling)
+	}
+}
+
+// SDK 明细 → 汇总行的映射：悬空判据 = **无标签**（与 daemon 的悬空过滤器、
+// image:prune 的默认目标集合同口径），Size/SharedSize 逐项带出。
+func TestDfImageRowsMapsFields(t *testing.T) {
+	rows := dfImageRows([]*image.Summary{
+		{ID: "sha256:a", RepoTags: []string{"nginx:1"}, Size: 10, SharedSize: 4},
+		{ID: "sha256:b", Size: 7, SharedSize: 3},
+	})
+	if len(rows) != 2 {
+		t.Fatalf("两条明细必须都进汇总: %+v", rows)
+	}
+	if rows[0].Dangling || rows[0].SizeBytes != 10 || rows[0].SharedBytes != 4 {
+		t.Fatalf("有标签的镜像不得判悬空: %+v", rows[0])
+	}
+	if !rows[1].Dangling || rows[1].SizeBytes != 7 || rows[1].SharedBytes != 3 {
+		t.Fatalf("无标签的镜像必须判悬空（daemon 同口径）: %+v", rows[1])
+	}
+}
+
+// 清理动作的**语义**守卫（可回收数字的诚实性靠它对账）：all=false 必须是
+// `dangling=true`（image:prune 的默认目标 = 面板承诺的那批镜像），all=true 才放开；
+// 卷清理必须是空过滤器（daemon 默认 = 只清匿名未用卷，命名卷不动）。
+func TestPruneFilterSemantics(t *testing.T) {
+	danglingOnly := imagePruneFilters(false)
+	if got := danglingOnly.Get("dangling"); len(got) != 1 || got[0] != "true" {
+		t.Fatalf("默认清理必须只针对悬空镜像（dangling=true），实际 %v", danglingOnly)
+	}
+	if got := imagePruneFilters(true).Get("dangling"); len(got) != 1 || got[0] != "false" {
+		t.Fatalf("all=true 必须放开悬空限制（dangling=false），实际 %v", imagePruneFilters(true))
+	}
+	vol := volumePruneFilters()
+	if len(vol.Get("all")) != 0 || len(vol.Get("dangling")) != 0 || len(vol.Get("label")) != 0 {
+		t.Fatalf("卷清理不得带任何过滤器（daemon 默认只清匿名未用卷），实际 %v", vol)
+	}
+}

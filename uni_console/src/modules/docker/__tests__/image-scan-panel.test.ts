@@ -180,7 +180,7 @@ describe('空态与触发', () => {
 })
 
 describe('扫描中', () => {
-  it('加载态 + 任务中心提示（pending 期间的可见性归任务中心，面板把这一点说清）', async () => {
+  it('加载态把「在干活」说清（耗时预期），不带去向说明句（零解释文案）', async () => {
     api.fetchDockerCmdResult.mockResolvedValue({ status: 'pending' })
     const w = await mountPanel()
     await clickBtn(w, '扫描镜像')
@@ -188,7 +188,9 @@ describe('扫描中', () => {
 
     expect(api.sendDockerCmd).toHaveBeenCalledTimes(1)
     expect(w.text()).toContain('正在扫描')
-    expect(w.text()).toContain('任务中心')
+    expect(w.text()).toContain('可能需要几分钟')
+    // 去向说明句（「进度可在任务中心查看」）已按「零解释文案」纪律删除。
+    expect(w.text()).not.toContain('任务中心')
     // 触发按钮在途不可重复点（重复触发只会吃到 409）。
     expect(w.findAll('button').some((b) => (b.text() ?? '').includes('扫描镜像'))).toBe(false)
   })

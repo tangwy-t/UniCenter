@@ -1243,18 +1243,24 @@ type DockerState struct {
 // 只会把每帧撑大一倍；「按明细排查」是列表页的事，按需另查（image:inspect / 卷页）。
 //
 // 字段口径全部来自 daemon 的 verbose df 响应（SDK v28 的 types.DiskUsage）：
-// Images 是 []*image.Summary（Size/RepoTags），Volumes 是 []*volume.Volume
+// Images 是 []*image.Summary（Size/SharedSize/RepoTags），Volumes 是 []*volume.Volume
 // （UsageData.Size，-1=未知），BuildCache 是 []*build.CacheRecord（Size）；
 // daemon **不**给预聚合的 TotalSize/Reclaimable（那些类型已标记废弃）—— 汇总在
-// agent 侧求和，口径见各字段注释。
+// agent 侧成形（镜像合计直接取顶层 LayersSize；其余由 agent 按明细算），口径见各字段注释。
 type DockerDiskUsage struct {
-	// ImagesTotalMB 是全部镜像的占用合计（Σ image.Size，MB）。含共享层的重复计入
-	// —— 与 docker CLI 的 SIZE 列同口径（docker 自己也这么加，共享只在逐镜像视图提示）。
+	// ImagesTotalMB 是全部镜像的占用合计（MB），取自 daemon df 的**层存储合计**
+	// （LayersSize，每个层只算一次）—— 与 `docker system df` 的 Images/SIZE 列同源同值。
+	// **不是** Σ 各条目 Size：那样共享层会按引用它的镜像个数重复计入，实测比 CLI 高约
+	// 两成（六期对账的偏差来源）。
 	ImagesTotalMB float64 `json:"images_total_mb"`
-	// ImagesDanglingMB 是悬空镜像的占用合计（Σ 无标签镜像的 Size，MB）。悬空判据
-	// 与镜像清单的 Dangling 同源（无标签 = daemon 悬空过滤器 = image:prune 的默认
-	// 目标集合）：这个数字就是「能安全收回多少」的镜像半边，口径对不上会多报
-	// 一份并不存在的空间（见 isDanglingImage 的实测论证）。
+	// ImagesDanglingMB 是悬空镜像的**独占层**之和（Σ(Size − SharedSize)，MB）——
+	// image:prune 的默认目标真会释放的字节（多个悬空镜像彼此共享的层不计入，是
+	//「必然释放」的下界；宁可少报，不多报）。悬空判据与镜像清单的 Dangling 同源
+	// （无标签 = daemon 悬空过滤器 = image:prune 的默认目标集合，见 isDanglingImage
+	// 的实测论证）。**不是** Σ Size：共享层还被其他镜像引用着，删了也不释放 ——
+	// 旧口径曾承诺 3.04GB、prune 实测只回收 2052 字节（「从没存在过的空间」）。
+	// SharedSize=-1（daemon 未算共享体积，老 API 的 -1 哨兵）的条目**整条跳过** ——
+	// 拿全 Size 冒充独占正是多报。
 	ImagesDanglingMB float64 `json:"images_dangling_mb"`
 	// VolumesTotalMB 是数据卷占用合计（Σ 已知体积，MB）。**已知体积的求和**：非
 	// local 驱动不提供体积（UsageData.Size=-1），排除在求和之外 —— 该合计是下界，
@@ -1348,11 +1354,24 @@ type DockerNetwork struct {
 	ContainersCount int    `json:"containers_count"`
 }
 
-// DockerProject 是一个 compose 项目（由容器标签归纳，不调 compose CLI 发现）。
+// DockerProject 是一个 compose 项目。归纳面 = **容器标签 ∪ 网络/卷标签**，不调
+// compose CLI 发现：容器给全量事实（容器计数、运行态、配置文件路径与容器观察到的
+// 服务名）；网络/卷标签只补「项目存在」这一条 —— scale→0 后容器全没了，项目却没
+// 消失（默认网络与数据卷还留着，compose 给它们都打了 project 标签），只看容器会让
+// 项目从快照里整条消失：页面没有行、工作台进不去、也就无从 Up 回来。
+//
+// Services 另取并集：配置文件**声明**的网元集合 ∪ 容器**观察到**的网元集合的大小
+// （多文件取并集，见 declaredServiceNames）—— 页面拿它与「有容器的网元行」相减，
+// 差恰好是「有声明、没容器」的那部分（服务停了或缩到 0、配置改了还没 up）；只数
+// 容器则差恒为 0，那部分永远不可达。配置文件都读不到时退回容器归纳的已知网元数
+// （读不到 ≠ 零个）。
 type DockerProject struct {
 	Name string `json:"name"`
-	// ConfigFiles 来自 com.docker.compose.project.config_files 标签；
-	// 老版本 compose 无此标签 → 显示「未知(旧版)」而不是编造路径。
+	// ConfigFiles 来自 com.docker.compose.project.config_files 标签（多文件逗号
+	// 分隔）；没有成员容器时（scale→0）回落到 agent 的项目索引（持久化的「项目 →
+	// 主配置文件」映射，从容器标签学得）—— 没有它，工作台的配置区与 Up 都无从下手。
+	// 两处都拿不到（老版本 compose 无此标签且索引无记录）时保持空列表：页面显示
+	// 「未知」而不是编造路径。
 	ConfigFiles []string `json:"config_files,omitempty"`
 	// State ∈ running | partial | stopped（由成员容器的运行态归纳）。
 	State           string `json:"state,omitempty"`
@@ -2290,10 +2309,19 @@ func IsDockerEventType(t string) bool {
 
 // dockerEventActions 是事件动作的**前缀**白名单。
 //
-// 为什么按前缀而不是全串枚举：daemon 的 exec 系动作在线上形态带命令后缀
-// （"exec_create: /bin/sh -c ls"），全串枚举会把每一个合法动作拆成无穷多份；
-// 校验取「首个 ": " 之前的词元」∈ 集合 —— 「谁在说话」是协议的判断，说话的内容
-// 是数据。集合照 `docker system events` 文档的动作全集收敛到本订阅范围会用到的子集。
+// 为什么按前缀而不是全串枚举：daemon 的动作在线上形态能带后缀 —— exec 系的
+// "exec_create: /bin/sh -c ls"、健康检查的 "health_status: unhealthy" —— 全串枚举
+// 会把每一个合法动作拆成无穷多份；校验取「首个 ": " 之前的词元」∈ 集合 ——
+// 「谁在说话」是协议的判断，说话的内容是数据。集合照 `docker system events` 文档
+// 的动作全集收敛到本订阅范围的**合法动作词表**。
+//
+// 词表 ≠ 投递清单：exec_* 四词条即「合法但不上行」—— agent 侧的上行策展已把 exec
+// 族**整族丢弃**（信噪比：带健康检查的容器每个探针周期产出 exec_create/exec_start/
+// exec_die 三连，QA 实测约占活动流 ~80%；泄漏面：exec_create/start 的后缀是命令
+// 原文，命令行带凭据是常态），正常帧里不会出现 exec 族；而 health_status 带后缀
+// 照常上行（core 的 dockernotify 按它告警）。exec_* 留在词表是校验契约的一部分
+// （Validate 在 agent 写前、core 读后各过一遍），不是投递承诺 —— 过滤的裁定记录
+// 见 agent 侧 copyEvents 的注释。
 var dockerEventActions = map[string]bool{
 	"attach": true, "commit": true, "copy": true, "create": true, "destroy": true,
 	"detach": true, "die": true, "exec_create": true, "exec_detach": true,

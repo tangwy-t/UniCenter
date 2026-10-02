@@ -33,12 +33,14 @@
     </ul>
     <p v-else class="tpp__empty">正在等待进度…</p>
 
-    <!-- 收尾提示（接入失败/断开/eof）：抽屉的 5s 轮询会把条目带向终态，这里只说
+    <!-- 收尾提示（接入失败/断开/eof）：任务页的 5s 轮询会把条目带向终态，这里只说
          「流这边怎么了」，结论句以任务行的 summary 为准。 -->
     <p v-if="hint" class="tpp__hint">{{ hint }}</p>
-    <!-- 取消语义的出口说明：本组件只读无输入态，收起（卸载）即 Abort —— 断开这条
-         流就是取消这场拉取（端点契约），说在明处免得「收一下」变成误杀。 -->
-    <p class="tpp__cancel">收起即取消该拉取；关闭任务中心不影响进行中的拉取。</p>
+    <!-- 取消语义的出口说明：本组件只读无输入态，收起（卸载）即 Abort —— 但断开
+         这条流只是不再观看（core 会 best-effort 下发 cancel；cancel 与完成有竞态，
+         是否真被截止按拉取的**实际结局**结算，见后端 pull_progress.go 的竞态注释），
+         措辞不承诺因果 —— 结局以任务行结论为准。 -->
+    <p class="tpp__cancel">收起后不再显示进度；这场拉取是否被截止，以任务行结论为准。</p>
   </div>
 </template>
 
@@ -47,16 +49,18 @@
    * 任务中心里的拉取进度内联视图（6b）：把 pull-progress-dialog 的进度态抽出来
    * **只读复用** —— 同一条流端点（cmds/:ref/pull）与同一个折叠器（utils/pull.ts），
    * 没有 input/result 态：发起在镜像页（输入态的输入面在那边），任务行自己会随
-   * 抽屉轮询走向终态，本组件只负责「展开时逐层看得见」。
+   * 任务页轮询走向终态，本组件只负责「展开时逐层看得见」。
    *
    * 生命周期是本组件的关键取舍（与 pull-progress-dialog 的分岔）：
    *   - **卸载即 Abort**：收起行/离开页面（组件卸载）断流 —— 端点契约是「客户端
-   *     断开 = 服务端下发 cancel」，收起就是任务中心对进行中拉取的唯一取消手势
-   *     （后端 6b 的取消纪律：流任务复用进度流 Abort，不新造取消动作）；
-   *   - **失活不断流**：keep-alive 失活或抽屉关闭时组件仍挂载（ElDrawer 默认不销毁
-   *     关闭后的内容），连接保持 —— 这里断流会把一场与服务端无关的「切个页签」
-   *     变成取消拉取；流是拉取的生命线，监控窗口关掉不等于放弃拉取。
-   *     （抽屉的 5s 轮询停表是另一回事：那是页面开销纪律，与流的存续无关。）
+   *     断开 → 服务端 best-effort 下发 cancel」（后端 6b 的取消纪律：流任务复用
+   *     进度流 Abort，不新造取消动作）；但 cancel 与完成有竞态，终态按拉取的
+   *     **实际结局**结算（pull_progress.go 的「取消与完成的竞态」注释），故断面
+   *     文案不承诺「断开 = 取消」（是否被截止以任务行结论为准）；
+   *   - **失活不断流**：keep-alive 失活（任务页被 worktab 缓存）时组件仍挂载，
+   *     连接保持 —— 这里断流会把一场与服务端无关的「切个页签」变成一次断开；
+   *     流是拉取进度的生命线，监控窗口关掉不等于要放弃观看。
+   *     （任务页的 5s 轮询停表是另一回事：那是页面开销纪律，与流的存续无关。）
    */
   import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
   import { ElProgress } from 'element-plus'
@@ -94,7 +98,7 @@
     doneLayers: 0
   })
   const streamEnded = ref(false)
-  /** '' = 流还连着；'open' = 接入失败（拉取仍在服务端跑）；'broken' = 连上后断开（断开即取消）。 */
+  /** '' = 流还连着；'open' = 接入失败（拉取仍在服务端跑）；'broken' = 连上后断开（是否被截止按实际结局结算，不承诺因果）。 */
   const streamFailed = ref<'' | 'open' | 'broken'>('')
   const streamFailText = ref('')
 
@@ -118,9 +122,7 @@
       return `进度流未能建立（${streamFailText.value}），拉取仍在进行`
     }
     if (streamFailed.value === 'broken') {
-      return streamFailText.value
-        ? `进度流已断开（${streamFailText.value}），断开即取消拉取`
-        : '进度流已断开，断开即取消拉取'
+      return streamFailText.value ? `进度流已断开（${streamFailText.value}）` : '进度流已断开'
     }
     if (streamEnded.value) return '进度已全部到达'
     return ''
@@ -160,7 +162,7 @@
       if (seq !== readSeq) return
       if (!res.ok || !res.body) {
         // 接入失败（401/403/404/409…）：这条连接没建立过，不会触发服务端取消 ——
-        // 拉取仍在跑，任务行随抽屉轮询走向终态，不打断任何东西。
+        // 拉取仍在跑，任务行随任务页轮询走向终态，不打断任何东西。
         streamFailed.value = 'open'
         streamFailText.value = streamOpenConclusion(res.status)
         return
@@ -183,7 +185,8 @@
       if (feed.eof) {
         streamEnded.value = true
       } else {
-        // 读尽但没见 eof：网络层收口、应用层没收官 —— 视同断流（断开即取消）。
+        // 读尽但没见 eof：网络层收口、应用层没收官 —— 视同断流（不再观看；
+        // 是否被截止按拉取的实际结局结算）。
         streamFailed.value = 'broken'
         streamFailText.value = ''
       }
@@ -202,7 +205,8 @@
     void runStream()
   })
 
-  /** 卸载即断流（= 服务端取消这场拉取）：收起行、离开页面（组件销毁）都走这里。幂等。 */
+  /** 卸载即断流（core 会就此 best-effort 下发 cancel；是否真被截止按拉取的实际
+   * 结局结算，不承诺因果）：收起行、离开页面（组件销毁）都走这里。幂等。 */
   function abortStream(): void {
     readSeq++
     streamAbort?.abort()
@@ -247,9 +251,12 @@
     }
 
     // 取消语义的出口说明：最后一句、最弱化 —— 读它的人是准备收起的人。
+    // 对比度 AA（终审 QA D2 同源 #a8abb2 盘点）：placeholder 档（#a8abb2）对浅灰底
+    // 仅 ≈2.1:1 —— 升到 regular 档（#606266 对浅灰底 ≈5.7:1；暗色只升不降）。
+    // 「最弱化」的表意由位置与字号承载，不再用低对比色承载。只换色值，形态不动。
     &__cancel {
       margin-bottom: 0;
-      color: var(--el-text-color-placeholder);
+      color: var(--el-text-color-regular);
     }
   }
 
@@ -314,7 +321,7 @@
     }
   }
 
-  // 平板竖屏以下（抽屉占满宽度）：字节列让位给进度条（条是主信息）。
+  // 平板竖屏以下（整页窄屏）：字节列让位给进度条（条是主信息）。
   @include respond-below('tablet') {
     .tpp-layer__status {
       width: 7em;

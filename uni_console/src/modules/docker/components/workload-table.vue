@@ -27,7 +27,8 @@
    * 排查的第一条线索（同名容器可能分布在多台机器上），紧跟「名称」这组身份列。
    * 写操作**按行主机派发**不在本组件：菜单只 emit 出去，指令通道与确认档由页面
    * （单行）与批量栏（多行）各自持有 —— 表格只负责把「用户点了哪一行的哪个动作」
-   * 说清楚。
+   * 说清楚。导航（详情 / 日志）同理只 emit：8a 起它们是整页路由，跳转由页面做
+   * （表格不认识路由）。
    */
   import { computed, h } from 'vue'
   import { ElButton, ElEmpty } from 'element-plus'
@@ -39,6 +40,7 @@
   } from '@/enums/permission'
   import ArtButtonMore from '@/components/core/forms/art-button-more/index.vue'
   import ArtButtonTable from '@/components/core/forms/art-button-table/index.vue'
+  import ArtSvgIcon from '@/components/core/base/art-svg-icon/index.vue'
   import ArtTable from '@/components/core/tables/art-table/index.vue'
   import { useAuth } from '@/hooks/core/useAuth'
   import type { ColumnOption } from '@/types/component'
@@ -102,7 +104,7 @@
       if (!entry) return null
       return {
         key: action,
-        label: blocked ? `🔒 ${entry.label}（需要更高权限）` : entry.label,
+        label: blocked ? `${entry.label}（需要更高权限）` : entry.label,
         icon: entry.icon,
         auth: entry.perm,
         color: entry.danger === 'normal' ? undefined : 'var(--art-danger)',
@@ -111,7 +113,7 @@
     }
     return [
       // 日志项走 docker:inspect 权限（与详情页路由、container:logs 指令同一档）；
-      // 点击打开抽屉的日志 Tab，不再跳详情页（抽屉是本页的轻量入口）。
+      // 点击进容器详情页的日志 Tab（8a 起整页路由，页面读 ?tab=logs 落位）。
       { key: 'logs', label: '日志', icon: 'ri:file-list-3-line', auth: PermDockerInspect },
       // 启动/停止按容器状态二选一（spec §11.1）；其余状态（已停止/已创建）给「启动」。
       writeItem(row.state === 'running' ? 'container:stop' : 'container:start'),
@@ -132,6 +134,9 @@
     // 平板竖屏（>=768）补上排查要看的事实（主机、CPU、内存、镜像、端口、保护）；
     // 网络吞吐只在桌面（>=1024）展示。数据列一律 minWidth（宽屏按比例分摊），
     // 固定宽度只留给 selection/index/操作这类结构性列，见 responsive-columns.ts 的约定。
+    // 行内容一律**单行**（showOverflowTooltip：超长省略号截断、悬停看全文）——
+    // 与模块「长 ID 短显 + title 全显」同一口径；任何单元格折行都会把行高堆起来，
+    // 表就不再是清单（内存/网络的组合文案以前正是每行折成两行的来源）。
     return [
       // 勾选列只在有写权限时出现：没这个权限的人看到一个用不上的勾选框只会困惑。
       ...(canWrite.value ? [{ type: 'selection' as const, width: 46 }] : []),
@@ -150,12 +155,14 @@
         prop: 'statusText',
         label: '状态',
         minWidth: 190,
+        showOverflowTooltip: true,
         formatter: (row: DockerWorkloadItem) => containerStateText(row)
       },
       {
         prop: 'cpuPercent',
         label: 'CPU',
         minWidth: 90,
+        showOverflowTooltip: true,
         hideBelow: 'tablet',
         formatter: (row: DockerWorkloadItem) => cpuText(row)
       },
@@ -163,6 +170,7 @@
         prop: 'memUsageMb',
         label: '内存',
         minWidth: 170,
+        showOverflowTooltip: true,
         hideBelow: 'tablet',
         formatter: (row: DockerWorkloadItem) => memText(row)
       },
@@ -170,6 +178,7 @@
         prop: 'netTxBytesSec',
         label: '网络',
         minWidth: 190,
+        showOverflowTooltip: true,
         // 吞吐是三类资源指标里最次要的（列也最宽），平板竖屏也隐藏，桌面起展示。
         hideBelow: 'desktop',
         formatter: (row: DockerWorkloadItem) => netText(row)
@@ -186,7 +195,9 @@
         prop: 'ports',
         label: '端口',
         minWidth: 160,
-        // 连通性排查的第一线索（服务为什么进不去），平板竖屏保留。
+        showOverflowTooltip: true,
+        // 连通性排查的第一线索（服务为什么进不去），平板竖屏保留；多映射在
+        // portsText 里折叠成「首条 +N」单行，不再竖向堆高行。
         hideBelow: 'tablet',
         formatter: (row: DockerWorkloadItem) => portsText(row.ports)
       },
@@ -194,11 +205,21 @@
         prop: 'protected',
         label: '保护',
         minWidth: 96,
+        showOverflowTooltip: true,
         // 保护是「动手前必须看见」的事实（spec §11.1 草图的 🔒）：列表上给可见标记，
         // 权限不足时的结论句写在被禁用的菜单条目上（那里才是用户看得到的地方）。
         // 小屏横屏让位后，这条结论仍会出现在 ⋯ 菜单（禁用条目）与确认弹窗里。
+        // 标记用锁图标 + 文字（不用 🔒 emoji：无 emoji 字体的环境里是豆腐块）；
+        // formatter 产出的 vnode 在 ArtTable 的渲染上下文里取不到本组件的 scope id，
+        // 布局类走 :global（与 projects.vue 的 docker-proj-state 同一手法）。
         hideBelow: 'tablet',
-        formatter: (row: DockerWorkloadItem) => (row.protected ? '🔒 受保护' : '—')
+        formatter: (row: DockerWorkloadItem) =>
+          row.protected
+            ? h('span', { class: 'wkl-lock' }, [
+                h(ArtSvgIcon, { icon: 'ri:lock-2-line' }),
+                '受保护'
+              ])
+            : '—'
       },
       {
         prop: 'operation',
@@ -228,9 +249,22 @@
 </script>
 
 <style lang="scss" scoped>
+  @use '../views/overview-tokens' as t;
+
+  // 「清除筛选」默认档按钮的主色文字对比度 AA：病灶与处方见 overview-tokens
+  // 的 primary-text-aa（终审 QA D2·浅色实测 3.68:1）。
+  @include t.primary-text-aa;
+
   // 单根包装层：只为通过 single-root 守卫，不参与布局（display: contents 不产生盒）。
   .wkl-table {
     display: contents;
+  }
+
+  // 保护列的锁 + 文字（布局只在图标与文字之间，与模块状态点同类的小挂件）。
+  :global(.wkl-lock) {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
   }
 
   // 空态不渲染在 ArtTable 里（见文件头注释）：给它接近表格空态的留白。

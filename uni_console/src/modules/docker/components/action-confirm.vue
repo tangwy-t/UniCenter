@@ -10,7 +10,12 @@
   >
     <!-- 卡片：这一屏只回答两件事 —— 要动的是谁、后果是什么。 -->
     <div class="ac-card" :class="{ 'is-danger': form.danger !== 'normal' }">
-      <span v-if="form.protected" class="ac-card__lock" title="受保护">🔒</span>
+      <!-- 锁语义与列表保护列同款（锁图标 + 受保护）：不用 🔒 emoji ——
+           无 emoji 字体的环境里会渲染成豆腐块；锁走 ArtSvgIcon 的图标范式。 -->
+      <span v-if="form.protected" class="ac-card__lock">
+        <ArtSvgIcon icon="ri:lock-2-line" />
+        受保护
+      </span>
       <div class="ac-card__body">
         <div class="ac-card__target">{{ form.targetText }}</div>
         <div v-if="form.conclusion" class="ac-card__line">{{ form.conclusion }}</div>
@@ -55,6 +60,7 @@
 <script setup lang="ts">
   import { computed, ref, watch } from 'vue'
   import { ElButton, ElCheckbox, ElDialog, ElInput } from 'element-plus'
+  import ArtSvgIcon from '@/components/core/base/art-svg-icon/index.vue'
   import { useAuth } from '@/hooks/core/useAuth'
   import { PermDockerExec } from '@/enums/permission'
   import type { DockerActionOptions } from '../utils/actions'
@@ -166,6 +172,12 @@
 </script>
 
 <style lang="scss" scoped>
+  @use '../views/overview-tokens' as t;
+
+  // 「取消」等默认档按钮的主色文字对比度 AA：病灶与处方见 overview-tokens
+  // 的 primary-text-aa（终审 QA D2·浅色实测 3.68:1）。
+  @include t.primary-text-aa;
+
   // 目标卡片：结论放在第一屏，用边框色区分「常规」与「有破坏性」。
   .ac-card {
     display: flex;
@@ -181,8 +193,11 @@
     }
 
     &__lock {
+      display: inline-flex;
       flex: none;
-      font-size: 16px;
+      gap: 4px;
+      align-items: center;
+      font-size: 13px;
       line-height: 1.4;
     }
 

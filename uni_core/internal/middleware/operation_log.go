@@ -61,6 +61,54 @@ var sensitiveFieldSet = map[string]struct{}{
 // CtxOperationModule is the gin context key under which the operation module name is stored.
 const CtxOperationModule = "operationModule"
 
+// binaryUploadPlaceholders 声明「请求体是二进制流、绝不进 body 捕获」的端点与其
+// 审计占位文案。匹配按路由模板的**后缀**（gin 的 FullPath 带可配置的 APIPrefix，
+// 后缀匹配让声明不随部署前缀漂移）。
+//
+// 为什么在 octet-stream 兜底之外还要端点声明：给占位一个**具体**的文案
+// （「二进制构建上下文」而非泛化的「二进制请求体」），审计读者一眼知道这条
+// 记录搬的是什么。今后新端点要专属文案就往这里加一行；不加也照样被
+// octet-stream 兜底罩住（见 binaryUploadExempt）。
+var binaryUploadPlaceholders = []struct{ suffix, label string }{
+	{"/docker/hosts/:id/build-context", "二进制构建上下文"},
+}
+
+// binaryUploadExempt 判定一次请求是否豁免 body 捕获；豁免时返回审计占位文案。
+//
+// 两条腿，各司其职：
+//   - 端点声明（服务端事实）：命中即豁免 —— 路由是我们注册的，声明不会漏；
+//   - Content-Type octet-stream（客户端声明）：兜底腿，也是「不易漏」的那条 ——
+//     今后任何二进制/流式端点只要按本仓库惯例声明 octet-stream（raw body
+//     端点的统一形态，构建上下文处理器还以此判形执法），就自动豁免，不需要
+//     记得回来改这个文件。
+//
+// 为什么豁免（QA P0-3）：本中间件对 POST /docker/hosts/:id/build-context 的
+// body 捕获把 gzip 原始字节截样落进 sys_operation_log.request_params —— 审计表
+// 收二进制垃圾，且 gzip 流的可解压前缀（tar 头部：Dockerfile、.env 之类）
+// 是**不可控的泄漏面**（脱敏只认 JSON 键，二进制正文零掩码）。豁免后审计仍
+// 记录这条操作（谁/何时/对哪个主机/成败/耗时），只是正文换成占位 —— 审计要的
+// 是「谁做了什么」，不是被搬运的字节本身。
+func binaryUploadExempt(c *gin.Context) (string, bool) {
+	for _, ep := range binaryUploadPlaceholders {
+		if strings.HasSuffix(c.FullPath(), ep.suffix) {
+			return binaryBodyPlaceholder(c, ep.label), true
+		}
+	}
+	if ct := c.ContentType(); strings.HasPrefix(ct, "application/octet-stream") {
+		return binaryBodyPlaceholder(c, "二进制请求体"), true
+	}
+	return "", false
+}
+
+// binaryBodyPlaceholder 拼占位文案：正文不采集，只记搬运的量级（chunked 无
+// Content-Length 时说「长度未知」—— 审计不编数字）。
+func binaryBodyPlaceholder(c *gin.Context, label string) string {
+	if n := c.Request.ContentLength; n >= 0 {
+		return fmt.Sprintf("%s %d 字节", label, n)
+	}
+	return label + "（长度未知）"
+}
+
 // SetModuleName returns a middleware that injects the given module name into the gin context.
 // It must be applied before OperationLogMiddleware so the module name is available.
 func SetModuleName(name string) gin.HandlerFunc {
@@ -84,8 +132,16 @@ func OperationLogMiddleware(svc OperationLogServiceInterface, logger logger.Logg
 
 		// Read and desensitize request body, then restore it for downstream handlers.
 		// Use LimitReader to cap memory consumption from large request bodies.
+		//
+		// 二进制上传端点豁免（P0-3，见 binaryUploadExempt）：豁免路径**零接触**
+		// body —— 不预读、不 MultiReader 拼回（拼回语义上无损，但上传通道的
+		// body 是一根要原样流进 handler 的水管，core 中转零落盘、背压沿栈传导；
+		// 「唯一读者是 handler」让 MaxBytesReader 的次序与背压链保持单一事实源）。
+		// 审计里落的是「二进制…N 字节」占位，不是正文。
 		var requestParams string
-		if c.Request.Body != nil {
+		if placeholder, exempt := binaryUploadExempt(c); exempt {
+			requestParams = placeholder
+		} else if c.Request.Body != nil {
 			bodyBytes, err := io.ReadAll(io.LimitReader(c.Request.Body, maxBodyReadSize))
 			if err == nil {
 				requestParams = desensitizeJSON(string(bodyBytes))
@@ -267,6 +323,13 @@ func (w *bodyCaptureWriter) WriteHeader(code int) {
 	w.statusCode = code
 	w.ResponseWriter.WriteHeader(code)
 }
+
+// Unwrap 把这一层包装对 http.ResponseController 透明（连接级 deadline 的接管
+// 需要一路穿到 net/http 原始 writer）。必须显式写出来：内嵌的是 gin.ResponseWriter
+// **接口**，而接口的方法集里没有 Unwrap（只有 gin 的具体类型 responseWriter 有），
+// 所以「内嵌接口」的包装不会自动继承它 —— 少了这一行，middleware.LongLived 在
+// 带本包装的 POST 端点（构建上下文上传）上会拿到 ErrNotSupported 而静默失效。
+func (w *bodyCaptureWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 // desensitizeJSON replaces sensitive field values (passwords, tokens, secrets, keys, etc.)
 // with "***" in a JSON string. If the input is not valid JSON, it is returned unchanged.

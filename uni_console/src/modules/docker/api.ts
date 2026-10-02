@@ -22,6 +22,14 @@ export type DockerProjectItem = Api.Docker.DockerProjectItem
 export type DockerCmdResultResp = Api.Docker.DockerCmdResultResp
 export type DockerWorkloadItem = Api.Docker.DockerWorkloadItem
 export type DockerWorkloadListResp = Api.Docker.DockerWorkloadListResp
+export type DockerImageListItem = Api.Docker.DockerImageListItem
+export type DockerImageListResp = Api.Docker.DockerImageListResp
+export type DockerVolumeListItem = Api.Docker.DockerVolumeListItem
+export type DockerVolumeListResp = Api.Docker.DockerVolumeListResp
+export type DockerNetworkListItem = Api.Docker.DockerNetworkListItem
+export type DockerNetworkListResp = Api.Docker.DockerNetworkListResp
+export type DockerProjectListItem = Api.Docker.DockerProjectListItem
+export type DockerProjectListResp = Api.Docker.DockerProjectListResp
 export type DockerRegistryItem = Api.Docker.DockerRegistryItem
 export type DockerRegistryListResp = Api.Docker.DockerRegistryListResp
 export type DockerTaskItem = Api.Docker.DockerTaskItem
@@ -90,6 +98,71 @@ export function fetchDockerState(hostId: string) {
  */
 export function fetchDockerContainers(params: DockerWorkloadQuery = {}) {
   return request.get<DockerWorkloadListResp>({ url: `${PREFIX}/docker/containers`, params })
+}
+
+// ── 跨主机资源清单（9b：镜像/卷/网络/项目四页的数据源）────────────────
+// 四个端点与容器统一表同一模式：全部可管主机聚合成一张表，条目内嵌单主机快照
+// 条目 + 归属两列（hostId/hostname），total 是全量、items 至多 500。过滤参数
+// 全部作为 query 发给端点（服务端过滤）；空值不发（axios 对 undefined 自动省略），
+// 非法值（如 projects 的 state）由服务端给 400 结论句。
+
+/** 跨主机镜像清单查询参数（形状对齐 uni_core 的 request.DockerImageQuery）。 */
+export interface DockerImagesQuery {
+  /** 限定单主机（留空 = 全部主机）。 */
+  hostId?: string
+  /** repoTag 子串匹配（大小写不敏感；多标签 join(" ") 后匹配，与后端同一句）。 */
+  keyword?: string
+  /** 只取悬空镜像（<none> 标签，prune 的主目标）。 */
+  dangling?: boolean
+  /** 只取未被任何容器使用的镜像。 */
+  unused?: boolean
+}
+
+/** 跨主机镜像清单（GET /docker/images）：镜像 tab 的数据源。 */
+export function fetchDockerImages(params: DockerImagesQuery = {}) {
+  return request.get<DockerImageListResp>({ url: `${PREFIX}/docker/images`, params })
+}
+
+/** 跨主机卷清单查询参数（形状对齐 request.DockerVolumeQuery）。 */
+export interface DockerVolumesQuery {
+  hostId?: string
+  /** 卷名子串匹配（大小写不敏感）。 */
+  keyword?: string
+  /** 只取未被任何容器挂载的卷。 */
+  unused?: boolean
+}
+
+/** 跨主机卷清单（GET /docker/volumes）：数据卷 tab 的数据源。 */
+export function fetchDockerVolumes(params: DockerVolumesQuery = {}) {
+  return request.get<DockerVolumeListResp>({ url: `${PREFIX}/docker/volumes`, params })
+}
+
+/** 跨主机网络清单查询参数（形状对齐 request.DockerNetworkQuery）。 */
+export interface DockerNetworksQuery {
+  hostId?: string
+  /** 网络名子串匹配（大小写不敏感）。 */
+  keyword?: string
+  /** 只取 internal 网络（不接外网的隔离网络）。 */
+  internal?: boolean
+}
+
+/** 跨主机网络清单（GET /docker/networks）：网络 tab 的数据源。 */
+export function fetchDockerNetworks(params: DockerNetworksQuery = {}) {
+  return request.get<DockerNetworkListResp>({ url: `${PREFIX}/docker/networks`, params })
+}
+
+/** 跨主机项目清单查询参数（形状对齐 request.DockerProjectQuery）。 */
+export interface DockerProjectsQuery {
+  hostId?: string
+  /** 项目名子串匹配（大小写不敏感）。 */
+  keyword?: string
+  /** 项目态：running / stopped（stopped = 一切非 running，partial 归入 stopped）。 */
+  state?: 'running' | 'stopped'
+}
+
+/** 跨主机项目清单（GET /docker/projects）：项目索引页的数据源。 */
+export function fetchDockerProjects(params: DockerProjectsQuery = {}) {
+  return request.get<DockerProjectListResp>({ url: `${PREFIX}/docker/projects`, params })
 }
 
 /**

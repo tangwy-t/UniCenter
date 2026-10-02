@@ -31,14 +31,16 @@
         </div>
       </template>
       <!-- 无 df 数据：给行级结论而不是零值条形 ——「没有数据」不能被读成「没有占用」。
-           清理入口照常给出（列表页的清理流不依赖 df，走的是资源清单）。 -->
+           有删除权限时清理入口照常给出（列表页的清理流不依赖 df，走的是资源清单）。 -->
       <div v-else class="dov-disk__na">磁盘数据不可用（该主机未上报 system df 占用）</div>
 
       <div class="dov-disk__foot">
         <span v-if="row.available" class="dov-disk__reclaim truncate" :title="row.reclaimText">
           {{ row.reclaimText }}
         </span>
-        <span class="dov-disk__actions">
+        <!-- 清理入口的权限门 = docker:delete（两个条目通向的列表页清理按钮同档）：
+             无权限不渲染 ——「不渲染 ≠ 禁用」的分期控件矩阵纪律，QA 实测此前照常渲染。 -->
+        <span v-if="canReclaim" class="dov-disk__actions">
           <button
             type="button"
             class="dov-disk__go"
@@ -77,6 +79,8 @@
    * emit，导航（带 ?host= 的 router.push）在页面层收口 —— 与主机卡片的分工同款。
    */
   import { computed } from 'vue'
+  import { useAuth } from '@/hooks/core/useAuth'
+  import { PermDockerDelete } from '@/enums/permission'
   import type { DockerHostItem } from '../api'
   import { hostLabel } from '../utils/host'
   import { diskRowModels, type DiskRowModel } from '../utils/overview'
@@ -91,6 +95,11 @@
 
   /** 行序即后端行序（hosts 列表顺序），不重排 —— 与主机卡片区同一来源同一顺序。 */
   const rows = computed<DiskRowModel[]>(() => diskRowModels(props.hosts))
+
+  // 清理入口的权限门（与镜像/卷列表页底栏的清理按钮同档 docker:delete）：无权限
+  // 不渲染 ——「不渲染 ≠ 禁用」（分期控件矩阵纪律，与同页 hero 任务中心入口同一口径）。
+  const { hasAuth } = useAuth()
+  const canReclaim = computed(() => hasAuth(PermDockerDelete))
 </script>
 
 <style lang="scss" scoped>

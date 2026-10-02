@@ -13,7 +13,16 @@
 
     <RouterView v-if="isRefresh" v-slot="{ Component, route }" :style="contentStyle">
       <!-- 缓存路由动画 -->
-      <Transition :name="showTransitionMask ? '' : actualTransition" mode="out-in" appear>
+      <!--
+        mode="out-in" 修复（2026-10-01 白屏根治）：out-in 的「先离场、离场完成后再入场」
+        序列依赖过场动画完成瞬间的补渲染；此时若过渡组件恰有一个待 flush 的更新任务
+        （页内异步数据回落 / query 写回触发的重渲染正好落进离场窗口），补渲染会被
+        吞掉，过渡停留在「离场完成、入场永不开始」的空占位态 —— 表现即：切页后
+        内容区空白、URL 已变、F5 恢复、控制台零报错。去掉序列约束后离/入场动画
+        并行（旧页退出动画与新页进入动画同时播放），视觉仍是连贯的交叉过渡，
+        且不再存在可卡死的中间态。
+      -->
+      <Transition :name="showTransitionMask ? '' : actualTransition" appear>
         <KeepAlive :max="10" :exclude="keepAliveExclude">
           <component
             class="art-page-view"
@@ -25,7 +34,7 @@
       </Transition>
 
       <!-- 非缓存路由动画 -->
-      <Transition :name="showTransitionMask ? '' : actualTransition" mode="out-in" appear>
+      <Transition :name="showTransitionMask ? '' : actualTransition" appear>
         <component
           class="art-page-view"
           :is="Component"
