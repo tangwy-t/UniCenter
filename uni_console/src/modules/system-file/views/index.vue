@@ -302,7 +302,7 @@
       <footer v-if="pagination.total > 0" class="panel-footer">
         <span class="footer-hint">
           <template v-if="selectedIds.length"
-            >已选 <b class="text-theme">{{ selectedIds.length }}</b> 项</template
+            >已选 <b class="text-theme-aa">{{ selectedIds.length }}</b> 项</template
           >
           <template v-else>共 {{ pagination.total }} 个文件</template>
         </span>
@@ -325,7 +325,7 @@
       <div v-if="selectedIds.length" class="batch-bar">
         <span class="batch-icon"><ArtSvgIcon icon="ri:checkbox-multiple-line" /></span>
         <span class="batch-text"
-          >已选 <b class="text-theme">{{ selectedIds.length }}</b> 项</span
+          >已选 <b class="text-theme-aa">{{ selectedIds.length }}</b> 项</span
         >
         <span class="batch-divider" />
         <ArtButtonTable
@@ -1128,8 +1128,10 @@
   }
 
   .chip.is-active {
-    background: var(--theme-color);
-    border-color: var(--theme-color);
+    // 白字主色填充（QA №9 全站扫的填充补漏）：填充换加深档（白字 6.59:1），
+    // 原值主色 3.68:1 不达标；描边跟填充同色收口。
+    background: var(--aa-primary-fill);
+    border-color: var(--aa-primary-fill);
     color: #fff;
   }
 
@@ -1222,7 +1224,8 @@
 
   .view-btn.is-active {
     background: var(--default-box-color);
-    color: var(--theme-color);
+    // 主色文字对比度 AA（QA №9）：token 与数字见 @styles/core/aa-text.scss。
+    color: var(--aa-primary-text);
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
   }
 
@@ -1330,7 +1333,8 @@
 
   .card-btn:hover {
     background: var(--art-hover-color);
-    color: var(--theme-color);
+    // 主色文字对比度 AA（QA №9）：hover 档 token，见 @styles/core/aa-text.scss。
+    color: var(--aa-primary-text-hover);
   }
 
   .card-btn.is-danger:hover {

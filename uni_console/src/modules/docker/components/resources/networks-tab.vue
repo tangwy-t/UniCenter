@@ -331,10 +331,6 @@
 <style lang="scss" scoped>
   @use '../../views/overview-tokens' as t;
 
-  // 「清除筛选」等默认档按钮的主色文字对比度 AA：病灶与处方见 overview-tokens
-  // 的 primary-text-aa（终审 QA D2·浅色实测 3.68:1）。
-  @include t.primary-text-aa;
-
   // 空态渲染在本组件（ArtTable 不转发 `#empty`）：给它接近表格空态的留白。
   .docker-empty {
     padding: 56px 0;

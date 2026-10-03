@@ -373,7 +373,8 @@
   .uc-chip--role {
     border-color: transparent;
     background: color-mix(in srgb, var(--art-primary) 10%, transparent);
-    color: var(--art-primary);
+    /* 主色文字对比度 AA（QA №9）：token 与数字见 @styles/core/aa-text.scss。 */
+    color: var(--aa-primary-text);
     font-weight: 500;
   }
 

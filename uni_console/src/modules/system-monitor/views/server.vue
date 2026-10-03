@@ -1382,7 +1382,8 @@
 
   .sv-range__item.is-active {
     background: var(--default-box-color);
-    color: var(--el-color-primary);
+    // 主色文字对比度 AA（QA №9）：token 与数字见 @styles/core/aa-text.scss。
+    color: var(--aa-primary-text);
     font-weight: 600;
     box-shadow: 0 1px 2px rgba(16, 24, 40, 0.08);
   }
@@ -1408,7 +1409,8 @@
 
   .sv-metric.is-active {
     background: var(--default-box-color);
-    color: var(--el-color-primary);
+    // 主色文字对比度 AA（QA №9）：token 与数字见 @styles/core/aa-text.scss。
+    color: var(--aa-primary-text);
     border-color: var(--el-color-primary);
     font-weight: 600;
   }
@@ -1475,7 +1477,8 @@
   }
 
   .sv-info-row__value.is-chip {
-    color: var(--el-color-primary);
+    // 主色文字对比度 AA（QA №9）：token 与数字见 @styles/core/aa-text.scss。
+    color: var(--aa-primary-text);
     font-weight: 600;
   }
 

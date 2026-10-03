@@ -101,6 +101,11 @@ var autoMigrateEntities = []any{
 	// 普通表：量级是「每个私有仓库一行」；密码列存 AES-GCM 密文盒（seccrypt），
 	// 绝不明文落库 —— 表由 AutoMigrate 按实体建，无版本化 DDL（见文件顶注释）。
 	&entity.DockerRegistryCredential{},
+	// ── Docker 任务历史（8d）────────────────────────────────────
+	// 普通表：量级是「每条到终态的指令一行」，由保留策略（sys.docker.taskRetentionDays，
+	// 默认 30 天）按受理时刻清理，不做分区（清理是删除而非归档，分区只会在审计上
+	// 引入第二种故障）。写入面只有 CmdStore 的终态钩子一条（service.DockerTaskHistoryRecorder）。
+	&entity.DockerTaskHistory{},
 	// 指标 6 表**刻意缺席**，见上方说明。
 }
 

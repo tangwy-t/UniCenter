@@ -149,15 +149,25 @@ func NewForProcess(deps Deps) *Runtime {
 //
 // **生产代码请用 NewForProcess**：裸构造不填 Exec/Executable/GOOS，
 // 那三个字段缺省时升级只会「替换文件但不重启进程」（见 NewForProcess 的说明）。
+//
+// **HTTPClient 是硬性契约：nil 直接 panic**（fail fast）。它曾经有一个「静默 5 分钟
+// 默认」的兜底，被删掉了 —— 那个兜底把装配缺陷变成了一条**只在下一次升级时显形**的
+// 错误：main 注入 30 分钟下载客户端（慢链路上不被总时限截断），而漏注入时运行时会
+// 悄悄换上 5 分钟默认值，症状是「弱网下升级永远下不完」，且从代码上看不出客户端
+// 是哪来的。现在漏注入在构造那一刻就炸，口径只有一句：**下载客户端由装配方显式
+// 决定**（生产：main 的 transport.CAClient / 无 CA 链路同口径补的客户端；测试：
+// httptest 的客户端）。panic 而不是返回错误：本包的裸构造签名是 *Runtime，且这是
+// 「装配期缺陷」——与 dockerops 的 SetSessions(nil) 同一条纪律（缺陷必须立刻现形，
+// 而不是静默降级）。
 func New(deps Deps) *Runtime {
+	if deps.HTTPClient == nil {
+		panic("upgrade: Deps.HTTPClient 必须显式注入（nil = 装配缺陷；5 分钟默认兜底已删除，见 New 的说明）")
+	}
 	if deps.Log == nil {
 		deps.Log = nopLogger{}
 	}
 	if deps.Now == nil {
 		deps.Now = time.Now
-	}
-	if deps.HTTPClient == nil {
-		deps.HTTPClient = &http.Client{Timeout: 5 * time.Minute}
 	}
 	if deps.Sleep == nil {
 		deps.Sleep = sleepCtx

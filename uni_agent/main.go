@@ -127,10 +127,11 @@ func run() error {
 		log.Warn("cannot build download client with CA, auto-upgrade may fail", "err", err.Error())
 	}
 	if downloadClient == nil {
-		// CAFile 为空（或无 CA 可加载）时 CAClient 契约返回 nil = 用系统信任库；
-		// 而 upgrade.New 对 nil 客户端的兜底默认同样是 5 分钟 —— 同一条「慢下载死在
-		// 总时限」缺陷的另一半（无 CA 链路）。显式补一个同口径的客户端：信任库语义
-		// 不变（nil Transport = 系统信任库），只把两条下载链路的时限对齐。
+		// CAFile 为空（或无 CA 可加载）时 CAClient 契约返回 nil = 用系统信任库。
+		// 这里**必须显式补一个同口径的客户端**：upgrade.New 对 nil 客户端不再有
+		// 任何兜底（2026 收口删掉了那个静默的 5 分钟默认值，nil 直接 panic —— 见
+		// upgrade.New 的说明），而下载链路的时限只有装配方知道（30 分钟，理由见上）。
+		// 信任库语义不变（nil Transport = 系统信任库），两条下载链路的时限对齐。
 		downloadClient = &http.Client{Timeout: downloadTimeout}
 	}
 	upgradeRuntime := upgrade.NewForProcess(upgrade.Deps{

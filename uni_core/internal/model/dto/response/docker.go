@@ -267,7 +267,7 @@ type DockerImageListResp struct {
 }
 
 // DockerImageHostDiskItem 是一台主机的可回收镜像账目（镜像页底栏
-//「N 个可回收 · X」的一行）。
+// 「N 个可回收 · X」的一行）。
 type DockerImageHostDiskItem struct {
 	// HostID 是主机设备 ID（与清单条目的归属列同源）。
 	HostID uint64 `json:"hostId,string"`
@@ -488,21 +488,24 @@ type DockerRegistryListResp struct {
 // DockerTaskItem 是任务中心的一行（一条指令从受理到终态的照实投影）。
 //
 // Status 的取值集合是**指令记录状态的照实投影**：pending/succeeded/failed/timeout。
-// 为什么没有 cancelled —— 盘点结论（6b 查现状、零行为改动纪律下的裁决）：
-// 指令记录没有「取消」生产者：流取消（三期）作用在**流会话**上、与指令记录
-// 分家（会话建立后记录已终结）；pull 真被截止时 agent 以 failed + 结论句
-// 「拉取已取消」回写，取消语义由 Summary 这一句承载。本切片不造新状态 ——
-// 那要改状态机与 agent（协议/agent 侧皆不在本切片边界内，且违反
-// 「既有受理/轮询/流零行为改动」的纪律）。timeout 照实暴露：它是 sweep 的
-// 服务端推断（与「执行失败」是两类事实），冒充 failed 会让排障的人去查一个
+// 为什么没有 cancelled —— 取消作用在**流会话与执行**上、与指令记录分家：显式取消
+// 端点下发的 cancel 让 agent 终止操作，被真截止时 agent 以 failed + 结论句
+// 「拉取已取消」回写，取消语义由 Summary 这一句承载；记录本身仍只有 agent 的
+// result 一个写入者（core 无第二写入路径，也不推断）。timeout 照实暴露：它是 sweep
+// 的服务端推断（与「执行失败」是两类事实），冒充 failed 会让排障的人去查一个
 // 不存在的执行错误。
 //
-// **「拉取已取消」只在 pull 真被截止时出现**（取消/完成竞态的裁决，B4）：core 的
-// cancel 是客户端断流触发的 best-effort 动作，可能恰好在 daemon 干完活之后到达 ——
-// 那一侧由 agent 按**拉取的实际结局**结算（完成即成功，迟到的 cancel 是 no-op），
-// 于是这里的 succeeded / failed 各自说的是事实，而不是「谁先到」。
+// **「拉取已取消」只在 pull 真被截止时出现**（取消/完成竞态的裁决，B4）：取消是
+// 显式端点下发的 best-effort 动作（本波语义收口：断流只是停止观看，不再触发取消），
+// 它可能恰好在 daemon 干完活之后到达 —— 那一侧由 agent 按**拉取的实际结局**结算
+// （完成即成功，迟到的 cancel 是 no-op），于是这里的 succeeded / failed 各自说的
+// 是事实，而不是「谁先到」。
+//
+// Action 也是前端判断「可取消/可观看」的依据（进度三族 image:pull/build/push 有
+// 进度流与显式取消；其余动作两者皆无 —— 不需要额外的 streamable/cancellable 字段）。
 type DockerTaskItem struct {
-	// Ref 是指令号（轮询 /cmds/:ref 与拉取进度流 /cmds/:ref/pull 的钥匙）。
+	// Ref 是指令号（轮询 /cmds/:ref、进度流 /cmds/:ref/pull|build|push 与取消
+	// /cmds/:ref/cancel 的钥匙）。
 	Ref string `json:"ref"`
 	// HostID 是目标主机的设备 ID（雪花值，string 编码与全站同纪律）。
 	HostID uint64 `json:"hostId,string"`
@@ -524,14 +527,23 @@ type DockerTaskItem struct {
 	Summary string `json:"summary"`
 }
 
-// DockerTaskListResp 是最近任务列表响应（≤100 条、受理时刻降序）。
+// DockerTaskListResp 是任务中心的一页（实时 ∪ 历史合并后按受理时刻降序）。
 //
-// **不报 Total**：枚举窗口本身是契约（「最近」不是全量承诺），窗口外的条目数
-// 无从知晓 —— 报一个「窗口内匹配数」会被当成全量口径误读（与 /docker/containers
-// 的 Total 语义刻意不同：那边的枚举是完整的）。
-// Items 空时为空数组而非 null（与全站清单约定一致，前端少一层判空）。
+// **报 Total**（8d 起，口径与 6b 相反并已作废）：6b 的「不报 Total」建立在
+// 「枚举窗口就是契约」上 —— 窗口外的条目数无从知晓，报一个窗口内匹配数会被误读成
+// 全量。持久层落地后窗口外有历史面兜底，Total = 实时数 + 历史数 − 重叠数，是**这个
+// 合并列表的真实全量**（与 /docker/containers 的 Total 语义对齐：两边现在都报得出
+// 全量）。Items 是本页条目（空时为空数组而非 null，与全站清单约定一致）；
+// Page/PageSize 回显本次请求的页参数（服务端可能夹过页大小上限，回显让前端与
+// 服务端对「当前是第几页、一页几条」保持同一句话）。
 type DockerTaskListResp struct {
 	Items []DockerTaskItem `json:"items"`
+	// Total 是合并列表的全量条数（不含分页）。
+	Total int64 `json:"total"`
+	// Page 是本次返回的页码（1 起）。
+	Page int `json:"page"`
+	// PageSize 是本次生效的页大小。
+	PageSize int `json:"pageSize"`
 }
 
 // ── 容器 stats 历史（P2：GET /docker/hosts/:id/containers/:cid/stats-history）──

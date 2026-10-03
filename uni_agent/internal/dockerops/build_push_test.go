@@ -7,6 +7,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -203,6 +205,15 @@ var buildRef = "1790000000000000017"
 // pushCmd 编一条 image:push 指令（可带 4c 凭据）。
 func pushCmd(auth *agentproto.DockerRegistryAuth) *agentproto.DockerCmd {
 	o := agentproto.DockerCmdOptions{Target: "app:1"}
+	if auth != nil {
+		o.Registry = auth.Registry
+	}
+	return &agentproto.DockerCmd{Ref: pushRef, Action: agentproto.DockerActionImagePush, Options: o, Auth: auth}
+}
+
+// pushCmdTarget 编一条推送到指定 target 的指令（整仓推送/多 tag 场景用）。
+func pushCmdTarget(target string, auth *agentproto.DockerRegistryAuth) *agentproto.DockerCmd {
+	o := agentproto.DockerCmdOptions{Target: target}
 	if auth != nil {
 		o.Registry = auth.Registry
 	}
@@ -618,11 +629,12 @@ func TestBuildProgressFrameCarriesNoContextSecrets(t *testing.T) {
 
 // ── 取消/完成的竞态（B4 同款扩面：build / push）──────────────────────────────
 //
-// 背景与 pull 的 B4 同一场景：用户在构建/推送进行中切页/关对话框 → 前端断流 →
-// core 下发 cancel 帧；若 daemon 恰在同时把活干完，旧实现按「ctx 被中断」把一场
-// **已经完成**的活记成失败（任务中心红字，而产物/清单其实都已落地）。用例把结算
-// 规则钉死：完成的事实优先于迟到的取消，且**只有**各自的完成证据能翻案（防止顺手
-// 把真取消也放行）。
+// 背景与 pull 的 B4 同一场景（cancel 只由显式取消端点下发：POST /cmds/:ref/cancel
+// → CancelProgress → cancel 帧 → 会话收摊；断流只停观看）：用户在构建/推送进行中
+// 经端点下发取消；若 daemon 恰在同时把活干完，旧实现按「ctx 被中断」把一场**已经
+// 完成**的活记成失败（任务中心红字，而产物/清单其实都已落地）。用例把结算规则钉死：
+// 完成的事实优先于迟到的取消，且**只有**各自的完成证据能翻案（防止顺手把真取消也
+// 放行）。
 
 // build 的完成证据：目标 tag 的本机镜像 ID 变了（构建前后各问一次 ImageRefID）——
 // 独立于流的事实，产物从无到有（空串 → 非空）也算变。
@@ -643,8 +655,8 @@ func TestBuildImageCancelAfterProductLandedStaysSucceeded(t *testing.T) {
 	ch <- BuildProgress{Stream: "#6 exporting layers"}
 	advanceUntil(t, clk, 50*time.Millisecond, 400*time.Millisecond, func() bool { return sink.count() >= 1 })
 
-	// 用户切页 → core 下发 cancel → 会话收摊 → buildCtx 被中断，ImageBuild 以 ctx
-	// 错误返回（替身与 SDK 同款）。
+	// 用户经显式取消端点下发 cancel（core 端点 → cancel 帧）→ 会话收摊 → buildCtx
+	// 被中断，ImageBuild 以 ctx 错误返回（替身与 SDK 同款）。
 	m.OnFrame(&agentproto.CoreDockerFrame{
 		SessionID: agentproto.DockerBuildSessionID(buildRef), Op: agentproto.DockerFrameOpCancel,
 	})
@@ -871,3 +883,507 @@ func TestIsPushCompletionLine(t *testing.T) {
 // 「流通道未装配 = 黑盒快路径」分支已从 buildImage/pushImage 删除，构造契约改为
 // 必须非 nil（见 write.go 的 SetSessions 与 pull_progress_test 的
 // TestSetSessionsNilFailsFast —— 旧守卫对象不存在，新守卫钉 fail fast）。）
+
+// ── 结算的 2026 收口版（判据链 / 逐 tag 计数 / 证据三）────────────────────────
+//
+// 上面那批 B4 用例钉的是「迟到 cancel 不得改写成取消」；这批钉的是**判据本身**：
+// 换了什么、为什么换、反向病例（不许把没完成的读成完成）逐条在此。
+
+// buildFixtureAPI 造一个「真机流夹具 + 观测序列」的构建替身：
+//   - fixture 走 adapter 的同一解析器（生产接线逐字相同）；
+//   - refs 是 ImageRefID 的观测序列（开工前一次、结算时一次）。
+func buildFixtureAPI(fixture string, refs ...string) *stubAPI {
+	return &stubAPI{buildFixture: fixture, imageRefIDs: refs}
+}
+
+// TestBuildImageAuxIdDecidesCacheHitAsSucceeded：**全缓存命中**的构建 —— 产物 ID
+// 与开工前逐字节相同（tag 早就指着同一个镜像），旧判据（ID 变了）开不了口。
+// aux 行的产物 ID 与「tag 现在指向谁」一对照即成立：tag 指向本场产物 = 本场完成。
+func TestBuildImageAuxIdDecidesCacheHitAsSucceeded(t *testing.T) {
+	dir := t.TempDir()
+	const id = "sha256:ac8fcc79148b3e73c2efd278a4a6b91cb8d23dcaf9d932a69585108fadd58715"
+	api := buildFixtureAPI(buildStreamLegacyCacheHit, id, id)
+	w, m, clk, sink := newPullFixture(api)
+	w.SetTransferDir(dir)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Do(context.Background(), buildCmd(t, dir, "", "cap-c:1"))
+		done <- err
+	}()
+	// 夹具放完 = daemon 干完活；等会话建立（帧已出）再下 cancel。
+	advanceUntil(t, clk, 50*time.Millisecond, 400*time.Millisecond, func() bool { return sink.count() >= 1 })
+	m.OnFrame(&agentproto.CoreDockerFrame{
+		SessionID: agentproto.DockerBuildSessionID(buildRef), Op: agentproto.DockerFrameOpCancel,
+	})
+	if err := pullResultOf(t, done); err != nil {
+		t.Fatalf("全缓存命中（产物 ID 未变但 tag 指向本场产物）必须按成功结算，实际: %v", err)
+	}
+	if len(api.imageRefCalls) != 2 {
+		t.Fatalf("判据必须做开工前/结算两次对照，实际 %d 次: %v", len(api.imageRefCalls), api.imageRefCalls)
+	}
+}
+
+// 反向守卫：aux 读数到手但 **tag 指向别处**（本场产物没打上去）—— 必须记取消。
+// 这条挡住「知道构建出过东西 ≠ 本场承诺兑现」的偷换：判据链在产物 ID 已知时
+// 只认「tag 指向它」，不再看别的证据。
+func TestBuildImageAuxIdButTagPointsElsewhereStaysCanceled(t *testing.T) {
+	dir := t.TempDir()
+	api := buildFixtureAPI(buildStreamLegacyFresh,
+		"sha256:401d0eb0befded5c5c0000000000000000000000000000000000000000000000",
+		"sha256:401d0eb0befded5c5c0000000000000000000000000000000000000000000000")
+	w, m, clk, sink := newPullFixture(api)
+	w.SetTransferDir(dir)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Do(context.Background(), buildCmd(t, dir, "", "cap-b:1"))
+		done <- err
+	}()
+	advanceUntil(t, clk, 50*time.Millisecond, 400*time.Millisecond, func() bool { return sink.count() >= 1 })
+	m.OnFrame(&agentproto.CoreDockerFrame{
+		SessionID: agentproto.DockerBuildSessionID(buildRef), Op: agentproto.DockerFrameOpCancel,
+	})
+	var ee *ExecError
+	if err := pullResultOf(t, done); !errors.As(err, &ee) || ee.Msg != "构建已取消" {
+		t.Fatalf("tag 没落到本场产物上时必须记取消，实际: %v", err)
+	}
+}
+
+// TestBuildImageKitFixtureDecidesCacheHitAsSucceeded：BuildKit 夹具（产物 ID 只在
+// moby.image.id 的 aux 行里）走同一条判据链 —— 两代 builder 的读数在结算侧没有分叉。
+func TestBuildImageKitFixtureDecidesCacheHitAsSucceeded(t *testing.T) {
+	dir := t.TempDir()
+	const id = "sha256:3b7ada8d7f83cbcfcf1f93639ecead46e139e05260b32889b79a0e9392a4d4ea"
+	api := buildFixtureAPI(buildStreamBuildKit, id, id)
+	w, m, clk, sink := newPullFixture(api)
+	w.SetTransferDir(dir)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Do(context.Background(), buildCmd(t, dir, "", "cap-a:1"))
+		done <- err
+	}()
+	advanceUntil(t, clk, 50*time.Millisecond, 400*time.Millisecond, func() bool { return sink.count() >= 1 })
+	m.OnFrame(&agentproto.CoreDockerFrame{
+		SessionID: agentproto.DockerBuildSessionID(buildRef), Op: agentproto.DockerFrameOpCancel,
+	})
+	if err := pullResultOf(t, done); err != nil {
+		t.Fatalf("BuildKit 形态必须走同一判据链（产物 ID == tag 指向）: %v", err)
+	}
+}
+
+// TestBuildImageAuxReadingNeverEntersFrames：aux 的产物读数是判据、不是进度 ——
+// 它不得进帧面（帧里既搜不到产物 ID，也不该多出空行）。
+func TestBuildImageAuxReadingNeverEntersFrames(t *testing.T) {
+	dir := t.TempDir()
+	api := buildFixtureAPI(buildStreamLegacyFresh, "", "")
+	w, m, clk, sink := newPullFixture(api)
+	w.SetTransferDir(dir)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Do(context.Background(), buildCmd(t, dir, "", "cap-b:1"))
+		done <- err
+	}()
+	advanceUntil(t, clk, 50*time.Millisecond, 400*time.Millisecond, func() bool { return sink.count() >= 1 })
+	m.OnFrame(&agentproto.CoreDockerFrame{
+		SessionID: agentproto.DockerBuildSessionID(buildRef), Op: agentproto.DockerFrameOpCancel,
+	})
+	_ = pullResultOf(t, done) // 结局不是本用例关心的（只看帧面）
+
+	for _, f := range sink.all() {
+		// 只针对 aux 携带的**完整**产物 ID：daemon 自己的文本行里带着 12 位截断形态
+		//（" ---> ac8fcc79148b" / "Successfully built ac8fcc79148b"）是合法进度，不算泄漏。
+		if strings.Contains(string(f.Data), "ac8fcc79148b3e73c2efd278a4a6b91cb8d23dcaf9d932a69585108fadd58715") {
+			t.Fatalf("aux 的产物 ID 不得进帧面: %s", f.Data)
+		}
+		for _, item := range buildLinesOf(t, f) {
+			if !item.Done && item.Error == "" && item.ID == "" && item.Status == "" && item.Stream == "" {
+				t.Fatalf("帧里不得有空行（aux 读数漏进帧面的形态）: %+v", item)
+			}
+		}
+	}
+}
+
+// TestBuildImageCompletionLineLostWithTagEventStaysSucceeded：收尾行随连接丢了
+// （只有进度通道、没有 aux 读数）、产物 ID 与开工前相同（全缓存命中）——
+// 唯一剩下的事实是 daemon 的 tag 事件：窗口内这个 tag 被（重新）打过，且写进去的
+// 就是它现在指向的镜像。
+func TestBuildImageCompletionLineLostWithTagEventStaysSucceeded(t *testing.T) {
+	dir := t.TempDir()
+	ch := make(chan BuildProgress, 8)
+	const id = "sha256:cached0000000000000000000000000000000000000000000000000000000000"
+	api := &stubAPI{
+		buildCh:     ch,
+		imageRefIDs: []string{id, id}, // 全缓存命中：tag 指向的镜像没变
+		tagEvents: []EventItem{
+			{Type: "image", Action: "tag", ActorName: "app:1", ActorID: id},
+		},
+	}
+	w, m, clk, sink := newPullFixture(api)
+	w.SetTransferDir(dir)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Do(context.Background(), buildCmd(t, dir, "", "app:1"))
+		done <- err
+	}()
+	ch <- BuildProgress{Stream: "#8 exporting layers done"}
+	advanceUntil(t, clk, 50*time.Millisecond, 400*time.Millisecond, func() bool { return sink.count() >= 1 })
+	m.OnFrame(&agentproto.CoreDockerFrame{
+		SessionID: agentproto.DockerBuildSessionID(buildRef), Op: agentproto.DockerFrameOpCancel,
+	})
+	if err := pullResultOf(t, done); err != nil {
+		t.Fatalf("窗口内该 tag 被写过（缓存命中的重打 tag 也会发事件）必须按成功结算: %v", err)
+	}
+	if api.tagEventCalls != 1 {
+		t.Fatalf("tag 事件回放必须恰好问一次，实际 %d", api.tagEventCalls)
+	}
+}
+
+// 反向守卫：窗口内的 tag 事件**写的是别的镜像** —— 不得说成功（那可能是别人重打
+// 的 tag，与本场构建无关）。
+func TestBuildImageTagEventForOtherImageStaysCanceled(t *testing.T) {
+	dir := t.TempDir()
+	ch := make(chan BuildProgress, 8)
+	const id = "sha256:cached0000000000000000000000000000000000000000000000000000000000"
+	api := &stubAPI{
+		buildCh:     ch,
+		imageRefIDs: []string{id, id},
+		tagEvents: []EventItem{
+			{Type: "image", Action: "tag", ActorName: "app:1", ActorID: "sha256:somebodyelse"},
+		},
+	}
+	w, m, clk, sink := newPullFixture(api)
+	w.SetTransferDir(dir)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Do(context.Background(), buildCmd(t, dir, "", "app:1"))
+		done <- err
+	}()
+	ch <- BuildProgress{Stream: "#8 exporting layers done"}
+	advanceUntil(t, clk, 50*time.Millisecond, 400*time.Millisecond, func() bool { return sink.count() >= 1 })
+	m.OnFrame(&agentproto.CoreDockerFrame{
+		SessionID: agentproto.DockerBuildSessionID(buildRef), Op: agentproto.DockerFrameOpCancel,
+	})
+	var ee *ExecError
+	if err := pullResultOf(t, done); !errors.As(err, &ee) || ee.Msg != "构建已取消" {
+		t.Fatalf("tag 事件写的是别的镜像时必须记取消，实际: %v", err)
+	}
+}
+
+// 反向守卫：tag 事件读不到（回放失败）→ 该证据开不了口，落回取消。
+func TestBuildImageTagEventQueryFailsStaysCanceled(t *testing.T) {
+	dir := t.TempDir()
+	ch := make(chan BuildProgress, 8)
+	const id = "sha256:cached0000000000000000000000000000000000000000000000000000000000"
+	api := &stubAPI{
+		buildCh:     ch,
+		imageRefIDs: []string{id, id},
+		tagEventErr: errors.New("events log unavailable"),
+	}
+	w, m, clk, sink := newPullFixture(api)
+	w.SetTransferDir(dir)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Do(context.Background(), buildCmd(t, dir, "", "app:1"))
+		done <- err
+	}()
+	ch <- BuildProgress{Stream: "#8 exporting layers done"}
+	advanceUntil(t, clk, 50*time.Millisecond, 400*time.Millisecond, func() bool { return sink.count() >= 1 })
+	m.OnFrame(&agentproto.CoreDockerFrame{
+		SessionID: agentproto.DockerBuildSessionID(buildRef), Op: agentproto.DockerFrameOpCancel,
+	})
+	var ee *ExecError
+	if err := pullResultOf(t, done); !errors.As(err, &ee) || ee.Msg != "构建已取消" {
+		t.Fatalf("证据读不到时必须落回取消（不许猜）: %v", err)
+	}
+}
+
+// TestBuildImageDeadlineAfterProductLandedStaysSucceeded：**真截止**（执行时限到点、
+// 会话仍在）与迟到 cancel 同一条纪律 —— 活干完了就记完成，终态项与 eof 照发
+// （页面不会看到一条没有终态的流）。
+func TestBuildImageDeadlineAfterProductLandedStaysSucceeded(t *testing.T) {
+	dir := t.TempDir()
+	ch := make(chan BuildProgress, 8)
+	api := &stubAPI{
+		buildCh:     ch,
+		buildErr:    errors.New("context deadline exceeded"),
+		imageRefIDs: []string{"", "sha256:built"},
+	}
+	w, _, _, sink := newPullFixture(api)
+	w.SetTransferDir(dir)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Do(context.Background(), buildCmd(t, dir, "", "app:1"))
+		done <- err
+	}()
+	ch <- BuildProgress{Stream: "#6 exporting layers"}
+	close(ch) // 通道关闭 = 构建以 buildErr 收场（会话还在）
+	if err := pullResultOf(t, done); err != nil {
+		t.Fatalf("产物已落地时真截止也必须按完成结算: %v", err)
+	}
+	fs := sink.all()
+	if len(fs) == 0 || !fs[len(fs)-1].EOF {
+		t.Fatal("完成档必须补发终态项与 eof（否则页面看到一条没有终态的流）")
+	}
+	term := buildLinesOf(t, fs[len(fs)-1])
+	if last := term[len(term)-1]; !last.Done {
+		t.Fatalf("终态项必须恰在流末且 Done: %+v", term)
+	}
+}
+
+// pushFixture 造一个「本机有 N 个 tag + 可指定 registry 策略」的推送替身。
+func pushFixture(api *stubAPI, ch chan PullProgress) (*WriteExecutor, *SessionManager, *fakeClock, *frameSink) {
+	api.pushCh = ch
+	return newPullFixture(api)
+}
+
+// cancelPush 等会话建立后下发 cancel（推送取消的唯一入口 = core 显式取消端点；本
+// 函数直接投递该端点会下发的 cancel 帧）。
+func cancelPush(t *testing.T, m *SessionManager, clk *fakeClock, sink *frameSink) {
+	t.Helper()
+	advanceUntil(t, clk, 50*time.Millisecond, 400*time.Millisecond, func() bool {
+		return m.lookup(agentproto.DockerPushSessionID(pushRef)) != nil && sink.count() >= 1
+	})
+	m.OnFrame(&agentproto.CoreDockerFrame{
+		SessionID: agentproto.DockerPushSessionID(pushRef), Op: agentproto.DockerFrameOpCancel,
+	})
+}
+
+// TestPushImageUntaggedPartialLandedIsHonest：**整仓推送**（target 不带 tag）的
+// 部分兑现 —— daemon 逐个 tag 推，只有第一个 tag 的收尾行到了就被 cancel：
+// 结论必须如实说「1/3 已推送」，而不是笼统的「已取消」（旧形态见首行即判完成，
+// 会把这一场读成成功 —— 两个方向都不对）。
+func TestPushImageUntaggedPartialLandedIsHonest(t *testing.T) {
+	ch := make(chan PullProgress, 8)
+	api := &stubAPI{images: []ImageInfo{
+		{RepoTags: []string{"app:1", "app:2", "app:3"}},
+	}}
+	w, m, clk, sink := pushFixture(api, ch)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Do(context.Background(), pushCmdTarget("app", nil))
+		done <- err
+	}()
+	ch <- PullProgress{Status: "The push refers to repository [docker.io/library/app]"}
+	ch <- PullProgress{Status: "1: digest: sha256:aaa size: 476"}
+	cancelPush(t, m, clk, sink)
+
+	var ee *ExecError
+	if err := pullResultOf(t, done); !errors.As(err, &ee) || ee.Msg != "部分 tag 已推送（1/3）" {
+		t.Fatalf("部分兑现必须如实计数，实际: %v", err)
+	}
+}
+
+// TestPushImageUntaggedAllTagsLandedStaysSucceeded：三个 tag 的收尾行都到了 ——
+// 全部兑现 = 完成（迟到 cancel 是 no-op）。
+func TestPushImageUntaggedAllTagsLandedStaysSucceeded(t *testing.T) {
+	ch := make(chan PullProgress, 8)
+	api := &stubAPI{images: []ImageInfo{
+		{RepoTags: []string{"app:1", "app:2", "app:3"}},
+	}}
+	w, m, clk, sink := pushFixture(api, ch)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Do(context.Background(), pushCmdTarget("app", nil))
+		done <- err
+	}()
+	for _, tag := range []string{"1", "2", "3"} {
+		ch <- PullProgress{Status: tag + ": digest: sha256:aaa size: 476"}
+	}
+	cancelPush(t, m, clk, sink)
+	if err := pullResultOf(t, done); err != nil {
+		t.Fatalf("三个 tag 全部兑现必须按成功结算: %v", err)
+	}
+}
+
+// TestPushImageEvidenceThreeRescuesLostCompletionLine：**证据三端到端** ——
+// 收尾行一条都没到（模拟随连接丢掉的尾数据），但 registry 侧探测显示该 tag 的
+// manifest 从无到有：这场推送确实落 registry 了，必须按成功结算。
+//
+// 这也是 containerd 存储上唯一能开口的那条（RepoDigests 由本地 tag 合成，
+// 证据二在那里恒不开火）。
+func TestPushImageEvidenceThreeRescuesLostCompletionLine(t *testing.T) {
+	f := newFakeRegistry(t)
+	ch := make(chan PullProgress, 8)
+	api := probeAPI()
+	api.pushCh = ch
+	target := f.host() + "/app:1"
+	w, m, clk, sink := newPullFixture(api)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Do(context.Background(), pushCmdTarget(target, nil))
+		done <- err
+	}()
+	// 先等基线探完再改 registry 状态：首帧出现 ⇒ ImagePush 已在跑 ⇒ 基线（在
+	// ImagePush 之前同步完成）必已落地 —— 否则会撞上「基线看到的就是新 digest」
+	// 的竞态，用例会闪。
+	ch <- PullProgress{ID: "aaa", Status: "Pushing", Current: 90, Total: 100}
+	advanceUntil(t, clk, 50*time.Millisecond, 400*time.Millisecond, func() bool { return sink.count() >= 1 })
+	// 推送「执行期间」registry 被写入了 —— 真机上的时序就是如此。
+	f.set("app", "1", "sha256:landed")
+	cancelPush(t, m, clk, sink)
+
+	if err := pullResultOf(t, done); err != nil {
+		t.Fatalf("registry 侧从无到有 = 这场推送已落 registry，必须按成功结算: %v", err)
+	}
+}
+
+// 反向守卫：registry 侧的 digest **没变**（上次留下的 tag 还在那儿）——
+// 不得凭「现在 registry 上有这个 tag」说成功（反向的不诚实：重推可能被截止了）。
+func TestPushImageEvidenceThreeUnchangedDigestStaysCanceled(t *testing.T) {
+	f := newFakeRegistry(t)
+	f.set("app", "1", "sha256:same")
+	ch := make(chan PullProgress, 8)
+	api := probeAPI()
+	api.pushCh = ch
+	w, m, clk, sink := newPullFixture(api)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Do(context.Background(), pushCmdTarget(f.host()+"/app:1", nil))
+		done <- err
+	}()
+	ch <- PullProgress{ID: "aaa", Status: "Pushing", Current: 10, Total: 100}
+	cancelPush(t, m, clk, sink)
+
+	var ee *ExecError
+	if err := pullResultOf(t, done); !errors.As(err, &ee) || ee.Msg != "推送已取消" {
+		t.Fatalf("registry 内容没变时必须记取消，实际: %v", err)
+	}
+}
+
+// TestPushImageEvidenceThreeCountsPartial：整仓推送 + 收尾行全丢 —— 计数交给
+// registry 侧探测：三个 tag 里两个落了 → 「2/3」。
+func TestPushImageEvidenceThreeCountsPartial(t *testing.T) {
+	f := newFakeRegistry(t)
+	ch := make(chan PullProgress, 8)
+	api := probeAPI()
+	api.pushCh = ch
+	// 本机 tag 是**带仓库限定**的形态（真实形态：推 127.0.0.1:PORT/app 的机器上，
+	// 本地 tag 就是 127.0.0.1:PORT/app:1）。
+	api.images = []ImageInfo{{RepoTags: []string{
+		f.host() + "/app:1", f.host() + "/app:2", f.host() + "/app:3",
+	}}}
+	w, m, clk, sink := newPullFixture(api)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Do(context.Background(), pushCmdTarget(f.host()+"/app", nil))
+		done <- err
+	}()
+	ch <- PullProgress{ID: "aaa", Status: "Pushing", Current: 10, Total: 100}
+	advanceUntil(t, clk, 50*time.Millisecond, 400*time.Millisecond, func() bool { return sink.count() >= 1 })
+	// 推送期间：1 与 2 落 registry，3 没赶上（基线已探完，见上一条用例的口径）。
+	f.set("app", "1", "sha256:a")
+	f.set("app", "2", "sha256:b")
+	cancelPush(t, m, clk, sink)
+
+	var ee *ExecError
+	if err := pullResultOf(t, done); !errors.As(err, &ee) || ee.Msg != "部分 tag 已推送（2/3）" {
+		t.Fatalf("registry 侧计数不符，实际: %v", err)
+	}
+}
+
+// TestPushImageRegistryUnreachableStaysCanceled：探不动 registry（端口没人听）——
+// 该证据开不了口，落回取消（宁可漏救，不编一条完成）。
+func TestPushImageRegistryUnreachableStaysCanceled(t *testing.T) {
+	// 占一个端口再立刻关掉：拿到一个「刚被释放」的端口号（连接必被拒）。
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	deadHost := strings.TrimPrefix(srv.URL, "http://")
+	srv.Close()
+
+	ch := make(chan PullProgress, 8)
+	api := probeAPI()
+	api.pushCh = ch
+	w, m, clk, sink := newPullFixture(api)
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Do(context.Background(), pushCmdTarget(deadHost+"/app:1", nil))
+		done <- err
+	}()
+	ch <- PullProgress{ID: "aaa", Status: "Pushing", Current: 10, Total: 100}
+	cancelPush(t, m, clk, sink)
+
+	var ee *ExecError
+	if err := pullResultOf(t, done); !errors.As(err, &ee) || ee.Msg != "推送已取消" {
+		t.Fatalf("探不动 registry 时必须落回取消，实际: %v", err)
+	}
+}
+
+// 反向守卫：应推集合不可考（本机镜像清单读不到）—— **不结算**（N 无从谈起，
+// 任何 M==N 都是编的），即使收尾行到了也落取消。
+func TestPushImageTagSetUnknownStaysCanceled(t *testing.T) {
+	ch := make(chan PullProgress, 8)
+	api := &stubAPI{imagesErr: errors.New("daemon busy")}
+	w, m, clk, sink := pushFixture(api, ch)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Do(context.Background(), pushCmdTarget("app", nil))
+		done <- err
+	}()
+	ch <- PullProgress{Status: "1: digest: sha256:aaa size: 476"}
+	cancelPush(t, m, clk, sink)
+
+	var ee *ExecError
+	if err := pullResultOf(t, done); !errors.As(err, &ee) || ee.Msg != "推送已取消" {
+		t.Fatalf("应推集合不可考时必须退回保守，实际: %v", err)
+	}
+}
+
+// TestPushImageUnknownTagLandedGrowsDenominator：daemon 在推送那一刻多枚举到一个
+// tag（我方快照里没有）—— 它的收尾行到过即已落，必须进分母，否则会出现
+// M > N 的自相矛盾结论。
+func TestPushImageUnknownTagLandedGrowsDenominator(t *testing.T) {
+	ch := make(chan PullProgress, 8)
+	api := &stubAPI{images: []ImageInfo{{RepoTags: []string{"app:1"}}}}
+	w, m, clk, sink := pushFixture(api, ch)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Do(context.Background(), pushCmdTarget("app", nil))
+		done <- err
+	}()
+	ch <- PullProgress{Status: "1: digest: sha256:aaa size: 476"}
+	ch <- PullProgress{Status: "9: digest: sha256:bbb size: 476"}
+	cancelPush(t, m, clk, sink)
+	if err := pullResultOf(t, done); err != nil {
+		t.Fatalf("多出来的已落 tag 必须进分母（M==N 即完成）: %v", err)
+	}
+}
+
+// TestPushImageDeadlineAfterFullLandingStaysSucceeded：真截止落在全量兑现之后 ——
+// 完成事实优先，终态 Done 项与 eof 照发。
+func TestPushImageDeadlineAfterFullLandingStaysSucceeded(t *testing.T) {
+	ch := make(chan PullProgress, 8)
+	api := &stubAPI{pushErr: errors.New("context deadline exceeded"), pushCh: ch}
+	w, _, _, sink := newPullFixture(api)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Do(context.Background(), pushCmd(nil))
+		done <- err
+	}()
+	ch <- PullProgress{Status: "1: digest: sha256:aaa size: 476"}
+	close(ch) // 会话还在、以 pushErr 收场（真截止）
+	if err := pullResultOf(t, done); err != nil {
+		t.Fatalf("全量兑现后真截止必须按完成结算: %v", err)
+	}
+	fs := sink.all()
+	if len(fs) == 0 || !fs[len(fs)-1].EOF {
+		t.Fatal("完成档必须补发终态项与 eof")
+	}
+	term := pullLinesOf(t, fs[len(fs)-1])
+	if last := term[len(term)-1]; !last.Done {
+		t.Fatalf("终态项必须恰在流末且 Done: %+v", term)
+	}
+}

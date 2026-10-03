@@ -458,6 +458,20 @@ const flush = async () => {
   await nextTick()
 }
 
+/**
+ * 等下钻导航落定：判据用「路由到没到目标」而不是「过了几轮宏任务」——
+ * 页面/挂载流程里还可能有别的导航在飞（如 ?host 写回 query 的 replace），
+ * 轮数会随负载漂；等事实则不漂，慢就多等几轮。
+ */
+async function waitFullPath(router: Router, fullPath: string) {
+  await vi.waitUntil(() => router.currentRoute.value.fullPath === fullPath, { timeout: 5000 })
+}
+
+/** 同上，只钉 path（query 由用例自己接着断言）。 */
+async function waitPath(router: Router, path: string) {
+  await vi.waitUntil(() => router.currentRoute.value.path === path, { timeout: 5000 })
+}
+
 async function mountOverview(): Promise<{ w: VueWrapper; router: Router }> {
   const router = await makeRouter()
   await router.push('/docker')
@@ -636,7 +650,7 @@ describe('下钻（控制塔的本职：把人交棒给列表页 / 详情页）'
 
     const tile = w.findAll('.kpi-tile').find((n) => n.text().includes('容器'))!
     await tile.trigger('click')
-    await flush()
+    await waitPath(router, '/docker/containers')
     expect(router.currentRoute.value.path).toBe('/docker/containers')
   })
 
@@ -662,13 +676,13 @@ describe('下钻（控制塔的本职：把人交棒给列表页 / 详情页）'
     const h1Row = w.findAll('.dov-disk__row').find((r) => r.text().includes('bogon'))!
     const goImages = h1Row.findAll('.dov-disk__go').find((b) => b.text() === '镜像清理…')!
     await goImages.trigger('click')
-    await flush()
+    await waitFullPath(router, '/docker/resources?host=h1&tab=images')
     // 7a：磁盘面板下钻到收敛页的对应 tab（host + tab 都进 query，深链还原现场）。
     expect(router.currentRoute.value.fullPath).toBe('/docker/resources?host=h1&tab=images')
 
     const goVolumes = h1Row.findAll('.dov-disk__go').find((b) => b.text() === '卷清理…')!
     await goVolumes.trigger('click')
-    await flush()
+    await waitFullPath(router, '/docker/resources?host=h1&tab=volumes')
     expect(router.currentRoute.value.fullPath).toBe('/docker/resources?host=h1&tab=volumes')
   })
 
@@ -677,7 +691,7 @@ describe('下钻（控制塔的本职：把人交棒给列表页 / 详情页）'
 
     const card = w.findAll('.dov-host').find((c) => c.text().includes('bogon'))!
     await card.trigger('click')
-    await flush()
+    await waitFullPath(router, '/docker/containers?host=h1')
     expect(router.currentRoute.value.fullPath).toBe('/docker/containers?host=h1')
   })
 
@@ -697,6 +711,7 @@ describe('下钻（控制塔的本职：把人交棒给列表页 / 详情页）'
       protected: true
     })
     await flush()
+    await waitPath(router, '/docker/containers/c1')
     // 8a：容器详情是一条整页路由（host 随行 —— 详情页据此还原到同一台机器）；
     // 7b 的「列表页 + ?id 开抽屉」形态已随抽屉一起删除，query 里不该再有 id。
     expect(router.currentRoute.value.path).toBe('/docker/containers/c1')

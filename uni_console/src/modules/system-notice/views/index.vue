@@ -309,7 +309,8 @@
 <style lang="scss" scoped>
   /* 公告标题链接:Ruoyi 风格 link-type,点击打开详情 */
   .notice-title-link {
-    color: var(--el-color-primary);
+    // 主色文字对比度 AA（QA №9）：token 与数字见 @styles/core/aa-text.scss。
+    color: var(--aa-primary-text);
     cursor: pointer;
     white-space: nowrap;
     transition: opacity 0.2s ease;

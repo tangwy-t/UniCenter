@@ -338,10 +338,6 @@
   @use '@styles/core/breakpoints.scss' as *;
   @use '../views/overview-tokens' as t;
 
-  // 「重试」等默认档按钮的主色文字对比度 AA：病灶与处方见 overview-tokens
-  // 的 primary-text-aa（终审 QA D2·浅色实测 3.68:1/hover 3.27:1）。
-  @include t.primary-text-aa;
-
   /*
    * 序列色 = EP 语义色按「分类槽」固定指派（dataviz 六项校验两模式全过，实测值见
    * 注释）：CPU 蓝（primary，明暗同值）/ 内存 teal / 接收蓝 / 发送 amber。
@@ -379,16 +375,14 @@
 
   .wkl-stats__live {
     // 「实时」状态签：主色 plain（它是状态而不是序列，不该撞序列色）。
+    // 只定义这两个「外观」槽（浅底 + light-5 描边组成 live 胶囊，与 EP plain 的白底区分）。
     --el-tag-bg-color: var(--el-color-primary-light-9);
     --el-tag-border-color: var(--el-color-primary-light-5);
-    // 文字对比度 AA（终审 QA D2 同源 primary 蓝盘点）：EP 主色文字对 light-9 底
-    // 3.27:1 —— 取「主色六成 + 正文色四成」混色（浅色 ≈5.4:1、暗色随主题只升不降；
-    // 与 overview-tokens 的 primary-text-aa 同一处方）。只换变量槽值，形态不动。
-    --el-tag-text-color: color-mix(
-      in srgb,
-      var(--el-color-primary) 60%,
-      var(--el-text-color-primary)
-    );
+    // 文字对比度的 AA 档（原病灶：EP 主色文字对 light-9 底 3.27:1）不再在本处落槽 ——
+    // 本签吃全局层（@styles/core/aa-text.scss 的 .el-tag--primary:not(.el-tag--dark)，
+    // html:root 前缀特异性 0,3,1 高于 EP 的 0,2,0，与注入顺序解耦）。更正一处旧注释的
+    // 误判：EP 生成类名时对缺省 type 补 --primary（tag2 的 ns.m(type || 'primary')），
+    // 本签有 el-tag--primary 类、够得着全局规则，此前的本地重复落槽已删。
   }
 
   .wkl-stats__note {

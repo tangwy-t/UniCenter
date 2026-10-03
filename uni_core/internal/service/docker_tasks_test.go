@@ -85,8 +85,9 @@ func taskRec(ref string, deviceID, userID uint64, action, target string, created
 		Action: action, Target: target, Status: dockerstate.StatusPending, CreatedAt: created}
 }
 
-// TestTasksCrossHostOrderAndCap 钉住核心契约：跨主机聚合、受理时刻降序、上限 100 条。
-func TestTasksCrossHostOrderAndCap(t *testing.T) {
+// TestTasksCrossHostOrderAndPaging 钉住核心契约：跨主机聚合、受理时刻降序、
+// 分页（8d 起取代 6b 的「上限 100 条」—— 上限由页大小承载，Total 报真实全量）。
+func TestTasksCrossHostOrderAndPaging(t *testing.T) {
 	dev7 := &entity.Device{Hostname: "h7"}
 	dev7.ID = 7
 	dev9 := &entity.Device{Hostname: "h9"}
@@ -123,7 +124,7 @@ func TestTasksCrossHostOrderAndCap(t *testing.T) {
 			resp.Items[0].Summary, resp.Items[1].Summary)
 	}
 
-	// 上限：补到超过 100 条，端点只回最新 100（索引容量 300 内）。
+	// 分页（8d 起取代「上限 100 条」）：补到 124 条在飞窗口内，逐页取回。
 	// 用 image:pull 播种（可见动作）—— container:inspect 是读面，从 P2 打磨批起
 	// 不进任务列表（守卫见 TestTasksHidesReadOnlyActions）。
 	for i := 0; i < 120; i++ {
@@ -133,11 +134,30 @@ func TestTasksCrossHostOrderAndCap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(resp.Items) != dockerTaskCap {
-		t.Fatalf("上限必须恰为 %d, got %d", dockerTaskCap, len(resp.Items))
+	if len(resp.Items) != 10 || resp.Total != 124 || resp.Page != 1 || resp.PageSize != 10 {
+		t.Fatalf("缺省分页 = 第 1 页 10 条 / 共 124: items=%d total=%d page=%d pageSize=%d",
+			len(resp.Items), resp.Total, resp.Page, resp.PageSize)
 	}
-	if resp.Items[0].CreatedAt < 5119 {
-		t.Fatalf("截断后端必须保留最新（受理时刻最大在前）, got %d", resp.Items[0].CreatedAt)
+	if resp.Items[0].CreatedAt != 5119 || resp.Items[9].CreatedAt != 5110 {
+		t.Fatalf("第 1 页必须是最新的 10 条（受理时刻降序）, got %d..%d",
+			resp.Items[0].CreatedAt, resp.Items[9].CreatedAt)
+	}
+	// 页大小 100（绑定层上限）：第 1 页 100 条、第 2 页 24 条，尾巴上仍是最旧的 r1。
+	big, err := svc.Tasks(context.Background(), &request.DockerTasksQuery{PageRequest: pageReq(1, 100)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(big.Items) != 100 || big.Total != 124 || big.Items[0].CreatedAt != 5119 {
+		t.Fatalf("页大小 100 的第 1 页: items=%d total=%d head=%d",
+			len(big.Items), big.Total, big.Items[0].CreatedAt)
+	}
+	tail, err := svc.Tasks(context.Background(), &request.DockerTasksQuery{PageRequest: pageReq(2, 100)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tail.Items) != 24 || tail.Items[len(tail.Items)-1].Ref != "r1" {
+		t.Fatalf("第 2 页 = 剩余 24 条且以最旧结尾: %d 条, tail=%s",
+			len(tail.Items), tail.Items[len(tail.Items)-1].Ref)
 	}
 }
 

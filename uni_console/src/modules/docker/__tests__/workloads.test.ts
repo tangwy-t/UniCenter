@@ -140,11 +140,14 @@ async function mountPage(query: Record<string, string> = {}): Promise<VueWrapper
   return w
 }
 
-/** navigation 的落定：router.push 是异步的（内存历史也要过导航管线），
- *  nextTick 不够 —— 多给一轮宏任务。 */
-async function flushNav() {
+/**
+ * 等一次导航落定：内存路由的 push 也要过导航管线（**多轮微任务**），nextTick 不够。
+ * 判据用「路由已到目标」而不是「过了几轮宏任务」—— 页面自己还有写回导航在飞
+ * （?host 落 query 的 replace，见 host-context.reload），轮数会随负载漂。
+ */
+async function waitRoute(path: string) {
+  await vi.waitUntil(() => currentRouter!.currentRoute.value.path === path, { timeout: 5000 })
   await nextTick()
-  await new Promise((r) => setTimeout(r, 0))
 }
 
 /** hero 簇里的图标钮（ArtButtonTable 替身，title 经 attrs fallthrough 到根 div）。 */
@@ -303,7 +306,7 @@ describe('行操作按行主机派发', () => {
     const w = await mountPage()
     const table = w.findComponent({ name: 'DockerWorkloadTable' })
     table.vm.$emit('menu-select', { row: ALL.items[1], key: 'logs' })
-    await flushNav()
+    await waitRoute('/docker/containers/c2')
 
     // navigation 语义：本页只把目标行交给路由（表格不认识路由，跳转在页面里做）。
     expect(currentRouter!.currentRoute.value.path).toBe('/docker/containers/c2')
@@ -314,7 +317,7 @@ describe('行操作按行主机派发', () => {
     const w = await mountPage()
     const table = w.findComponent({ name: 'DockerWorkloadTable' })
     table.vm.$emit('open-detail', ALL.items[0])
-    await flushNav()
+    await waitRoute('/docker/containers/c1')
 
     expect(currentRouter!.currentRoute.value.path).toBe('/docker/containers/c1')
     expect(currentRouter!.currentRoute.value.query).toEqual({ host: 'h1' })
@@ -400,7 +403,7 @@ describe('详情/创建入口：一律整页路由（8a/8b）', () => {
     const btn = findHeroButton(withHost, '创建容器')
     expect(btn, 'hero 上应有「创建容器」入口').toBeTruthy()
     await btn!.trigger('click')
-    await flushNav()
+    await waitRoute('/docker/containers/create')
     expect(currentRouter!.currentRoute.value.path).toBe('/docker/containers/create')
     expect(currentRouter!.currentRoute.value.query).toEqual({ host: 'h2' })
 
@@ -408,7 +411,7 @@ describe('详情/创建入口：一律整页路由（8a/8b）', () => {
     const btn2 = findHeroButton(noHost, '创建容器')
     expect(btn2, 'hero 上应有「创建容器」入口').toBeTruthy()
     await btn2!.trigger('click')
-    await flushNav()
+    await waitRoute('/docker/containers/create')
     expect(currentRouter!.currentRoute.value.path).toBe('/docker/containers/create')
     expect(currentRouter!.currentRoute.value.query).toEqual({})
   })
@@ -418,7 +421,7 @@ describe('详情/创建入口：一律整页路由（8a/8b）', () => {
     const btn = findHeroButton(w, '任务中心')
     expect(btn, 'hero 上应有任务中心入口').toBeTruthy()
     await btn!.trigger('click')
-    await flushNav()
+    await waitRoute('/docker/tasks')
     expect(currentRouter!.currentRoute.value.path).toBe('/docker/tasks')
   })
 })

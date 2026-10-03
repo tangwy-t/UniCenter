@@ -426,11 +426,27 @@ describe('服务卡动作派发（语义平移自列表页：按容器逐个发�
     const coreCard = w.findAll('.pws-card')[0]!
     const stopBtn = coreCard.findAll('button').find((b) => b.text() === '停止')
     expect(stopBtn).toBeTruthy()
+    // 等按钮真的可点再点：ElButton 在 disabled/loading 时会【吞掉 click】（不 emit），
+    // 而 dispatchEvent 不受 DOM disabled 阻止 —— 状态晚一拍时点下去静默无事。
+    await vi.waitUntil(() => !(stopBtn!.element as HTMLButtonElement).disabled, { timeout: 5000 })
     await stopBtn!.trigger('click')
     await flushPromises()
 
     const calls = callsOf('container:stop')
-    expect(calls).toHaveLength(1)
+    // 失败时才渲染的现场快照（受保护结论/按钮禁用态/已发指令）—— 这条断言的历史
+    // 假红形态是「点击被 ElButton 的可点性闸吞掉（不 emit）」与「快照还没到」，
+    // 现场快照让两类一眼可分。
+    let diag = ''
+    if (calls.length !== 1) {
+      const btns = coreCard
+        .findAll('button')
+        .map((b) => ({ t: (b.text() ?? '').trim(), d: (b.element as HTMLButtonElement).disabled }))
+      diag =
+        `cardText=${coreCard.text().slice(0, 90)}｜buttons=${JSON.stringify(btns)}` +
+        `｜sendTotal=${api.sendDockerCmd.mock.calls.length}` +
+        `｜actions=${JSON.stringify(api.sendDockerCmd.mock.calls.map((c) => (c[1] as { action: string }).action))}`
+    }
+    expect(calls, diag).toHaveLength(1)
     expect(calls[0]![0]).toBe('h1')
     expect(calls[0]![1]).toMatchObject({ action: 'container:stop', target: 'uni-center-core' })
   })
@@ -444,7 +460,18 @@ describe('服务卡动作派发（语义平移自列表页：按容器逐个发�
     await flushPromises()
 
     const calls = callsOf('container:start')
-    expect(calls).toHaveLength(1)
+    // 同「停」用例：失败时的现场快照（按钮禁用态/卡片结论/已发指令）。
+    let diag = ''
+    if (calls.length !== 1) {
+      const btns = webCard
+        .findAll('button')
+        .map((b) => ({ t: (b.text() ?? '').trim(), d: (b.element as HTMLButtonElement).disabled }))
+      diag =
+        `cardText=${webCard.text().slice(0, 90)}｜buttons=${JSON.stringify(btns)}` +
+        `｜sendTotal=${api.sendDockerCmd.mock.calls.length}` +
+        `｜actions=${JSON.stringify(api.sendDockerCmd.mock.calls.map((c) => (c[1] as { action: string }).action))}`
+    }
+    expect(calls, diag).toHaveLength(1)
     expect(calls[0]![1]).toMatchObject({ action: 'container:start', target: 'uni-center-web' })
   })
 
@@ -452,6 +479,11 @@ describe('服务卡动作派发（语义平移自列表页：按容器逐个发�
     const w = await mountWorkspace()
     await w.findAll('.pws-container')[0]!.trigger('click')
     await flushPromises()
+    // 等导航落定：判据用「路由到了」而不是「过了几轮微任务/宏任务」—— 页面自己还有
+    // ?host 写回等别的导航可能在飞，轮数会随负载漂。
+    await vi.waitUntil(() => currentRouter!.currentRoute.value.path === '/docker/containers/c1', {
+      timeout: 5000
+    })
     // 8a：详情是一条整页路由（host 随行 —— 详情页据此还原到同一台机器）；
     // 7b 的「列表页 + ?id 开抽屉」形态已随抽屉一起删除。
     expect(currentRouter!.currentRoute.value.path).toBe('/docker/containers/c1')
@@ -580,7 +612,6 @@ describe('配置区集成（编辑器 mock 往返）', () => {
 
     await w.find('.stub-editor-saved').trigger('click')
     await flushPromises()
-
     expect(callsOf('compose.file:read')).toHaveLength(2)
     expect(api.fetchDockerState.mock.calls.length).toBeGreaterThanOrEqual(3)
   })

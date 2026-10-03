@@ -92,6 +92,61 @@ func TestTasksHandlerEnvelope(t *testing.T) {
 	if !strings.Contains(body, `"hostId":"7"`) {
 		t.Fatalf("hostId 必须 string 编码（雪花值前端精度）: %s", body)
 	}
+	// 分页三件套（8d）：items 全在场时 total=3，page/pageSize 回显本次请求的生效值。
+	if !strings.Contains(body, `"total":3`) || !strings.Contains(body, `"page":1`) || !strings.Contains(body, `"pageSize":10`) {
+		t.Fatalf("分页信封缺失（total/page/pageSize）: %s", body)
+	}
+}
+
+// TestTasksHandlerPaging 钉住分页参数透传：page/pageSize 直达服务端（合并读面按它
+// 切页），越界页回空 items 但 total 不变 —— 前端据 total 把页码拉回第一页。
+func TestTasksHandlerPaging(t *testing.T) {
+	env := tasksTestEnv(t, []string{"docker:list"})
+	seedTaskRecord(t, env.cmds, "t-ok", "ok")
+	seedTaskRecord(t, env.cmds, "t-failed", "拉取镜像失败")
+	seedTaskRecord(t, env.cmds, "t-pending", "")
+
+	call := func(query string) (int, string) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/docker/tasks"+query, nil)
+		env.handler.Tasks(c)
+		return w.Code, w.Body.String()
+	}
+
+	code, body := call("?page=2&pageSize=1")
+	if code != http.StatusOK {
+		t.Fatalf("分页查询必须 200, got %d (%s)", code, body)
+	}
+	if !strings.Contains(body, `"total":3`) || !strings.Contains(body, `"page":2`) || !strings.Contains(body, `"pageSize":1`) {
+		t.Fatalf("分页回显不符: %s", body)
+	}
+	// 第 2 页只有 1 条（按受理时刻降序的第二条 = t-failed，三条同毫秒时按 ref 降序）。
+	if !strings.Contains(body, `"ref":"t-pending"`) && !strings.Contains(body, `"ref":"t-ok"`) &&
+		!strings.Contains(body, `"ref":"t-failed"`) {
+		t.Fatalf("第 2 页必须恰有一条条目: %s", body)
+	}
+	if strings.Count(body, `"ref":`) != 1 {
+		t.Fatalf("第 2 页 pageSize=1 必须只回 1 条: %s", body)
+	}
+
+	// 越界页：空 items + total 不变。
+	code, body = call("?page=9&pageSize=10")
+	if code != http.StatusOK || !strings.Contains(body, `"total":3`) || !strings.Contains(body, `"items":[]`) {
+		t.Fatalf("越界页必须回空 items 且 total 不变: %d %s", code, body)
+	}
+
+	// page=0 走 omitempty → 缺省第 1 页（与全站 PageRequest 同款）；page 超上限 400。
+	code, body = call("?page=0")
+	if code != http.StatusOK || !strings.Contains(body, `"page":1`) {
+		t.Fatalf("page=0 必须回落第 1 页: %d %s", code, body)
+	}
+	if code, body = call("?page=10001"); code != http.StatusBadRequest {
+		t.Fatalf("page 超上限必须 400（防天文偏移）: %d %s", code, body)
+	}
+	if code, body = call("?pageSize=101"); code != http.StatusBadRequest {
+		t.Fatalf("pageSize 超上限必须 400: %d %s", code, body)
+	}
 }
 
 // TestTasksHandlerBadQuery 钉住 400：非法 status/action 结论句（service 已测

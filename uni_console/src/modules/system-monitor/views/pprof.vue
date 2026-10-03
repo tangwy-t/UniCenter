@@ -1190,7 +1190,8 @@ go tool pprof -http=:8080 &lt;server 二进制&gt; {{ fileNameExample }}</pre>
     padding: 1px 8px;
     border-radius: 999px;
     background: var(--el-color-primary-light-9);
-    color: var(--el-color-primary);
+    // 主色文字对比度 AA（QA №9）：token 与数字见 @styles/core/aa-text.scss。
+    color: var(--aa-primary-text);
     cursor: pointer;
     transition: background 0.15s ease;
   }
@@ -1335,7 +1336,8 @@ go tool pprof -http=:8080 &lt;server 二进制&gt; {{ fileNameExample }}</pre>
 
   .pf-seg__item.is-active {
     background: var(--default-box-color);
-    color: var(--el-color-primary);
+    // 主色文字对比度 AA（QA №9）：token 与数字见 @styles/core/aa-text.scss。
+    color: var(--aa-primary-text);
     font-weight: 600;
     box-shadow: 0 1px 2px rgba(16, 24, 40, 0.08);
   }
@@ -1361,7 +1363,8 @@ go tool pprof -http=:8080 &lt;server 二进制&gt; {{ fileNameExample }}</pre>
   }
 
   .pf-breadcrumb__chip.is-last {
-    color: var(--el-color-primary);
+    // 主色文字对比度 AA（QA №9）：token 与数字见 @styles/core/aa-text.scss。
+    color: var(--aa-primary-text);
     border-color: var(--el-color-primary-light-5);
     background: var(--el-color-primary-light-9);
     font-weight: 600;
@@ -1553,7 +1556,10 @@ go tool pprof -http=:8080 &lt;server 二进制&gt; {{ fileNameExample }}</pre>
     padding: 0 18px;
     border-radius: 10px;
     border: none;
-    background: var(--el-color-primary);
+    // 白字主色填充（QA №9 全站扫的填充补漏）：resting 用深二档（白字 5.39:1）、
+    // hover 再深一档（--aa-primary-fill，白字 6.59:1）——与按钮批同范式，原值
+    // 主色 3.68:1、hover 浅三档 2.43:1 都不达标。
+    background: var(--el-color-primary-dark-2);
     color: #fff;
     font-size: 13px;
     font-weight: 600;
@@ -1562,7 +1568,7 @@ go tool pprof -http=:8080 &lt;server 二进制&gt; {{ fileNameExample }}</pre>
   }
 
   .pf-lock-mask__cta:hover {
-    background: var(--el-color-primary-light-3);
+    background: var(--aa-primary-fill);
   }
 
   /* ---------- Top 热点函数 ---------- */
@@ -1719,7 +1725,8 @@ go tool pprof -http=:8080 &lt;server 二进制&gt; {{ fileNameExample }}</pre>
     border-radius: 9px;
     border: 1px solid var(--el-color-primary-light-5);
     background: var(--el-color-primary-light-9);
-    color: var(--el-color-primary);
+    // 主色文字对比度 AA（QA №9）：token 与数字见 @styles/core/aa-text.scss。
+    color: var(--aa-primary-text);
     font-size: 12px;
     font-weight: 600;
     cursor: pointer;
@@ -1751,7 +1758,8 @@ go tool pprof -http=:8080 &lt;server 二进制&gt; {{ fileNameExample }}</pre>
   }
 
   .pf-download-line__name {
-    color: var(--el-color-primary);
+    // 主色文字对比度 AA（QA №9）：token 与数字见 @styles/core/aa-text.scss。
+    color: var(--aa-primary-text);
     padding: 0 4px;
   }
 
@@ -1772,7 +1780,8 @@ go tool pprof -http=:8080 &lt;server 二进制&gt; {{ fileNameExample }}</pre>
   }
 
   .pf-download-line__btn:hover:not(:disabled) {
-    color: var(--el-color-primary);
+    // 主色文字对比度 AA（QA №9）：hover 档 token，见 @styles/core/aa-text.scss。
+    color: var(--aa-primary-text-hover);
     border-color: var(--el-color-primary-light-5);
   }
 

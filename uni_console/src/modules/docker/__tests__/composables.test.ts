@@ -1,10 +1,17 @@
+// @vitest-environment jsdom
 /**
- * 指令通道 composable 的测试：受理分类、轮询终态、成功后重拉、行级 pending。
+ * 指令通道 composable 的测试：受理分类、轮询终态、成功后重拉、行级 pending、
+ * 落定重拉的生命周期。
  *
  * 这一层是二期所有写页面的公共依赖（2B 计划 D3），它的行为错了会让每个页面各错一遍，
  * 所以这里把「成功/失败/超时/受理被拒/轮询失败」五种终态与「重拉时机」都钉住。
+ *
+ * jsdom：落定重拉的撤销要在**真组件作用域**里验（本 composable 在 setup 期调用，
+ * 作用域销毁 = 页面卸载）—— 纯函数式用例不受影响，只是跑在带 DOM 的环境里。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { defineComponent, h } from 'vue'
+import { mount } from '@vue/test-utils'
 import { HttpError } from '@/utils/http/error'
 
 const mocks = vi.hoisted(() => ({ send: vi.fn(), result: vi.fn() }))
@@ -161,6 +168,41 @@ describe('useDockerCmds · 行级 pending', () => {
     release({ ref: 'r1' })
     mocks.result.mockResolvedValue({ status: 'succeeded' })
     await p
+  })
+})
+
+describe('useDockerCmds · 落定重拉的生死', () => {
+  it('组件卸载撤销还没到点的落定重拉（页面没了，不留白发请求）', async () => {
+    mocks.send.mockResolvedValue({ ref: 'r1' })
+    mocks.result.mockResolvedValue({ status: 'succeeded' })
+    const refresh = vi.fn()
+    let cmds!: ReturnType<typeof useDockerCmds>
+    // 与真实接线同形：在组件 setup 期调用 —— 作用域即页面，unmount 即销毁作用域。
+    const Host = defineComponent({
+      name: 'CmdLifecycleHost',
+      setup() {
+        cmds = useDockerCmds({ hostId: () => 'h1', sleep: async () => {}, refresh, settleMs: 40 })
+        return () => h('div')
+      }
+    })
+    const w = mount(Host)
+    await cmds.run({ action: 'container:start', target: 'mysql' })
+    expect(refresh).toHaveBeenCalledTimes(1) // 立即重拉
+
+    w.unmount() // 页面卸载：落在 40ms 后的落定重拉随之撤销
+    await new Promise((r) => setTimeout(r, 160)) // 跨过 settleMs
+    expect(refresh, '卸载后不该再有白发请求').toHaveBeenCalledTimes(1)
+  })
+
+  it('对照：不卸载时落定重拉照常到点（是撤销，不是把重拉关掉了）', async () => {
+    mocks.send.mockResolvedValue({ ref: 'r1' })
+    mocks.result.mockResolvedValue({ status: 'succeeded' })
+    const refresh = vi.fn()
+    const cmds = makeCmds({ refresh }) // 无组件作用域（纯函数式用法）：不注册清理
+    await cmds.run({ action: 'container:start', target: 'mysql' })
+    expect(refresh).toHaveBeenCalledTimes(1)
+    await new Promise((r) => setTimeout(r, 30)) // settleMs=0：落定重拉在下一拍
+    expect(refresh).toHaveBeenCalledTimes(2)
   })
 })
 

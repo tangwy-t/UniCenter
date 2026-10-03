@@ -208,7 +208,8 @@
 
   /* 类型徽标色彩语义与字典 list_class 一一对应(管理列表 tag 同源) */
   .nd-type.is-primary {
-    color: var(--el-color-primary);
+    // 主色文字对比度 AA（QA №9）：token 与数字见 @styles/core/aa-text.scss。
+    color: var(--aa-primary-text);
     background: color-mix(in srgb, var(--el-color-primary) 7%, transparent);
   }
 
@@ -396,7 +397,8 @@
   }
 
   .nd-content :deep(a) {
-    color: var(--el-color-primary);
+    // 主色文字对比度 AA（QA №9）：token 与数字见 @styles/core/aa-text.scss。
+    color: var(--aa-primary-text);
     text-decoration: underline;
     text-underline-offset: 3px;
   }

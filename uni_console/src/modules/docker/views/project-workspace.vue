@@ -345,10 +345,6 @@
 <style lang="scss" scoped>
   @use './overview-tokens' as t;
 
-  // 「重新检测 / 重试 / 返回项目列表」等默认档按钮的主色文字对比度 AA：
-  // 病灶与处方见 overview-tokens 的 primary-text-aa（终审 QA D2·浅色实测 3.68:1）。
-  @include t.primary-text-aa;
-
   @include t.rise-keyframes;
 
   /* 次要文字对比度 AA（P2 打磨批，与总览页同款处置）：EP 默认

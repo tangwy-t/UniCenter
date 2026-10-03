@@ -694,10 +694,6 @@
   @use '@styles/core/breakpoints.scss' as *;
   @use './overview-tokens' as t;
 
-  // 「取消 / 重新检测」等默认档按钮的主色文字对比度 AA：病灶与处方见 overview-tokens
-  // 的 primary-text-aa（终审 QA D2·浅色实测 3.68:1）。
-  @include t.primary-text-aa;
-
   /* 次要文字对比度 AA（P2 打磨批，与总览页同款处置）：EP 默认
      --el-text-color-secondary(#909399) 对白底只有 3.08:1（QA 实测 2.97–3.08），低于
      AA 正文线 → 页面范围内把它升到 regular 档（浅色 6.1:1、暗色随主题同样达标）。
@@ -806,7 +802,8 @@
     }
 
     &__retry {
-      color: var(--el-color-primary);
+      // 主色文字对比度 AA（QA №9）：token 与数字见 @styles/core/aa-text.scss。
+      color: var(--aa-primary-text);
       cursor: pointer;
       margin-left: 4px;
     }

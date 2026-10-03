@@ -20,7 +20,7 @@ import (
 // ── 构建/推送进度流端点（P2）──────────────────────────────────────────────
 //
 // 接入纪律与拉取进度流**逐条相同**（权限按记录的 docker:manage、发起人归属、
-// 派生句柄、断开即 cancel —— 数据形态不同不能带来任何鉴权差别）。夹具照
+// 派生句柄、断开只是停止观看 —— 数据形态不同不能带来任何鉴权差别）。夹具照
 // seedPullRecord/seedPullProgressSession/pullStreamContext 同款各建一套。
 
 const buildRecRef = "1790000000000000888"
@@ -224,9 +224,10 @@ func TestBuildStreamForwardsNDJSON(t *testing.T) {
 	}
 }
 
-// TestBuildStreamDisconnectCancelsAgent：客户端断开 → 下发 cancel（对构建的语义
-// 重量与拉取同款：它**终止这场构建**）、清理会话。
-func TestBuildStreamDisconnectCancelsAgent(t *testing.T) {
+// TestBuildStreamDisconnectOnlyDetaches：客户端断开**只是停止观看** —— 不下发
+// cancel（构建照常跑完）、会话留在注册表里（可重进观看）。终止构建走显式取消端点
+// （POST /cmds/:ref/cancel），不再由断流触发。
+func TestBuildStreamDisconnectOnlyDetaches(t *testing.T) {
 	env := newTestDockerHandler(t, []string{"docker:manage"})
 	rec := seedBuildRecord(t, env, 7, 1)
 	sess := seedBuildProgressSession(t, env, 7, 1)
@@ -244,13 +245,14 @@ func TestBuildStreamDisconnectCancelsAgent(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("客户端断开后处理器必须返回")
 	}
-	if env.sessions.Get(agentproto.DockerBuildSessionID(buildRecRef)) != nil {
-		t.Fatal("断开后必须清理会话")
+	if env.sessions.Get(agentproto.DockerBuildSessionID(buildRecRef)) == nil {
+		t.Fatal("断开只是停止观看：会话必须留在注册表里（寿命 = 指令寿命）")
 	}
-	frames := env.sender.frameOps()
-	if len(frames) != 1 || frames[0].Op != agentproto.DockerFrameOpCancel ||
-		frames[0].SessionID != agentproto.DockerBuildSessionID(buildRecRef) {
-		t.Fatalf("断开必须下发 cancel（语义 = 放弃构建）: %+v", frames)
+	if frames := env.sender.frameOps(); len(frames) != 0 {
+		t.Fatalf("断流不得下发任何控制帧（cancel 只来自显式取消端点）: %+v", frames)
+	}
+	if sess.Attached() {
+		t.Fatal("断开后接入占用必须释放 —— 否则重进观看会撞 409")
 	}
 }
 
@@ -386,8 +388,9 @@ func TestPushStreamRejectsAndForwards(t *testing.T) {
 	})
 }
 
-// TestPushStreamDisconnectCancelsAgent：断开 → 下发 cancel（终止推送）并清理。
-func TestPushStreamDisconnectCancelsAgent(t *testing.T) {
+// TestPushStreamDisconnectOnlyDetaches：与构建同款（断开只是停止观看，终止走显式
+// 取消端点）。
+func TestPushStreamDisconnectOnlyDetaches(t *testing.T) {
 	env := newTestDockerHandler(t, []string{"docker:manage"})
 	rec := seedPushRecord(t, env, 7, 1)
 	sess := seedPushProgressSession(t, env, 7, 1)
@@ -405,12 +408,13 @@ func TestPushStreamDisconnectCancelsAgent(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("客户端断开后处理器必须返回")
 	}
-	if env.sessions.Get(agentproto.DockerPushSessionID(pushRecRef)) != nil {
-		t.Fatal("断开后必须清理会话")
+	if env.sessions.Get(agentproto.DockerPushSessionID(pushRecRef)) == nil {
+		t.Fatal("断开只是停止观看：会话必须留在注册表里（寿命 = 指令寿命）")
 	}
-	frames := env.sender.frameOps()
-	if len(frames) != 1 || frames[0].Op != agentproto.DockerFrameOpCancel ||
-		frames[0].SessionID != agentproto.DockerPushSessionID(pushRecRef) {
-		t.Fatalf("断开必须下发 cancel（语义 = 放弃推送）: %+v", frames)
+	if frames := env.sender.frameOps(); len(frames) != 0 {
+		t.Fatalf("断流不得下发任何控制帧（cancel 只来自显式取消端点）: %+v", frames)
+	}
+	if sess.Attached() {
+		t.Fatal("断开后接入占用必须释放 —— 否则重进观看会撞 409")
 	}
 }

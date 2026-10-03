@@ -1,13 +1,19 @@
 <template>
   <!-- 单根（single-root 守卫扫描全模块的 .vue）：ElDialog 是唯一根。它默认在原地
        渲染（append-to-body 未开 —— 与 action-confirm 同一挂法；页内没有嵌套弹窗，
-       不需要搬到 body）。 -->
+       不需要搬到 body）。
+       **非模态**（modal=false）：进度是「观看」，不该挡住页面 —— 拉取进行中用户
+       照样能翻列表/切主机/开别的对话框，本窗可以拖开（draggable）或者干脆关掉
+       （关掉 = 收起这场观看，拉取照常跑完，去任务中心还能再看）。 -->
   <ElDialog
     :model-value="modelValue"
     title="拉取镜像"
     width="560px"
+    :modal="false"
+    modal-class="docker-progress-nonblocking"
     :close-on-click-modal="false"
-    :close-on-press-escape="phase !== 'pulling'"
+    :lock-scroll="false"
+    draggable
     @update:model-value="onDialogVisible"
   >
     <!-- ── 输入态：镜像引用 ──
@@ -97,9 +103,12 @@
       </ul>
       <p v-else class="pp-progress__empty">正在等待进度…</p>
 
-      <!-- 收尾提示：三态（用户取消 / 流接入失败 / 流中途断开）+ eof 后等 result，
+      <!-- 收尾提示：三态（已请求取消 / 流接入失败 / 流中途断开）+ eof 后等 result，
            各自说清楚「接下来等什么」，不让对话框看起来像卡死。 -->
       <p v-if="waitingHint" class="pp-progress__hint">{{ waitingHint }}</p>
+      <!-- 取消请求失败的就地结论句（403 无权取消 / 409 该任务已结束 / 500 未送达）：
+           按钮就在下面，结论就地给，不上 toast。 -->
+      <p v-if="cancelError" class="pp-progress__error">{{ cancelError }}</p>
     </div>
 
     <!-- ── 终态：结论句（成功 = 镜像名 + 耗时；失败 = 结论句原文）── -->
@@ -115,13 +124,17 @@
           开始拉取
         </ElButton>
       </template>
-      <!-- 拉取在途只有一条出路：取消（断流 → 服务端 best-effort cancel；是否真被
-           截止按拉取的实际结局结算，见后端 pull_progress.go 的竞态注释 —— 措辞
-           不承诺因果）。ESC 与遮罩点击此时都被关掉（action-confirm 的 loading
-           纪律）：误触不该杀掉一场进行中的拉取。 -->
-      <ElButton v-else-if="phase === 'pulling'" :disabled="canceled" @click="cancelPull">
-        {{ canceled ? '已取消' : '取消拉取' }}
-      </ElButton>
+      <!-- 拉取在途两条出口，彼此独立：
+           - 关闭 = 收起这场观看（服务端只解除接入，拉取照常跑完 —— 任务中心
+             再展开行就能接着看）；
+           - 取消拉取 = 向服务端下发取消请求（能否真被截止以任务结论为准：服务端
+             只发一帧 cancel，agent 按拉取的实际结局结算，故措辞是「已请求取消」）。 -->
+      <template v-else-if="phase === 'pulling'">
+        <ElButton @click="requestClose">关闭</ElButton>
+        <ElButton :loading="canceling" :disabled="cancelRequested" @click="cancelPull">
+          {{ cancelRequested ? '已请求取消' : '取消拉取' }}
+        </ElButton>
+      </template>
       <ElButton v-else type="primary" @click="requestClose">关闭</ElButton>
     </template>
   </ElDialog>
@@ -139,13 +152,16 @@
    * 收尾口径：result 到终态时以它为准（结论句原文）；流 eof 之后 result 迟迟不落时
    * 退回流的终态项 —— 双确认但不互等致死。
    *
-   * 断流的语义重量（与日志/stats 流的根本不同）：**客户端断开 = 服务端取消这场拉取**
-   * （core 会向 agent 下发 cancel）。取消按钮、关对话框、卸载都走同一条 abort ——
-   * 这不是副作用，是本端点给消费端的契约。
+   * **观看与执行解耦**（本波语义收口）：进度流是「观看」——
+   *   - 关对话框（页脚关闭 / X / ESC / 卸载）只**断流**：服务端只解除接入，不下发
+   *     cancel，拉取照常跑完、结果经既有 result 轮询入账；去任务中心展开任务行还能
+   *     接着看（同一条流随时可重接）。对话框非模态，进度不再挡住页面。
+   *   - 「取消拉取」是**另一个动作**：调显式取消端点（cancelDockerCmd），由服务端下发
+   *     一帧 cancel；它 best-effort、与「拉取恰好干完活」存在竞态，故按钮措辞是
+   *     「已请求取消」，结论以 result 的原文为准（后端 pull_progress.go 的竞态注释）。
    *
    * 生命周期纪律照 container-stats 的 statsSeq：序号 + AbortController，关对话框/
-   * 重新打开让在飞的「流 + 轮询」双双失效；主机切换由页面关掉本对话框（images 页
-   * onHostSwitch 既有纪律），组件内再把 hostId 在受理时钉死一道（双保险）。
+   * 重新打开让在飞的「流 + 轮询」双双失效。
    */
   import { computed, onBeforeUnmount, ref, watch } from 'vue'
   import { ElButton, ElDialog, ElInput, ElOption, ElProgress, ElSelect } from 'element-plus'
@@ -153,6 +169,7 @@
   import { useAuth } from '@/hooks/core/useAuth'
   import { PermDockerConfig } from '@/enums/permission'
   import {
+    cancelDockerCmd,
     fetchDockerCmdResult,
     fetchDockerRegistries,
     openDockerPullStream,
@@ -244,24 +261,45 @@
     totalBytes: 0,
     doneLayers: 0
   })
-  const canceled = ref(false)
+  /** 取消请求已成功下发（与服务端下发帧是两件事：这里只记「请求发出去了」）。 */
+  const cancelRequested = ref(false)
+  /** 取消请求在途（按钮 loading，防重复点）。 */
+  const canceling = ref(false)
+  /** 取消请求失败的就地结论句（403/409/500 —— 服务端 msg 优先）。 */
+  const cancelError = ref('')
   const streamEnded = ref(false)
-  /** '' = 流还连着；'open' = 接入失败（拉取仍在服务端跑）；'broken' = 连上后断开（不承诺因果：是否被截止按实际结局结算）。 */
+  /** '' = 流还连着；'open' = 接入失败（拉取仍在服务端跑）；'broken' = 连上后断开（只是不再观看：任务照常跑完，结论以 result 为准）。 */
   const streamFailed = ref<'' | 'open' | 'broken'>('')
   const streamFailText = ref('')
   const resultState = ref<ResultState | null>(null)
   /** 进度态头部的目标引用（受理时钉下；模板要显示，故是 ref）。 */
   const pullTarget = ref('')
 
+  /** 当前这场拉取的钥匙（受理时钉下；取消按钮要用 —— 取消是独立于观看的动作）。 */
+  let activeHostId = ''
+  let activeRef = ''
+
   /** 生命周期序号：关闭/重开让在飞的「流 + 轮询」双双失效（照 container-stats 的 statsSeq）。 */
   let pullSeq = 0
   let streamAbort: AbortController | null = null
-  /** 流的终态项（done/error 那一行；取消路径上服务端不发）。 */
+  /** 流的终态项（done/error 那一行；被取消的拉取 agent 不发终态项）。 */
   let streamTerminal: PullTerminal | null = null
   let startedAt = 0
   let endedAt = 0
   /** 双次重拉只补一次的闸（关闭路径可能被走两遍：页脚按钮 + prop 回写）。 */
   let refreshedAfterSuccess = false
+  /**
+   * 「落定重拉」（关闭后 1.5s 那次）的定时器句柄集 —— **卸载时全部撤销**。
+   *
+   * 为什么撤销：重拉的落点是页面（refresh = 页面的清单重拉），页面卸载后这次调用
+   * 就是白发（真实 UX：关闭对话框后 1.5s 内切页，请求还是飞出去）；测试里它还会
+   * 跨用例存活（放大器下实测：上一条用例的重拉打进下一条用例的窗口）。
+   * 只挂在 onBeforeUnmount 上：**关闭本身不该撤销它** —— 关闭正是要排这次落定重拉
+   *（agent 落定时 push 的帧与立即重拉会擦肩，补这一拍覆盖两种到达次序）。
+   * 用集合而不是单个句柄：「关闭 → 1.5s 内重开 → 再关闭」会同时挂着两场各一次，
+   * 只留最后一个句柄会让先排的那次在卸载后照旧飞出去。
+   */
+  const settleTimers = new Set<ReturnType<typeof setTimeout>>()
 
   /** 流收口后 result 轮询的兜底上限（对齐 useDockerCmds 的 20 次口径）。 */
   const MAX_RESULT_POLLS = 20
@@ -296,10 +334,12 @@
     return parts.join(' · ')
   })
 
-  /** 收尾提示：把「还在等什么」说清楚（三态收口 + eof 后等 result），对话框不该看起来卡死。 */
+  /** 收尾提示：把「还在等什么」说清楚（已请求取消 + 三态收口 + eof 后等 result），
+      对话框不该看起来卡死。措辞不承诺因果：取消是下发出去的请求，是否真被截止由
+      result 的结论句裁定（任务行/本窗终态都以它为准）。 */
   const waitingHint = computed(() => {
     if (phase.value !== 'pulling') return ''
-    if (canceled.value) return '已取消，正在等待指令收尾…'
+    if (cancelRequested.value) return '已请求取消，正在等待指令收尾…'
     if (streamFailed.value === 'open') {
       return `进度流未能建立（${streamFailText.value}），拉取仍在进行，等待结果…`
     }
@@ -369,6 +409,10 @@
       accepting.value = false
     }
     pullTarget.value = target
+    // 这场拉取的钥匙（取消按钮要用）：hostId 在受理时钉死 —— 一次指令只属于
+    // 受理它的那台主机，取消请求也发往同一台。
+    activeHostId = hostId
+    activeRef = cmdRef
     startedAt = Date.now()
     streamTerminal = null
     phase.value = 'pulling'
@@ -423,14 +467,15 @@
         streamTerminal = feed.terminal
         streamEnded.value = true
       } else {
-        // 读尽但没见 eof：网络层收口、应用层没收官 —— 视同断流（不再观看；
-        // 是否被截止按拉取的实际结局结算）。
+        // 读尽但没见 eof：网络层收口、应用层没收官 —— 视同断流（只是不再观看：
+        // 拉取照常跑完，结论以 result 为准）。
         streamFailed.value = 'broken'
         streamFailText.value = ''
       }
     } catch (e) {
       if (seq !== pullSeq) return
-      // 主动断开（取消/收尾/关对话框）不是故障：流是被自己掐断的。
+      // 主动断开（关对话框/收尾/卸载）不是故障：流是被自己掐断的 —— 掐断的是
+      // 观看，不是拉取（服务端只解除接入）。
       if ((e as { name?: string })?.name === 'AbortError') return
       streamFailed.value = 'broken'
       streamFailText.value = errMsg(e, '进度流连接中断')
@@ -470,18 +515,18 @@
     }
   }
 
-  /** result 轮询是否该起兜底上限：eof / 断流 / 用户取消之后，result 按时序应很快
+  /** result 轮询是否该起兜底上限：eof / 断流 / 已请求取消之后，result 按时序应很快
       落定（agent 钉了 eof 先于 result），等不到就是记录异常，不该无限等。 */
   function resultDeadlineArmed(): boolean {
-    return streamEnded.value || streamFailed.value !== '' || canceled.value
+    return streamEnded.value || streamFailed.value !== '' || cancelRequested.value
   }
 
   /** result 终态收尾（权威通道）：结论句原文 + 断掉还挂着的流。 */
   function finalize(seq: number, ok: boolean, error: string): void {
     if (seq !== pullSeq) return
     endedAt = Date.now()
-    // result 已终态：流若还挂着（时序兜底下可能没走完）就断掉 —— 会话已收口，
-    // 此时的 cancel 无副作用。
+    // result 已终态：流若还挂着（时序兜底下可能没走完）就断掉 —— 这只是收起
+    // 观看（记录已落定，流那边也随 eof 收摊了）。
     abortStream()
     if (ok) {
       setResult(true, `已拉取 ${pullTarget.value}（耗时 ${durationText()}）`)
@@ -490,13 +535,14 @@
     }
   }
 
-  /** result 等不到（记录异常/网络断）的退路：结论退回流的终态项；取消路径上服务端
-      不发终态项，按「已取消」措辞；两头都没有时只说「未能确认」—— 不编造结论。 */
+  /** result 等不到（记录异常/网络断）的退路：结论退回流的终态项；被取消的拉取
+      agent 不发终态项，按「已请求取消」措辞（不代答「已取消」—— 是否真被截止
+      只有 result 能说）；两头都没有时只说「未能确认」。 */
   function finalizeFallback(seq: number): void {
     if (seq !== pullSeq) return
     endedAt = Date.now()
-    if (canceled.value) {
-      setResult(false, '拉取已取消')
+    if (cancelRequested.value) {
+      setResult(false, '已请求取消，拉取结果未能确认')
     } else if (streamTerminal) {
       if (streamTerminal.ok) {
         setResult(true, `已拉取 ${pullTarget.value}（耗时 ${durationText()}）`)
@@ -520,21 +566,37 @@
 
   // ── 取消 / 关闭 / 收口 ──
 
-  function cancelPull(): void {
-    if (phase.value !== 'pulling' || canceled.value) return
-    canceled.value = true
-    // 断流即取消（端点契约：客户端断开 → 服务端向 agent 下发 cancel 终止拉取）。
-    // result 轮询继续：结论句「拉取已取消」由服务端落进 result，页面前端不代答。
-    abortStream()
+  /**
+   * 取消拉取：调**显式取消端点**（独立于观看的动作）。两处刻意：
+   *   - **断流不在这里**：取消不等于收起观看 —— 进度流照常连着，用户看得见它
+   *     怎么收场（是否需要继续看由用户自己的「关闭」决定）；
+   *   - result 轮询继续：终态结论句由服务端裁定（真被截止 = 「拉取已取消」；
+   *     恰好已完成 = 成功），页面前端不代答。
+   */
+  async function cancelPull(): Promise<void> {
+    if (phase.value !== 'pulling' || cancelRequested.value || canceling.value) return
+    if (activeRef === '') return
+    canceling.value = true
+    cancelError.value = ''
+    try {
+      await cancelDockerCmd(activeHostId, activeRef)
+      cancelRequested.value = true
+    } catch (e) {
+      // 403 无权取消 / 409 该任务已结束 / 500 取消未送达：就地给结论句（服务端 msg
+      // 优先）—— 不静默吞掉，也不把「送不出去」说成「已取消」。
+      cancelError.value = errMsg(e, '取消请求未发出，请稍后重试')
+    } finally {
+      canceling.value = false
+    }
   }
 
-  /** 断流（幂等：没有在飞的流就不扰动）。 */
+  /** 断流（幂等：没有在飞的流就不扰动）——**只是停止观看**，与取消无关。 */
   function abortStream(): void {
     streamAbort?.abort()
     streamAbort = null
   }
 
-  /** 收口：序号让在飞的流与轮询失效 + 断流（= 服务端取消拉取）。幂等。 */
+  /** 收口：序号让在飞的流与轮询失效 + 断流（只是停止观看；拉取照常跑完）。幂等。 */
   function cleanup(): void {
     pullSeq++
     abortStream()
@@ -553,7 +615,11 @@
     if (!resultState.value?.ok || refreshedAfterSuccess) return
     refreshedAfterSuccess = true
     safeRefresh()
-    setTimeout(safeRefresh, 1500)
+    const t = setTimeout(() => {
+      settleTimers.delete(t)
+      safeRefresh()
+    }, 1500)
+    settleTimers.add(t)
   }
 
   function safeRefresh(): void {
@@ -579,10 +645,11 @@
     emit('update:modelValue', v)
   }
 
-  // 父组件置 false（主机切换 onHostSwitch / 页面级收口）走 watch；置 true（打开）
-  // 时整表重置 —— 上一次拉取的任何残留（层表/结论/刷新标记/凭据选择）不进新一场；
-  // 凭据清单随打开重拉（管理对话框可能在两次拉取之间改过它）。immediate：
-  // 「带着打开态挂载」（测试/将来别的入口直接传 true）与「先挂载再打开」走同一条路。
+  // 父组件置 false（页面级收口 / 页面卸载）走 watch；置 true（打开）时整表重置 ——
+  // 上一次拉取的任何残留（层表/结论/刷新标记/凭据选择）不进新一场；凭据清单随打开
+  // 重拉（管理对话框可能在两次拉取之间改过它）。immediate：「带着打开态挂载」
+  //（测试/将来别的入口直接传 true）与「先挂载再打开」走同一条路。
+  // 关闭路径一律只收口观看（cleanupAndFinish）：拉取在服务端照常跑完。
   watch(
     () => props.modelValue,
     (v, old) => {
@@ -604,20 +671,29 @@
     accepting.value = false
     registryChoice.value = ''
     feedView.value = { layers: [], note: '', downloadedBytes: 0, totalBytes: 0, doneLayers: 0 }
-    canceled.value = false
+    cancelRequested.value = false
+    canceling.value = false
+    cancelError.value = ''
     streamEnded.value = false
     streamFailed.value = ''
     streamFailText.value = ''
     resultState.value = null
     pullTarget.value = ''
+    activeHostId = ''
+    activeRef = ''
     streamTerminal = null
     startedAt = 0
     endedAt = 0
     refreshedAfterSuccess = false
   }
 
-  // 卸载只收口不重拉：页面都没了，重拉的落点不存在（页脚关闭路径已补过重拉）。
-  onBeforeUnmount(cleanup)
+  // 卸载收口：断观看 + **撤销还没到点的落定重拉**（页面没了，这次调用的落点不存在；
+  // 关闭路径已各自排过/补过重拉，不欠这一拍）。收口也只是停止观看 —— 拉取在服务端照常跑完。
+  onBeforeUnmount(() => {
+    cleanup()
+    for (const t of settleTimers) clearTimeout(t)
+    settleTimers.clear()
+  })
 </script>
 
 <style lang="scss" scoped>
@@ -627,6 +703,22 @@
   // 「关闭 / 取消拉取」等默认档按钮的主色文字对比度 AA：病灶与处方见 overview-tokens
   // 的 primary-text-aa（终审 QA D2·浅色实测 3.68:1）。
   @include t.primary-text-aa;
+
+  // 非模态 = **真的不挡页面**：EP 的对话框包壳（.el-overlay / .el-overlay-dialog）
+  // 铺满视口，即使 :modal="false" 也会吃掉整个页面的点击（实测：外侧点击落在包壳上，
+  // 页面收不到，还会被当成「点外面」把窗收掉）。这里让包壳对指针透明、只有对话框
+  // 本体可交互 —— 拉取在途时用户照常翻列表/切筛选/开别的窗口；关窗只有显式路径
+  //（X / ESC / 页脚关闭）。
+  // 两种写法都给：包壳既可能是本组件根元素（拿到 scoped 属性），也可能是它的后代，
+  // 只写一种会在 EP 的 DOM 形状变化时静默失效。
+  :global(.docker-progress-nonblocking),
+  :global(.docker-progress-nonblocking .el-overlay-dialog) {
+    pointer-events: none;
+  }
+
+  :global(.docker-progress-nonblocking .el-dialog) {
+    pointer-events: auto;
+  }
 
   // 输入态：错误句与提示句都是对话框内的就地结论（对话框开着，结论不放 toast）。
   .pp-input {
@@ -676,7 +768,8 @@
     &__note,
     &__summary,
     &__empty,
-    &__hint {
+    &__hint,
+    &__error {
       margin: 6px 0 0;
       font-size: 12px;
       line-height: 1.6;
@@ -694,6 +787,11 @@
     &__empty,
     &__hint {
       color: var(--el-text-color-secondary);
+    }
+
+    // 取消请求失败的就地结论句（与输入态错误句同一形态：红字、紧跟内容）。
+    &__error {
+      color: var(--el-color-danger);
     }
   }
 

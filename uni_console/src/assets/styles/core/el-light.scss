@@ -18,11 +18,20 @@
       'base': #fa896b
     )
   ),
+  // 按钮主题：文字槽全量改走主色文字 AA 层（aa-text.scss 的 --aa-primary-text
+  // 一族，病灶与数字见该文件）—— 无 type 默认档文字原为主色 3.68:1（hover
+  // 对 light-9 底 3.27:1），混色后 6.04/5.37。悬停链接槽原为 text-secondary
+  // （2.7:1）同样过不了线下限，一并收口。radio-button / checkbox-button 的
+  // inner 文字读 var(--el-button-text-color, <本表值>) 的兜底端，同一处修改
+  // 把这两族未选中文字也带到达标（$button 是它们文字色的唯一共享源）。
+  // 描边槽（border-color 等）不属文字族，维持主色原值（3.68 ≥ 非文本 3:1）。
   $button: (
     'hover-bg-color': var(--el-color-primary-light-9),
     'hover-border-color': var(--el-color-primary),
     'border-color': var(--el-color-primary),
-    'text-color': var(--el-color-primary)
+    'text-color': var(--aa-primary-text),
+    'hover-text-color': var(--aa-primary-text),
+    'hover-link-text-color': var(--aa-primary-text)
   ),
   $messagebox: (
     'border-radius': '12px'

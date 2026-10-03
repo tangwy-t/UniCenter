@@ -28,10 +28,6 @@ html:root {
   --el-border-radius-small: calc(var(--custom-radius) / 3 + 4px) !important;
   --el-messagebox-border-radius: calc(var(--custom-radius) / 3 + 4px) !important;
   --el-popover-border-radius: calc(var(--custom-radius) / 3 + 4px) !important;
-
-  .region .el-radio-button__original-radio:checked + .el-radio-button__inner {
-    color: var(--theme-color);
-  }
 }
 
 // ==================== 对比度 AA（全站批·QA 浅色实测，门槛 4.5:1） ====================

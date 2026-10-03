@@ -19,7 +19,7 @@
  * （缺省 = target，无 target 时 = action），页面据此禁用该行按钮防重复提交；
  * `busy` 是全局在途判断（批量操作时禁用整条操作栏）。
  */
-import { computed, ref } from 'vue'
+import { computed, getCurrentScope, onScopeDispose, ref } from 'vue'
 import { isHttpError } from '@/utils/http/error'
 import { fetchDockerCmdResult, sendDockerCmd } from '../api'
 import { pollDelay } from '../utils/cmd'
@@ -144,6 +144,28 @@ export function useDockerCmds(options: UseDockerCmdsOptions = {}) {
   const inflight = ref(0)
   const busy = computed(() => inflight.value > 0)
 
+  /**
+   * 「落定重拉」定时器的句柄集：**作用域销毁（调用方组件卸载）时全部撤销**。
+   *
+   * 为什么必须撤销：这些定时器长在组件之外 —— 页面卸载后它们照常到点，对已经不存在的
+   * 页面白发若干次 refresh（真实 UX：写完操作后 1.5s 内切页 → 请求还是飞出去了）。
+   * 测试里它们还会**跨用例存活**：放大复现时实测到下一条用例的窗口里冒出上一条用例的
+   * 重拉请求（调用栈落在 useResourceList 的 load 上，来源是旧实例）；
+   * 那种「上一条用例的尾巴打进下一条用例」的噪声正是闪烁类问题最难查的形态之一。
+   * 用集合而不是单个句柄：批量操作会并发跑多条指令，每条成功各自排一次落定重拉，
+   * 只留最后一个句柄会让先排的那几次在卸载后照旧飞出去（漏一半）。
+   * 作用域即调用方组件（本 composable 在 setup 期调用）；无作用域时（纯函数式用法）
+   * 不注册清理，行为与之前一致。
+   */
+  const settleTimers = new Set<ReturnType<typeof setTimeout>>()
+  const scope = getCurrentScope()
+  if (scope) {
+    onScopeDispose(() => {
+      for (const t of settleTimers) clearTimeout(t)
+      settleTimers.clear()
+    })
+  }
+
   async function run(input: DockerCmdInput): Promise<DockerCmdRunResult> {
     const key = input.key ?? input.target ?? input.action
     // 主机 id 在**入口处固定**：指令在途时用户切了主机，轮询若跟着新主机走，
@@ -195,9 +217,11 @@ export function useDockerCmds(options: UseDockerCmdsOptions = {}) {
               await options.refresh?.()
               const settle = options.settleMs ?? 1500
               if (options.refresh && settle >= 0) {
-                setTimeout(() => {
+                const t = setTimeout(() => {
+                  settleTimers.delete(t)
                   void options.refresh?.()
                 }, settle)
+                settleTimers.add(t)
               }
             } catch {
               /* 静默：陈旧/离线由页面头部标注 */

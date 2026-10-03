@@ -324,6 +324,12 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 	// 与配置提供者要的是原生客户端（与 WithCursorStore(redis) 同源）。
 	dockerStore := dockerstate.NewStore(redis)
 	dockerCmdStore := dockerstate.NewCmdStore(redis)
+	// 任务历史持久层（8d）：同一个仓储喂三处 —— 终态钩子（写）、任务中心读面（合并）、
+	// 保留清理任务（删）。钩子挂在这里而不是各写入调用方：CmdStore 的终态转换点是
+	// 唯一咽喉（agent result / 缓存秒回 / discard / sweep 全数经过），将来新增路径
+	// 不会漏掉落库（契约见 dockerstate.TerminalHook）。
+	dockerTaskHistoryRepo := repository.NewDockerTaskHistoryRepo(db)
+	dockerCmdStore.WithTerminalHook(service.NewDockerTaskHistoryRecorder(dockerTaskHistoryRepo, log).Record)
 	// stats 留存（P2）：同一个 Redis 客户端、同一族键（docker:stats:history:*）。
 	// 与上面两个 store 同款「一个实例喂两处」：ingest 侧以观察者挂钩写入（快照
 	// 落库后投影），读面以查询/清理面注入 —— 各消费方只声明自己需要的窄接口。
@@ -397,9 +403,11 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 		// stats 留存读面（P2）：查询历史曲线 + 设备删除时的连带清理（与上面的
 		// 写入挂钩共用同一个 store 实例 —— 两边读写的是同一族键）。
 		WithStatsHistory(dockerStatsHistory)
-	// 任务面（6b）：任务中心的最近指令读面 —— 复用同一个 CmdStore 与设备/用户表，
-	// 不建新存储（枚举索引在 CmdStore 数据面内）。设备表与上面读到的是同一个 repo。
-	dockerTasksSvc := service.NewDockerTaskService(dockerCmdStore, deviceRepo, userRepo, log)
+	// 任务面（6b / 8d）：任务中心的读面 = 实时（CmdStore，含在途）∪ 历史（持久层），
+	// 按 ref 合并去重（实时胜）、整体分页。设备表与上面读到的是同一个 repo；
+	// 历史面与终态钩子、清理任务共用同一个仓储实例。
+	dockerTasksSvc := service.NewDockerTaskService(dockerCmdStore, deviceRepo, userRepo, log).
+		WithHistory(dockerTaskHistoryRepo)
 	// 上限预检注入同一个注册表：CountByDevice 与流端点的会话是同一份账目。
 	dockerCmdSvc := service.NewDockerCmdService(dockerCmdStore, agentHub, dockerStore, log).
 		WithStreamSessions(dockerSessions).
@@ -594,11 +602,13 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 		OpLogRepo:    opLogRepo,
 		LoginLogRepo: loginLogRepo,
 		JobLogRepo:   jobLogRepo,
-		ConfigRepo:   configRepo,
-		DictTypeRepo: dictTypeRepo,
-		DictDataRepo: dictDataRepo,
-		ConfigSvc:    configSvc,
-		CacheStore:   cacheStore,
+		// 任务中心历史清理（8d）：与三类日志清理共用 DeleteBefore 窄接口。
+		DockerTaskRepo: dockerTaskHistoryRepo,
+		ConfigRepo:     configRepo,
+		DictTypeRepo:   dictTypeRepo,
+		DictDataRepo:   dictDataRepo,
+		ConfigSvc:      configSvc,
+		CacheStore:     cacheStore,
 		// 设备指标域（Plan 2C）：三个后台服务 + 结构化日志。
 		// AgentFlush 同时供 flush / backfill 两个任务使用 —— 它们是同一实例的两个
 		// 入口（落库 / 回退水位后落库），所以这里只填一次。

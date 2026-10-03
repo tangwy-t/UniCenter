@@ -23,9 +23,15 @@
             >{{ formatMenuTitle(item.meta?.title as string) }}</span
           >
         </div>
+        <!-- 分隔符对比度 AA（QA №10 浅色实测 2.59:1）：g-500（#949eb7）对页底 #fafbfc
+             仅 2.59:1，远低于 4.5:1 —— 升到 g-700（#4d5875）≈6.8:1。调色板里没有
+             达标的中间档（g-600 #7987a1 实测 3.50:1 同样不达标），故与主文字同档；
+             层级仍成立——主文字是交互内容，分隔符是结构符号。暗色侧 g-700 随主题
+             自动落到 #ababba（对页底 #070707 ≈8.9:1），且比主文字的 g-800（≈12:1）
+             低一档，层级差恰好保留。 -->
         <div
           v-if="!isLastItem(index) && item.meta?.title"
-          class="mx-1 text-sm not-italic text-g-500"
+          class="mx-1 text-sm not-italic text-g-700"
           aria-hidden="true"
         >
           /

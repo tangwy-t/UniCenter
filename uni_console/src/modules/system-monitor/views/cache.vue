@@ -1754,7 +1754,8 @@
 
   .cache-size-btn:hover {
     border-color: var(--el-color-primary-light-5);
-    color: var(--el-color-primary);
+    // 主色文字对比度 AA（QA №9）：hover 档 token，见 @styles/core/aa-text.scss。
+    color: var(--aa-primary-text-hover);
   }
 
   .cache-size-btn:focus-visible {
@@ -1763,7 +1764,8 @@
   }
 
   .cache-size-btn.is-active {
-    color: var(--el-color-primary);
+    // 主色文字对比度 AA（QA №9）：token 与数字见 @styles/core/aa-text.scss。
+    color: var(--aa-primary-text);
     background: var(--el-color-primary-light-9);
     border-color: var(--el-color-primary-light-5);
   }

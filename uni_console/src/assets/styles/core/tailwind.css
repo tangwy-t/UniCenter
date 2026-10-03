@@ -96,6 +96,13 @@
   /* System Theme Color */
   --color-theme: var(--theme-color);
 
+  /* 主色「文字」AA 变体（QA №9）：给 tailwind 侧需要「主色文字」的模板用
+     （text-theme-aa / hover:text-theme-aa / !text-theme-aa）。值域是
+     @styles/core/aa-text.scss 的 --aa-primary-text token —— 与 EP 组件槽同源；
+     text-theme 原值（--theme-color）留着给图标/底纹/描边（非文本 3:1 门槛，
+     主色 3.68:1 已达标），两者语义分工：-aa 后缀 = 文字专用。 */
+  --color-theme-aa: var(--aa-primary-text);
+
   /* Hover Color */
   --color-hover-color: var(--art-hover-color);
 

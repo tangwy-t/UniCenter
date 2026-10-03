@@ -1,0 +1,389 @@
+/**
+ * 文字对比度 AA · 全站通用层（QA №9 主色批 + 语义色批）
+ *
+ * ## 这是什么
+ *
+ * 「品牌/语义色当文字色」的全站收口层。主色文字在中性底（白卡 / 页底 #fafbfc /
+ * 主色 light-9 淡染）上的对比度统一由本文件的三个 token 取值，EP 组件变量槽与
+ * 按钮主题（el-light.scss 的 $button）都只引用 token、不复制色值 —— 一处改值
+ * 全站生效，杜绝了此前的「每个组件各拷一份混色表达式」式漂移。语义色文字族
+ * （success/warning/danger/error/info，见下文专节）在第二批按同一范式收口。
+ *
+ * ## token 与达标数字（浅色，QA 静态计算口径）
+ *
+ * 病灶：主色 #3b82f6 当文字——对白底 3.68:1、对页底 3.55:1、对 light-9 底
+ * 3.27:1，全在 4.5:1 门槛下。处方是「主色六成 + 主题正文色四成」的混色
+ * （与 docker 侧已验收的 primary-text-aa 同一处方，此前只在 docker 组件局部
+ * 生效，本层将它收敛为全站唯一来源）：
+ *
+ *   --aa-primary-text        主色 60% + 正文色 40%：白底 6.04、页底 5.83、
+ *                            light-9 底 5.37 —— resting 主色文字的统一值；
+ *   --aa-primary-text-hover  主色 70% + 正文色 30%：白底 5.31、页底 5.12、
+ *                            light-9 底 4.72 —— 悬停态需要「更贴近主色」的
+ *                            反馈感，又不能跌破门槛，取 70/30；
+ *   --aa-primary-fill        主色 70% + 黑 30%：白字对它的对比 6.59 ——
+ *                            「填充 + 白字」场景（plain/text 按钮的悬停/按下、
+ *                            分页活动页填充）的达标填充。黑端写字面 #000 而
+ *                            不是 var(--el-color-black)：后者被全局映射成了
+ *                            white（el-ui.scss 的 !important），当「加深」用
+ *                            会反向变浅（实栈抓到过）。
+ *
+ * 暗色不回归：混色的正文色端取 var(--el-text-color-primary)，暗色下该值是
+ * 85% 白——混色随主题变亮（对暗卡 7.85:1、对暗页底 8.75:1，暗色 resting 的
+ * 主色原值本就 4.91:1，只升不降）；填充端两种主题同值（加深对两个主题都是
+ * 保持白字达标的方向）。
+ *
+ * ## 为什么用 html:root 前缀而不是直接写类选择器
+ *
+ * EP 组件 CSS 经 unplugin-element-plus 随异步 chunk 注入，同优先级的覆盖会因
+ * 注入顺序不稳定而失效（与 el-ui.scss 的全站批同一纪律）——html:root 抬高
+ * 特异性，与注入顺序解耦。各规则的变量槽归属逐一核对过：只动文字/填充槽，
+ * 不碰描边、布局与 EP 品牌色本身。
+ *
+ * ## 语义色文字族（本批：success/warning/danger/error/info 五基色）
+ *
+ * 同一处方扩到语义五色：resting 逐色取「能过线的最大语义色权重」（色越亮、
+ * 正文色端越重），hover/fill 两档与主色族同构。病灶与达标数字（浅色，
+ * 静态计算；括号里是 EP 基色原值的旧对比）：
+ *
+ *   基色              resting 权重   白底 / 各自 light-9 底
+ *   success #13deb9    40/60        5.41 / 5.07（原 1.72 / 1.61）
+ *   warning #ffae1f    40/60        5.55 / 5.21（原 1.85 / 1.74）
+ *   danger  #ff4d4f    60/40        5.81 / 5.15（原 3.27 / 2.90）
+ *   error   #fa896b    50/50        5.31 / 4.89（原 2.37 / 2.18）
+ *   info    #909399    60/40        5.28 / 4.81（原 3.08 / 2.80）
+ *
+ *   hover 档（link 形态，底色=白/页底）：success 45/55 = 4.85/4.68、
+ *   warning 45/55 = 5.00/4.83、danger 70/30 = 5.00/4.83、info 65/35 = 4.91/4.74；
+ *   fill 档（plain/text 悬停实心底，白字对填充）：success/warning 基色 50%+黑
+ *   = 6.10/6.40、danger/info 基色 70%+黑 = 6.02/5.68 —— fill 取「白字 ≥6 的最
+ *   贴近档」，基色亮度高的 success/warning 需要更重的黑端（70%+黑时白字只有
+ *   3.47/3.69，过不了线）。
+ *
+ * 为什么权重不统一 60/40：success/warning 基色相对亮度高（约 0.56/0.52），
+ * 60% 语义色的混色对 light-9 底只有 3.31/3.48 —— 过不了线；resting 一律取
+ * 该色能过线的最大语义色权重，在保住色相识别的上限内定档。
+ *
+ * 暗色只升不降：正文色端 var(--el-text-color-primary) 在暗色是近白，五色
+ * 对暗卡实测 7.75–12.44、对暗色 light-9 底 6.97–10.36（旧值暗色下 danger
+ * 情形只有 3.27–3.74）。error 与 danger 是两个独立基色（EP 的 error 槽用于
+ * alert/message 与 tag（2.11 起 el-tag 也有 error 档，本层一并覆盖），
+ * danger 用于 tag/button/link），各自收各自的槽，不合并。
+ *
+ * 覆盖的 EP 变量槽（html:root 前缀抗异步注入；逐槽核对过，只动文字槽）：
+ *   - el-tag：--el-tag-text-color（success/warning/danger/error/info 五档；
+ *     light 与 plain 两形态共用此槽——plain 形态 EP 只改底/描边，文字继承
+ *     type 档；dark 形态是白字+填充＝填充+白字族，排除）；
+ *   - el-button：plain/text 形态的 7 个按钮槽（同主色族写法）与 link 形态的
+ *     text/hover-link 两槽（success/warning/danger/info 四档；EP 无 error 档
+ *     按钮与 link —— error 只进 alert/message/tag）；
+ *   - el-alert（is-light）：标题与 description 两处文字色
+ *     （success/warning/error/info）；
+ *   - el-message：--el-message-text-color（success/warning/error/info）。本应用
+ *     message 底是白盒（el-ui.scss 覆盖 background），故按白底计算达标；
+ *   - el-link：--el-link-text-color / --el-link-hover-text-color
+ *     （success/warning/danger/info；当前全站无渲染点，同主色族的 el-link
+ *     先例一并覆盖，避免后来者再开一轮）。
+ *   本族的组件字面量同步收口：sql.vue 的 durTone 时长文字与慢查询计数
+ *   （见 use-sql-format 的 durTextTone）、device 的 usageTone 数值文字
+ *   （见 display.ts 的 usageTextTone）—— 组件只引用 token，不复制色值。
+ *
+ * ## 本层不负责的（刻意留白）
+ *
+ * - 「填充+白字」族：实心语义按钮的白字、深色 tag、alert 深色形态的底色
+ *   填充（语义档归填充批次，与主色族的分工同）；
+ * - 散点的 var(--el-color-*) 逐处文字引用与老字面量（device/docker 等组件
+ *   的零散状态文字）：非本批裁定名单，留册待下一批定量收口；
+ * - 主色「填充+白字」的按钮/单选填充（上一批已在 el-ui.scss 修过），本层只
+ *   动分页活动页填充（上一批的例外，此前无人认领）。
+ */
+
+html:root {
+  --aa-primary-text: color-mix(
+    in srgb,
+    var(--el-color-primary) 60%,
+    var(--el-text-color-primary)
+  );
+  --aa-primary-text-hover: color-mix(
+    in srgb,
+    var(--el-color-primary) 70%,
+    var(--el-text-color-primary)
+  );
+  --aa-primary-fill: color-mix(in srgb, var(--el-color-primary) 70%, #000);
+}
+
+// 语义色文字族 token（权重与达标数字见文件头；黑端写字面 #000 的理由同
+// --aa-primary-fill：本应用把 var(--el-color-black) 全局映射成了 white）。
+html:root {
+  --aa-success-text: color-mix(
+    in srgb,
+    var(--el-color-success) 40%,
+    var(--el-text-color-primary)
+  );
+  --aa-warning-text: color-mix(
+    in srgb,
+    var(--el-color-warning) 40%,
+    var(--el-text-color-primary)
+  );
+  --aa-danger-text: color-mix(
+    in srgb,
+    var(--el-color-danger) 60%,
+    var(--el-text-color-primary)
+  );
+  --aa-error-text: color-mix(
+    in srgb,
+    var(--el-color-error) 50%,
+    var(--el-text-color-primary)
+  );
+  --aa-info-text: color-mix(
+    in srgb,
+    var(--el-color-info) 60%,
+    var(--el-text-color-primary)
+  );
+
+  --aa-success-text-hover: color-mix(
+    in srgb,
+    var(--el-color-success) 45%,
+    var(--el-text-color-primary)
+  );
+  --aa-warning-text-hover: color-mix(
+    in srgb,
+    var(--el-color-warning) 45%,
+    var(--el-text-color-primary)
+  );
+  --aa-danger-text-hover: color-mix(
+    in srgb,
+    var(--el-color-danger) 70%,
+    var(--el-text-color-primary)
+  );
+  --aa-info-text-hover: color-mix(
+    in srgb,
+    var(--el-color-info) 65%,
+    var(--el-text-color-primary)
+  );
+
+  --aa-success-fill: color-mix(in srgb, var(--el-color-success) 50%, #000);
+  --aa-warning-fill: color-mix(in srgb, var(--el-color-warning) 50%, #000);
+  --aa-danger-fill: color-mix(in srgb, var(--el-color-danger) 70%, #000);
+  --aa-info-fill: color-mix(in srgb, var(--el-color-info) 70%, #000);
+}
+
+html:root {
+  // 主色 plain / text 按钮：resting 文字 (light-9 底 5.37)、hover/active 白字
+  // 加深填充（6.59）。描边槽不动（非文本 3:1 门槛，主色描边 3.68 已达标）。
+  .el-button--primary.is-plain,
+  .el-button--primary.is-text {
+    --el-button-text-color: var(--aa-primary-text);
+    --el-button-hover-text-color: var(--el-color-white);
+    --el-button-hover-bg-color: var(--aa-primary-fill);
+    --el-button-hover-border-color: var(--aa-primary-fill);
+    --el-button-active-text-color: var(--el-color-white);
+    --el-button-active-bg-color: var(--aa-primary-fill);
+    --el-button-active-border-color: var(--aa-primary-fill);
+  }
+
+  // 主色 link 按钮：无底色常态，hover 也无底色（EP 的 link 变体悬停只换文字色），
+  // 故 hover 用 70/30 档（白底 5.31）而不是加深填充 —— link 的反馈靠色相贴近。
+  .el-button--primary.is-link {
+    --el-button-text-color: var(--aa-primary-text);
+    --el-button-hover-link-text-color: var(--aa-primary-text-hover);
+  }
+
+  // 分页（EP 默认档）：活动页码与悬停页码都吃 --el-pagination-hover-color
+  // （该槽也供 focus 描边，非文本不受门槛约束，换色无害）。
+  .el-pagination {
+    --el-pagination-hover-color: var(--aa-primary-text);
+  }
+
+  // 分页（is-background 档）：活动页码是主色填充 + 白字（3.68:1），填充加深到
+  // 达标档（6.59），文字槽白色保持 —— 与上一批按钮填充同范式。
+  .el-pagination.is-background .el-pager li.is-active {
+    background-color: var(--aa-primary-fill);
+  }
+
+  // 标签页（el-tabs）：活动页签与悬停页签都是主色文字（各 3.68:1），两态各取
+  // 一档（resting / hover 分工与其余族一致）；EP 的悬停规则在活动规则之后，
+  // 活动页签悬停同样落到 hover 档，两态都达标。
+  .el-tabs__item.is-active {
+    color: var(--aa-primary-text);
+  }
+
+  .el-tabs__item:hover {
+    color: var(--aa-primary-text-hover);
+  }
+
+  // radio-button 未选中文字：resting 已经 $button 兜底（el-light.scss 同一
+  // token）；hover 是 EP 硬编码的主色（3.68:1，且比 resting 更浅——方向反了），
+  // 换成 hover 档。:not(:checked) 限定在隐藏的原生 radio 上，选中态的白字对
+  // 深填充不归本规则管。
+  .el-radio-button__original-radio:not(:checked) + .el-radio-button__inner:hover {
+    color: var(--aa-primary-text-hover);
+  }
+
+  // el-tag 主色档：light 效果对 light-9 底（3.27）、plain 效果对白底（3.68）。
+  // 排除 .el-tag--dark（它的白字是填充+白字族，归填充批次，不在文字族）。
+  .el-tag--primary:not(.el-tag--dark) {
+    --el-tag-text-color: var(--aa-primary-text);
+  }
+
+  // el-link 主色档：resting / hover 两个文字槽（EP 默认 hover 取 light-3，
+  // 比 resting 更浅，是门槛下更糟的一档，必须一起换）。
+  .el-link--primary {
+    --el-link-text-color: var(--aa-primary-text);
+    --el-link-hover-text-color: var(--aa-primary-text-hover);
+  }
+}
+
+// ==================== 语义色文字族（success/warning/danger/error/info） ====================
+
+html:root {
+  // ---- el-tag：light/plain 两形态共用文字槽，排除 dark（白字+填充属填充族）----
+  .el-tag--success:not(.el-tag--dark) {
+    --el-tag-text-color: var(--aa-success-text);
+  }
+
+  .el-tag--warning:not(.el-tag--dark) {
+    --el-tag-text-color: var(--aa-warning-text);
+  }
+
+  .el-tag--danger:not(.el-tag--dark) {
+    --el-tag-text-color: var(--aa-danger-text);
+  }
+
+  .el-tag--info:not(.el-tag--dark) {
+    --el-tag-text-color: var(--aa-info-text);
+  }
+
+  // error 档：2.11 起 EP 给 el-tag 也加了 error 类型（与 alert/message 同一
+  // 基色；原值对各自 light-9 底 2.18:1，token 后 4.89:1）。当前全站无渲染点，
+  // 照主色族 el-link 先例一并覆盖，避免后来者再开一轮。
+  .el-tag--error:not(.el-tag--dark) {
+    --el-tag-text-color: var(--aa-error-text);
+  }
+
+  // ---- el-button plain/text：四档同主色族写法（EP 无 error 按钮档）----
+  .el-button--success.is-plain,
+  .el-button--success.is-text {
+    --el-button-text-color: var(--aa-success-text);
+    --el-button-hover-text-color: var(--el-color-white);
+    --el-button-hover-bg-color: var(--aa-success-fill);
+    --el-button-hover-border-color: var(--aa-success-fill);
+    --el-button-active-text-color: var(--el-color-white);
+    --el-button-active-bg-color: var(--aa-success-fill);
+    --el-button-active-border-color: var(--aa-success-fill);
+  }
+
+  .el-button--warning.is-plain,
+  .el-button--warning.is-text {
+    --el-button-text-color: var(--aa-warning-text);
+    --el-button-hover-text-color: var(--el-color-white);
+    --el-button-hover-bg-color: var(--aa-warning-fill);
+    --el-button-hover-border-color: var(--aa-warning-fill);
+    --el-button-active-text-color: var(--el-color-white);
+    --el-button-active-bg-color: var(--aa-warning-fill);
+    --el-button-active-border-color: var(--aa-warning-fill);
+  }
+
+  .el-button--danger.is-plain,
+  .el-button--danger.is-text {
+    --el-button-text-color: var(--aa-danger-text);
+    --el-button-hover-text-color: var(--el-color-white);
+    --el-button-hover-bg-color: var(--aa-danger-fill);
+    --el-button-hover-border-color: var(--aa-danger-fill);
+    --el-button-active-text-color: var(--el-color-white);
+    --el-button-active-bg-color: var(--aa-danger-fill);
+    --el-button-active-border-color: var(--aa-danger-fill);
+  }
+
+  .el-button--info.is-plain,
+  .el-button--info.is-text {
+    --el-button-text-color: var(--aa-info-text);
+    --el-button-hover-text-color: var(--el-color-white);
+    --el-button-hover-bg-color: var(--aa-info-fill);
+    --el-button-hover-border-color: var(--aa-info-fill);
+    --el-button-active-text-color: var(--el-color-white);
+    --el-button-active-bg-color: var(--aa-info-fill);
+    --el-button-active-border-color: var(--aa-info-fill);
+  }
+
+  // ---- el-button link 形态：无底色常态，hover 换 70/30 档（同主色 link）----
+  .el-button--success.is-link {
+    --el-button-text-color: var(--aa-success-text);
+    --el-button-hover-link-text-color: var(--aa-success-text-hover);
+  }
+
+  .el-button--warning.is-link {
+    --el-button-text-color: var(--aa-warning-text);
+    --el-button-hover-link-text-color: var(--aa-warning-text-hover);
+  }
+
+  .el-button--danger.is-link {
+    --el-button-text-color: var(--aa-danger-text);
+    --el-button-hover-link-text-color: var(--aa-danger-text-hover);
+  }
+
+  .el-button--info.is-link {
+    --el-button-text-color: var(--aa-info-text);
+    --el-button-hover-link-text-color: var(--aa-info-text-hover);
+  }
+
+  // ---- el-alert（is-light）：标题继承父级 color，description 有独立规则，
+  // 两处都要写（EP 的 description 规则会盖过继承）----
+  .el-alert--success.is-light,
+  .el-alert--success.is-light .el-alert__description {
+    color: var(--aa-success-text);
+  }
+
+  .el-alert--warning.is-light,
+  .el-alert--warning.is-light .el-alert__description {
+    color: var(--aa-warning-text);
+  }
+
+  .el-alert--error.is-light,
+  .el-alert--error.is-light .el-alert__description {
+    color: var(--aa-error-text);
+  }
+
+  .el-alert--info.is-light,
+  .el-alert--info.is-light .el-alert__description {
+    color: var(--aa-info-text);
+  }
+
+  // ---- el-message：只换文字槽（图标/底纹是非文本，维持原值）----
+  .el-message--success {
+    --el-message-text-color: var(--aa-success-text);
+  }
+
+  .el-message--warning {
+    --el-message-text-color: var(--aa-warning-text);
+  }
+
+  .el-message--error {
+    --el-message-text-color: var(--aa-error-text);
+  }
+
+  .el-message--info {
+    --el-message-text-color: var(--aa-info-text);
+  }
+
+  // ---- el-link：resting / hover 两槽（同主色 el-link 先例）----
+  .el-link--success {
+    --el-link-text-color: var(--aa-success-text);
+    --el-link-hover-text-color: var(--aa-success-text-hover);
+  }
+
+  .el-link--warning {
+    --el-link-text-color: var(--aa-warning-text);
+    --el-link-hover-text-color: var(--aa-warning-text-hover);
+  }
+
+  .el-link--danger {
+    --el-link-text-color: var(--aa-danger-text);
+    --el-link-hover-text-color: var(--aa-danger-text-hover);
+  }
+
+  .el-link--info {
+    --el-link-text-color: var(--aa-info-text);
+    --el-link-hover-text-color: var(--aa-info-text-hover);
+  }
+}

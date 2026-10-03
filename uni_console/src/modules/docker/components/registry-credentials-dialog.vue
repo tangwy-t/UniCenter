@@ -406,10 +406,6 @@
   @use '@styles/core/breakpoints.scss' as *;
   @use '../views/overview-tokens' as t;
 
-  // 「关闭 / 返回列表 / 编辑」等默认档按钮（含 text 变体）的主色文字对比度 AA：
-  // 病灶与处方见 overview-tokens 的 primary-text-aa（终审 QA D2·浅色实测 3.68:1）。
-  @include t.primary-text-aa;
-
   // 等宽字体（地址是「键」：要逐字对上，等宽才可对读与肉眼校对）。
   .rg-mono {
     font-family: var(--el-font-family-mono, ui-monospace, 'SFMono-Regular', Consolas, monospace);
@@ -441,7 +437,8 @@
 
     &__retry {
       margin-left: 6px;
-      color: var(--el-color-primary);
+      // 主色文字对比度 AA（QA №9）：token 与数字见 @styles/core/aa-text.scss。
+      color: var(--aa-primary-text);
       cursor: pointer;
     }
   }

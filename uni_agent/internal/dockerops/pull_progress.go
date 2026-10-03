@@ -83,26 +83,29 @@ func imageAuthOf(cmd *agentproto.DockerCmd) *ImageAuth {
 // 三个结局：
 //   - 成功：终态项 Done → eof → result{ok}（结论句按老流程由前端说法，detail 无附注）；
 //   - daemon 失败：终态项 Error（daemon 原文）→ eof → 结论句「拉取镜像失败」；
-//   - 取消（core 下发 cancel → 会话收摊 → 拉取用的 ctx 被中断）：**不发**终态项与
-//     eof（会话已消失，帧也发不出去），结论句「拉取已取消」—— 与「失败」分开措辞：
-//     用户主动放弃不是故障，不该按故障句式弹红。
+//   - 取消（core 显式取消端点 → cancel 帧 → 会话收摊 → 拉取用的 ctx 被中断）：
+//     **不发**终态项与 eof（会话已消失，帧也发不出去），结论句「拉取已取消」——
+//     与「失败」分开措辞：用户主动放弃不是故障，不该按故障句式弹红。
 //
-// **取消与完成的竞态（QA B4）**：cancel 是 core 在「用户断开进度流」时下发的
-// best-effort 动作（前端切页、关对话框、收起任务行都会触发），它到达 agent 的时刻
-// 与 daemon 干完活的时刻可以只差毫秒。此时「ctx 被中断 → 记取消」会把一场**已经
-// 成功**的拉取记成「失败·拉取已取消」（实测：任务中心显示失败，而 `docker images`
-// 里镜像已落地）—— 终态必须按**拉取的实际结局**结算：
+// **取消/截止与完成的竞态（QA B4，2026 收口版）**：cancel 只由 core 的**显式取消
+// 端点**下发（POST /docker/hosts/:id/cmds/:ref/cancel → CancelProgress → cancel 帧 →
+// agent 会话收摊），观看端断流（切页、关对话框、收起任务行）只停观看、不再触发。
+// 它到达 agent 的时刻与 daemon 干完活的时刻可以只差毫秒。此时「ctx 被中断 → 记取消」
+// 会把一场**已经成功**的拉取记成「失败·拉取已取消」（实测：任务中心显示失败，而
+// `docker images` 里镜像已落地）—— 终态必须按**拉取的实际结局**结算：
 //   - 已完成的证据一：daemon 的收尾行（isPullCompletionLine）已经到过我们的读循环；
-//   - 已完成的证据二：拉取前后本机镜像 ID 变了（pullLanded）—— 收尾行可能随中断的
+//   - 已完成的证据二：拉取前后本机镜像 ID 变了（refMoved）—— 收尾行可能随中断的
 //     连接一起被丢掉（ctx 取消直接关连接，缓冲里还没读到的尾数据不复存在），
 //     故需要一条**独立于流**的事实补判；
 //   - 两条都没有 → 拉取真被截止，才记「拉取已取消」。
 //
 // 证据二为什么是「ID 变了」而不是「现在有镜像」：本机本来就有的镜像，在取消后
-// 依然存在，单看「有」会把「重拉被截止」也说成成功（那是反向的不诚实）。
+// 依然在，单看「有」会把「重拉被截止」也说成成功（那是反向的不诚实）。
 //
-// 迟到 cancel 对已完成的拉取是 no-op：这里返回 nil（成功），不改写任何终态 ——
-// 用户放弃的是「观看」，不是「结果」。
+// 迟到 cancel 对已完成的拉取是 no-op：终态按完成结算 —— 用户放弃的是「等待」，
+// 不是「结果」。**真截止（指令的执行时限到点）同此一条**：时限记的是「我们不再等」，
+// 不是「它没干完」，活真干完了就该记完成（收口动作见 completion.go 的 settleWrite，
+// 三族同一张表）。
 func (e *WriteExecutor) pullImage(ctx context.Context, cmdRef, target string, auth *ImageAuth) error {
 	// 会话管理器由构造契约保证非 nil（见 SetSessions / sessionsValue 的说明 ——
 	// 7c 删掉了「未装配 = 一期黑盒」的回退分支）。
@@ -139,18 +142,13 @@ func (e *WriteExecutor) pullImage(ctx context.Context, cmdRef, target string, au
 		fr.emit(p)
 	})
 	if err != nil {
-		if sess.isClosing() {
-			// 会话已收摊 = 用户取消（或断连后的 cancel）。先按**已完成**的两种证据
-			// 结算（见函数头），都没有才落到「取消」。
-			if daemonDone.Load() || e.pullLanded(ctx, target, beforeID, beforeErr) {
-				return nil
-			}
-			// 终态项与 eof 无从发出（会话已消失），结论句按「取消」措辞。
-			return &ExecError{Msg: "拉取已取消"}
-		}
-		fr.finish(false, err.Error())
-		waitStreamEnded(sess)
-		return wrapDocker("拉取镜像失败", err)
+		// 结算：证据一（收尾行）或证据二（本机引用位移）任一成立即完成 —— 迟到
+		// cancel 与真截止对已完成的拉取都是 no-op。判据走自己的上下文
+		//（真截止会把指令 ctx 一起作废，见 evidenceCtx）。
+		ectx, ecancel := evidenceCtx(ctx)
+		defer ecancel()
+		return settleWrite(daemonDone.Load() || e.refMoved(ectx, target, beforeID, beforeErr),
+			sess.isClosing(), fr, sess, "拉取已取消", "拉取镜像失败", err)
 	}
 	fr.finish(true, "")
 	waitStreamEnded(sess)
@@ -169,27 +167,10 @@ func (e *WriteExecutor) pullImage(ctx context.Context, cmdRef, target string, au
 // 为什么必须按行判定而不是「读循环结束」：读循环结束的两种形态（正常 EOF 与会话
 // 收摊导致的读中断）在这一层看起来都是「ImagePull 返回了」，只有这些行能把
 // 「干完了」与「被截断」分开。也刻意不采 "Digest: …"（它在引用更新之前就发出，
-// 那一小段窗口内的中断由 pullLanded 兜底）。
+// 那一小段窗口内的中断由 refMoved 兜底）。
 func isPullCompletionLine(p PullProgress) bool {
 	if p.ID != "" {
 		return false
 	}
 	return strings.HasPrefix(p.Status, "Status: ")
-}
-
-// pullLanded 报告「这场拉取把镜像落到本机了」这条**独立于流**的事实：
-// 拉取前后同一个引用的本机镜像 ID 变了（此前没有 = 空串，现在有了，也算变）。
-//
-// 两处刻意不判：拉取前查不了（beforeErr != nil）或现在查不了 —— 没有对照基线时
-// 「现在有镜像」无法区分「这场拉出来的」与「本来就有的」，宁可开不了口（落回
-// 「取消」），也不编一条完成。
-func (e *WriteExecutor) pullLanded(ctx context.Context, target, beforeID string, beforeErr error) bool {
-	if beforeErr != nil {
-		return false
-	}
-	afterID, err := e.api.ImageRefID(ctx, target)
-	if err != nil {
-		return false
-	}
-	return afterID != "" && afterID != beforeID
 }

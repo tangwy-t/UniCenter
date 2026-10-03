@@ -111,14 +111,34 @@ async function switchToUpload(w: VueWrapper) {
   await flush()
 }
 
-/** 模拟选择文件：把 File 塞进隐藏的原生 input 并触发 change。 */
+/**
+ * 模拟选择文件：把 File 塞进隐藏的原生 input 并触发 change。
+ *
+ * 预检是异步的（gzip 魔数经 FileReader 读切片），落定时机**不能数 flush 轮数**：
+ * jsdom 的 FileReader 走三层 setImmediate（check 相位），而 flush 是 setTimeout
+ * （timers 相位）—— 两族的相对次序取决于「此刻事件循环在哪个相位」，负载下会漂出
+ * 「两轮 flush」的预算，于是偶发「上传还没发生 / 结论句还没上屏」。改成等**判据**：
+ * 这一选的两条出路任一出现即算落定 —— 本选发起了上传（调用数增长），或就地换了
+ * 结论句（后缀/大小/魔数的拒绝都走它）。
+ */
 async function pickFile(w: VueWrapper, file: File) {
   const input = w.find('input[type="file"]')
   expect(input.exists(), '隐藏的文件选择器应已渲染（上传形态）').toBe(true)
   Object.defineProperty(input.element, 'files', { value: [file], configurable: true })
+  const uploadsBefore = api.uploadDockerBuildContext.mock.calls.length
+  const errorBefore = w.find('.bp-field__error').exists() ? w.find('.bp-field__error').text() : ''
   await input.trigger('change')
+  await vi.waitUntil(
+    () => {
+      const errorNow = w.find('.bp-field__error').exists() ? w.find('.bp-field__error').text() : ''
+      return (
+        api.uploadDockerBuildContext.mock.calls.length > uploadsBefore ||
+        (errorNow !== '' && errorNow !== errorBefore)
+      )
+    },
+    { timeout: 5000 }
+  )
   await flush()
-  await flush() // 魔数预读是异步 FileReader：多 flush 一轮让 onload 落定
 }
 
 /** 抓取最近一次上传调用的参数（mock 的调用记录）。 */

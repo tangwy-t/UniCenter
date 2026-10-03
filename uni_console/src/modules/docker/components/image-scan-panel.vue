@@ -215,10 +215,6 @@
   @use '@styles/core/breakpoints.scss' as *;
   @use '../views/overview-tokens' as t;
 
-  // 「重新扫描 / 重试」等默认档按钮的主色文字对比度 AA：病灶与处方见 overview-tokens
-  // 的 primary-text-aa（终审 QA D2·浅色实测 3.68:1）。
-  @include t.primary-text-aa;
-
   // 空态/加载态下的说明行：结论弱化（它解释「为什么慢/为什么没有」，不是数据）。
   .isc-note {
     margin: 8px 0 0;

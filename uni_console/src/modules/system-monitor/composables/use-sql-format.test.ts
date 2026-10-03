@@ -3,6 +3,7 @@ import {
   OP_COLORS,
   OPS,
   clamp01,
+  durTextTone,
   durTone,
   fmtCount,
   fmtPct,
@@ -109,6 +110,26 @@ describe('durTone', () => {
   it('非法阈值返回中性灰', () => {
     expect(durTone(10, 0)).toBe('#94a3b8')
     expect(durTone(NaN, 300)).toBe('#94a3b8')
+  })
+})
+
+describe('durTextTone', () => {
+  // 文字族 AA 收口：同一分档，但输出 token 引用（对比度数字见 use-sql-format
+  // 内注释与 @styles/core/aa-text.scss）。
+  it('与 durTone 同档位，返回 token 引用', () => {
+    expect(durTextTone(10, 300)).toBe('var(--aa-success-text)')
+    expect(durTextTone(200, 300)).toBe('var(--aa-warning-text)')
+    expect(durTextTone(500, 300)).toBe('var(--aa-danger-text)')
+  })
+
+  it('非法阈值走 regular 文字色（原中性灰白底仅 2.56:1）', () => {
+    expect(durTextTone(10, 0)).toBe('var(--el-text-color-regular)')
+    expect(durTextTone(NaN, 300)).toBe('var(--el-text-color-regular)')
+  })
+
+  it('边界与 durTone 完全同步（阈值/3 与阈值归高端档）', () => {
+    expect(durTextTone(100, 300)).toBe('var(--aa-warning-text)')
+    expect(durTextTone(300, 300)).toBe('var(--aa-danger-text)')
   })
 })
 

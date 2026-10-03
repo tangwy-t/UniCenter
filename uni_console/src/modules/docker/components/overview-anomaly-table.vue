@@ -123,7 +123,8 @@
     background: none;
     font: inherit;
     font-size: 13px;
-    color: var(--el-color-primary);
+    // 主色文字对比度 AA（QA №9）：token 与数字见 @styles/core/aa-text.scss。
+    color: var(--aa-primary-text);
     cursor: pointer;
     text-align: left;
     max-width: 100%;

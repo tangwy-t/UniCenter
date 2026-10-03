@@ -70,9 +70,11 @@
           &.is-active {
             background: var(--el-color-primary-light-9);
 
+            // 选中项文字与图标：主色文字 AA 层（QA №9）——主色原文对 light-9
+            // 底 3.27:1，token 后 5.37:1（见 @styles/core/aa-text.scss）。
             .art-svg-icon,
             span {
-              color: var(--theme-color) !important;
+              color: var(--aa-primary-text) !important;
             }
           }
         }

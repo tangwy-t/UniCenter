@@ -14,6 +14,7 @@ import {
   formatUptime,
   isCriticalUsage,
   isWatermarkStale,
+  usageTextTone,
   usageTone,
   watermarkState
 } from '../utils/display'
@@ -172,6 +173,32 @@ describe('usageTone / isCriticalUsage', () => {
     expect(isCriticalUsage(89.9)).toBe(false)
     expect(isCriticalUsage(90)).toBe(true)
     expect(isCriticalUsage(null)).toBe(false)
+  })
+})
+
+describe('usageTextTone（数值文字的 AA 档）', () => {
+  // 文字与条/图表分档同源（usageTone），但文字必须过 4.5:1 —— 原值对白底
+  // 只有 1.72–3.68:1，故文字侧改走 token（数字见 @styles/core/aa-text.scss）。
+  it('与 usageTone 同分档，输出 token 引用', () => {
+    expect(usageTextTone(10)).toBe('var(--aa-success-text)')
+    expect(usageTextTone(60)).toBe('var(--aa-primary-text)')
+    expect(usageTextTone(85)).toBe('var(--aa-warning-text)')
+    expect(usageTextTone(95)).toBe('var(--aa-danger-text)')
+  })
+
+  it('边界与 usageTone 完全一致（50 进蓝、80 进琥珀、90 进红）', () => {
+    expect(usageTextTone(49.9)).toBe('var(--aa-success-text)')
+    expect(usageTextTone(50)).toBe('var(--aa-primary-text)')
+    expect(usageTextTone(79.9)).toBe('var(--aa-primary-text)')
+    expect(usageTextTone(80)).toBe('var(--aa-warning-text)')
+    expect(usageTextTone(89.9)).toBe('var(--aa-warning-text)')
+    expect(usageTextTone(90)).toBe('var(--aa-danger-text)')
+  })
+
+  it('缺值维持 placeholder（其值已全局修到达标）', () => {
+    expect(usageTextTone(null)).toBe('var(--el-text-color-placeholder)')
+    expect(usageTextTone(undefined)).toBe('var(--el-text-color-placeholder)')
+    expect(usageTextTone(NaN)).toBe('var(--el-text-color-placeholder)')
   })
 })
 

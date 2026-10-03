@@ -8,12 +8,14 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/netip"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/distribution/reference"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
@@ -496,6 +498,41 @@ func (a *sdkAdapter) ImageRepoDigests(ctx context.Context, ref string) ([]string
 	return v.RepoDigests, nil
 }
 
+// RegistryPolicy 读 daemon 的仓库连接策略（契约见 DockerAPI.RegistryPolicy）。
+//
+// 来源是 /info 的 RegistryConfig —— daemon 自己就是这么判「这个仓库安不安全」的
+// （moby 的 registry/config.go：IndexConfigs 的 Secure 标志 + insecure-registries
+// 的网段）。SDK 类型不出 adapter：这里折成最小事实集（网段前缀 + 具名仓库标志）。
+func (a *sdkAdapter) RegistryPolicy(ctx context.Context) (RegistryPolicy, error) {
+	info, err := a.cli.Info(ctx)
+	if err != nil {
+		return RegistryPolicy{}, err
+	}
+	out := RegistryPolicy{IndexSecure: map[string]bool{}}
+	if info.RegistryConfig == nil {
+		// 这份 daemon 没有任何仓库策略可读（老版本或极简实现）：返回空策略 ——
+		// 空策略的含义是「显式说了什么都没有」，不是「拍一个默认值兜底」：
+		// 探测侧据此把一切按 https 处理（RegistryPolicy.IsInsecure 的取向）。
+		return out, nil
+	}
+	for _, cidr := range info.RegistryConfig.InsecureRegistryCIDRs {
+		if cidr == nil {
+			continue
+		}
+		prefix, err := netip.ParsePrefix(cidr.String())
+		if err != nil {
+			continue // 不可解析的网段条目：跳过（它本来也匹配不上任何 host）
+		}
+		out.InsecureCIDRs = append(out.InsecureCIDRs, prefix)
+	}
+	for name, idx := range info.RegistryConfig.IndexConfigs {
+		if idx != nil {
+			out.IndexSecure[name] = idx.Secure
+		}
+	}
+	return out, nil
+}
+
 func (a *sdkAdapter) ImageInspect(ctx context.Context, ref string) (ImageDetail, error) {
 	v, err := a.cli.ImageInspect(ctx, ref)
 	if err != nil {
@@ -867,14 +904,17 @@ func (a *sdkAdapter) ImageLoad(ctx context.Context, path string) error {
 // 响应体流上完成，提前关闭 = 推送半途而废）、进度行经 emit 逐条交出。auth（4c）
 // 与 ImagePull 共用同一凭据面与同一编码器；nil = 无凭据（与 4b 之前 pull 的
 // 自由度一致）。
+//
+// **不带 tag 的 ref 走 daemon 的 all=1**（推该仓库的全部本地 tag）：SDK 在
+// All=false 时会把无 tag 的引用补成 :latest 并把 tag=latest 传给 daemon —— 于是
+// 「推整仓」在现实中退化成「只推 latest」，而这与接口契约（推全部本地 tag）、
+// 与页面把 target 填成仓库名时的预期都不符（本机真机实测：只推 latest，
+// 仓库里其余 tag 一个不动）。all=1 是 daemon 自己的整仓语义（flavor 与 docker CLI
+// 的 push -a 同款），把选择权交回 daemon 侧。
 func (a *sdkAdapter) ImagePush(ctx context.Context, ref string, auth *ImageAuth, emit func(PullProgress)) error {
-	opts := image.PushOptions{}
-	if auth != nil {
-		encoded, err := encodeImageAuth(auth)
-		if err != nil {
-			return err
-		}
-		opts.RegistryAuth = encoded
+	opts, err := pushOptions(ref, auth)
+	if err != nil {
+		return err
 	}
 	rc, err := a.cli.ImagePush(ctx, ref, opts)
 	if err != nil {
@@ -887,6 +927,55 @@ func (a *sdkAdapter) ImagePush(ctx context.Context, ref string, auth *ImageAuth,
 	}
 	// 推送与拉取是 daemon 的**同一个** JSON 进度流（同字段同终态行），消费器共用。
 	return consumePullStream(rc, emit)
+}
+
+// pushOptions 造推送选项：整仓语义（见 pushAllTags）+ 4c 凭据的编码。
+//
+// 抽成独立函数是为了把「all=1 这件决定」放在一个可被单元测试直接钉住的地方
+// （SDK 的 PushOptions 不出 adapter，但它的取值是契约的一部分：不带 tag 的 target
+// 必须走整仓，否则 daemon 只推 :latest）。
+func pushOptions(ref string, auth *ImageAuth) (image.PushOptions, error) {
+	opts := image.PushOptions{All: pushAllTags(ref)}
+	if auth != nil {
+		encoded, err := encodeImageAuth(auth)
+		if err != nil {
+			return image.PushOptions{}, err
+		}
+		opts.RegistryAuth = encoded
+	}
+	return opts, nil
+}
+
+// pushAllTags 报告一个推送引用要不要走 daemon 的 **all=1（整仓）**语义：不带 tag
+// 的仓库引用走它（该仓库的全部本地 tag 逐个推），带 tag 或 digest 形态不走。
+//
+// 为什么由 adapter 定这件事：SDK 在 All=false 时会把无 tag 的引用**补成 :latest**
+// （见 client.ImagePush 的 reference.TagNameOnly）——那是「推一个 tag」而不是
+// 「推整仓」，与接口契约（api.go 的 ImagePush）相悖。判据就是「引用里有没有 tag」
+// 这一个问题，解不开引用的形态交给 SDK 去报错（本函数返回 false，与 SDK 同一步
+// 解析口径一致）。
+func pushAllTags(ref string) bool {
+	named := mustParseNamed(ref)
+	if named == nil {
+		return false
+	}
+	if _, isTagged := named.(reference.Tagged); isTagged {
+		return false
+	}
+	if _, isCanonical := named.(reference.Canonical); isCanonical {
+		return false
+	}
+	return true
+}
+
+// mustParseNamed 解析镜像引用；解不开返回 nil（`isTagged` 判定因此为 false，
+// 与 SDK 的同一步解析口径一致 —— SDK 会先失败，走不到 all 分支）。
+func mustParseNamed(ref string) reference.Named {
+	named, err := reference.ParseNormalizedNamed(ref)
+	if err != nil {
+		return nil
+	}
+	return named
 }
 
 // ImageBuild 构建镜像：**先校验后送出**。校验（scanBuildContext）把穿越 tar、
@@ -1080,9 +1169,8 @@ func tarCanonicalName(name string) string {
 // buildJSONLine 是 daemon 构建输出流的一行（照 pullJSONLine 的取向：最小自定义
 // 结构，JSONMessage 已废弃且字段随版本漂移）。BuildKit 的步骤行走 stream；
 // legacy builder 的 "Step 1/4 : …" 也走 stream；构建期间拉基础镜像的层进度
-// 走 id/status/progressDetail（与 pull 同款）；aux.ID 是最终镜像 id（absorbed
-// 成功的终态项已覆盖「构建完成」这个事实，aux 不产记录 —— 镜像 id 半分钟内
-// 就会出现在镜像清单里）。
+// 走 id/status/progressDetail（与 pull 同款）；aux.ID 是**产物镜像 ID**（两代
+// builder 都在成功收口时发这一行 —— 见 consumeBuildStream）。
 type buildJSONLine struct {
 	ID          string `json:"id,omitempty"`
 	Status      string `json:"status,omitempty"`
@@ -1091,6 +1179,29 @@ type buildJSONLine struct {
 		Message string `json:"message,omitempty"`
 	} `json:"errorDetail,omitempty"`
 	Error string `json:"error,omitempty"`
+	// Aux 是 daemon 的旁路记录（aux 键）：本域只用它的 ID 字段（产物镜像 ID）。
+	// **RawMessage 而不是定型结构**：同一个键在 BuildKit 下还会装字符串形态的
+	// 进度记录（moby.buildkit.trace 的 base64 protobuf）—— 用定型结构解析会让
+	// 整个流在那一行上崩掉（实测：BuildKit 的每一条进度行都是这种形态）。
+	Aux json.RawMessage `json:"aux,omitempty"`
+}
+
+// auxImageID 从 aux 记录里取产物镜像 ID（`{"ID":"sha256:…"}` 形态）。
+//
+// 取不出来就返回空串：BuildKit 的 moby.buildkit.trace 行是同一键上的 base64
+// 字符串（本域刻意不解析 protobuf），对判据而言它什么也没说 —— 跳过，
+// 而不是把整行当错误。
+func auxImageID(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var v struct {
+		ID string `json:"ID"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return ""
+	}
+	return v.ID
 }
 
 // consumeBuildStream 把构建输出的 JSON 流逐行折成 BuildProgress 交给 emit
@@ -1133,10 +1244,22 @@ func consumeBuildStream(r io.Reader, emit func(BuildProgress)) error {
 			emit(BuildProgress{Stream: stream})
 			continue
 		}
+		if id := auxImageID(line.Aux); id != "" {
+			// aux 行 = **产物镜像 ID**（两代 builder 同形：legacy 的
+			// `{"aux":{"ID":"sha256:…"}}`、BuildKit 的
+			// `{"id":"moby.image.id","aux":{"ID":"sha256:…"}}`；都在构建成功收口
+			// 时才发，见 api.go 的 BuildProgress.ImageID）。它不产进度记录
+			//（帧面刻意不承载镜像 ID —— 镜像 id 半分钟内就会出现在镜像清单里），
+			// 但它是构建结算的判据，必须原样交给执行器。
+			emit(BuildProgress{ImageID: id})
+			continue
+		}
 		if line.ID != "" || line.Status != "" {
 			emit(BuildProgress{ID: line.ID, Status: line.Status})
 		}
-		// aux（最终镜像 id）：不产记录（终态项已说「构建完成」，镜像 id 进清单）。
+		// 走到这里 = 没有 stream / aux / 错误的其它行（例如 BuildKit 的
+		// moby.buildkit.trace：进度编码在 aux 的 base64 protobuf 里，本域刻意
+		// 不解析）—— 不产记录，也不该在这里报警。
 	}
 }
 
@@ -1292,6 +1415,84 @@ func (a *sdkAdapter) Events(ctx context.Context) (<-chan EventItem, io.Closer, e
 		}
 	}()
 	return ch, cancelCloser{cancel}, nil
+}
+
+// eventReplayQuiet 是 tag 事件回放的**静默判完**时长：窗口内的回放是一串连续
+// 消息，之后 daemon 会沉默到 until 到点才关流 —— 静默这么久即认为回放完毕
+// （见 ImageTagEvents 的说明：本机/局域网 daemon 的回放都在毫秒级完成）。
+const eventReplayQuiet = 500 * time.Millisecond
+
+// imageTagEventFilter 是 tag 事件回放的 daemon 侧过滤：只要 image 资源的 tag 动作。
+// 过滤放在 daemon 侧（与 eventsTypeFilter 同一取向）：回放窗口里绝大多数事件与
+// 判据无关，收下来再丢是白占带宽。
+var imageTagEventFilter = filters.NewArgs(
+	filters.Arg("type", agentproto.DockerEventTypeImage),
+	filters.Arg("event", "tag"),
+)
+
+// ImageTagEvents 回放窗口内的镜像 tag 事件（契约见 DockerAPI.ImageTagEvents）。
+//
+// 形态：/events 带 since/until（daemon 按自己的事件日志裁剪），读到**回放完毕**
+// 即结束 —— 一次调用拿全窗口，不需要提前订阅。三点实现口径：
+//   - since/until 走 eventStamp（RFC3339Nano：SDK 只认这一族形态）；
+//   - until 带着容忍时钟差的松弛（可能落在几秒之后），而 daemon 要到 until 到点才
+//     关流 —— 傻等会让异常收尾的结算白白多挂几秒（单 worker 串行，下一条指令也
+//     跟着等）。窗口是**过去**，daemon 会立刻回放窗口内全部事件，之后沉默；
+//     沉默 eventReplayQuiet 即认为回放完毕（真沉默下去只是判据开不了口 ——
+//     保守方向，不会给别的证据添乱）；
+//   - 结束条件是消息通道关闭或回放静默；错误通道只在**建立失败或流中途出错**时
+//     给错，且这里的错误要**上抛**（调用方据此判定证据开不了口，不能与「窗口里
+//     没有事件」混为一谈）。
+func (a *sdkAdapter) ImageTagEvents(ctx context.Context, since, until time.Time) ([]EventItem, error) {
+	msgCh, errCh := a.cli.Events(ctx, events.ListOptions{
+		Since:   eventStamp(since),
+		Until:   eventStamp(until),
+		Filters: imageTagEventFilter,
+	})
+	var out []EventItem
+	quiet := time.NewTimer(eventReplayQuiet)
+	defer quiet.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case msg, ok := <-msgCh:
+			if !ok {
+				return out, nil
+			}
+			out = append(out, toEventItem(msg))
+			// 每条消息重置静默计时（回放是一串连续消息，不是单条）。
+			if !quiet.Stop() {
+				select {
+				case <-quiet.C:
+				default:
+				}
+			}
+			quiet.Reset(eventReplayQuiet)
+		case err, ok := <-errCh:
+			if !ok || err == nil || errors.Is(err, io.EOF) {
+				// 正常收口。**io.EOF 也走错误通道**：SDK 的 Events 把「流读完」
+				// 当解码错误发过来（client.Events 的 decode 失败分支不区分
+				// EOF 与真错）—— 不认它的话，「until 已到点、daemon 关流」这
+				// 一条正常路径会被误报成证据不可用（真机实测踩到）。
+				return out, nil
+			}
+			return nil, err
+		case <-quiet.C:
+			// 回放完毕（见上：daemon 要等 until 到点才关流）。
+			return out, nil
+		}
+	}
+}
+
+// eventStamp 把时刻折成 daemon 认得的时间戳形态。
+//
+// **RFC3339Nano（UTC）而不是 unix 秒**：SDK 的 events 选项在发出前会过一遍
+// `timetypes.GetTimestamp`（它接受 RFC3339、纯 unix 秒整数或时长串）——「秒.纳秒」
+// 这种复合形态会被它**判错并让整个订阅失败**（本机真机实测踩到：探测整场开不了口、
+// 判据静默失效）。UTC 是让两台机器的字符串比对不受本地时区影响。
+func eventStamp(t time.Time) string {
+	return t.UTC().Format(time.RFC3339Nano)
 }
 
 // toEventItem 把 SDK 事件折成本域记录：主体名取 Actor.Attributes["name"]

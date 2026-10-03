@@ -133,10 +133,17 @@ async function clickRowButton(w: VueWrapper, registry: string, label: string) {
   await flush()
 }
 
-/** 表单输入：按 placeholder 定位（原生 input 的 setValue，与 pull-dialog 同款）。 */
+/**
+ * 表单输入：按 placeholder 定位（原生 input 的 setValue，与 pull-dialog 同款）。
+ *
+ * 等输入框**真的渲染出来**再填：开弹窗是一串异步（点入口 → 开窗状态 → 渲染），
+ * 拿固定轮数的 flush 去兜在负载下会漂（images-write 实测过「输入框还没进 DOM」的红）；
+ * 判据换成「元素存在」这个事实。
+ */
 async function fill(w: VueWrapper, placeholder: string, value: string) {
-  const el = w.find(`input[placeholder="${placeholder}"]`)
-  expect(el.exists(), `输入框「${placeholder}」应已渲染`).toBe(true)
+  const selector = `input[placeholder="${placeholder}"]`
+  await vi.waitUntil(() => w.find(selector).exists(), { timeout: 5000 })
+  const el = w.find(selector)
   await el.setValue(value)
   await flush()
   return el

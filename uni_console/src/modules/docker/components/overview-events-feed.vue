@@ -29,7 +29,10 @@
       <ul v-if="rows.length" class="dov-feed__list">
         <li v-for="r in rows" :key="r.item.seq" class="dov-feed__row">
           <ArtSvgIcon :icon="r.icon" class="dov-feed__type" :class="`is-${r.tone}`" />
-          <span class="dov-feed__action">{{ r.action }}</span>
+          <!-- action 显示中文化文案（映射表覆盖协议全词表，见 utils/events）；
+               原始短语进 title —— daemon 原文是事实不是解释（排障引用得靠它，
+               命令后缀 / 检查结果这类数据只此一份），悬停可取，不占版面。 -->
+          <span class="dov-feed__action" :title="r.rawAction">{{ r.action }}</span>
           <span class="dov-feed__actor dov-mono" :title="r.actor">{{ r.actor }}</span>
           <span class="dov-feed__host" :title="`主机 ${r.host}`">{{ r.host }}</span>
           <!-- 相对时间随 1 秒心跳走；悬停给绝对时刻（title，最小侵入 —— 不加列）。
@@ -124,7 +127,10 @@
     item: DockerEventItem
     icon: string
     tone: string
+    /** 中文化后的动作文案（映射覆盖协议全词表，含 health_status 后缀结论）。 */
     action: string
+    /** daemon 原始 action 短语（含 ": " 后缀原文）—— 悬停 title 的引用钥匙。 */
+    rawAction: string
     actor: string
     host: string
     /** 相对时间的秒值（条目 t 是毫秒戳，这里除千 —— 曾按秒直减，「多久之前」恒「刚刚」）。 */
@@ -140,6 +146,7 @@
         icon: meta.icon,
         tone: meta.tone,
         action: eventActionText(e.action),
+        rawAction: e.action,
         // 名字优先，其次短 id（sha256 前缀剥掉，容器 id 与镜像摘要同一形态）
         actor: e.actorName || e.actorId.replace(/^sha256:/, '').slice(0, 12) || '—',
         host: e.hostname || `主机 ${e.hostId}`,
@@ -365,10 +372,6 @@
   /* 令牌数值复制自 monitor-tokens（经本模块 views/overview-tokens，见其文件头注释） */
   @use '../views/overview-tokens' as t;
   @use '@styles/core/breakpoints.scss' as *;
-
-  // 「重试」等默认档按钮的主色文字对比度 AA：病灶与处方见 overview-tokens
-  // 的 primary-text-aa（终审 QA D2·浅色实测 3.68:1）。
-  @include t.primary-text-aa;
 
   @include t.pulse-keyframes;
 

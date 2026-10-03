@@ -289,12 +289,13 @@ describe('分类控件矩阵：action 字面量全在白名单内', () => {
     expect(containersSrc).toContain('PermDockerList')
     const overviewSrc = readFileSync(join(ROOT, 'views/overview.vue'), 'utf8')
     expect(overviewSrc).toContain("'/docker/tasks'")
-    // 页面层：列表读 GET /docker/tasks、可见期间 5 秒轮询、拉取进度内联复用进度组件
-    //（被删 task-center-drawer 的三块内容原样平移）。
+    // 页面层：列表读 GET /docker/tasks、可见期间 5 秒轮询、进度三族的内联观看复用
+    // 同一个进度组件（被删 task-center-drawer 的三块内容原样平移；观看与执行解耦后
+    // 展开区还承载「取消」这个独立动作 —— 组件名随之从 pull 专用改为族通用）。
     const tasksSrc = readFileSync(join(ROOT, 'views/tasks.vue'), 'utf8')
     expect(tasksSrc).toContain('fetchDockerTasks')
     expect(tasksSrc).toContain('POLL_MS = 5000')
-    expect(tasksSrc).toContain('TaskPullProgress')
+    expect(tasksSrc).toContain('TaskProgress')
   })
 
   it('P2 分发面已接线：构建入口在镜像 tab 底栏（manage 门控），推送入口在镜像详情页头（manage 门控、预填镜像）', () => {

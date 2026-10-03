@@ -1217,6 +1217,9 @@ declare namespace Api {
 
     interface DockerTaskListResp {
       items: Api.Docker.DockerTaskItem[]
+      total: number
+      page: number
+      pageSize: number
     }
 
     interface DockerStatsHistoryResp {

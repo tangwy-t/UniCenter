@@ -155,7 +155,14 @@ $popup-menu-radius: 6px;
   // ---------------------- Design theme menu ----------------------
   .el-menu-design {
     @include theme-menu-base;
-    @include menu-active(var(--theme-color), var(--el-color-primary-light-9));
+    // 选中项文字与图标走主色文字 AA 层（QA №9）：主色原值对 light-9 选中底
+    // 3.27:1，token 后 5.37:1（数值见 @styles/core/aa-text.scss）。暗色菜单
+    // （下一段 #fff/#27282d）对深底本就达标，不动。
+    @include menu-active(
+      var(--aa-primary-text),
+      var(--el-color-primary-light-9),
+      var(--aa-primary-text)
+    );
     @include menu-hover($hover-bg-color);
 
     .el-sub-menu__icon-arrow {

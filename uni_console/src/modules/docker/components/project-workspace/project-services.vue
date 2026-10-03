@@ -223,7 +223,9 @@
     targets: DockerContainerItem[]
   ) {
     const gate = serviceGate(svc)
-    if (!gate.allowed) return
+    if (!gate.allowed) {
+      return
+    }
     if (gate.needForce) {
       svcConfirm.value = {
         visible: true,
@@ -401,10 +403,6 @@
 <style lang="scss" scoped>
   @use '@styles/core/breakpoints.scss' as *;
   @use '../../views/overview-tokens' as t;
-
-  // 「停止 / 启动 / 重启」等默认档按钮的主色文字对比度 AA：病灶与处方见
-  // overview-tokens 的 primary-text-aa（终审 QA D2·浅色实测 3.68:1）。
-  @include t.primary-text-aa;
 
   // 卡片网格：一列起步（手机横屏），tablet（768）起两列，wide（1440）起三列 —— 卡片是同质单元，
   // 栅格随宽度扩张；容器行多的卡不会被拉伸成不等高（align-items 起点对齐）。

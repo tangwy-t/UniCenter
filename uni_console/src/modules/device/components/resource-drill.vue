@@ -280,7 +280,8 @@
       border: 0;
 
       &:hover:not(:disabled) {
-        color: var(--el-color-primary);
+        // 主色文字对比度 AA（QA №9）：hover 档 token，见 @styles/core/aa-text.scss。
+        color: var(--aa-primary-text-hover);
       }
 
       &:disabled {
@@ -315,7 +316,8 @@
       border: 0;
 
       &:hover {
-        color: var(--el-color-primary);
+        // 主色文字对比度 AA（QA №9）：hover 档 token，见 @styles/core/aa-text.scss。
+        color: var(--aa-primary-text-hover);
       }
     }
 
@@ -356,7 +358,8 @@
       /* 选中态用主色左边条 + 浅底：比纯换色更能标出「当前项」 */
       &.is-active {
         font-weight: 600;
-        color: var(--el-color-primary);
+        // 主色文字对比度 AA（QA №9）：token 与数字见 @styles/core/aa-text.scss。
+        color: var(--aa-primary-text);
         background: var(--el-color-primary-light-9);
         box-shadow: inset 2px 0 0 var(--el-color-primary);
       }

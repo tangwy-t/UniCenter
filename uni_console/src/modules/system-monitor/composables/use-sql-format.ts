@@ -6,6 +6,9 @@
  *
  * 配色函数返回的是**字面色值**而非 CSS 变量:视图侧需要把它们
  * 拼进 style(如 `${color}14` 做浅底),CSS 变量无法参与字符串拼接。
+ * 例外是 durTextTone:时长**文字**的对比度 AA 收口(走 token 层的
+ * var(--aa-*-text)),它不做字符串拼接、只喂 color,故返回 token 引用;
+ * durTone 的字面色值继续服务条形填充(非文本,不进文字族)。
  */
 
 /** 未知 / 不适用时的中性灰(与视图中性色保持一致)。 */
@@ -55,6 +58,28 @@ export function durTone(ms: number, thr: number): string {
   if (ms < thr / 3) return '#10b981'
   if (ms < thr) return '#f59e0b'
   return '#dc2626'
+}
+
+/**
+ * 时长数值**文字**的档位色,与 durTone 同一分档,但返回 AA token 引用
+ * (语义色文字族收口,数字与理由见 @styles/core/aa-text.scss 文件头):
+ *   - 绿 #10b981 对白底原仅 2.54:1、琥珀 #f59e0b 2.15:1、红 #dc2626 在
+ *     暗色下 3.74:1 —— 全部过不了 4.5:1 门槛;
+ *   - 换 token 后(浅色白底/灰底、暗色暗卡均含在内):成功 5.07–5.41、
+ *     警告 5.21–5.55、危险 5.15–5.81、暗色 7.75+。
+ * 中性灰(阈值非法时的占位档)由 #94a3b8(白底 2.56:1)改走 regular 文字色
+ * (白底 6.11:1,暗色随主题自适应)。durTone 的字面色值保留给条形填充与
+ * 进度条(非文本族,维持既有裁定),二者共用同一分档逻辑(durTone 为唯一源)。
+ */
+const DUR_TEXT_TONE: Record<string, string> = {
+  '#10b981': 'var(--aa-success-text)',
+  '#f59e0b': 'var(--aa-warning-text)',
+  '#dc2626': 'var(--aa-danger-text)',
+  '#94a3b8': 'var(--el-text-color-regular)'
+}
+
+export function durTextTone(ms: number, thr: number): string {
+  return DUR_TEXT_TONE[durTone(ms, thr)] ?? 'var(--el-text-color-regular)'
 }
 
 /**

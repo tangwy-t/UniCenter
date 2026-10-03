@@ -736,11 +736,6 @@
   // 的 danger-plain-aa（浅色 QA 实测 2.87:1）。
   @include t.danger-plain-aa;
 
-  // hero 的普通动作（打标签/导出/推送）与「重试」等默认档按钮主色蓝字：
-  // 对比度 AA 的病灶与处方见 overview-tokens 的 primary-text-aa
-  //（终审 QA D2·浅色实测 3.68:1）。
-  @include t.primary-text-aa;
-
   /* 次要文字对比度 AA（终审 QA D2 同源盘点 · 六页批漏网页补齐）：EP 默认
      --el-text-color-secondary(#909399) 对白底只有 3.08:1，低于 AA 正文线 —— 本页
      hero 短 id、元信息标签、镜像摘要等 12–14px 次要文字全吃它。页面范围内升到

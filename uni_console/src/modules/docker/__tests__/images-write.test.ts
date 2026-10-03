@@ -170,7 +170,10 @@ async function selectFirstImage(w: VueWrapper) {
   await flush()
 }
 
-/** 底栏操作按钮（按文字找）。 */
+/** 底栏操作按钮（按文字找）。
+ *  点击若「按钮明明可点却什么都没发生」，两类成因：ElButton 在 disabled/loading 时
+ *  吞 click（活性判据见下），或宿主墙钟回拨踩中 Vue 的事件时间戳守卫（合成事件被静默
+ *  丢弃 —— 已由 src/test/setup.ts 全局豁免，成因与证据见那里）。 */
 async function clickBar(w: VueWrapper, label: string) {
   const btn = w.findAll('button').find((b) => (b.text() ?? '').includes(label))
   expect(btn, `找不到底栏按钮「${label}」`).toBeTruthy()
@@ -184,6 +187,24 @@ function confirmOf(w: VueWrapper) {
   const confirm = w.findComponent({ name: 'DockerActionConfirm' })
   expect(confirm.exists(), '确认弹窗未挂载').toBe(true)
   return confirm
+}
+
+/**
+ * 弹窗里的输入框：等它**真的渲染出来**再返回。
+ *
+ * 为什么不是「拿到就 setValue/exists 断言」：开窗是一串异步（点底栏 → 页面开窗状态
+ * → 弹窗 props → 内容区渲染），拿固定轮数的 flush 去兜在负载下会漂（全量首跑实测过
+ * 「输入框还没进 DOM」的红）；判据换成**元素存在**这个事实。
+ */
+async function dialogInputOf(w: VueWrapper, placeholder: string) {
+  const selector = `input[placeholder="${placeholder}"]`
+  await vi.waitUntil(() => w.find(selector).exists(), { timeout: 5000 })
+  return w.find(selector)
+}
+
+/** 等弹窗**关闭**这件事落地（提交 → 指令 → 轮询 → 关窗是一串异步；同样不数轮数）。 */
+async function waitClosed(confirm: ReturnType<typeof confirmOf>) {
+  await vi.waitUntil(() => confirm.props('modelValue') === false, { timeout: 5000 })
 }
 
 function submitBtn(confirm: ReturnType<typeof confirmOf>, label: string) {
@@ -218,11 +239,14 @@ describe('打标签：输入档收集新引用（校验挡提交）', () => {
     await clickBar(w, '打标签…')
 
     const confirm = confirmOf(w)
+    // 等「弹窗已打开」这个**事实**：点击 → 选中态 → 开窗状态 → 父组件渲染 → 子组件
+    // props，是一串异步；判据用 props 本身（不数 flush 轮数 —— 负载下轮数会漂）。
+    await vi.waitUntil(() => confirm.props('modelValue') === true, { timeout: 5000 })
     expect(confirm.props('modelValue')).toBe(true)
     expect(confirm.props('action')).toBe('image:tag')
     // 输入档形态：标签是「新的镜像引用」，无逐字期望（不发 confirm 值）。
     expect(confirm.find('.ac-input__label').text()).toBe('新的镜像引用')
-    const input = confirm.find('input[placeholder="例如 仓库/名称:标签"]')
+    const input = await dialogInputOf(w, '例如 仓库/名称:标签')
     expect(input.exists()).toBe(true)
 
     // 空串：主按钮禁用（不发指令）。
@@ -254,12 +278,13 @@ describe('打标签：输入档收集新引用（校验挡提交）', () => {
     await clickBar(w, '打标签…')
 
     const confirm = confirmOf(w)
-    await confirm.find('input[placeholder="例如 仓库/名称:标签"]').setValue('nginx:v2')
+    await (await dialogInputOf(w, '例如 仓库/名称:标签')).setValue('nginx:v2')
     const cancel = confirm.findAll('button').find((b) => (b.text() ?? '').includes('取消'))
     await cancel!.trigger('click')
     await flush()
 
     expect(api.sendDockerCmd).not.toHaveBeenCalled()
+    await waitClosed(confirm)
     expect(confirm.props('modelValue')).toBe(false)
   })
 })
@@ -276,7 +301,7 @@ describe('载入镜像：输入档收集文件名（必填，格式不前端拦�
     // 原 prompt 的正文口径搬进 hint：讲清文件须已放在 agent 下载目录。
     expect(confirm.find('.ac-input__hint').text()).toContain('文件需已放在该主机的 agent 下载目录')
 
-    const input = confirm.find('input[placeholder="例如 镜像名.tar"]')
+    const input = await dialogInputOf(w, '例如 镜像名.tar')
     expect(isDisabled(submitBtn(confirm, '载入镜像'))).toBe(true)
     // 沿用原 prompt 口径：任意非空文件名放行（格式由服务端兜）。
     await input.setValue('my backup.tar.gz')
@@ -311,7 +336,7 @@ describe('导出 tar：alreadyExists 两段式（同一只弹窗内切档）', (
     expect(confirm.find('.ac-input__label').text()).toBe('文件名')
     expect(confirm.find('.ac-input__hint').text()).toContain('产物落在该主机的 agent 下载目录')
 
-    const input = confirm.find('input[placeholder="例如 镜像名.tar"]')
+    const input = await dialogInputOf(w, '例如 镜像名.tar')
     expect(isDisabled(submitBtn(confirm, '导出'))).toBe(true)
     await input.setValue('mysql.tar')
     await submitBtn(confirm, '导出').trigger('click')
@@ -331,15 +356,15 @@ describe('导出 tar：alreadyExists 两段式（同一只弹窗内切档）', (
     // 逐字档的 placeholder 来自形态推导（「例如 backup.tar」），与输入档的说明文字不同档。
     expect(confirm.props('modelValue')).toBe(true)
     expect(confirm.find('.ac-input__label').text()).toBe('输入文件名以确认')
-    expect(
-      (confirm.find('input[placeholder="例如 backup.tar"]').element as HTMLInputElement).value
-    ).toBe('')
+    // 第二段的输入框是**另一个节点**（形态切换后重渲染）：等它渲染出来再读值。
+    const literalInput = await dialogInputOf(w, '例如 backup.tar')
+    expect((literalInput.element as HTMLInputElement).value).toBe('')
     expect(isDisabled(submitBtn(confirm, '覆盖导出'))).toBe(true)
 
     // 照抄不一致不通过；一致才放行。
-    await confirm.find('input[placeholder="例如 backup.tar"]').setValue('mysql')
+    await literalInput.setValue('mysql')
     expect(isDisabled(submitBtn(confirm, '覆盖导出'))).toBe(true)
-    await confirm.find('input[placeholder="例如 backup.tar"]').setValue('mysql.tar')
+    await literalInput.setValue('mysql.tar')
     expect(isDisabled(submitBtn(confirm, '覆盖导出'))).toBe(false)
 
     await submitBtn(confirm, '覆盖导出').trigger('click')
@@ -354,6 +379,7 @@ describe('导出 tar：alreadyExists 两段式（同一只弹窗内切档）', (
       confirm: 'mysql.tar'
     })
     // 成功后弹窗关闭。
+    await waitClosed(confirm)
     expect(confirm.props('modelValue')).toBe(false)
   })
 
@@ -363,12 +389,13 @@ describe('导出 tar：alreadyExists 两段式（同一只弹窗内切档）', (
     await clickBar(w, '导出 tar…')
 
     const confirm = confirmOf(w)
-    await confirm.find('input[placeholder="例如 镜像名.tar"]').setValue('mysql.tar')
+    await (await dialogInputOf(w, '例如 镜像名.tar')).setValue('mysql.tar')
     await submitBtn(confirm, '导出').trigger('click')
     await flush()
 
     expect(api.sendDockerCmd).toHaveBeenCalledTimes(1)
     // 关闭判定只看 modelValue（关闭过渡播放期间内容节点还在 DOM 里，不能拿它当凭据）。
+    await waitClosed(confirm)
     expect(confirm.props('modelValue')).toBe(false)
   })
 
@@ -382,11 +409,12 @@ describe('导出 tar：alreadyExists 两段式（同一只弹窗内切档）', (
     await clickBar(w, '导出 tar…')
 
     const confirm = confirmOf(w)
-    await confirm.find('input[placeholder="例如 镜像名.tar"]').setValue('mysql.tar')
+    await (await dialogInputOf(w, '例如 镜像名.tar')).setValue('mysql.tar')
     await submitBtn(confirm, '导出').trigger('click')
     await flush()
 
     expect(api.sendDockerCmd).toHaveBeenCalledTimes(1)
+    await waitClosed(confirm)
     expect(confirm.props('modelValue')).toBe(false)
   })
 })

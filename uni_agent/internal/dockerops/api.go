@@ -11,6 +11,10 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
+	"net/netip"
+	"strings"
+	"time"
 )
 
 // ── 本域数据类型（**不是** SDK 类型的别名）──────────────────────────────
@@ -240,6 +244,14 @@ type BuildProgress struct {
 	ID     string
 	Status string
 	Stream string
+	// ImageID 是本场构建**产物**的镜像 ID —— 只有 daemon 的 aux 行会带上它
+	// （legacy builder 的 `{"aux":{"ID":"sha256:…"}}` 与 BuildKit 的
+	// `{"id":"moby.image.id","aux":{"ID":"sha256:…"}}` 同形；两者都在构建成功
+	// 收口时才发）。它不是进度行（帧面刻意不承载它，见 adapter 的 consumeBuildStream），
+	// 而是**完成证据**：结算拿它和「目标 tag 现在指向谁」对照 —— 两者一致即证明
+	// tag 落到了本场产物上（全缓存命中时镜像 ID 不变，只有这条对照能开口，
+	// 见 build_push.go 的构建结算）。
+	ImageID string
 }
 
 // ContainerDetail 是容器 inspect 的结果。
@@ -307,6 +319,71 @@ type ImageAuth struct {
 	Password string
 }
 
+// RegistryPolicy 是 daemon 侧的**仓库连接策略**（探测面用的最小事实集）。
+//
+// 为什么探测要用 daemon 的策略而不是自己拍一个：推送这条路上与 registry 建立连接
+// 的是 daemon（自签证书、insecure-registries、镜像加速都由它的配置决定），agent
+// 侧的探测若用另一套信任规则，就会出现「daemon 推得动、探不动的自签仓库」或
+// 「探测只认 https、而 daemon 走明文」这类口径分裂 —— 探测必须**与推送同一套信任**，
+// 多一分少一分都是错的。两件事足够回答「这个仓库在 daemon 眼里安不安全」：
+type RegistryPolicy struct {
+	// InsecureCIDRs 是 daemon 的 insecure-registries 网段（解析好的前缀）。
+	InsecureCIDRs []netip.Prefix
+	// IndexSecure 是具名仓库的 Secure 标志（键 = daemon 配置里的仓库名，
+	// 如 docker.io / 无端口的 insecure 仓库名）。
+	IndexSecure map[string]bool
+}
+
+// IsInsecure 报告 host（不含协议的仓库地址，可带端口）在 daemon 眼里是不是
+// **不安全**的 —— 也就是 daemon 会明文 HTTP 直连的那种。
+//
+// 判定与 daemon 自己的 isSecureIndex/buildIndexConfigs 同序（moby 的
+// registry/config.go）：
+//  1. 具名条目优先（IndexSecure 里有 → 用它的 Secure 标志取反）；
+//  2. 其余按网段判：host 是 IP 字面量就直接比，是域名就解析后比 —— 解析这一步
+//     正是 **localhost 特例**的来源（"localhost" 解析到 127.0.0.1，落在默认的
+//     127.0.0.0/8 里，于是与 127.0.0.1:5000 这类回环仓库同档，走明文）。
+//
+// 解析不了（DNS 故障）时按安全处理（https）：宁可探不动（判据开不了口），
+// 也不把明文当成自签仓库的兜底。
+func (p RegistryPolicy) IsInsecure(host string) bool {
+	name := host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		name = h
+	}
+	name = strings.Trim(name, "[]")
+	if secure, ok := p.IndexSecure[name]; ok {
+		return !secure
+	}
+	if ip, err := netip.ParseAddr(name); err == nil {
+		return hostInPrefixes(p.InsecureCIDRs, ip)
+	}
+	// 域名：解析成一组地址再判（daemon 侧的 isCIDRMatch 同款口径 —— 任意一个
+	// 解析结果落在网段内即视为不安全）。带超时：结算路径不能被一次卡死的 DNS 拖住。
+	ctx, cancel := context.WithTimeout(context.Background(), registryLookupTimeout)
+	defer cancel()
+	addrs, err := net.DefaultResolver.LookupNetIP(ctx, "ip", name)
+	if err != nil {
+		return false
+	}
+	for _, ip := range addrs {
+		if hostInPrefixes(p.InsecureCIDRs, ip.Unmap()) {
+			return true
+		}
+	}
+	return false
+}
+
+// hostInPrefixes 报告 ip 是否落在任一前缀内。
+func hostInPrefixes(prefixes []netip.Prefix, ip netip.Addr) bool {
+	for _, p := range prefixes {
+		if p.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 // DockerAPI 是本包需要的 Docker 能力面。
 //
 // 全部方法返回的错误都可以上抛给调用方折成结果；**例外是 Ping**：它的错误必须是
@@ -356,6 +433,33 @@ type DockerAPI interface {
 	// 恒不开火，完成结算由收尾行那半承担。恒不开火是**保守方向**：判不出就不判，
 	// 绝不误判完成（误报成功的代价比漏救大）。
 	ImageRepoDigests(ctx context.Context, ref string) ([]string, error)
+	// RegistryPolicy 读 daemon 的仓库连接策略（insecure-registries 与具名仓库的
+	// Secure 标志）—— 推送完成判据的**证据三**（registry 侧探测）拿它与 daemon
+	// 同一套信任规则（见 RegistryPolicy 的说明）。
+	//
+	// 契约与 ComposeVersion 同款：（进程内不缓存）每次现读 —— 策略可能在运行期
+	// 被运维改（daemon.json + reload），缓存会让判据与推送用到两套信任。读不到
+	// （daemon 抖动）返回错误：探测面据此**整体失效**（判据开不了口，保守方向），
+	// 绝不用拍脑袋的默认策略兜底。
+	RegistryPolicy(ctx context.Context) (RegistryPolicy, error)
+	// ImageTagEvents 回放 [since, until] 窗口内的**镜像 tag 事件**（结算用）。
+	//
+	// 为什么需要它（构建完成判据的最后一环）：镜像被（重新）打上某个 tag 时，
+	// daemon 会记一条 type=image / action=tag 的事件，事件里带 tag 名与被指向的
+	// 镜像 ID —— 这是「这个 tag 在这个窗口里被写过」的独立事实。构建**全缓存
+	// 命中**时产物 ID 不变（本机引用没有位移），若 daemon 的收尾行又随被中断的
+	// 连接丢了，只剩这条事件能证明「tag 落地这一步真跑过」（实测：legacy 与
+	// BuildKit 两代 builder、classic 与 containerd 两种存储，缓存命中的重打
+	// tag 都会发这条事件）。
+	//
+	// 为什么是**回放**而不是订阅：结算发生在异常收尾的那一刻，订阅必须提前建立
+	// 且会为每场构建多挂一条长连接；回放由 daemon 的事件日志（内存环形缓冲）在
+	// daemon 侧按窗口裁剪，一次调用、读到 EOF 即结束。缓冲里没有（事件太密或
+	// 太老）时返回空列表 —— 判据开不了口，不影响别的证据。
+	//
+	// 返回的记录与 Events 同一本域形态（ActorName = tag 名、ActorID = 被指向的
+	// 镜像 ID）；实现已按 type=image / action=tag 在 daemon 侧过滤。
+	ImageTagEvents(ctx context.Context, since, until time.Time) ([]EventItem, error)
 	// ComposeVersion 探测 compose 形态与版本（单一 flavor 纪律：只在进程内第一次调用时真正执行）。
 	ComposeVersion(ctx context.Context) (flavor, version string, err error)
 
@@ -405,6 +509,11 @@ type DockerAPI interface {
 	// 与 4b 之前的拉取自由度一致 —— 公共仓库或宿主侧 docker login）。推送期间
 	// daemon 的进度行（与 pull **同一个** JSON 流形态）经 emit 逐条交出；
 	// 返回**推送结束**的最终错误。
+	//
+	// **不带 tag 的 target = 推该仓库的全部本地 tag**（每个 tag 各发一条
+	// "<tag>: digest: …" 收尾行）：这是 docker CLI `push -a` 的语义，也是本方法
+	// 的契约 —— 实现要向 daemon 传 all=1 才是这个语义（SDK 默认会把无 tag 的引用
+	// 补成 :latest 只推一个，见 adapter.ImagePush 的说明）。
 	ImagePush(ctx context.Context, ref string, auth *ImageAuth, emit func(PullProgress)) error
 	ImageTag(ctx context.Context, src, dst string) error
 	// ImageSave 把镜像写成 tar；path 由调用方按 transferDir 拼好。

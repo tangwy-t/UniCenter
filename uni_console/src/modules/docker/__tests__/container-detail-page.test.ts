@@ -175,6 +175,26 @@ async function flushStream(rounds = 4) {
   }
 }
 
+/**
+ * 等路由 query 落定（tab/host 的写回是一次**异步导航**：watch → router.replace）。
+ * 判据用「路由事实」而不是「过了几轮宏任务」—— 导航管线里若有别的导航在飞，
+ * 轮数会随负载漂；等事实则不漂。
+ */
+async function waitQuery(key: string, value: string | undefined) {
+  await vi.waitUntil(
+    () => {
+      const raw = currentRouter!.currentRoute.value.query[key]
+      return value === undefined ? raw === undefined : String(raw) === value
+    },
+    { timeout: 5000 }
+  )
+}
+
+/** 等路由 path 落定（同上：判据 = 事实）。 */
+async function waitPath(path: string) {
+  await vi.waitUntil(() => currentRouter!.currentRoute.value.path === path, { timeout: 5000 })
+}
+
 /** Art* 全局组件替身：保留 slot（真组件靠 unplugin 注册，测试环境里没有）。 */
 const passthrough = (name: string) =>
   defineComponent({
@@ -358,9 +378,11 @@ describe('深链形态：?tab= 落位与权限回退', () => {
   it('Tab 切换写进 URL（刷新/分享回到同一屏）', async () => {
     const w = await mountPage()
     await switchTab(w, 'env')
+    await waitQuery('tab', 'env')
     expect(currentRouter!.currentRoute.value.query.tab).toBe('env')
     // 回到默认屏时不留 tab（URL 只说与默认不同的那部分）。
     await switchTab(w, 'overview')
+    await waitQuery('tab', undefined)
     expect(currentRouter!.currentRoute.value.query.tab).toBeUndefined()
   })
 })
@@ -699,6 +721,7 @@ describe('写指令成功后的状态重读（QA 修正：页面不能带着旧�
     await clickPageButton(w, '删除…')
     await clickDialogButton(w, '删除')
     await flushStream(2)
+    await waitPath('/docker/containers')
     expect(currentRouter!.currentRoute.value.path).toBe('/docker/containers')
     expect(currentRouter!.currentRoute.value.query.host).toBe('h2')
   })
@@ -761,6 +784,7 @@ describe('主机跟随：query host 落定/切换 → 重读 + 断流', () => {
   it('query 里没有 host 时落到第一台并写回 query（模块主机上下文约定）', async () => {
     await mountPage({})
     await flushStream(2)
+    await waitQuery('host', 'h1')
     expect(currentRouter!.currentRoute.value.query.host).toBe('h1')
     expect(api.sendDockerCmd).toHaveBeenCalledWith(
       'h1',

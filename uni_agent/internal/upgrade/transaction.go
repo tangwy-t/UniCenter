@@ -65,10 +65,6 @@ func CheckOnStartup(deps Deps) (restart bool, err error) {
 	if log == nil {
 		log = nopLogger{}
 	}
-	now := deps.Now
-	if now == nil {
-		now = time.Now
-	}
 	tx := readTransaction(deps.StateDir)
 	if tx == nil {
 		return false, nil // 绝大多数启动：没有未结的升级事务
@@ -77,7 +73,7 @@ func CheckOnStartup(deps Deps) (restart bool, err error) {
 	case phasePending:
 		tx.Attempts++
 		if tx.Attempts >= maxStartAttempts {
-			r := &Runtime{deps: withDefaults(deps, log, now), log: log}
+			r := newStartupRuntime(deps)
 			log.Warn("upgrade rollback: new version kept failing to start",
 				"attempts", tx.Attempts, "to", tx.ToVersion)
 			r.rollback(tx, "not_connected_after_upgrade", "新版本反复启动失败")
@@ -101,11 +97,20 @@ func CheckOnStartup(deps Deps) (restart bool, err error) {
 	}
 }
 
-// withDefaults 给 rollback 用的 Runtime 补默认值（CheckOnStartup 不走 New）。
-func withDefaults(deps Deps, log Logger, now func() time.Time) Deps {
-	deps.Log = log
-	deps.Now = now
-	return deps
+// newStartupRuntime 构造启动检查用的一次性运行时。
+//
+// 它**只走回滚这一条路**（rollback → 还原备份 → exec 旧版本 / 上报），不下载任何
+// 东西 —— 故不受 New 对 Deps.HTTPClient 的硬性契约约束（那条契约管的是「能下载的
+// 运行时」，见 New 的说明）。这不是绕开检查：把「不下载」写进函数名与这句注释里，
+// 将来谁想在这里加下载路径，都会先撞上 New 的 panic 与这段口径。
+func newStartupRuntime(deps Deps) *Runtime {
+	if deps.Log == nil {
+		deps.Log = nopLogger{}
+	}
+	if deps.Now == nil {
+		deps.Now = time.Now
+	}
+	return &Runtime{deps: deps, log: deps.Log}
 }
 
 // readTransaction 读事务；文件不存在或损坏时返回 nil（损坏 = 没有未结事务：

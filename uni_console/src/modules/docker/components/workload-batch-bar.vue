@@ -281,10 +281,6 @@
 <style lang="scss" scoped>
   @use '../views/overview-tokens' as t;
 
-  // 「启动 / 停止 / 重启 / 取消」等默认档按钮的主色文字对比度 AA：病灶与处方见
-  // overview-tokens 的 primary-text-aa（终审 QA D2·浅色实测 3.68:1）。
-  @include t.primary-text-aa;
-
   // 单根包装层：只为通过 single-root 守卫，不参与布局（display: contents 不产生盒）。
   .wkl-batch-root {
     display: contents;
@@ -320,7 +316,8 @@
 
     // 进行中的波：主题色 + 进行语气（与已完成波的账目口吻区分开）。
     &.is-current {
-      color: var(--el-color-primary);
+      // 主色文字对比度 AA（QA №9）：token 与数字见 @styles/core/aa-text.scss。
+      color: var(--aa-primary-text);
     }
 
     // 有失败的波：如实用警示色（失败明细在批末汇总里，这里只挂「这波没全成」的旗）。

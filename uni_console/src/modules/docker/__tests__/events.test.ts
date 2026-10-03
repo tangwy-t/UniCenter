@@ -1,7 +1,8 @@
 /**
  * utils/events 的纯逻辑钉子：行解析（回放/实时/坏行）、时间排序窗口与显示上限、
- * 重连回放的去重守卫、action 中文化映射（含未映射透传）、秒级相对时间（含毫秒除千
- * 的浮点整段取整）、绝对时刻格式化、四类资源的图标/色槽、账目口径句。
+ * 重连回放的去重守卫、action 中文化映射（协议词表逐词条覆盖 + health_status 后缀
+ * 结论 + 表外词元透传）、秒级相对时间（含毫秒除千的浮点整段取整）、绝对时刻格式化、
+ * 四类资源的图标/色槽、账目口径句。
  *
  * 与 log-viewer.test.ts 同一约定：组件不挂载（组件级行为在 events-feed.test.ts，
  * 那边是 jsdom + vi.mock 的流消费测试）。
@@ -219,26 +220,99 @@ describe('重连回放的去重守卫', () => {
   })
 })
 
-describe('action 中文化映射', () => {
-  it('高频动作映射为中文', () => {
+describe('action 中文化映射（协议词表全覆盖）', () => {
+  // 契约镜像：协议侧 dockerEventActions 的逐词条快照（uni_protocol/docker.go）。
+  // 前端测试无法 import Go 源码，两处的同步靠这里 + events.ts 的双向注释；
+  // 「集合相等」断言是机器守卫 —— 少一条 = 直显英文的漏网，多一条 = 表与契约漂移。
+  const PROTOCOL_ACTIONS = [
+    'attach',
+    'commit',
+    'copy',
+    'create',
+    'destroy',
+    'detach',
+    'die',
+    'exec_create',
+    'exec_detach',
+    'exec_die',
+    'exec_start',
+    'enable',
+    'disable',
+    'export',
+    'health_status',
+    'import',
+    'kill',
+    'load',
+    'mount',
+    'oom',
+    'pause',
+    'pull',
+    'push',
+    'reload',
+    'remove',
+    'rename',
+    'resize',
+    'restart',
+    'save',
+    'start',
+    'stop',
+    'tag',
+    'top',
+    'unmount',
+    'unpause',
+    'update'
+  ] as const
+
+  it('映射表与协议词表集合相等：无缺失（不留直显英文）且无表外词条（不暗示可达）', () => {
+    expect([...Object.keys(EVENT_ACTION_TEXT)].sort()).toEqual([...PROTOCOL_ACTIONS].sort())
+  })
+
+  it.each(PROTOCOL_ACTIONS)('词条 %s 有中文映射（非原样透传、无 ASCII 残留）', (token) => {
+    const text = eventActionText(token)
+    expect(text).not.toBe('')
+    expect(text).not.toBe(token) // 原样透传就是漏网
+    expect(text).not.toMatch(/[a-zA-Z]/) // 上屏文案不许带英文
+  })
+
+  it('高频词条逐条对值（防止映射值错位或误译）', () => {
     expect(eventActionText('start')).toBe('启动')
     expect(eventActionText('stop')).toBe('停止')
     expect(eventActionText('die')).toBe('退出')
     expect(eventActionText('create')).toBe('创建')
     expect(eventActionText('destroy')).toBe('销毁')
-    expect(eventActionText('pull')).toBe('拉取')
-    expect(eventActionText('health_status')).toBe('健康检查')
-    expect(eventActionText('exec_start')).toBe('开始执行')
+    expect(eventActionText('restart')).toBe('重启')
+    expect(eventActionText('pause')).toBe('暂停')
+    expect(eventActionText('unpause')).toBe('恢复')
+    expect(eventActionText('rename')).toBe('改名')
     expect(eventActionText('oom')).toBe('内存不足')
+    expect(eventActionText('pull')).toBe('拉取')
+    expect(eventActionText('push')).toBe('推送')
+    expect(eventActionText('remove')).toBe('移除')
+    expect(eventActionText('top')).toBe('查看进程')
+    expect(eventActionText('export')).toBe('导出')
+    expect(eventActionText('enable')).toBe('启用')
+    expect(eventActionText('disable')).toBe('停用')
+    expect(eventActionText('reload')).toBe('重载')
+    expect(eventActionText('exec_start')).toBe('开始执行')
   })
 
-  it('未映射的动作原样透传（新版本 docker 引入的动作不至于变成空白）', () => {
+  it('health_status 带后缀：检查结果进文案（异常与正常各有其句，不再只给基调）', () => {
+    expect(eventActionText('health_status')).toBe('健康检查') // 老 daemon 无后缀
+    expect(eventActionText('health_status: unhealthy')).toBe('健康检查异常')
+    expect(eventActionText('health_status: healthy')).toBe('健康检查正常')
+    // 未知结果词退回基调（不误译成异常/正常任一侧），原始短语由 title 兜底。
+    expect(eventActionText('health_status: starting')).toBe('健康检查')
+  })
+
+  it('带 ": " 后缀的动作按词元切分（协议 Validate 同一口径；exec 族上游已过滤，函数仍须正确）', () => {
+    expect(eventActionText('exec_create: /bin/sh -c ls')).toBe('准备执行')
+    expect(eventActionText('exec_die: exit 0')).toBe('执行退出')
+    expect(eventActionText('kill: signal 9')).toBe('强杀')
+  })
+
+  it('表外词元原样透传（协议扩词的兜底 —— 正常帧不可达，宁可原始词不误译）', () => {
     expect(eventActionText('frobnicate')).toBe('frobnicate')
     expect(eventActionText('')).toBe('')
-  })
-
-  it('映射表本身可被整表断言（加词条忘了映射函数是另一类故障，留给渲染测试）', () => {
-    expect(Object.keys(EVENT_ACTION_TEXT).length).toBeGreaterThanOrEqual(20)
   })
 })
 

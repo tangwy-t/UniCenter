@@ -57,7 +57,7 @@ const buildCtxSweepAge = 24 * time.Hour
 
 // maxBuildCtxUploadBytes 是组装账目的尺寸闸（默认 = 协议 MaxDockerBuildContextBytes）。
 // var 而非 const：测试调小来驱动账目触线而不必真的搬运 512MB
-//（与 adapter 的 maxBuildContextEntries 同一纪律）。
+// （与 adapter 的 maxBuildContextEntries 同一纪律）。
 var maxBuildCtxUploadBytes = int64(agentproto.MaxDockerBuildContextBytes)
 
 // buildCtxFileMode 是临时产物的权限（0600）：agent 以 root 运行，产物目录
@@ -222,7 +222,7 @@ func (r *buildCtxReceiver) Finish(sessionID uint64, sha256Hex string, size int64
 }
 
 // Abort 丢弃一个会话的半成品（中止控制帧的落点）。未知会话是正常时序
-//（core 的中止帧与 agent 的自弃竞态），静默返回。
+// （core 的中止帧与 agent 的自弃竞态），静默返回。
 func (r *buildCtxReceiver) Abort(sessionID uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

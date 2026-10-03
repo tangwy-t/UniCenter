@@ -13,8 +13,9 @@
  *     + 立即轮询 result（双通道并行）；
  *   - 逐层渲染：同层折叠、Pushing 字节条、Pushed 终态勾、「已上传」汇总；
  *   - 终态收尾：流 eof 先到 → result 终态 → 结论句；**推送不重拉**（本地清单没变）；
- *   - 取消：断流（Abort）→ 「已取消」→ result 结论句收尾；
- *   - 关对话框：断流 + 停轮询；重新打开：整表重置（预填与凭据选择回到初始态）。
+ *   - 取消：调显式取消端点（**不断流**）→ 「已请求取消」→ result 结论句收尾；
+ *   - 关对话框：断流（只是停止观看，**不下发取消**）+ 停轮询；重新打开：整表重置
+ *     （预填与凭据选择回到初始态）；非模态：不锁滚动、点页面别处不收窗。
  *
  * 流替身与轮询脚本同 build-dialog.test.ts 的一套（读尽后挂住、abort 唤醒）。
  * ElSelect 的断言走 findComponent（VTU 的 setValue 对组件 = 发 update:modelValue）。
@@ -28,6 +29,7 @@ import { HttpError } from '@/utils/http/error'
 const api = vi.hoisted(() => ({
   sendDockerCmd: vi.fn(),
   fetchDockerCmdResult: vi.fn(),
+  cancelDockerCmd: vi.fn(),
   openDockerPushStream: vi.fn(),
   // 凭据下拉的清单来源（仅 docker:config 用户才会真调）。
   fetchDockerRegistries: vi.fn()
@@ -76,7 +78,8 @@ const IMAGES = [
 
 /**
  * 流替身：按脚本逐行吐 chunk；读尽后挂住，abort 唤醒（AbortError）。
- * state.signal 记下组件传入的 signal —— 断言「取消 = 断流」靠它。
+ * state.signal 记下组件传入的 signal —— 断言「关对话框 = 断流（只是停止观看）」
+ * 以及「取消 ≠ 断流」靠它。
  */
 function scriptedStream(lines: string[]) {
   let i = 0
@@ -147,11 +150,13 @@ beforeEach(() => {
   )
   api.sendDockerCmd.mockReset()
   api.fetchDockerCmdResult.mockReset()
+  api.cancelDockerCmd.mockReset()
   api.openDockerPushStream.mockReset()
   api.fetchDockerRegistries.mockReset()
   auth.config = false
   api.sendDockerCmd.mockResolvedValue({ ref: 'r300' })
   api.fetchDockerCmdResult.mockResolvedValue({ status: 'pending' })
+  api.cancelDockerCmd.mockResolvedValue({ ref: 'r300' })
   api.fetchDockerRegistries.mockResolvedValue({ list: [] })
 })
 
@@ -214,8 +219,17 @@ async function choose(w: VueWrapper, value: string) {
   await flush()
 }
 
-/** 等一轮 result 轮询间隔（pollDelay(0) = 1s，真实计时）。 */
-const waitPoll = () => new Promise((r) => setTimeout(r, 1100))
+/**
+ * 等 result 轮询的第 n 次调用落地（1s 间隔是组件的真实计时）。
+ *
+ * 为什么不睡固定墙钟（旧写法 1.1s）：睡够买的是「时间过去了」，而不是「轮询到了」——
+ * 机器一忙（全量套件并发抢核）计时器回调会被推迟，1.1s 就可能短于组件的 1s sleep，
+ * 于是偶发「第二轮还没发」的假红。判据换成事实（调用数）后，慢就多等几轮。
+ */
+async function waitPolls(n: number) {
+  await vi.waitUntil(() => api.fetchDockerCmdResult.mock.calls.length >= n, { timeout: 5000 })
+  await flush()
+}
 
 describe('输入面：本地镜像选择', () => {
   it('预填引用（详情页入口）：选项来自该主机清单的全部仓库标签', async () => {
@@ -436,8 +450,7 @@ describe('终态收尾与关闭', () => {
 
     expect(w.text()).toContain('正在等待指令结果') // eof 已到、result 还在 pending
 
-    await waitPoll() // 第二轮轮询（pollDelay(0) = 1s）
-    await flush()
+    await waitPolls(2) // 第二轮轮询落地（pollDelay(0) = 1s 的真计时）
     expect(api.fetchDockerCmdResult).toHaveBeenCalledTimes(2)
     expect(w.text()).toContain('已推送 app:v1')
     expect(w.text()).toContain('耗时')
@@ -461,25 +474,50 @@ describe('终态收尾与关闭', () => {
   })
 })
 
-describe('取消路径', () => {
-  it('取消推送：断流（Abort）→ 进度态显示已取消 → result 结论句收尾', async () => {
+describe('非模态（进度不挡页面）', () => {
+  it('对话框非模态 + 不锁滚动 + 点页面别处不收窗（包壳挂指针穿透锚点类）', async () => {
+    const w = await mountDialog()
+    const dlg = w.findComponent({ name: 'ElDialog' })
+    expect(dlg.props('modal'), '去掉模态阻断').toBe(false)
+    expect(dlg.props('lockScroll'), '不锁页面滚动').toBe(false)
+    expect(dlg.props('closeOnClickModal'), '点页面别处不收起观看窗').toBe(false)
+    expect(String(dlg.props('modalClass')), '包壳类名 = 指针穿透规则的锚点').toContain(
+      'docker-progress-nonblocking'
+    )
+  })
+})
+
+describe('取消路径（独立于观看的显式动作）', () => {
+  it('取消推送：调取消端点（不断流）→ 进度态说「已请求取消」→ result 结论句收尾', async () => {
     const scripted = useStream([jf({ id: LA, status: 'Pushing', current: 100, total: 1000 })])
     usePolls([{ status: 'pending' }, { status: 'failed', error: '推送已取消' }])
     const w = await mountDetail()
     await click(w, '开始推送')
 
     await click(w, '取消推送')
-    expect(w.text()).toContain('已取消，正在等待指令收尾')
-    expect(scripted.state.signal?.aborted, '取消 = 断流（服务端随之终止推送）').toBe(true)
+    expect(api.cancelDockerCmd, '取消是显式端点，不是断流').toHaveBeenCalledWith('h1', 'r300')
+    expect(w.text()).toContain('已请求取消，正在等待指令收尾')
+    expect(scripted.state.signal?.aborted, '取消 ≠ 停止观看：进度流照常连着').toBe(false)
 
-    await waitPoll()
-    await flush()
+    await waitPolls(2)
     expect(w.text()).toContain('推送已取消')
+  })
+
+  it('取消请求失败（403 无权取消）：就地结论句，按钮可重试', async () => {
+    useStream([jf({ id: LA, status: 'Pushing', current: 100, total: 1000 })])
+    usePolls([{ status: 'pending' }])
+    api.cancelDockerCmd.mockRejectedValue(new HttpError('无权取消该指令', 403))
+    const w = await mountDetail()
+    await click(w, '开始推送')
+
+    await click(w, '取消推送')
+    expect(w.text()).toContain('无权取消该指令')
+    expect(buttons(w).some((b) => b.text === '取消推送'), '失败后按钮回到可点状态').toBe(true)
   })
 })
 
 describe('关闭与重开（生命周期收口）', () => {
-  it('推送在途关对话框：断流 + 停轮询', async () => {
+  it('推送在途关对话框：断流（只是停止观看，不下发 cancel）+ 停轮询', async () => {
     const scripted = useStream([jf({ id: LA, status: 'Pushing', current: 100, total: 1000 })])
     usePolls([{ status: 'pending' }])
     const w = await mountDetail()
@@ -488,9 +526,13 @@ describe('关闭与重开（生命周期收口）', () => {
 
     await w.setProps({ modelValue: false })
     await flush()
-    expect(scripted.state.signal?.aborted, '关对话框即断流').toBe(true)
+    expect(scripted.state.signal?.aborted, '关对话框只是收起这场观看').toBe(true)
+    expect(api.cancelDockerCmd, '关闭 ≠ 取消：取消只由显式按钮触发').not.toHaveBeenCalled()
 
-    await new Promise((r) => setTimeout(r, 2100)) // 跨过下一个轮询间隔
+    // 「轮询已停」是**反向判据**（什么都没发生），只能靠时间窗口举证 —— 这里的时长
+    // 是窗口宽度而不是「等待步数」：跨两个轮询间隔（pollDelay(0)=1s）仍无新调用，
+    // 窗口越宽结论越强；负载下的计时器推迟只会让窗口更强，不会把结论翻面。
+    await new Promise((r) => setTimeout(r, 2200))
     expect(api.fetchDockerCmdResult, '轮询应已停').toHaveBeenCalledTimes(1)
   })
 

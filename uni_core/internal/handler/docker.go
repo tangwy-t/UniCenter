@@ -333,18 +333,20 @@ func (h *DockerHandler) StatsHistory(c *gin.Context) {
 
 // Tasks 返回任务中心的最近任务（docker:list，路由静态 perm）。
 //
-// 本切片不做取消动作（见 service/docker_tasks.go 的取消纪律）：前端对拉取类任务
-// 复用既有进度流 Abort（断开 /cmds/:ref/pull 即下发 cancel）；非流任务无取消入口。
-// 断流是 best-effort 的，与「daemon 恰好干完活」存在竞态 —— 终态由 agent 按拉取的
+// 取消走**显式端点**（POST /docker/hosts/:id/cmds/:ref/cancel，见 CancelCmd）：
+// 取消是动作，不是观看的副作用 —— 进度流的断开只停止观看。取消本身仍是
+// best-effort 的，与「daemon 恰好干完活」存在竞态 —— 终态由 agent 按操作的
 // 实际结局结算（完成即成功，迟到的 cancel 是 no-op），本端点只如实投影结果。
 //
-// @Summary      最近任务
-// @Description  最近受理的 docker 指令（≤100 条、受理时刻降序、跨主机聚合）；hostId 限定单主机、status 过滤 pending/done、action 过滤动作码；条目含 ref/主机/动作/目标/发起人用户名/受理时刻/终态（pending/succeeded/failed/timeout）/终态结论句；拉取类任务前端凭 action 复用 /cmds/:ref/pull 打开进度流（取消=断开进度流）
+// @Summary      任务列表
+// @Description  任务中心的一页：实时（CmdStore，含在途）+ 历史（持久层）按 ref 合并去重（实时胜）、受理时刻降序；hostId 限定单主机、status 过滤 pending/done、action 过滤动作码；page/pageSize 分页（缺省 1/10，页大小上限 100），total 为合并列表全量；条目含 ref/主机/动作/目标/发起人用户名/受理时刻/终态（pending/succeeded/failed/timeout）/终态结论句；进度族任务（image:pull/build/push）前端凭 action 复用 /cmds/:ref/pull|build|push 打开进度流（观看）；取消走 POST /cmds/:ref/cancel
 // @Tags         Docker 管理
 // @Produce      json
-// @Param        hostId   query  uint64  false  "限定单主机(缺省=跨主机)"
-// @Param        status   query  string  false  "阶段过滤(pending/done)"
-// @Param        action   query  string  false  "动作码过滤(如 image:pull)"
+// @Param        hostId    query  uint64  false  "限定单主机(缺省=跨主机)"
+// @Param        status    query  string  false  "阶段过滤(pending/done)"
+// @Param        action    query  string  false  "动作码过滤(如 image:pull)"
+// @Param        page      query  int     false  "页码(缺省 1)"
+// @Param        pageSize  query  int     false  "每页条数(缺省 10,上限 100)"
 // @Security     BearerAuth
 // @Success      200  {object}  app.Response{data=response.DockerTaskListResp}  "查询成功"
 // @Failure      400  {object}  app.Response  "参数错误(status 非 pending/done) / 未知操作"

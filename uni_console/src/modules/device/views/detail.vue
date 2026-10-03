@@ -201,7 +201,8 @@
                 />
               </div>
 
-              <div class="dd-card__value" :style="{ color: card.tone }">{{ card.text }}</div>
+              <!-- 数值文字走 AA token（toneText）；下方进度条取原值 tone（非文本族，维持裁定） -->
+              <div class="dd-card__value" :style="{ color: card.toneText }">{{ card.text }}</div>
 
               <!-- F-14：缺值**不画进度条**（空条会被读成「使用率 0」） -->
               <ElProgress
@@ -397,6 +398,7 @@
     formatUnixSeconds,
     formatUptime,
     isCriticalUsage,
+    usageTextTone,
     usageTone,
     watermarkState
   } from '../utils/display'
@@ -422,6 +424,7 @@
     formatUnixSeconds,
     formatUptime,
     isCriticalUsage,
+    usageTextTone,
     usageTone,
     watermarkState
   }
@@ -551,6 +554,7 @@
         hasValue: typeof d?.cpuUsedPercent === 'number',
         text: formatPercent(d?.cpuUsedPercent),
         tone: usageTone(d?.cpuUsedPercent),
+        toneText: usageTextTone(d?.cpuUsedPercent),
         footLeft,
         footRight: cpuN
       },
@@ -564,6 +568,7 @@
         hasValue: typeof d?.memUsedPercent === 'number',
         text: formatPercent(d?.memUsedPercent),
         tone: usageTone(d?.memUsedPercent),
+        toneText: usageTextTone(d?.memUsedPercent),
         footLeft,
         // F-7：绝对值由趋势面板的最新桶回填（0 额外请求）
         footRight: memAbsolute.value
@@ -578,6 +583,7 @@
         hasValue: typeof d?.diskUsedPercent === 'number',
         text: formatPercent(d?.diskUsedPercent),
         tone: usageTone(d?.diskUsedPercent),
+        toneText: usageTextTone(d?.diskUsedPercent),
         footLeft,
         footRight: diskAbsolute.value
       },
@@ -591,6 +597,7 @@
         hasValue: false,
         text: formatUptime(d?.bootTime),
         tone: 'var(--el-text-color-primary)',
+        toneText: 'var(--el-text-color-primary)',
         footLeft: d?.bootTime ? `开机 ${formatUnixSeconds(d.bootTime)}` : '未上报开机时间',
         footRight: ''
       }
@@ -1071,7 +1078,8 @@
       border: 0;
 
       &:hover {
-        color: var(--el-color-primary);
+        // 主色文字对比度 AA（QA №9）：hover 档 token，见 @styles/core/aa-text.scss。
+        color: var(--aa-primary-text-hover);
       }
     }
 

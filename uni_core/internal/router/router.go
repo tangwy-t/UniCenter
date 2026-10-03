@@ -582,8 +582,9 @@ func Setup(deps Dependencies) *gin.Engine {
 			docker.GET("/hosts/:id/containers/:cid/stats-history", perm(permission.PermDockerInspect), deps.Docker.Hdl.StatsHistory)
 			// 任务中心（6b）：最近指令的任务化列表 —— pull/up 等长任务不再靠弹窗
 			// 转圈，收口成跨主机的可见性。数据全是既有数据面（指令记录 + 6b 补的
-			// 最近枚举索引），权限与读面其余端点同档 docker:list；取消动作 =
-			// 前端复用拉取进度流的 Abort（非流任务本切片不提供取消，见注释）。
+			// 最近枚举索引），权限与读面其余端点同档 docker:list；取消动作走
+			// 显式取消端点（/cmds/:ref/cancel，见下），不再借道进度流 Abort ——
+			// 断开进度流只是停止观看（非流任务仍不提供取消，见 service/docker_tasks.go）。
 			docker.GET("/tasks", perm(permission.PermDockerList), deps.Docker.Hdl.Tasks)
 			// 指令面：**无静态 perm**（权限按 action 决定，见 DockerDeps 的说明）。
 			docker.POST("/hosts/:id/cmds", deps.Docker.Hdl.SendCmd)
@@ -602,13 +603,20 @@ func Setup(deps Dependencies) *gin.Engine {
 			docker.GET("/hosts/:id/cmds/:ref/stats", longLived, deps.Docker.Hdl.StatsStream)
 			// 拉取进度流（4b）：同款 fetch 形态，权限（docker:manage，与 image:pull
 			// 受理同档）与归属在处理器内判定；唯一「指令 pending 期间即可接入」的流
-			//（会话由受理时预登记，句柄取协议派生的 pull_<ref>）。
+			//（会话由受理时预登记，句柄取协议派生的 pull_<ref>）。**断开只是停止
+			// 观看**（不发 cancel，任务照常跑完）—— 终止操作走下面的显式取消端点。
 			docker.GET("/hosts/:id/cmds/:ref/pull", longLived, deps.Docker.Hdl.PullStream)
 			// 构建/推送进度流（P2）：与拉取进度流同款 fetch 形态与接入纪律，
 			// 句柄取协议派生的 build_<ref>/push_<ref>（受理时预登记，pending 期间
 			// 即可接入）。
 			docker.GET("/hosts/:id/cmds/:ref/build", longLived, deps.Docker.Hdl.BuildStream)
 			docker.GET("/hosts/:id/cmds/:ref/push", longLived, deps.Docker.Hdl.PushStream)
+			// 显式取消（语义收口）：观看与执行解耦 —— 断开进度流只是停止观看，
+			// 「取消」只经由这条端点下发 cancel 帧。与指令面/流端点同款**无静态
+			// perm**：权限码取自记录（进度三族都是 docker:manage），归属再校验
+			// 发起人。**不挂 longLived**：它是一次短请求（202 即回），不是一个
+			// 长活连接（nginx 的白名单也因此不必动）。
+			docker.POST("/hosts/:id/cmds/:ref/cancel", deps.Docker.Hdl.CancelCmd)
 			// 私有仓库凭据（4c）：静态 docker:config —— 凭据是「分发」支柱的密钥
 			// 材料，读（列表）与写（增/改/删）同档；密码任何读路径只回掩码，
 			// 解密只在 image:pull/image:push 的受理注入（service 侧唯一读口）。

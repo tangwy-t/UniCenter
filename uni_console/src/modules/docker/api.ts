@@ -205,6 +205,26 @@ export function fetchDockerCmdResult(hostId: string, ref: string) {
 }
 
 /**
+ * 显式取消一条进度族指令（POST /docker/hosts/:id/cmds/:ref/cancel）—— 取消是
+ * **独立于观看的动作**：关对话框/切页/收起进度行只停止观看（服务端不再下发
+ * cancel），终止操作只经由这里。
+ *
+ * 202 说的是「取消请求已下发」，不是「已取消」：core 向 agent 发一帧 cancel
+ * （best-effort，设备离线时返回 500 结论句），是否真被截止以指令记录的终态为准
+ *（agent 按操作的实际结局结算 —— 恰好已完成的操作仍记成功，迟到的 cancel 是
+ * no-op）。调用方照常轮询 cmds/:ref 收结论句，**不代答**。
+ *
+ * 不走 showErrorMessage：按钮就开着，结论（403 无权取消 / 409 该任务已结束 /
+ * 500 取消未送达…）就地显示 —— 与 sendDockerCmd 同一条「结论不放 toast」的纪律。
+ */
+export function cancelDockerCmd(hostId: string, ref: string) {
+  return request.post<{ ref: string }>({
+    url: `${PREFIX}/docker/hosts/${hostId}/cmds/${ref}/cancel`,
+    showErrorMessage: false
+  })
+}
+
+/**
  * 构建上下文上传（P3·分发输入段）：POST /docker/hosts/:id/build-context，
  * 请求体就是 tar.gz 字节流本身（不是 multipart —— 服务端按 Content-Type 判形），
  * 200 回 `{ filename }`（core 由会话号推导的产物名，直接喂给 image:build 的
@@ -300,11 +320,16 @@ export function deleteDockerRegistry(registry: string) {
   })
 }
 
-// ── 任务中心（6b）──────────────────────────────────────────────────
-// 读面在 uni_core 的 service/docker_tasks.go：≤100 条、受理时刻降序、跨主机聚合；
-// 条目含 ref（轮询与拉取进度流的钥匙）、发起人、终态与结论句原文。
+// ── 任务中心（6b / 8d）────────────────────────────────────────────────
+// 读面在 uni_core 的 service/docker_tasks.go：实时（CmdStore，含在途）∪ 历史
+// （持久层）按 ref 合并去重（实时胜）、受理时刻降序、整体分页；条目含 ref（轮询与
+// 拉取进度流的钥匙）、发起人、终态与结论句原文。total 是合并列表的真实全量
+// （不再是「窗口内匹配数」—— 历史面落地后报得出就如实报）。
 
-/** 任务中心查询参数（三项都可选且相互独立，全部作为 query 发给端点、服务端过滤）。 */
+/**
+ * 任务中心查询参数（过滤三项都可选且相互独立，全部作为 query 发给端点、服务端过滤；
+ * 分页两项同样透传 —— 前端不做本地过滤、也不做本地切页）。
+ */
 export interface DockerTasksQuery {
   /** 限定单主机（留空 = 跨主机聚合）。 */
   hostId?: string
@@ -312,6 +337,10 @@ export interface DockerTasksQuery {
   status?: 'pending' | 'done'
   /** 动作码过滤（如 image:pull；未登记动作由服务端给 400 结论句）。 */
   action?: string
+  /** 页码（1 起；缺省 1）。 */
+  page?: number
+  /** 每页条数（缺省 10，上限 100）。 */
+  pageSize?: number
 }
 
 /**
@@ -388,13 +417,14 @@ export function openDockerStatsStream(
  * 拉取进度流（4b 进度面）：GET cmds/:ref/pull —— NDJSON 进度行。
  *
  * 与日志/stats 流同一条纪律（fetch + ReadableStream、Authorization 头照 http 层的
- * 口径手工带）。三条与同族的差异：
+ * 口径手工带）。两条与同族的差异：
  *   ① **指令 pending 期间即可接入**：会话不是由 result 终态里的 session_id 给出的
  *     （拉取的 result 只在结束时回），而是 core 在受理指令时就按「句柄 = pull_ + ref」
  *     预登记 —— 受理一回来就能开流，拉取全程逐层可见；
- *   ② 断开的语义重量不同：日志/stats 断开只是停流，这里断开（Abort）会让服务端向
- *     agent 下发 cancel，**终止这场拉取** —— 进度对话框关掉等于放弃拉取，是契约
- *     而不是副作用；
+ *   ② **断开（Abort）只是停止观看**（观看与执行解耦）：服务端只解除接入、不下发
+ *     cancel —— 拉取照常跑完，终态经既有 result 轮询入账；同一条流随时可以重接
+ *     （重进观看，断线期间的帧在会话缓冲里等着）。终止拉取是另一个动作：
+ *     {@link cancelDockerCmd}；
  *   ③ 行形状是打平的进度记录（id/status/current/total/done/error），eof 挂在最后
  *     一条进度行上（终态项与 eof 同行），消费端见 utils/pull.ts 的解析与折叠。
  */
@@ -414,10 +444,10 @@ export function openDockerPullStream(
 // ── 构建与推送的进度流（P2·分发闭环）────────────────────────────────
 // 与 openDockerPullStream 同一条纪律（fetch + ReadableStream、Authorization 头照
 // http 层的口径手工带、**指令 pending 期间即可接入** —— 会话由 core 受理时按
-// 句柄 build_<ref>/push_<ref> 预登记、断开 = 服务端向 agent 下发 cancel 终止操作
-// 本身）。三条端点各自只承载自己的进度族（handler 按记录的 action 拒绝交叉接入），
-// 行形状不同：build 是步骤/文本行（id/status/stream），push 与 pull 同字段集
-//（daemon 的同一个 JSON 进度流）。
+// 句柄 build_<ref>/push_<ref> 预登记、**断开只是停止观看**（不发 cancel，操作照常
+// 跑完；终止走 cancelDockerCmd），同一条流随时可重接）。三条端点各自只承载自己的
+// 进度族（handler 按记录的 action 拒绝交叉接入），行形状不同：build 是步骤/文本行
+//（id/status/stream），push 与 pull 同字段集（daemon 的同一个 JSON 进度流）。
 
 /**
  * 构建进度流（P2）：GET cmds/:ref/build —— NDJSON 构建记录行

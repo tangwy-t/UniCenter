@@ -79,6 +79,37 @@ type CmdRecord struct {
 // CmdStore 读写指令记录、在飞索引与到期索引。
 type CmdStore struct {
 	rdb goredis.UniversalClient
+	// onTerminal 是终态转换的观察者（8d 任务历史持久层；nil = 未装配，行为与
+	// 引入它之前逐字一致）。见 WithTerminalHook 的契约。
+	onTerminal TerminalHook
+}
+
+// TerminalHook 是「一条指令完成了终态写入」的通知回调。
+//
+// 契约（实现方必须遵守，因为它是历史持久化的唯一入账点）：
+//   - rec 保证是**终态形态**（status/error/finished_at 已填：Complete 侧是本次
+//     result 的结论，Timeout 侧是服务端推断的超时结论）；回调**不得改写** rec
+//     —— 它是调用方持有的同一条记录（Timeout 侧交出的是一份拷贝，改写它也改不到
+//     调用方，但契约照旧：观察者不是参与者）；
+//   - 调用时机：**每次成功的终态写入之后**。Complete 侧包含「重复 result 重放」
+//     这种重写（本方法不读旧状态，无从分辨，也不值得为分辨多一次 GET —— 事实
+//     相同，重写无害）；Timeout 侧则只在脚本确认「pending → timeout」真的落下时
+//     触发（已终结的记录返回 0，不惊动钩子）。**幂等由实现方按 ref 兜底**。
+//   - 回调**同步**执行且错误无处可返还（无返回值）：它发生在 Redis 写入之后，
+//     失败不得反向影响指令主链 —— 观察者不是参与者（实现方自行降级为日志）。
+type TerminalHook func(ctx context.Context, rec *CmdRecord)
+
+// WithTerminalHook 注入终态钩子（装配在 wireup 一处完成）。
+func (s *CmdStore) WithTerminalHook(h TerminalHook) *CmdStore {
+	s.onTerminal = h
+	return s
+}
+
+// notifyTerminal 触发终态钩子（唯一调用点：Complete 与 Timeout 的真实转换处）。
+func (s *CmdStore) notifyTerminal(ctx context.Context, rec *CmdRecord) {
+	if s.onTerminal != nil && rec != nil {
+		s.onTerminal(ctx, rec)
+	}
 }
 
 // NewCmdStore 构造指令存储。
@@ -234,6 +265,13 @@ func (s *CmdStore) Complete(ctx context.Context, rec *CmdRecord, res *agentproto
 	pipe.ZRem(ctx, CmdDeadlineKey, rec.Ref)
 	pipe.HDel(ctx, InflightKey(rec.DeviceID), inflightField(rec.Action, rec.Target))
 	_, err = pipe.Exec(ctx)
+	if err == nil {
+		// 终态钩子（8d 任务历史持久层）：**Redis 写成功之后**才通知 —— 钩子收到的是
+		// 已经落定的同一份事实，失败降级由实现方自理（观察者不是参与者，主链返回值
+		// 不受影响）。收在这一处而不是各调用方：终态转换的唯一咽喉就是本方法，
+		// agent result / 缓存秒回 / discard 三条路径自动全数覆盖，将来新增路径也不会漏。
+		s.notifyTerminal(ctx, rec)
+	}
 	return err
 }
 
@@ -243,16 +281,31 @@ func (s *CmdStore) Timeout(ctx context.Context, rec *CmdRecord) error {
 		return nil
 	}
 	msg := "指令超时未完成"
-	_, err := timeoutScript.Run(ctx, s.rdb, []string{CmdKeyPrefix + rec.Ref},
-		msg, time.Now().UnixMilli(), int(ResultTTL/time.Second)).Result()
+	// 终态时刻取一次、两处共用（脚本里的写入值与钩子看到的必须逐毫秒一致）。
+	finishedAt := time.Now().UnixMilli()
+	n, err := timeoutScript.Run(ctx, s.rdb, []string{CmdKeyPrefix + rec.Ref},
+		msg, finishedAt, int(ResultTTL/time.Second)).Result()
 	if err != nil && err != goredis.Nil {
 		return err
 	}
+	// 脚本返回值语义：1 = 本次真的完成了「pending → timeout」终结，0 = 记录已终态
+	//（或不存在），什么都没变。（go-redis 把 Lua number 解成 int64，断言按它的形。）
+	transitioned, _ := n.(int64)
 	// 在飞索引与到期索引一并清理：sweep 是终态的唯一保证路径，清不干净就永久泄漏。
 	pipe := s.rdb.TxPipeline()
 	pipe.ZRem(ctx, CmdDeadlineKey, rec.Ref)
 	pipe.HDel(ctx, InflightKey(rec.DeviceID), inflightField(rec.Action, rec.Target))
 	_, err = pipe.Exec(ctx)
+	if transitioned == 1 {
+		// 时序钉死：先把转换值合成给钩子，再通知 —— 入参 rec 的状态字段**不被本方法的
+		// 原子脚本改动**（真相在 Redis 里），直接把它交出去会让钩子读到一条
+		// 「status 还是 pending」的伪终态。
+		done := *rec
+		done.Status = StatusTimeout
+		done.Error = msg
+		done.FinishedAt = finishedAt
+		s.notifyTerminal(ctx, &done)
+	}
 	return err
 }
 

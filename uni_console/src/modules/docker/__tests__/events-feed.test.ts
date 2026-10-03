@@ -171,7 +171,7 @@ describe('活动流：回放 + 实时 + 坏行', () => {
     expect(rows[2].text()).toContain('uni-center-core')
   })
 
-  it('实时事件继续追加，action 未映射时原样透传', async () => {
+  it('实时事件继续追加，表外动作原样透传（协议扩词的兜底）', async () => {
     const w = mountFeed()
     await flush()
     streams[0].push(evLine({ t: Date.now() - 5_000 }) + '\n')
@@ -182,7 +182,21 @@ describe('活动流：回放 + 实时 + 坏行', () => {
     const rows = w.findAll('.dov-feed__row')
     expect(rows).toHaveLength(2)
     expect(rows[0].text()).toContain('启动')
-    expect(rows[1].text()).toContain('frobnicate') // 未映射原样显示
+    expect(rows[1].text()).toContain('frobnicate') // 表外词元原样显示
+  })
+
+  it('health_status 后缀上屏为中文结论，daemon 原始短语进 title（可核对的事实）', async () => {
+    const w = mountFeed()
+    await flush()
+    streams[0].push(
+      evLine({ t: Date.now() - 3_000, action: 'health_status: unhealthy' }) + '\n'
+    )
+    await flush()
+
+    const action = w.find('.dov-feed__action')
+    expect(action.text()).toBe('健康检查异常')
+    // 原始短语（含检查结果）不丢：悬停可取，排障引用靠它。
+    expect(action.attributes('title')).toBe('health_status: unhealthy')
   })
 
   it('回放后也无事件：空态句与断流态区分（「舰队很安静」）', async () => {
@@ -269,7 +283,20 @@ describe('活动流：滚动暂停与恢复（log-viewer 同款语义）', () =>
     streams[0].push(evLine({ action: 'die' }) + '\n')
     await flush()
     expect(el.scrollTop).toBe(100)
-    expect(w.find('.dov-feed__paused-text').text()).toContain('新事件 1 条')
+    // 等「新事件已入窗并计数」这个**事实**：从 push 到进窗是一串异步（读循环 →
+    // 折叠 → 渲染），判据用事实（计数文案）而不是固定轮数的 flush。
+    await vi.waitUntil(
+      () => w.find('.dov-feed__paused-text').text().includes('新事件 1 条'),
+      { timeout: 5000 }
+    )
+    let diag = ''
+    if (!w.find('.dov-feed__paused-text').text().includes('新事件')) {
+      diag =
+        `phase=${w.find('.dov-feed__status').text()} streams=${streams.length} ` +
+        `connects=${api.openDockerEventsStream.mock.calls.length} ` +
+        `aborted=${String(signals[0]?.aborted)} rows=${w.findAll('.dov-feed__row').length}`
+    }
+    expect(w.find('.dov-feed__paused-text').text(), diag).toContain('新事件 1 条')
     expect(w.findAll('.dov-feed__row')).toHaveLength(2)
   })
 

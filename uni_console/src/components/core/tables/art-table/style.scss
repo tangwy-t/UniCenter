@@ -73,11 +73,15 @@
           border: 1px solid var(--art-gray-300);
           transition: border-color 0.15s;
 
+          // 活动页码是主色填充 + 白字（主色原值 3.68:1，QA №9 全站扫）：
+          // 填充换主色文字 AA 层的加深档（--aa-primary-fill，白字 6.59:1），
+          // 描边跟填充同色收口；非活动项的悬停只动描边（非文本，主色 3.68:1
+          // 已过 3:1 门槛），保持原样。
           &.is-active {
             font-weight: 400;
             color: #fff;
-            background-color: var(--theme-color);
-            border: 1px solid var(--theme-color);
+            background-color: var(--aa-primary-fill);
+            border: 1px solid var(--aa-primary-fill);
           }
 
           &:hover:not(.is-disabled) {

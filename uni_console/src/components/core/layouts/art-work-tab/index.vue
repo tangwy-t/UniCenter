@@ -19,9 +19,9 @@
         }"
       >
         <li
-          class="art-card-xs inline-flex flex-cc h-8 mr-1.5 text-xs c-p hover:text-theme group"
+          class="art-card-xs inline-flex flex-cc h-8 mr-1.5 text-xs c-p hover:text-theme-aa group"
           :class="[
-            item.path === activeTab ? 'activ-tab !text-theme' : 'text-g-600 dark:text-g-800',
+            item.path === activeTab ? 'activ-tab !text-theme-aa' : 'text-g-600 dark:text-g-800',
             tabStyle === 'tab-google' ? 'google-tab relative !h-8 !leading-8 !border-none' : ''
           ]"
           :style="{
@@ -469,7 +469,9 @@
   @use '@styles/core/breakpoints.scss' as *;
 
   .google-tab.activ-tab {
-    color: var(--theme-color) !important;
+    // 活动页签文字：主色对 light-9 底 3.27:1 → 主色文字 AA 层 token 5.37:1
+    // （QA №9，token 与数字见 @styles/core/aa-text.scss）。
+    color: var(--aa-primary-text) !important;
     background-color: var(--el-color-primary-light-9) !important;
     border-bottom: 0 !important;
     border-bottom-right-radius: 0 !important;

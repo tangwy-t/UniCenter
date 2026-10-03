@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -415,4 +416,99 @@ func TestStreamSweepPullReconciliation(t *testing.T) {
 	if n, err := f.svc.Sweep(ctx); err != nil || n != 0 {
 		t.Fatalf("回收后的对账必须无事发生: n=%d err=%v", n, err)
 	}
+}
+
+// ── 显式取消（本波语义收口：cancel 只从这里出去）──────────────────────────
+
+// TestStreamCancelProgress：显式取消的四种形态 ——
+//   - 会话在本地：发 cancel 帧 + 从注册表移除；
+//   - 会话不在本地（预登记失败/已被清理/多实例）：**照发设备级帧**（agent 对未知
+//     会话的 cancel 是幂等忽略，晚发的这一帧同理）；
+//   - 非进度族 action：返回 false 且一帧不发（调用方折成 400 —— exec 有自己的
+//     WS cancel，普通写指令没有可取消的会话）；
+//   - 设备离线：如实返回 500 结论句（注册表清理不受影响）。
+func TestStreamCancelProgress(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("会话在本地：发帧 + 移除", func(t *testing.T) {
+		f := newStreamFixture(t, time.Minute)
+		pullRef := "1790000000000000002"
+		if err := f.reg.Register(dockerstream.Meta{
+			SessionID: agentproto.DockerPullSessionID(pullRef), DeviceID: 7, UserID: 42,
+			Action: agentproto.DockerActionImagePull, Ref: pullRef, Kind: dockerstream.KindPull,
+			CreatedAt: *f.now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		rec := &dockerstate.CmdRecord{Ref: pullRef, DeviceID: 7, UserID: 42,
+			Action: agentproto.DockerActionImagePull, Status: dockerstate.StatusPending}
+
+		ok, err := f.svc.CancelProgress(ctx, rec, "用户取消")
+		if !ok || err != nil {
+			t.Fatalf("进度族必须可取消: ok=%v err=%v", ok, err)
+		}
+		frames := f.sender.snapshot()
+		if len(frames) != 1 || frames[0].Op != agentproto.DockerFrameOpCancel ||
+			frames[0].SessionID != agentproto.DockerPullSessionID(pullRef) {
+			t.Fatalf("必须发一帧 cancel（句柄取协议派生）: %+v", frames)
+		}
+		if f.sender.devices[0] != 7 {
+			t.Fatalf("cancel 必须发往记录上的设备: %v", f.sender.devices)
+		}
+		if f.reg.Get(agentproto.DockerPullSessionID(pullRef)) != nil {
+			t.Fatal("取消后会话必须从注册表移除")
+		}
+	})
+
+	t.Run("会话不在本地：照发设备级帧", func(t *testing.T) {
+		f := newStreamFixture(t, time.Minute)
+		buildRef := "1790000000000000003"
+		rec := &dockerstate.CmdRecord{Ref: buildRef, DeviceID: 8, UserID: 42,
+			Action: agentproto.DockerActionImageBuild, Status: dockerstate.StatusPending}
+
+		ok, err := f.svc.CancelProgress(ctx, rec, "用户取消")
+		if !ok || err != nil {
+			t.Fatalf("无本地会话也必须可取消: ok=%v err=%v", ok, err)
+		}
+		frames := f.sender.snapshot()
+		if len(frames) != 1 || frames[0].Op != agentproto.DockerFrameOpCancel ||
+			frames[0].SessionID != agentproto.DockerBuildSessionID(buildRef) ||
+			f.sender.devices[0] != 8 {
+			t.Fatalf("无本地会话必须走设备级发送: %+v %v", frames, f.sender.devices)
+		}
+	})
+
+	t.Run("非进度族：不可取消且不发帧", func(t *testing.T) {
+		f := newStreamFixture(t, time.Minute)
+		rec := &dockerstate.CmdRecord{Ref: "1790000000000000004", DeviceID: 7, UserID: 42,
+			Action: agentproto.DockerActionContainerStop, Status: dockerstate.StatusPending}
+
+		ok, err := f.svc.CancelProgress(ctx, rec, "用户取消")
+		if ok || err != nil {
+			t.Fatalf("非进度族必须判不可取消: ok=%v err=%v", ok, err)
+		}
+		if len(f.sender.snapshot()) != 0 {
+			t.Fatalf("不可取消的任务一帧都不许发: %+v", f.sender.snapshot())
+		}
+	})
+
+	t.Run("设备离线：如实回结论句", func(t *testing.T) {
+		f := newStreamFixture(t, time.Minute)
+		f.sender.offline = true
+		pushRef := "1790000000000000005"
+		rec := &dockerstate.CmdRecord{Ref: pushRef, DeviceID: 7, UserID: 42,
+			Action: agentproto.DockerActionImagePush, Status: dockerstate.StatusPending}
+
+		ok, err := f.svc.CancelProgress(ctx, rec, "用户取消")
+		if !ok {
+			t.Fatal("离线不该把「可取消」判成「不可取消」")
+		}
+		if !isAppErr(err, apperror.CodeInternal) {
+			t.Fatalf("未送达必须回 500 语义: %v", err)
+		}
+		var ae *apperror.AppError
+		if !errors.As(err, &ae) || !strings.Contains(ae.Message, "取消未送达") {
+			t.Fatalf("结论句必须说清「未送达」: %v", err)
+		}
+	})
 }

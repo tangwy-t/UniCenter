@@ -105,21 +105,40 @@
                   eventRelativeTime(item.createdAt / 1000, nowSec)
                 }}</span>
               </div>
-              <!-- 展开区：进行中的拉取接实时进度流（收起仅停止观看，结局按实际结算 ——
-                   语义见子组件）；终态行给结论句原文（失败/超时的排障线索；
-                   成功拉取收尾时同样留在原地）。 -->
+              <!-- 展开区：进行中的进度族任务（pull/build/push）接实时进度流 ——
+                   收起/离开页面只是停止观看（断流不发 cancel），**再次展开即重接**
+                   （进度可续）；取消是展开区里的另一个动作（见子组件）。
+                   终态行给结论句原文（失败/超时的排障线索；成功收尾时同样留在原地）。 -->
               <div v-if="isExpanded(item.ref)" class="tk-item__detail">
-                <TaskPullProgress
-                  v-if="item.status === 'pending' && item.action === 'image:pull'"
+                <TaskProgress
+                  v-if="item.status === 'pending' && isProgressAction(item)"
                   :key="item.ref"
                   :host-id="item.hostId"
                   :cmd-ref="item.ref"
+                  :action="item.action"
+                  :can-cancel="canCancel(item)"
                 />
                 <p v-else-if="item.summary" class="tk-item__summary">{{ item.summary }}</p>
               </div>
             </div>
           </li>
         </ul>
+        <!-- 分页（8d）：条数与页码都来自服务端（合并列表的真实全量 + 本页页码），
+             页面只显示这两个硬事实；无行可翻（共 0 条）时整条不出。 -->
+        <div v-if="total > 0" class="tk-page">
+          <span class="tk-page__hint">第 {{ page }} 页 / 共 {{ total }} 条</span>
+          <ElPagination
+            background
+            small
+            layout="sizes, prev, pager, next"
+            :page-sizes="[10, 20, 50, 100]"
+            :total="total"
+            :current-page="page"
+            :page-size="pageSize"
+            @current-change="onCurrentChange"
+            @size-change="onSizeChange"
+          />
+        </div>
       </div>
     </div>
   </div>
@@ -133,10 +152,15 @@
    * 内联一个不改），宿主从抽屉换成页面：整页化后它有了自己的 URL 与刷新语义
    * （多分辨率适配：任务行在窄屏不再被抽屉宽度切成两行元信息）。
    *
-   * 数据是**一份**（GET /docker/tasks：≤100 条、受理时刻降序、跨主机），不与任何
-   * 单主机页面状态耦合 —— 这也是入口虽然长在总览 hero 与容器页 hero 上、列表却不按
-   * 当前主机过滤的原因：hostname 列已经回答「在哪台机器上」，再按入口主机收窄会把
-   * 「跨主机收口」这个立身之本又交回去。
+   * 数据是**一份**（GET /docker/tasks：实时 ∪ 历史合并、受理时刻降序、跨主机、
+   * 服务端分页），不与任何单主机页面状态耦合 —— 这也是入口虽然长在总览 hero 与容器页
+   * hero 上、列表却不按当前主机过滤的原因：hostname 列已经回答「在哪台机器上」，
+   * 再按入口主机收窄会把「跨主机收口」这个立身之本又交回去。
+   *
+   * 分页（8d）：**服务端分页**（page/pageSize 透传 + total 回显），前端不本地切
+   * —— 历史面让列表不再是一个「最近 100 条」的易失窗口（旧上限已改写为分页事实），
+   * 页头「共 N 条」与页尾分页器读的是同一个 total。越界页（保留清理后页码落空）
+   * 由 load 内的自愈拉回最后一页，见那里的注释。
    *
    * 列表**只含变更/长任务动作**：只读动作（inspect 档的日志/统计/详情/配置读取 ——
    * 页面浏览就会被自动受理）在服务端任务面就被剔除（docker_tasks.go 的读面收口，
@@ -145,10 +169,10 @@
    *
    * 刷新纪律（对齐列表页自动刷新）：进页面即拉、可见期间 5 秒一轮（后台标签页跳过
    * tick）、手动刷新随时可插队（seq 守卫防旧响应晚到覆盖新数据）；keep-alive 失活/
-   * 卸载停表，重新激活回来补拉。**进度流不在此列**：展开中的拉取进度流在页面失活时
-   * 保持连接（断开仅停止观看，不承诺因果：是否被截止由拉取的**实际结局**结算，后端
-   * pull_progress.go 的「取消与完成的竞态」注释；监控窗口关掉不等于放弃拉取 —— 详见
-   * task-pull-progress 的生命周期取舍），停表停的是这份列表的轮询开销。
+   * 卸载停表，重新激活回来补拉。**进度流不在此列**：展开中的进度流在页面失活时
+   * 保持连接，收起/卸载只是停止观看（断流不发 cancel，任务照常跑完 —— 后端
+   * docker_stream.go 的 servePull/Build/PushNDJSON 收尾纪律），再次展开即重接
+   *（进度可续，详见 task-progress 的生命周期取舍）；停表停的是这份列表的轮询开销。
    *
    * 过滤是**就地状态**（不进 query，原样平移抽屉口径）：服务端过滤每次切换即重拉，
    * 进 query 会让后退键变成「筛选项切换器」，与「回上一页」的直觉打架。
@@ -158,11 +182,21 @@
    */
   import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
   import { useRouter } from 'vue-router'
-  import { ElButton, ElEmpty, ElRadioButton, ElRadioGroup, ElSkeleton } from 'element-plus'
+  import {
+    ElButton,
+    ElEmpty,
+    ElPagination,
+    ElRadioButton,
+    ElRadioGroup,
+    ElSkeleton
+  } from 'element-plus'
   import ArtButtonTable from '@/components/core/forms/art-button-table/index.vue'
   import { usePageIcon } from '@/hooks/core/usePageIcon'
+  import { useAuth } from '@/hooks/core/useAuth'
+  import { useUserStore } from '@/store/modules/user'
+  import { PermDockerManage } from '@/enums/permission'
   import { fetchDockerTasks, type DockerTaskItem } from '../api'
-  import TaskPullProgress from '../components/task-pull-progress.vue'
+  import TaskProgress from '../components/task-progress.vue'
   import { lookupDockerAction } from '../utils/actions'
   import { eventRelativeTime } from '../utils/events'
 
@@ -180,6 +214,12 @@
   // ── 数据与四态（首拉 loading/error、空、ready；静默刷新失败保留旧列表） ──
 
   const items = ref<DockerTaskItem[]>([])
+  /** 合计条数：服务端合并列表（实时 ∪ 历史）的真实全量 —— 页头「共 N 条」与分页器
+      都读它（8d 起不再是「窗口内匹配数」，理由见 api.ts 的 DockerTasksQuery 注释）。 */
+  const total = ref(0)
+  /** 页码与页大小（服务端分页：切页/切大小即重拉，前端不本地切）。 */
+  const page = ref(1)
+  const pageSize = ref(10)
   const loading = ref(false)
   /** 首拉失败（还没有任何行可给）：错误态 + 重试。 */
   const firstError = ref(false)
@@ -199,7 +239,10 @@
   const state = computed<'loading' | 'error' | 'empty' | 'ready'>(() => {
     if (firstError.value) return 'error'
     if (loading.value && !hasLoaded.value) return 'loading'
-    if (hasLoaded.value && items.value.length === 0) return 'empty'
+    // 空态只认「全域/筛选下真的没有任务」（total=0）：total>0 而本页为空只可能是
+    // 「这一页被并发清理清空了」的越界窗口（下一拍就被拉回有效页），此时说
+    // 「没有进行中的任务」是一句假话 —— 宁可让列表空着等那一拍。
+    if (hasLoaded.value && items.value.length === 0 && total.value === 0) return 'empty'
     return 'ready'
   })
 
@@ -211,27 +254,51 @@
     return '还没有受理过任何任务'
   })
 
-  /** 页头副标题：三个硬事实（数据范围 / 窗口上限 / 自动刷新节奏）。原「最近受理的
-   * 指令」定位句与「可见期间」机制说明属解释性文案，已按「零解释文案」纪律删除。 */
-  const subtitle = computed(
-    () => `跨主机 · 最多 100 条 · 每 ${POLL_MS / 1000} 秒自动刷新`
+  /** 页头副标题：三个硬事实（数据范围 / 全量条数 / 自动刷新节奏）。原「最近受理的
+   * 指令」定位句与「可见期间」机制说明属解释性文案，已按「零解释文案」纪律删除；
+   * 8d 起「最多 100 条」的旧上限也随分页落地改写为「共 N 条」（首拉之前不报价 ——
+   * 抢跑一个「共 0 条」是假话）。 */
+  const subtitle = computed(() =>
+    hasLoaded.value
+      ? `跨主机 · 共 ${total.value} 条 · 每 ${POLL_MS / 1000} 秒自动刷新`
+      : `跨主机 · 每 ${POLL_MS / 1000} 秒自动刷新`
   )
 
   /**
-   * 拉一次任务列表（筛选作为 query 全部透传，服务端过滤 —— 与容器列表页同一条
-   * 纪律：前端不做本地过滤，筛选条件与请求一一对应）。
+   * 拉一次任务列表（筛选与分页作为 query 全部透传，服务端过滤/分页 —— 与容器列表页
+   * 同一条纪律：前端不做本地过滤、不做本地切页）。
    */
   async function load(silent = false) {
     const seq = ++loadSeq
     if (!silent) loading.value = true
     try {
-      const resp = await fetchDockerTasks(filter.value === 'all' ? {} : { status: filter.value })
+      const resp = await fetchDockerTasks({
+        ...(filter.value === 'all' ? {} : { status: filter.value }),
+        page: page.value,
+        pageSize: pageSize.value
+      })
       if (seq !== loadSeq) return
       items.value = resp.items ?? []
+      total.value = resp.total ?? 0
+      // 页参数以**服务端回显**为准（8d 契约）：服务端会夹页大小上限并据此切页，
+      // 前端跟着它对同一句话（回显缺席时保留本地值 —— 老服务端的降级路径）。
+      if (resp.page) page.value = resp.page
+      if (resp.pageSize) pageSize.value = resp.pageSize
       hasLoaded.value = true
       firstError.value = false
       refreshError.value = false
       nowSec.value = Math.floor(Date.now() / 1000)
+      // 越界页自愈：保留清理（或筛选切换时的位移）可能让当前页落空，回拉到最后一页
+      // —— 分页器与「共 N 条」必须是同一句话的两个说法，不能出现「第 3 页 / 共 5 条」
+      // 而列表空着。收敛性：回拉后的页必非空（total>0 时最后一页至少有 1 条），
+      // 且页码真的变了才重拉（防「服务端返回与合计自相矛盾」时打成死循环）。
+      if (items.value.length === 0 && total.value > 0 && page.value > 1) {
+        const last = Math.max(1, Math.ceil(total.value / pageSize.value))
+        if (last !== page.value) {
+          page.value = last
+          void load()
+        }
+      }
     } catch {
       if (seq !== loadSeq) return
       if (hasLoaded.value) {
@@ -276,10 +343,28 @@
     restartPoll()
   })
 
-  // 筛选变化即重拉（服务端过滤没有本地回退，不重拉列表就不会变）。
+  // 筛选变化即重拉（服务端过滤没有本地回退，不重拉列表就不会变）；同时回到第 1 页
+  // —— 筛选后的「第 3 页」没有意义（旧页码属于旧集合，且常常直接越界）。
   watch(filter, () => {
+    page.value = 1
     void load()
   })
+
+  // ── 分页（服务端分页；切页/切大小即重拉，不本地切） ──────────────
+  // 切页大小回到第 1 页（同一理由：旧页码属于旧的一页一世界的集合）。两条都走
+  // load（非 silent —— 页码在动，给一帧 loading 表意比静默换内容好）。
+  function onCurrentChange(p: number) {
+    if (p === page.value) return
+    page.value = p
+    void load()
+  }
+
+  function onSizeChange(s: number) {
+    if (s === pageSize.value) return
+    pageSize.value = s
+    page.value = 1
+    void load()
+  }
 
   // keep-alive 失活停表（页面被 worktab 缓存时不轮询）；激活回来补拉 —— 后台期间
   // 浏览器限流了 interval，切回来的列表已是旧的。首次激活（= 挂载）不算「回来」：
@@ -373,13 +458,40 @@
   }
 
   /**
-   * 可展开的两类行：进行中的拉取（接实时进度流，后端 6b 契约「前端凭 action 判断
-   * 可流」）；失败/超时且有结论句（排障线索原文）。已展开的行即使转入终态也保留
-   * 展开态（收尾结论就地接上，用户不用再点一次），收起按钮随之常驻。
+   * 可展开的两类行：
+   *   - 进行中的**进度族**任务（pull/build/push —— 与 core 的 progressSessionOf
+   *     同源的三族）接实时进度流；凭 action 判定（后端 6b 契约：action 就是
+   *     「可流/可取消」的依据，不需要额外的 streamable 字段）；
+   *   - 失败/超时且有结论句（排障线索原文）。
+   * 已展开的行即使转入终态也保留展开态（收尾结论就地接上，用户不用再点一次），
+   * 收起按钮随之常驻。
    */
+  const PROGRESS_ACTIONS = new Set(['image:pull', 'image:build', 'image:push'])
+
+  function isProgressAction(item: DockerTaskItem): boolean {
+    return PROGRESS_ACTIONS.has(item.action)
+  }
+
   function isExpandable(item: DockerTaskItem): boolean {
-    if (item.status === 'pending' && item.action === 'image:pull') return true
+    if (item.status === 'pending' && isProgressAction(item)) return true
     return (item.status === 'failed' || item.status === 'timeout') && item.summary !== ''
+  }
+
+  // ── 取消入口的可见性（展开区里的「取消」按钮）──────────────────────────
+  // 三闸与服务端逐条对齐，前两道在**前端只是可见性**（服务端仍会复核）：
+  //   - 任务属于我：core 的取消端点要求发起人归属（与进度流接入同档）——
+  //     别人的任务在我这里不出现这个按钮（username 是服务端联查的用户名，删号
+  //     降级为空串 → 不显示，fail-closed）；
+  //   - 我有 docker:manage：进度三族的受理权限码，无它服务端必 403；
+  //   - 任务还在 pending（终态的取消 = 409，不给无意义的按钮）。
+  const { hasAuth } = useAuth()
+  const userStore = useUserStore()
+  const myUsername = computed(() => userStore.getUserInfo?.username ?? '')
+
+  function canCancel(item: DockerTaskItem): boolean {
+    if (item.status !== 'pending' || !isProgressAction(item)) return false
+    if (!hasAuth(PermDockerManage)) return false
+    return item.username !== '' && item.username === myUsername.value
   }
 
   const expandedRefs = ref<string[]>([])
@@ -395,7 +507,8 @@
   }
 
   // 重新拉列表后，从窗口里消失的行带着展开态一起走（连带的进度流子组件卸载即断流
-  // —— 100 条窗口内进行中的拉取被挤出是极端情况，见 task-pull-progress 的取舍注释）。
+  // —— 那只是停止观看：任务照常跑完，展开态随行消失是列表窗口的事实；
+  // 本页条目被切走（翻页/筛选/轮询位移）同理，见 task-progress 的取舍注释）。
 </script>
 
 <style lang="scss" scoped>
@@ -446,11 +559,29 @@
     line-height: 1.6;
   }
 
-  // 任务行列表：行间以分隔线分组（无分页 —— 窗口就是「最近 100 条」这一屏）。
+  // 任务行列表：行间以分隔线分组（分页在卡片尾部，见 .tk-page —— 一页就是「最近
+  // pageSize 条」这一屏，翻页由服务端完成）。
   .tk-list {
     margin: 0;
     padding: 0;
     list-style: none;
+  }
+
+  // 分页条（8d）：左侧一个硬事实（第 X 页 / 共 N 条），右侧分页控件。
+  // 与页头副标题的「共 N 条」同源（同一个 total）—— 上下两处说同一句话。
+  .tk-page {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    justify-content: space-between;
+    padding-top: 10px;
+    border-top: 1px solid var(--el-border-color-lighter);
+
+    &__hint {
+      color: var(--el-text-color-regular);
+      font-size: 12px;
+    }
   }
 
   .tk-item {

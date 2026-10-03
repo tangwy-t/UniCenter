@@ -135,6 +135,9 @@ export default ({ mode, command }: { mode: string; command: 'serve' | 'build' })
     // 位于 node_modules,SSR/node 默认外部化会交给原生加载器解析 .scss 直接报错;
     // 内联进 vite 编译管线即可正常处理样式导入。
     test: {
+      // 全局 setup：合成事件的墙钟时间戳守卫豁免（WSL 墙钟回拨会静默吞事件 ——
+      // 成因、实测证据与回归守卫见 src/test/setup.ts）。
+      setupFiles: ['./src/test/setup.ts'],
       server: {
         deps: {
           inline: [/element-plus/]

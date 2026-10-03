@@ -77,15 +77,32 @@ type stubAPI struct {
 	repoDigestErr   error
 	repoDigestN     int
 	repoDigestCalls []string
-	tagged          []tagCall
-	saved           []saveCall
-	loaded          []string
+	// registryPolicy / registryPolicySet / registryPolicyErr 是探测面（推送完成判据
+	// 的证据三）的策略替身。**默认缺席**（未显式设置时返回错误 = 探测整场开不了口）：
+	// 单元测试不该碰真网络，而探针的构造要读策略 —— 缺席即短路。需要证据三的用例
+	// 显式设置策略，并把 target 指向进程内的假 registry（见 registry_probe_test.go）。
+	registryPolicy    RegistryPolicy
+	registryPolicySet bool
+	registryPolicyErr error
+	// tagEvents / tagEventErr 是 ImageTagEvents（构建完成判据的 tag 事件回放）的替身：
+	// 默认空列表（窗口里没有 tag 事件 = 该证据开不了口）。
+	tagEvents     []EventItem
+	tagEventErr   error
+	tagEventCalls int
+	tagged        []tagCall
+	saved         []saveCall
+	loaded        []string
 	// P2·分发面：build/push 的**定型记录 + 进度流替身**（与 pull 同款语义：
 	// buildCh/pushCh 非 nil 时逐条交给 emit，关闭返回 buildErr/pushErr；
 	// nil = 一次性成功/失败）。
-	built            []buildCall
-	buildCh          chan BuildProgress
-	buildErr         error
+	built    []buildCall
+	buildCh  chan BuildProgress
+	buildErr error
+	// buildFixture 是**真机捕获的构建流原文**（逐行 JSON）：非空时 ImageBuild 走
+	// adapter 的同一解析器（consumeBuildStream）逐条交给 emit，放完之后挂住等 ctx
+	// 取消再以 ctx 错误返回（与通道替身在掐断时的形态一致）——判据的夹具测试因此
+	// 与生产接线逐字相同，而不是手搓几条 BuildProgress。
+	buildFixture     string
 	pushed           []pushCall
 	pushCh           chan PullProgress
 	pushErr          error
@@ -253,6 +270,13 @@ func (s *stubAPI) ImageLoad(_ context.Context, path string) error {
 // scanBuildContext，替身只让它「通过」），进度通道逐条交给 emit。
 func (s *stubAPI) ImageBuild(ctx context.Context, spec BuildSpec, emit func(BuildProgress)) error {
 	s.built = append(s.built, buildCall{spec: spec})
+	if s.buildFixture != "" {
+		if err := consumeBuildStream(strings.NewReader(s.buildFixture), emit); err != nil {
+			return err
+		}
+		<-ctx.Done() // 流放完 = 「daemon 干完活」；之后等掐断（cancel/截止）
+		return ctx.Err()
+	}
 	if s.buildCh == nil {
 		return s.buildErr
 	}
@@ -339,7 +363,15 @@ func (s *stubAPI) ImageInspect(context.Context, string) (ImageDetail, error) {
 }
 
 // ImageRefID 按观测序列给答案（见 imageRefIDs 的说明）；序列用尽后沿用最后一项。
-func (s *stubAPI) ImageRefID(_ context.Context, ref string) (string, error) {
+//
+// **尊重 ctx**（ctx 作废即返回错误）：与真 daemon 同形 —— 真截止之后拿那条已作废的
+// ctx 去查询会立刻失败。结算判据因此必须走 evidenceCtx（completion.go），这条性质
+// 由 TestSettlementEvidenceSurvivesExpiredCommandCtx 钉住（真机 e2e 暴露的缺陷，
+// 替身当初不尊重 ctx 时看不见）。
+func (s *stubAPI) ImageRefID(ctx context.Context, ref string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	s.imageRefCalls = append(s.imageRefCalls, ref)
 	if s.imageRefErr != nil {
 		return "", s.imageRefErr
@@ -355,7 +387,11 @@ func (s *stubAPI) ImageRefID(_ context.Context, ref string) (string, error) {
 }
 
 // ImageRepoDigests 按观测序列给答案（见 repoDigests 的说明）；序列用尽后沿用最后一项。
-func (s *stubAPI) ImageRepoDigests(_ context.Context, ref string) ([]string, error) {
+// 同 ImageRefID：尊重 ctx（作废即查询失败）。
+func (s *stubAPI) ImageRepoDigests(ctx context.Context, ref string) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	s.repoDigestCalls = append(s.repoDigestCalls, ref)
 	if s.repoDigestErr != nil {
 		return nil, s.repoDigestErr
@@ -371,6 +407,31 @@ func (s *stubAPI) ImageRepoDigests(_ context.Context, ref string) ([]string, err
 }
 func (s *stubAPI) ComposeVersion(context.Context) (string, string, error) {
 	return s.flavor, s.flavorVer, nil
+}
+
+// RegistryPolicy 按替身面给策略（见 registryPolicy 字段的说明）：未显式设置即返回
+// 错误 —— 探测面短路，单元测试不碰真网络。
+func (s *stubAPI) RegistryPolicy(context.Context) (RegistryPolicy, error) {
+	if s.registryPolicyErr != nil {
+		return RegistryPolicy{}, s.registryPolicyErr
+	}
+	if !s.registryPolicySet {
+		return RegistryPolicy{}, errors.New("stub: 未设置仓库策略（探测面默认关闭）")
+	}
+	return s.registryPolicy, nil
+}
+
+// ImageTagEvents 按替身面给事件窗口（见 tagEvents 字段的说明）。同 ImageRefID：
+// 尊重 ctx（作废即查询失败）。
+func (s *stubAPI) ImageTagEvents(ctx context.Context, _, _ time.Time) ([]EventItem, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.tagEventCalls++
+	if s.tagEventErr != nil {
+		return nil, s.tagEventErr
+	}
+	return s.tagEvents, nil
 }
 
 // ── 三期流会话的替身（记录型）──────────────────────────────────────────────

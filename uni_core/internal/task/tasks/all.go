@@ -11,11 +11,14 @@ type Deps struct {
 	OpLogRepo    DeleteBeforeRepo
 	LoginLogRepo DeleteBeforeRepo
 	JobLogRepo   DeleteBeforeRepo
-	ConfigRepo   ConfigRepoInterface
-	DictTypeRepo DictTypeInterface
-	DictDataRepo DictDataRepoInterface
-	ConfigSvc    ConfigProvider
-	CacheStore   HashStoreInterface
+	// DockerTaskRepo 是任务中心历史的清理面（8d）：只依赖 DeleteBefore
+	// （与三类日志清理共用同一个窄接口，见 interfaces.go）。
+	DockerTaskRepo DeleteBeforeRepo
+	ConfigRepo     ConfigRepoInterface
+	DictTypeRepo   DictTypeInterface
+	DictDataRepo   DictDataRepoInterface
+	ConfigSvc      ConfigProvider
+	CacheStore     HashStoreInterface
 
 	// ─ 设备指标域（Plan 2C）────────────────────────────
 	// 三个后台服务的窄接口（消费方定义，见 interfaces.go）。
@@ -40,6 +43,8 @@ func All(d Deps) []task.Task {
 		NewOpLogCleanupTask(d.OpLogRepo, d.ConfigSvc),
 		NewLoginLogCleanupTask(d.LoginLogRepo, d.ConfigSvc),
 		NewJobLogCleanupTask(d.JobLogRepo, d.ConfigSvc),
+		// 任务中心历史清理（8d）：与三类日志清理同一形状（保留天数走配置）。
+		NewDockerTaskCleanupTask(d.DockerTaskRepo, d.ConfigSvc),
 		NewAgentUpgradePatrolTask(d.AgentUpgrade, d.Log),
 		NewConfigSyncTask(d.ConfigRepo, d.CacheStore),
 		NewDictSyncTask(d.DictTypeRepo, d.DictDataRepo, d.CacheStore),

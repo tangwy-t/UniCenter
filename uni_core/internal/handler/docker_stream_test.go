@@ -1111,10 +1111,11 @@ func TestPullStreamSkipsInvalidLine(t *testing.T) {
 	}
 }
 
-// TestPullStreamDisconnectCancelsAgent：客户端断开（请求 ctx 取消）→ 向 agent 下发
-// cancel 并清理会话。对拉取，这条 cancel 的语义是「放弃这场拉取」—— agent 侧据此
-// 终止拉取用的 ctx（与 stats/logs 的「断开即停」同一条纪律，重量不同）。
-func TestPullStreamDisconnectCancelsAgent(t *testing.T) {
+// TestPullStreamDisconnectOnlyDetaches：客户端断开（请求 ctx 取消）**只是停止观看**：
+// 不下发 cancel（拉取照常跑完，结果经既有 result 通道入账）、会话留在注册表里
+// （同一条句柄可以再接入 = 重进观看；寿命 = 指令寿命，由 sweep 终态对账回收）。
+// 这是本波「断流 ≠ 取消」的核心不变量：终止这场拉取只有显式取消端点一条路。
+func TestPullStreamDisconnectOnlyDetaches(t *testing.T) {
 	env := newTestDockerHandler(t, []string{"docker:manage"})
 	rec := seedPullRecord(t, env, 7, 1)
 	sess := seedPullProgressSession(t, env, 7, 1)
@@ -1132,12 +1133,82 @@ func TestPullStreamDisconnectCancelsAgent(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("客户端断开后处理器必须返回")
 	}
-	if env.sessions.Get(agentproto.DockerPullSessionID(pullRecRef)) != nil {
-		t.Fatal("断开后必须清理会话")
+	if env.sessions.Get(agentproto.DockerPullSessionID(pullRecRef)) == nil {
+		t.Fatal("断开只是停止观看：会话必须留在注册表里（寿命 = 指令寿命）")
 	}
-	frames := env.sender.frameOps()
-	if len(frames) != 1 || frames[0].Op != agentproto.DockerFrameOpCancel ||
-		frames[0].SessionID != agentproto.DockerPullSessionID(pullRecRef) {
-		t.Fatalf("断开必须下发 cancel（语义 = 放弃拉取）: %+v", frames)
+	if frames := env.sender.frameOps(); len(frames) != 0 {
+		t.Fatalf("断流不得下发任何控制帧（cancel 只来自显式取消端点）: %+v", frames)
+	}
+	if sess.Attached() {
+		t.Fatal("断开后接入占用必须释放 —— 否则重进观看会撞 409")
+	}
+}
+
+// TestPullStreamReattachResumesProgress：重进观看（再展开任务行/重接同一句柄）——
+// 断线期间到达的帧被缓冲、重接时先补上，随后新帧照常到达；eof 收尾后会话被清理
+// （与首次接入走同一条收尾路径）。「一次观看」与「流会话」的关系是 N:1。
+func TestPullStreamReattachResumesProgress(t *testing.T) {
+	ctx := context.Background()
+	env := newTestDockerHandler(t, []string{"docker:manage"})
+	rec := seedPullRecord(t, env, 7, 1)
+	sess := seedPullProgressSession(t, env, 7, 1)
+	sid := agentproto.DockerPullSessionID(pullRecRef)
+
+	deliver := func(f *agentproto.DockerFrame) {
+		t.Helper()
+		if err := env.sessions.DeliverDockerFrame(ctx, 7, f); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 第一段观看：接上、看到第 1 帧、断开（不看了 ≠ 取消）。
+	deliver(&agentproto.DockerFrame{SessionID: sid, Seq: 1, Data: pullLineOf(t,
+		agentproto.DockerPullProgressItem{T: 1790000000000, ID: "aaa", Status: "Downloading", Current: 10, Total: 100})})
+	w1, c1, cancel1 := pullStreamContext(rec, 1)
+	done1 := make(chan struct{})
+	go func() {
+		defer close(done1)
+		env.handler.PullStream(c1)
+	}()
+	waitStream(t, "第一段看到首帧", func() bool { return strings.Contains(w1.Body.String(), `"aaa"`) })
+	cancel1()
+	select {
+	case <-done1:
+	case <-time.After(3 * time.Second):
+		t.Fatal("断开后处理器必须返回")
+	}
+	if sess.Attached() {
+		t.Fatal("断开后接入占用必须释放 —— 否则重进观看会撞 409（本测试后半段正是重接）")
+	}
+
+	// 无人观看期间到达的帧：进会话缓冲（重接时补上）。
+	deliver(&agentproto.DockerFrame{SessionID: sid, Seq: 2, Data: pullLineOf(t,
+		agentproto.DockerPullProgressItem{T: 1790000000100, ID: "bbb", Status: "Extracting", Current: 50, Total: 100})})
+
+	// 重进观看：缓冲帧先补上（进度可续），随后新帧照常。
+	w2, c2, cancel2 := pullStreamContext(rec, 1)
+	defer cancel2()
+	done2 := make(chan struct{})
+	go func() {
+		defer close(done2)
+		env.handler.PullStream(c2)
+	}()
+	waitStream(t, "重接补上断线期间的帧", func() bool { return strings.Contains(w2.Body.String(), `"bbb"`) })
+	deliver(&agentproto.DockerFrame{SessionID: sid, Seq: 3, EOF: true,
+		Data: pullLineOf(t, agentproto.DockerPullProgressItem{T: 1790000000200, Done: true})})
+	select {
+	case <-done2:
+	case <-time.After(3 * time.Second):
+		t.Fatal("eof 之后处理器必须返回")
+	}
+	body := w2.Body.String()
+	if !strings.Contains(body, `"bbb"`) || !strings.Contains(body, `"eof":true`) {
+		t.Fatalf("重接必须补上缓冲帧并以 eof 收尾: %q", body)
+	}
+	if env.sessions.Get(sid) != nil {
+		t.Fatal("eof 转发完必须清理会话（与首次接入同一条收尾路径）")
+	}
+	if frames := env.sender.frameOps(); len(frames) != 0 {
+		t.Fatalf("两段观看都不得下发控制帧: %+v", frames)
 	}
 }

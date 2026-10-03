@@ -261,7 +261,7 @@
       (i) => i.value === String(status)
     )?.list_class
     const map: Record<string, string> = {
-      primary: 'text-theme',
+      primary: 'text-theme-aa',
       success: 'text-success',
       danger: 'text-danger',
       warning: 'text-warning',

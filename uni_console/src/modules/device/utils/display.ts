@@ -260,6 +260,27 @@ export function usageTone(v: number | null | undefined): string {
   return 'var(--el-color-success)'
 }
 
+/**
+ * usageTone 的「文字」版：同一分档，但返回 AA token 引用（语义色文字族
+ * 收口，数字与理由见 @styles/core/aa-text.scss 文件头）——
+ *   - 原值文字对比度全在门槛下：success 1.72:1 / warning 1.85:1 /
+ *     primary 3.68:1 / danger 3.27:1（对白底），换 token 后 5.07–5.81；
+ *   - 缺值档维持 placeholder（其值已由 el-ui.scss 全局修到 4.81:1）。
+ * usageTone 的原值保留给条/图表（非文本族，维持既有裁定）；本函数只做
+ * 「tone → token」映射，阈值分档唯一源在 usageTone，两者不会漂移。
+ */
+const USAGE_TEXT_TONE: Record<string, string> = {
+  'var(--el-color-danger)': 'var(--aa-danger-text)',
+  'var(--el-color-warning)': 'var(--aa-warning-text)',
+  'var(--el-color-primary)': 'var(--aa-primary-text)',
+  'var(--el-color-success)': 'var(--aa-success-text)'
+}
+
+export function usageTextTone(v: number | null | undefined): string {
+  // placeholder（缺值档）不在映射内，天然落到兜底 —— 与 usageTone 同值。
+  return USAGE_TEXT_TONE[usageTone(v)] ?? 'var(--el-text-color-placeholder)'
+}
+
 /** 是否处于「需要显眼提示」的高水位（进度条右上角脉冲点用）。 */
 export function isCriticalUsage(v: number | null | undefined): boolean {
   return typeof v === 'number' && Number.isFinite(v) && v >= 90

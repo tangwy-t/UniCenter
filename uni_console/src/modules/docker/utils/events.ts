@@ -89,52 +89,89 @@ export function parseEventLine(line: string): DockerEventFields | null {
 }
 
 /**
- * action → 中文文案的映射表。收录 docker events 的高频动作；**未映射的动作原样
- * 显示** —— 新版本 docker 引入未知动作时，读者看到的是原始词而不是空白或误译，
- * 排障时原始词反而更有用。
+ * action 词元 → 中文文案的**完备**映射表：逐词条对齐协议的动作白名单
+ * （uni_protocol/docker.go 的 dockerEventActions，36 词条）。「类型白名单
+ * （container|image|volume|network）+ 动作白名单」合起来划定了可到达动作的
+ * 上界，而这里按上界收全（不分类型）—— 表内不设缺口，活动流就不存在「直显
+ * 英文」的漏网。测试逐词条钉住（含集合相等断言），协议扩词而这里忘跟会被
+ * events.test.ts 直接拦下。
+ *
+ * 「词表 ≠ 投递清单」的两种形态各有一处对应：
+ *   - exec 族（exec_create/exec_detach/exec_die/exec_start）在 agent 侧整族
+ *     过滤（信噪比 + 命令原文泄漏面，见 copyEvents 注释），正常帧不会到达；
+ *     这里仍给全映射 —— 词表是校验契约，前端跟着契约走，不跟着投递现状走。
+ *   - 表外的 daemon 原生动作（image 的 untag/delete、network 的 connect/
+ *     disconnect）不在协议白名单内，两道校验都会拦（agent Validate 丢弃并留痕、
+ *     core 整行丢弃），永远到不了这里 —— 它们不是「漏网」，是上游就不放行，
+ *     故不收录（收录反而暗示可达）。未映射动作的兜底仍是原样透传（见
+ *     eventActionText），为的是协议日后扩词时读者看到原始词而不是空白或误译。
  */
 export const EVENT_ACTION_TEXT: Readonly<Record<string, string>> = {
-  // 容器（含 exec_* / health_status 这类带下划线的动作名）
-  create: '创建',
-  destroy: '销毁',
-  start: '启动',
-  stop: '停止',
-  die: '退出',
-  kill: '强杀',
-  restart: '重启',
-  pause: '暂停',
-  unpause: '恢复',
-  rename: '改名',
-  update: '更新',
+  // 容器（词表原文顺序不打乱，方便与 docker.go 对照）
   attach: '挂接',
-  detach: '分离',
   commit: '提交',
   copy: '复制',
+  create: '创建',
+  destroy: '销毁',
+  detach: '分离',
+  die: '退出',
   exec_create: '准备执行',
-  exec_start: '开始执行',
-  exec_die: '执行退出',
   exec_detach: '执行分离',
+  exec_die: '执行退出',
+  exec_start: '开始执行',
+  enable: '启用',
+  disable: '停用',
+  export: '导出',
   health_status: '健康检查',
-  oom: '内存不足',
-  resize: '调整终端',
-  // 镜像
-  pull: '拉取',
-  tag: '打标签',
-  untag: '去标签',
-  delete: '删除',
   import: '导入',
+  kill: '强杀',
   load: '载入',
-  save: '保存',
-  // 卷 / 网络
   mount: '挂载',
+  oom: '内存不足',
+  pause: '暂停',
+  pull: '拉取',
+  push: '推送',
+  reload: '重载',
+  remove: '移除',
+  rename: '改名',
+  resize: '调整终端',
+  restart: '重启',
+  save: '保存',
+  start: '启动',
+  stop: '停止',
+  tag: '打标签',
+  top: '查看进程',
   unmount: '卸载',
-  connect: '接入',
-  disconnect: '断开'
+  unpause: '恢复',
+  update: '更新'
 }
 
-/** action 的展示文案（映射表命中给中文，未映射原样透传）。 */
+/**
+ * health_status 的后缀 → 具体结论。daemon 把检查结果放动作后缀里
+ * （"health_status: unhealthy"），协议校验取「首个 ": " 之前的词元」，后缀是
+ * 数据不是动作 —— 展示时若只给「健康检查」，异常与正常两条就没了差别，这条
+ * 正是 dockernotify 告警联动的事实源（unhealthy），读者不该自己去认英文。
+ * 非 healthy/unhealthy 的后缀（daemon 未来加结果词）退回基调「健康检查」并
+ * 由原始短语（title）兜底，不误译。
+ */
+const HEALTH_STATUS_TEXT: Readonly<Record<string, string>> = {
+  healthy: '健康检查正常',
+  unhealthy: '健康检查异常'
+}
+
+/**
+ * action 的展示文案：先切词元（首个 ": " 之前，与协议 Validate 同一口径 ——
+ * 谁在说话是动作，说话内容是数据），health_status 的结果后缀单独成句，其余
+ * 词元查表；表外词元原样透传（协议扩词的兜底，正常帧不可达，见映射表注释）。
+ */
 export function eventActionText(action: string): string {
-  return EVENT_ACTION_TEXT[action] ?? action
+  const i = action.indexOf(': ')
+  const token = i >= 0 ? action.slice(0, i) : action
+  if (token === 'health_status' && i >= 0) {
+    const status = action.slice(i + 2).trim()
+    return HEALTH_STATUS_TEXT[status] ?? EVENT_ACTION_TEXT.health_status
+  }
+  return EVENT_ACTION_TEXT[token] ?? action
 }
 
 /**

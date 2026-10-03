@@ -257,6 +257,8 @@ describe('workload-batch-bar · 波次推进与波级反馈', () => {
     del!.element.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     await flush()
 
+    // 等确认输入框**真的渲染出来**（开窗是一串异步；固定轮数的 flush 在负载下会漂）。
+    await vi.waitUntil(() => w.find('.wkl-batch-del__input input').exists(), { timeout: 5000 })
     const input = w.find('.wkl-batch-del__input input')
     expect(input.exists()).toBe(true)
     await input.setValue('DELETE')

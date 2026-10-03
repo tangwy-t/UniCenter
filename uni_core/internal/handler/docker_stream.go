@@ -11,8 +11,10 @@ import (
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
 
+	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/response"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/app"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/apperror"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockerstate"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockerstream"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/ws"
 	agentproto "github.com/tangwy-t/UniCenter/uni_protocol"
@@ -27,6 +29,7 @@ import (
 //	GET /docker/hosts/:id/cmds/:ref/pull    —— 拉取进度流：NDJSON（进度行），Bearer + 归属校验
 //	GET /docker/hosts/:id/cmds/:ref/build   —— 构建进度流：NDJSON（步骤/文本行），Bearer + 归属校验
 //	GET /docker/hosts/:id/cmds/:ref/push    —— 推送进度流：NDJSON（进度行），Bearer + 归属校验
+//	POST /docker/hosts/:id/cmds/:ref/cancel —— 显式取消进度族指令（202），Bearer + 归属校验
 //	GET /docker/hosts/:id/stream/exec       —— 终端：WebSocket 升级，一次性 ticket
 //
 // 为什么两类端点的认证模型不同：日志 / stats / 各进度流用 fetch + ReadableStream
@@ -35,14 +38,17 @@ import (
 // 浏览器 API 下的形态。进度三族走 fetch 形态（与日志/stats 同族），且它们是
 // 「指令还在 pending 就可接入」的流 —— 会话由受理指令时预登记（见
 // service/docker_cmd.go 与协议 DockerPullSessionID / DockerBuildSessionID /
-// DockerPushSessionID），断开这条连接的 cancel 终止的是操作本身（与
-// stats/logs「断开即停流」同一条纪律）。
+// DockerPushSessionID）。
+//
+// **观看与执行解耦**（本波语义收口）：进度三族的流是「观看」——断开/写失败只解除
+// 接入（不发 cancel），任务照常跑完、结果经既有 result 通道入账；终止操作只有一条
+// 路：显式取消端点（CancelCmd）。日志/stats 维持「断开即停流」（它们是纯观看流，
+// 断开不牵动任何在跑的指令）；终端维持「断开即取消」（它承载的进程本身就是会话）。
 //
 // 六条 NDJSON 端点全部挂 middleware.LongLived（挂载点在 router.go）：http.Server 的
 // WriteTimeout 是**整条响应**的绝对窗口，不接管写截止的话，任何 >30s 的流都会在
-// 30.0s 被写失败掐断 —— 而本波「断流 = best-effort cancel」会把这声掐断升级成
-// 「取消操作本身」（P0：>30s 的拉取必然失败）。机制说明见
-// internal/middleware/long_lived.go。
+// 30.0s 被写失败掐断 —— 对进度三族，这声掐断现在只是「观看结束」（任务不受影响），
+// 对日志/终端仍是实打实的断开。机制说明见 internal/middleware/long_lived.go。
 
 const (
 	// execWriteTimeout 是单条 WS 消息的写超时：对端 TCP 卡死时写侧不能永久挂住
@@ -432,10 +438,11 @@ func progressSessionIDOf(action, ref string) string {
 
 // PullStream 镜像拉取进度流：接入序见 progressStreamSession —— 权限码就是
 // image:pull 的受理权限码（docker:manage），因为进度如实露出「在拉什么」
-// （镜像名/层/体积都是仓库面的事实）。
+// （镜像名/层/体积都是仓库面的事实）。断开只是停止观看，拉取照常跑完（终止走
+// POST /cmds/:ref/cancel）。
 //
 // @Summary      镜像拉取进度流(NDJSON)
-// @Description  按指令号接入拉取进度会话；每行一个进度记录 {"seq","t","id","status","current","total","done","error","eof"}；客户端断开即下发 cancel（终止拉取）
+// @Description  按指令号接入拉取进度会话；每行一个进度记录 {"seq","t","id","status","current","total","done","error","eof"}；客户端断开只是停止观看（拉取继续，终止走 POST /cmds/:ref/cancel）
 // @Tags         Docker 管理
 // @Produce      application/x-ndjson
 // @Param        id   path      uint64  true  "设备ID"
@@ -479,10 +486,14 @@ type pullNDJSONLine struct {
 // 逐行解码成字段写成 NDJSON 行；eof 挂在最后一个记录行上（与 stats 流同理）；
 // 一行解码失败时**跳过该行**并留痕（丢一眼进度不致命，把整条流转成错误才是）。
 //
-// 收尾纪律与 serveStatsNDJSON 相同：收到 eof 转发完 → 幂等清理；其余（客户端断开、
-// 写失败、会话被取消）→ 向 agent 发 cancel—— 对拉取，cancel 有真实的语义重量：
-// 它会**终止这场拉取**（agent 侧关闭拉取用的 ctx），故「进度对话框断开 = 放弃这场
-// 拉取」是本端点给消费端的契约（与 stats/logs「断开即停流」同一条纪律）。
+// 收尾纪律（本波语义收口，与日志/stats 的「断开即停流」**刻意分家**）：
+//   - 收到 eof 转发完 → 幂等清理（自然结束）；
+//   - 其余（客户端断开、写失败、会话被取消）→ **只解除接入**（ReleaseSession），
+//     **不发 cancel**：进度三族的流是「观看」，不是操作本身 —— 关掉对话框/切页/
+//     收起进度行只是停止观看，拉取照常跑完，结果经既有 result 通道入账。会话留在
+//     注册表里等下一次接入（重新观看），寿命 = 指令寿命（终态对账回收，见 Sweep）。
+//     终止这场拉取只有一条路：显式取消端点（POST /cmds/:ref/cancel →
+//     CancelProgress → 下发 cancel）。
 func (h *DockerHandler) servePullNDJSON(c *gin.Context, sess *dockerstream.Session) {
 	ctx := c.Request.Context()
 	// 流式响应的三个头与日志/stats 流同一来源（no-store 防缓存、X-Accel-Buffering
@@ -523,7 +534,7 @@ func (h *DockerHandler) servePullNDJSON(c *gin.Context, sess *dockerstream.Sessi
 				line.EOF = true // eof 挂在最后一个进度行（与日志「末帧数据+eof 同帧」同理）
 			}
 			if err := enc.Encode(line); err != nil {
-				h.streams.CancelSession(context.Background(), sess, "客户端断开或写失败")
+				h.streams.ReleaseSession(sess.ID())
 				return
 			}
 			lines++
@@ -531,7 +542,7 @@ func (h *DockerHandler) servePullNDJSON(c *gin.Context, sess *dockerstream.Sessi
 		if f.EOF && lines == 0 {
 			// eof 帧不带进度行（终态项与 eof 分了帧）：单独发一行 eof。
 			if err := enc.Encode(pullNDJSONLine{Seq: f.Seq, EOF: true}); err != nil {
-				h.streams.CancelSession(context.Background(), sess, "客户端断开或写失败")
+				h.streams.ReleaseSession(sess.ID())
 				return
 			}
 		}
@@ -547,7 +558,7 @@ func (h *DockerHandler) servePullNDJSON(c *gin.Context, sess *dockerstream.Sessi
 		h.streams.FinishSession(sess.ID())
 		return
 	}
-	h.streams.CancelSession(context.Background(), sess, "客户端断开或写失败")
+	h.streams.ReleaseSession(sess.ID())
 }
 
 // buildNDJSONLine 是构建进度流的一行（Content-Type: application/x-ndjson）。
@@ -573,7 +584,7 @@ type buildNDJSONLine struct {
 // 露出「用什么基础镜像、跑什么步骤」）。
 //
 // @Summary      镜像构建进度流(NDJSON)
-// @Description  按指令号接入构建进度会话；每行一个记录 {"seq","t","id","status","stream","done","error","eof"}；客户端断开即下发 cancel（终止构建）
+// @Description  按指令号接入构建进度会话；每行一个记录 {"seq","t","id","status","stream","done","error","eof"}；客户端断开只是停止观看（构建继续，终止走 POST /cmds/:ref/cancel）
 // @Tags         Docker 管理
 // @Produce      application/x-ndjson
 // @Param        id   path      uint64  true  "设备ID"
@@ -596,8 +607,9 @@ func (h *DockerHandler) BuildStream(c *gin.Context) {
 
 // serveBuildNDJSON 是构建进度的转发循环：帧 data 逐行解码成字段写成 NDJSON 行；
 // eof 挂在最后一个记录行上；一行解码失败跳过并留痕（与 stats/pull 同纪律）。
-// 收尾纪律同 servePullNDJSON：收到 eof 转发完 → 幂等清理；其余 → 发 cancel
-// （终止构建本身）。
+// 收尾纪律同 servePullNDJSON（本波语义收口）：收到 eof 转发完 → 幂等清理；其余
+// （断开/写失败）→ **只解除接入，不发 cancel** —— 构建照常跑完，终止只有显式取消
+// 端点一条路。
 func (h *DockerHandler) serveBuildNDJSON(c *gin.Context, sess *dockerstream.Session) {
 	ctx := c.Request.Context()
 	c.Header("Content-Type", "application/x-ndjson")
@@ -635,14 +647,14 @@ func (h *DockerHandler) serveBuildNDJSON(c *gin.Context, sess *dockerstream.Sess
 				line.EOF = true
 			}
 			if err := enc.Encode(line); err != nil {
-				h.streams.CancelSession(context.Background(), sess, "客户端断开或写失败")
+				h.streams.ReleaseSession(sess.ID())
 				return
 			}
 			lines++
 		}
 		if f.EOF && lines == 0 {
 			if err := enc.Encode(buildNDJSONLine{Seq: f.Seq, EOF: true}); err != nil {
-				h.streams.CancelSession(context.Background(), sess, "客户端断开或写失败")
+				h.streams.ReleaseSession(sess.ID())
 				return
 			}
 		}
@@ -658,7 +670,7 @@ func (h *DockerHandler) serveBuildNDJSON(c *gin.Context, sess *dockerstream.Sess
 		h.streams.FinishSession(sess.ID())
 		return
 	}
-	h.streams.CancelSession(context.Background(), sess, "客户端断开或写失败")
+	h.streams.ReleaseSession(sess.ID())
 }
 
 // pushNDJSONLine 是推送进度流的一行（与 pull 同字段集 —— daemon 的 push 与
@@ -681,7 +693,7 @@ type pushNDJSONLine struct {
 // image:push 的受理权限码 docker:manage —— 看进度与发起推送同档）。
 //
 // @Summary      镜像推送进度流(NDJSON)
-// @Description  按指令号接入推送进度会话；每行一个进度记录 {"seq","t","id","status","current","total","done","error","eof"}；客户端断开即下发 cancel（终止推送）
+// @Description  按指令号接入推送进度会话；每行一个进度记录 {"seq","t","id","status","current","total","done","error","eof"}；客户端断开只是停止观看（推送继续，终止走 POST /cmds/:ref/cancel）
 // @Tags         Docker 管理
 // @Produce      application/x-ndjson
 // @Param        id   path      uint64  true  "设备ID"
@@ -703,7 +715,8 @@ func (h *DockerHandler) PushStream(c *gin.Context) {
 }
 
 // servePushNDJSON 是推送进度的转发循环（与 servePullNDJSON 同构：同 line 形状、
-// 同 eof 纪律、同解码失败跳过、同断开即 cancel —— 只有 item 类型与日志措辞不同）。
+// 同 eof 纪律、同解码失败跳过、同「断开只解除接入」的收尾 —— 只有 item 类型与
+// 日志措辞不同）。
 func (h *DockerHandler) servePushNDJSON(c *gin.Context, sess *dockerstream.Session) {
 	ctx := c.Request.Context()
 	c.Header("Content-Type", "application/x-ndjson")
@@ -741,14 +754,14 @@ func (h *DockerHandler) servePushNDJSON(c *gin.Context, sess *dockerstream.Sessi
 				line.EOF = true
 			}
 			if err := enc.Encode(line); err != nil {
-				h.streams.CancelSession(context.Background(), sess, "客户端断开或写失败")
+				h.streams.ReleaseSession(sess.ID())
 				return
 			}
 			lines++
 		}
 		if f.EOF && lines == 0 {
 			if err := enc.Encode(pushNDJSONLine{Seq: f.Seq, EOF: true}); err != nil {
-				h.streams.CancelSession(context.Background(), sess, "客户端断开或写失败")
+				h.streams.ReleaseSession(sess.ID())
 				return
 			}
 		}
@@ -764,7 +777,95 @@ func (h *DockerHandler) servePushNDJSON(c *gin.Context, sess *dockerstream.Sessi
 		h.streams.FinishSession(sess.ID())
 		return
 	}
-	h.streams.CancelSession(context.Background(), sess, "客户端断开或写失败")
+	h.streams.ReleaseSession(sess.ID())
+}
+
+// CancelCmd 显式取消一条进度族指令（image:pull / image:build / image:push）。
+//
+// 它是「取消」这件事在系统里的**唯一**入口（本波语义收口）：观看面（进度流的
+// 断开）与执行彻底解耦 —— 关对话框/切页/收起进度行都只是停止观看，只有这里会
+// 向 agent 下发 cancel 帧去终止操作。
+//
+// 鉴权与进度流接入**同一张档**（三闸逐条相同）：记录存在且设备匹配（404）、
+// 记录的权限码 —— 进度三族都是 docker:manage（403）、发起人归属（403）。刻意与
+// 流端点逐字对齐而不是另立一档：取消端点的权限包络必须等于它替换掉的那条隐式
+// 路径（断流即取消），否则「有了一个显式按钮」就悄悄放宽或收紧了同一件事。
+//
+// 202 而不是 200：这里受理的是**取消请求**，截止与否由指令记录结算 —— agent 按
+// 操作的实际结局回写（迟到的 cancel 是 no-op：操作若恰好已完成，终态是成功而
+// 不是「已取消」，见 pull_progress.go 的竞态注释）。core 不代 agent 下结论，
+// 也不改写记录（记录的终态只有 agent 的 result 一个写入者）。
+//
+// @Summary      取消进度族指令
+// @Description  向目标主机下发 cancel 帧终止 image:pull / image:build / image:push 的执行（best-effort）；返回 202 表示取消请求已下发，截止与否以指令记录的终态为准
+// @Tags         Docker 管理
+// @Produce      json
+// @Param        id   path      uint64  true  "设备ID"
+// @Param        ref  path      string  true  "指令号"
+// @Security     BearerAuth
+// @Success      202  {object}  app.Response{data=response.DockerCmdResp}  "取消请求已下发（data.ref 为指令号）"
+// @Failure      400  {object}  app.Response  "请求参数不合法 / 该任务不支持取消"
+// @Failure      401  {object}  app.Response  "未登录"
+// @Failure      403  {object}  app.Response  "无操作权限 / 非发起人"
+// @Failure      404  {object}  app.Response  "指令不存在或已过期"
+// @Failure      409  {object}  app.Response  "该任务已结束"
+// @Failure      500  {object}  app.Response  "流通道未装配 / 取消未送达（设备离线等）"
+// @Router       /docker/hosts/{id}/cmds/{ref}/cancel [post]
+func (h *DockerHandler) CancelCmd(c *gin.Context) {
+	id, ok := app.Uint64Param(c, "id")
+	if !ok {
+		return
+	}
+	ref := c.Param("ref")
+	if ref == "" {
+		app.Error(c, apperror.BadRequest("请求参数不合法"))
+		return
+	}
+	if h.streams == nil {
+		app.Error(c, apperror.Internal("流通道未装配"))
+		return
+	}
+	rec, err := h.cmds.Lookup(c.Request.Context(), id, ref)
+	if err != nil {
+		app.Error(c, err)
+		return
+	}
+	if !h.guard.Ensure(c, rec.Perm) {
+		return // Ensure 已写好 403
+	}
+	uid, ok := currentUserID(c)
+	if !ok {
+		app.Error(c, apperror.Unauthorized("未登录或 token 已过期"))
+		return
+	}
+	if rec.UserID != uid {
+		// 归属校验：取消是「打断别人正在做的事」，比看进度更需要归属 —— 与原
+		// 「断流即取消」路径的判定逐字相同（只有发起人能接流，也就只有他能取消）。
+		app.Error(c, apperror.Forbidden("无权取消该指令"))
+		return
+	}
+	if rec.Status != dockerstate.StatusPending {
+		// 已终态：没有可取消的执行。迟到的点击如实回一句，而不是发一帧噪声
+		//（agent 侧那条会话可能早已随 eof 收摊）。
+		app.Error(c, apperror.Conflict("该任务已结束"))
+		return
+	}
+	cancellable, err := h.streams.CancelProgress(c.Request.Context(), rec, "用户取消")
+	if err != nil {
+		// 帧未送达（设备离线等）：如实说，别让用户以为「点了取消就一定会截止」。
+		app.Error(c, err)
+		return
+	}
+	if !cancellable {
+		// 有记录但不是进度三族（如 container:stop 这类短写指令）：没有可取消的会话。
+		app.Error(c, apperror.BadRequest("该任务不支持取消"))
+		return
+	}
+	// 202 Accepted：取消请求已下发，不是「已取消」—— 信封与 SendCmd 同形
+	//（同一个 app.Response + 同一个 DockerCmdResp），前端拦截器认得出。
+	c.JSON(http.StatusAccepted, app.Response{
+		Code: apperror.CodeOK, Message: "success", Data: response.DockerCmdResp{Ref: ref},
+	})
 }
 
 // execClientMsg 是终端 WS 的**客户端 → 服务端**消息。

@@ -373,7 +373,8 @@ func TestV010RunsThroughMigrationRunner(t *testing.T) {
 	}
 	got := readJobs(t, db)
 	// 与 v009 的同类断言一致：全量账本（新增任务种子迁移时必须同步这里）。
-	wantJobs := len(jobDefinitions) + len(agentJobDefinitions) + len(agentUpgradePatrolJobDefinitions)
+	wantJobs := len(jobDefinitions) + len(agentJobDefinitions) +
+		len(agentUpgradePatrolJobDefinitions) + len(dockerTaskJobDefinitions)
 	if len(got) != wantJobs {
 		t.Fatalf("sys_job 总数 = %d, want %d", len(got), wantJobs)
 	}

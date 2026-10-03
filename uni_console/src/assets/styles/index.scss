@@ -7,6 +7,9 @@
 // Element Plus 样式优化
 @use './core/el-ui.scss';
 
+// 文字对比度 AA 通用层（主色单源 + 语义色文字族 token；EP 变量槽收口，含按钮主题引用）
+@use './core/aa-text.scss';
+
 // Element Plus 暗黑主题
 @use './core/el-dark.scss';
 

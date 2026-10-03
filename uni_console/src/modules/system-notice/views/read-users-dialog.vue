@@ -164,7 +164,8 @@
       color: var(--el-text-color-secondary);
 
       strong {
-        color: var(--el-color-primary);
+        // 主色文字对比度 AA（QA №9）：token 与数字见 @styles/core/aa-text.scss。
+        color: var(--aa-primary-text);
         font-size: 15px;
         margin: 0 2px;
       }

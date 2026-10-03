@@ -35,7 +35,7 @@
       <span class="dz-icon">
         <ArtSvgIcon icon="ri:upload-cloud-2-line" class="text-[34px]" />
       </span>
-      <p class="dz-title"> 拖拽文件到此处,或 <span class="text-theme">点击选择</span> </p>
+      <p class="dz-title"> 拖拽文件到此处,或 <span class="text-theme-aa">点击选择</span> </p>
       <p class="dz-sub">支持图片 / 文档 / 压缩包 / 代码等常见格式,单次最多 {{ MAX_QUEUE }} 个</p>
       <input ref="fileInputRef" type="file" class="hidden" multiple @change="onPick" />
     </div>

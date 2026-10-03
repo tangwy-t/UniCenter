@@ -184,10 +184,6 @@
   @use '@styles/core/breakpoints.scss' as *;
   @use '../views/overview-tokens' as t;
 
-  // 「复制 / 下载 / 继续滚动」等默认档按钮的主色文字对比度 AA：病灶与处方见
-  // overview-tokens 的 primary-text-aa（终审 QA D2·浅色实测 3.68:1）。
-  @include t.primary-text-aa;
-
   .log-viewer {
     display: flex;
     flex-direction: column;

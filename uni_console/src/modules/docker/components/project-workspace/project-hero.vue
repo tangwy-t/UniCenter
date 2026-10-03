@@ -162,10 +162,6 @@
   // 病灶与处方见 overview-tokens 的 danger-plain-aa（浅色 QA 实测 2.87:1）。
   @include t.danger-plain-aa;
 
-  // hero 的普通动作（启动/重建…）与默认档按钮主色蓝字：对比度 AA 的病灶与处方见
-  // overview-tokens 的 primary-text-aa（终审 QA D2·浅色实测 3.68:1）。
-  @include t.primary-text-aa;
-
   .pwh {
     @include t.card;
     @include t.rise;

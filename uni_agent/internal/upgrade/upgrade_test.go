@@ -566,7 +566,10 @@ func TestSmokeSeesExecutableTempFile(t *testing.T) {
 // 替换成 0.2.0 之后**没有重启进程**：设备仍跑旧代码、上报旧版本，服务端永远显示
 // 「升级中」。这类漏设不会报错，只在真的升级时暴露，故用测试把它变成红灯。
 func TestNewForProcessFillsProcessDependencies(t *testing.T) {
-	r := NewForProcess(Deps{Version: "0.1.0", StateDir: t.TempDir()})
+	// HTTPClient 必须显式注入（2026 收口：静默的 5 分钟默认兜底已删除，
+	// nil 直接 panic —— 见 TestNewPanicsWithoutHTTPClient）。本测试关心的是另外
+	// 三个进程依赖，客户端给一个空的即可（构造期不看内容）。
+	r := NewForProcess(Deps{Version: "0.1.0", StateDir: t.TempDir(), HTTPClient: &http.Client{}})
 	if r.deps.Exec == nil {
 		t.Fatal("NewForProcess 必须注入 Exec（否则替换后不会重启进程）")
 	}
@@ -578,5 +581,39 @@ func TestNewForProcessFillsProcessDependencies(t *testing.T) {
 	}
 	if r.deps.GOOS != runtime.GOOS {
 		t.Fatalf("GOOS 应取运行时值，实得 %q", r.deps.GOOS)
+	}
+}
+
+// TestNewPanicsWithoutHTTPClient：HTTPClient 缺失 = **装配缺陷**，必须在构造那一刻
+// 现形（fail fast），而不是被一个静默的 5 分钟默认值兜住。
+//
+// 由来（旧形态的缺陷）：main 注入的是 30 分钟下载客户端（弱网慢下载不被总时限截断），
+// 而运行时对 nil 客户端会悄悄换成 5 分钟默认 —— 漏注入时症状是「升级永远下不完」，
+// 且从调用点看不出来客户端是哪来的；把默认值删掉之后，这类缺陷变成构造期的红灯。
+func TestNewPanicsWithoutHTTPClient(t *testing.T) {
+	deps := Deps{Version: "0.1.0", StateDir: t.TempDir()}
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("HTTPClient 为 nil 时必须 panic（fail fast），实际静默通过")
+		}
+		if s, ok := r.(string); !ok || !strings.Contains(s, "HTTPClient") {
+			t.Fatalf("panic 文案必须点名 HTTPClient（否则装配方不知道该补什么）: %v", r)
+		}
+	}()
+	_ = New(deps)
+}
+
+// TestCheckOnStartupUnaffectedByClientContract：启动检查（回滚）的一次性运行时
+// **不下载**，故不要求 HTTPClient —— 它的构造走 newStartupRuntime 而不是 New。
+// 这条测试把「回滚路径不因硬性契约而崩」钉住（生产 main 的 CheckOnStartup 调用
+// 本来就不带客户端：回滚发生在读配置之后、连网之前）。
+func TestCheckOnStartupUnaffectedByClientContract(t *testing.T) {
+	env := newTestEnv(t, []byte("NEW"), "0.2.0")
+	deps := env.deps("0.1.0", []byte("NEW"))
+	deps.HTTPClient = nil // 启动检查不需要下载客户端
+	restart, err := CheckOnStartup(deps)
+	if err != nil || restart {
+		t.Fatalf("没有未结事务时启动检查应无动作: restart=%v err=%v", restart, err)
 	}
 }

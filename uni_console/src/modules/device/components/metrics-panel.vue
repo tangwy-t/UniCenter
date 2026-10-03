@@ -752,7 +752,8 @@
     border-radius: 999px;
 
     &.is-active {
-      color: var(--el-color-primary);
+      // 主色文字对比度 AA（QA №9）：token 与数字见 @styles/core/aa-text.scss。
+      color: var(--aa-primary-text);
       background: var(--el-color-primary-light-9);
       border-color: var(--el-color-primary-light-5);
     }

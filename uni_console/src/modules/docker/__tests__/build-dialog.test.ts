@@ -15,8 +15,9 @@
  *   - 受理失败（409 在飞）：分类句就地显示、留在输入态可重试；
  *   - 终态双通道收尾：流 eof 先到 → result 终态 → 结论句（成功 = 引用 + 耗时）→
  *     关闭后双次重拉（新镜像要进列表）；
- *   - 取消：断流（Abort）→ 播报态显示「已取消」→ result 结论句收尾；
- *   - 关对话框：断流 + 停轮询 + 不重拉；重新打开：整表重置。
+ *   - 取消：调显式取消端点（**不断流**）→ 播报态说「已请求取消」→ result 结论句收尾；
+ *   - 关对话框：断流（只是停止观看，**不下发取消**）+ 停轮询 + 不重拉；重新打开：整表重置；
+ *   - 非模态：不锁滚动、点页面别处不收窗（包壳挂指针穿透锚点类）。
  *
  * ── 流替身怎么造 ───────────────────────────────────────────────────
  * 与 pull-dialog.test.ts 同一套：openDockerBuildStream 的 mock 返回按脚本逐行吐
@@ -35,6 +36,7 @@ import { HttpError } from '@/utils/http/error'
 const api = vi.hoisted(() => ({
   sendDockerCmd: vi.fn(),
   fetchDockerCmdResult: vi.fn(),
+  cancelDockerCmd: vi.fn(),
   openDockerBuildStream: vi.fn()
 }))
 vi.mock('../api', () => ({ ...api, default: undefined }))
@@ -63,7 +65,8 @@ function jf(o: Record<string, unknown>): string {
 
 /**
  * 流替身：按脚本逐行吐 chunk；读尽后挂住，abort 唤醒（AbortError）。
- * state.signal 记下组件传入的 signal —— 断言「取消 = 断流」靠它。
+ * state.signal 记下组件传入的 signal —— 断言「关对话框 = 断流（只是停止观看）」
+ * 以及「取消 ≠ 断流」靠它。
  */
 function scriptedStream(lines: string[]) {
   let i = 0
@@ -135,10 +138,12 @@ beforeEach(() => {
   )
   api.sendDockerCmd.mockReset()
   api.fetchDockerCmdResult.mockReset()
+  api.cancelDockerCmd.mockReset()
   api.openDockerBuildStream.mockReset()
   refresh.mockClear()
   api.sendDockerCmd.mockResolvedValue({ ref: 'r200' })
   api.fetchDockerCmdResult.mockResolvedValue({ status: 'pending' })
+  api.cancelDockerCmd.mockResolvedValue({ ref: 'r200' })
 })
 
 afterEach(() => {
@@ -166,9 +171,16 @@ function buttons(w: VueWrapper) {
   return w.findAll('button').map((b) => ({ el: b, text: (b.text() ?? '').trim() }))
 }
 
-async function click(w: VueWrapper, label: string) {
+async function click(w: VueWrapper, label: string, opts: { awaitEnabled?: boolean } = {}) {
   const btn = buttons(w).find((b) => b.text === label)
   expect(btn, `按钮「${label}」应已渲染`).toBeTruthy()
+  // 等按钮**真的可点**再点（默认）：ElButton 在 disabled/loading 时会【吞掉 click】
+  // （其 handleClick 直接 stopPropagation 返回，不 emit），而 dispatchEvent 不受 DOM
+  // disabled 属性阻止 —— 状态晚一拍时点下去静默无事，断言随后在别处炸开。
+  // 少数用例**要的就是「点被禁用的按钮」**（校验挡提交的负向面）：传 { awaitEnabled: false }。
+  if (opts.awaitEnabled !== false) {
+    await vi.waitUntil(() => !(btn!.el.element as HTMLButtonElement).disabled, { timeout: 5000 })
+  }
   await btn!.el.trigger('click')
   await flush()
 }
@@ -190,8 +202,17 @@ async function fillForm(w: VueWrapper) {
   await setField(w, '例如 app.tar', 'app.tar')
 }
 
-/** 等一轮 result 轮询间隔（pollDelay(0) = 1s，真实计时）。 */
-const waitPoll = () => new Promise((r) => setTimeout(r, 1100))
+/**
+ * 等 result 轮询的第 n 次调用落地（1s 间隔是组件的真实计时）。
+ *
+ * 为什么不睡固定墙钟（旧写法 1.1s）：睡够买的是「时间过去了」，而不是「轮询到了」——
+ * 机器一忙（全量套件并发抢核）计时器回调会被推迟，1.1s 就可能短于组件的 1s sleep，
+ * 于是偶发「第二轮还没发」的假红。判据换成事实（调用数）后，慢就多等几轮。
+ */
+async function waitPolls(n: number) {
+  await vi.waitUntil(() => api.fetchDockerCmdResult.mock.calls.length >= n, { timeout: 5000 })
+  await flush()
+}
 
 describe('输入态：校验挡提交', () => {
   it('非法镜像引用当场显错，点开始不派发（与拉取同一把协议尺）', async () => {
@@ -199,7 +220,7 @@ describe('输入态：校验挡提交', () => {
     await setField(w, '例如 registry.example.com/app:v1', '_bad')
     await setField(w, '例如 app.tar', 'app.tar')
     expect(w.text()).toContain('镜像引用不合法')
-    await click(w, '开始构建')
+    await click(w, '开始构建', { awaitEnabled: false })
     expect(api.sendDockerCmd).not.toHaveBeenCalled()
   })
 
@@ -213,7 +234,7 @@ describe('输入态：校验挡提交', () => {
     // 带路径成分：协议白名单外的形态先挡在表单里（分钟级失败等不起）。
     await setField(w, '例如 app.tar', 'dir/app.tar')
     expect(w.text()).toContain('文件名不合法')
-    await click(w, '开始构建')
+    await click(w, '开始构建', { awaitEnabled: false })
     expect(api.sendDockerCmd).not.toHaveBeenCalled()
   })
 
@@ -222,7 +243,7 @@ describe('输入态：校验挡提交', () => {
     await fillForm(w)
     await setField(w, '例如 docker/Dockerfile（缺省 = 上下文根的 Dockerfile）', '../etc/passwd')
     expect(w.text()).toContain('路径不合法')
-    await click(w, '开始构建')
+    await click(w, '开始构建', { awaitEnabled: false })
     expect(api.sendDockerCmd).not.toHaveBeenCalled()
 
     await setField(
@@ -243,7 +264,7 @@ describe('输入态：校验挡提交', () => {
     await setField(w, '参数名', '1BAD')
     await setField(w, '值', 'x')
     expect(w.text()).toContain('参数名不合法')
-    await click(w, '开始构建')
+    await click(w, '开始构建', { awaitEnabled: false })
     expect(api.sendDockerCmd).not.toHaveBeenCalled()
 
     // 只剩值没有键同样要键（「填了一半」不是空行）：报错指回参数名。
@@ -332,7 +353,18 @@ describe('播报渲染', () => {
     await flush()
 
     const text = w.text()
-    expect(text).toContain('registry.example.com/app:v1') // 播报态头部的目标引用
+    let diag = ''
+    if (!text.includes('registry.example.com/app:v1')) {
+      const inputs = w.findAll('input').map((i) => ({
+        ph: i.attributes('placeholder') ?? '',
+        v: (i.element as HTMLInputElement).value
+      }))
+      diag =
+        `sendDockerCmd=${api.sendDockerCmd.mock.calls.length} ` +
+        `phase=${w.find('.bp-input').exists() ? 'input' : w.find('.bp-progress').exists() ? 'building' : 'result'} ` +
+        `inputs=${JSON.stringify(inputs)}`
+    }
+    expect(text, diag).toContain('registry.example.com/app:v1') // 播报态头部的目标引用
     expect(text).toContain('#1 [internal] load build definition from Dockerfile')
     expect(text).toContain('FROM node:21')
     expect(text).not.toContain('FROM node:20') // 旧帧被折叠掉
@@ -357,8 +389,7 @@ describe('终态双通道收尾', () => {
     // 双通道时序：eof 已到、result 还在 pending —— 对话框说清「在等什么」。
     expect(w.text()).toContain('正在等待指令结果')
 
-    await waitPoll() // 第二轮轮询（pollDelay(0) = 1s）
-    await flush()
+    await waitPolls(2) // 第二轮轮询落地（pollDelay(0) = 1s 的真计时）
     expect(api.fetchDockerCmdResult).toHaveBeenCalledTimes(2)
     expect(w.text()).toContain('已构建 registry.example.com/app:v1')
     expect(w.text()).toContain('耗时')
@@ -367,8 +398,10 @@ describe('终态双通道收尾', () => {
     await click(w, '关闭')
     expect(w.emitted('update:modelValue')?.at(-1)).toEqual([false])
     expect(refresh).toHaveBeenCalledTimes(1) // 立即重拉（新镜像要进列表）
-    await new Promise((r) => setTimeout(r, 1600))
-    expect(refresh).toHaveBeenCalledTimes(2) // 1.5s 落定重拉（双次纪律）
+    // 1.5s 落定重拉：等「第二次 refresh 到了」这个事实（不睡满 1.6s —— 墙钟在负载下会漂，
+    // 而「到没到」不漂）。
+    await vi.waitUntil(() => refresh.mock.calls.length >= 2, { timeout: 5000 })
+    expect(refresh).toHaveBeenCalledTimes(2) // 落定重拉（双次纪律）
   })
 
   it('失败：结论句原文（服务端 error 透传），关闭不重拉', async () => {
@@ -385,8 +418,21 @@ describe('终态双通道收尾', () => {
   })
 })
 
-describe('取消路径', () => {
-  it('取消构建：断流（Abort）→ 播报态显示已取消 → result 结论句收尾', async () => {
+describe('非模态（进度不挡页面）', () => {
+  it('对话框非模态 + 不锁滚动 + 点页面别处不收窗（包壳挂指针穿透锚点类）', async () => {
+    const w = await mountDialog()
+    const dlg = w.findComponent({ name: 'ElDialog' })
+    expect(dlg.props('modal'), '去掉模态阻断').toBe(false)
+    expect(dlg.props('lockScroll'), '不锁页面滚动').toBe(false)
+    expect(dlg.props('closeOnClickModal'), '点页面别处不收起观看窗').toBe(false)
+    expect(String(dlg.props('modalClass')), '包壳类名 = 指针穿透规则的锚点').toContain(
+      'docker-progress-nonblocking'
+    )
+  })
+})
+
+describe('取消路径（独立于观看的显式动作）', () => {
+  it('取消构建：调取消端点（不断流）→ 播报态说「已请求取消」→ result 结论句收尾', async () => {
     const scripted = useStream([jf({ stream: '#2 [1/2] RUN npm install' })])
     usePolls([{ status: 'pending' }, { status: 'failed', error: '构建已取消' }])
     const w = await mountDialog()
@@ -394,18 +440,51 @@ describe('取消路径', () => {
     await click(w, '开始构建')
 
     await click(w, '取消构建')
-    expect(w.text()).toContain('已取消，正在等待指令收尾')
-    expect(scripted.state.signal?.aborted, '取消 = 断流（服务端随之终止构建）').toBe(true)
+    expect(api.cancelDockerCmd, '取消是显式端点，不是断流').toHaveBeenCalledWith('h1', 'r200')
+    expect(w.text()).toContain('已请求取消，正在等待指令收尾')
+    expect(scripted.state.signal?.aborted, '取消 ≠ 停止观看：播报流照常连着').toBe(false)
 
-    await waitPoll() // result 的「构建已取消」结论句落地
-    await flush()
+    await waitPolls(2) // result 的「构建已取消」结论句落地
     expect(w.text()).toContain('构建已取消')
     expect(refresh).not.toHaveBeenCalled()
+  })
+
+  it('取消请求失败（500 取消未送达）：就地结论句，按钮可重试', async () => {
+    useStream([jf({ stream: '#2 RUN npm install' })])
+    usePolls([{ status: 'pending' }])
+    api.cancelDockerCmd.mockRejectedValue(new HttpError('设备当前离线，取消未送达', 500))
+    const w = await mountDialog()
+    await fillForm(w)
+    await click(w, '开始构建')
+
+    await click(w, '取消构建')
+    expect(w.text()).toContain('设备当前离线，取消未送达')
+    expect(
+      buttons(w).some((b) => b.text === '取消构建'),
+      '失败后按钮回到可点状态'
+    ).toBe(true)
   })
 })
 
 describe('关闭与重开（生命周期收口）', () => {
-  it('构建在途关对话框：断流 + 停轮询 + 不重拉', async () => {
+  it('成功关闭后 1.5s 内卸载：落定重拉随之撤销（页面没了，不留白发请求）', async () => {
+    useStream([jf({ done: true, eof: true })])
+    usePolls([{ status: 'succeeded', detail: '' }])
+    const w = await mountDialog()
+    await fillForm(w)
+    await click(w, '开始构建')
+    await flush()
+    await click(w, '关闭')
+    expect(refresh).toHaveBeenCalledTimes(1) // 立即重拉
+
+    // 页面收口（卸载）：还没到点的落定重拉随之撤销 —— 跨过 1.5s 窗口仍只有那一次。
+    w.unmount()
+    mounted.splice(mounted.indexOf(w), 1) // 已卸载：afterEach 不再重复卸载
+    await new Promise((r) => setTimeout(r, 1700))
+    expect(refresh, '卸载后不该再有白发请求').toHaveBeenCalledTimes(1)
+  })
+
+  it('构建在途关对话框：断流（只是停止观看，不下发 cancel）+ 停轮询 + 不重拉', async () => {
     const scripted = useStream([jf({ stream: '#2 RUN npm install' })])
     usePolls([{ status: 'pending' }])
     const w = await mountDialog()
@@ -415,9 +494,13 @@ describe('关闭与重开（生命周期收口）', () => {
 
     await w.setProps({ modelValue: false }) // 父组件置 false
     await flush()
-    expect(scripted.state.signal?.aborted, '关对话框即断流').toBe(true)
+    expect(scripted.state.signal?.aborted, '关对话框只是收起这场观看').toBe(true)
+    expect(api.cancelDockerCmd, '关闭 ≠ 取消：取消只由显式按钮触发').not.toHaveBeenCalled()
 
-    await new Promise((r) => setTimeout(r, 2100)) // 跨过下一个轮询间隔
+    // 「轮询已停」是**反向判据**（什么都没发生），只能靠时间窗口举证 —— 这里的时长
+    // 是窗口宽度而不是「等待步数」：跨两个轮询间隔（pollDelay(0)=1s）仍无新调用，
+    // 窗口越宽结论越强；负载下的计时器推迟只会让窗口更强，不会把结论翻面。
+    await new Promise((r) => setTimeout(r, 2200))
     expect(api.fetchDockerCmdResult, '轮询应已停').toHaveBeenCalledTimes(1)
     expect(refresh).not.toHaveBeenCalled()
   })

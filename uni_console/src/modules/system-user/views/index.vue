@@ -651,7 +651,8 @@
     padding: 4px 8px;
     border-radius: 6px;
     font-size: 12px;
-    color: var(--el-color-primary);
+    // 主色文字对比度 AA（QA №9）：token 与数字见 @styles/core/aa-text.scss。
+    color: var(--aa-primary-text);
     background: var(--el-color-primary-light-9);
     border: 1px solid var(--el-color-primary-light-7);
     max-width: 220px;
@@ -686,7 +687,8 @@
     cursor: pointer;
 
     &:hover {
-      color: var(--el-color-primary);
+      // 主色文字对比度 AA（QA №9）：hover 档 token，见 @styles/core/aa-text.scss。
+      color: var(--aa-primary-text-hover);
     }
   }
 

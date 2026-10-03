@@ -355,15 +355,18 @@
             <div class="sql-cells sql-cells--health">
               <div class="sql-cell" title="超过慢查询阈值的 SQL 累计次数">
                 <div class="sql-cell__label">慢查询</div>
-                <div class="sql-cell__value tabular-nums" style="color: #f59e0b">{{
+                <!-- 警告语义文字：原 #f59e0b 对白底 2.15:1，改走 AA token（见 @styles/core/aa-text.scss） -->
+                <div class="sql-cell__value tabular-nums" style="color: var(--aa-warning-text)">{{
                   fmtCount(stats.global.slow_count)
                 }}</div>
               </div>
               <div class="sql-cell" title="执行失败的 SQL 累计次数">
                 <div class="sql-cell__label">错误</div>
+                <!-- 危险语义文字：原 #dc2626 暗色下 3.74:1 不达标（浅色 4.83 贴线），
+                     与慢查询计数同族同排，改走 AA token（见 @styles/core/aa-text.scss） -->
                 <div
                   class="sql-cell__value tabular-nums"
-                  :style="{ color: stats.global.error_count > 0 ? '#dc2626' : undefined }"
+                  :style="{ color: stats.global.error_count > 0 ? 'var(--aa-danger-text)' : undefined }"
                 >
                   {{ fmtCount(stats.global.error_count) }}
                 </div>
@@ -494,9 +497,10 @@
                 >
                   {{ q.table || '—' }}
                 </span>
+                <!-- 时长文字：AA token 引用（durTextTone；数字见 @styles/core/aa-text.scss） -->
                 <span
                   class="sql-slow__dur tabular-nums"
-                  :style="{ color: durTone(q.duration_ms, thresholdMs) }"
+                  :style="{ color: durTextTone(q.duration_ms, thresholdMs) }"
                 >
                   {{ fmtNum(q.duration_ms, q.duration_ms < 10 ? 2 : 1) }}<i>ms</i>
                 </span>
@@ -555,7 +559,7 @@
           <span class="sql-drawer__chip tabular-nums">{{ drawerEntry.timestamp }}</span>
           <span
             class="sql-drawer__dur tabular-nums"
-            :style="{ color: durTone(drawerEntry.duration_ms, thresholdMs) }"
+            :style="{ color: durTextTone(drawerEntry.duration_ms, thresholdMs) }"
           >
             {{ fmtNum(drawerEntry.duration_ms, drawerEntry.duration_ms < 10 ? 2 : 1) }} ms
           </span>
@@ -570,7 +574,7 @@
             <span class="text-xs text-g-600">耗时相对慢查询阈值（{{ thresholdMs }}ms）</span>
             <span
               class="text-xs tabular-nums"
-              :style="{ color: durTone(drawerEntry.duration_ms, thresholdMs) }"
+              :style="{ color: durTextTone(drawerEntry.duration_ms, thresholdMs) }"
             >
               {{ fmtNum(Math.min((drawerEntry.duration_ms / thresholdMs) * 100, 9999), 1) }}%
               {{ drawerEntry.duration_ms >= thresholdMs ? '· 已超限' : '' }}
@@ -622,6 +626,7 @@
     OP_COLORS,
     OPS,
     clamp01,
+    durTextTone,
     durTone,
     fmtCount,
     fmtPct,
@@ -1102,7 +1107,8 @@
 
   .sql-range__item.is-active {
     background: var(--default-box-color);
-    color: var(--el-color-primary);
+    // 主色文字对比度 AA（QA №9）：token 与数字见 @styles/core/aa-text.scss。
+    color: var(--aa-primary-text);
     font-weight: 600;
     box-shadow: 0 1px 2px rgba(16, 24, 40, 0.08);
   }
@@ -1457,7 +1463,8 @@
   .sql-filterchip.is-active {
     border-color: var(--el-color-primary);
     background: var(--el-color-primary-light-9);
-    color: var(--el-color-primary);
+    // 主色文字对比度 AA（QA №9）：token 与数字见 @styles/core/aa-text.scss。
+    color: var(--aa-primary-text);
     font-weight: 600;
   }
 

@@ -271,11 +271,12 @@ func TestPullImageCancelStops(t *testing.T) {
 
 // ── 取消/完成的竞态（B4 守卫）──────────────────────────────────────────────
 //
-// 背景（QA 实测）：用户在拉取进行中切页/关对话框 → 前端断流 → core 按取消纪律
-// 下发 cancel 帧；若 daemon 恰在同时把活干完，旧实现按「ctx 被中断」把这场**已经
-// 成功**的拉取记成「失败·拉取已取消」（任务中心红字，而 `docker images` 里镜像
-// 已经落地）。四条用例把结算规则钉死：完成的事实优先于迟到的取消，且**只有**
-// 「完成」的两条独立证据能翻案（防止顺手把真取消也放行）。
+// 背景（QA 实测；P2 起「观看/执行」解耦 —— 断流只停观看、不再下发 cancel，cancel
+// 只由显式取消端点下发：POST /cmds/:ref/cancel → CancelProgress → cancel 帧 → 会话
+// 收摊）：用户在拉取进行中经该端点下发取消；若 daemon 恰在同时把活干完，旧实现按
+// 「ctx 被中断」把这场**已经成功**的拉取记成「失败·拉取已取消」（任务中心红字，而
+// `docker images` 里镜像已经落地）。四条用例把结算规则钉死：完成的事实优先于迟到的
+// 取消，且**只有**「完成」的两条独立证据能翻案（防止顺手把真取消也放行）。
 
 // 证据一：daemon 的收尾行已经到达读循环（"Status: …" = 镜像已写进本地存储、
 // 引用已更新）—— 此后到达的 cancel 是 no-op，终态按完成结算。
@@ -294,8 +295,8 @@ func TestPullImageCancelAfterDaemonCompletedStaysSucceeded(t *testing.T) {
 	ch <- PullProgress{Status: "Status: Downloaded newer image for nginx:latest"}
 	advanceUntil(t, clk, 50*time.Millisecond, 400*time.Millisecond, func() bool { return sink.count() >= 1 })
 
-	// 用户切页/关对话框 → core 下发 cancel → 会话收摊 → 拉取用的 ctx 被中断，
-	// ImagePull 以 ctx 错误返回（替身与 SDK 同款）。
+	// 用户经显式取消端点下发 cancel（core 端点 → cancel 帧）→ 会话收摊 → 拉取用的
+	// ctx 被中断，ImagePull 以 ctx 错误返回（替身与 SDK 同款）。
 	m.OnFrame(&agentproto.CoreDockerFrame{
 		SessionID: agentproto.DockerPullSessionID(pullRef),
 		Op:        agentproto.DockerFrameOpCancel,
@@ -538,5 +539,110 @@ func TestConsumePullStreamBrokenLineIsError(t *testing.T) {
 	err := consumePullStream(strings.NewReader(`{"id":"aaa","status":"Downloading"}`+"\nnot-json\n"), func(PullProgress) {})
 	if err == nil {
 		t.Fatal("损坏流必须返回错误")
+	}
+}
+
+// ── 真截止（执行时限到点）的结算（2026 收口：与迟到 cancel 同一张表）───────────
+
+// TestPullImageDeadlineAfterImageLandedStaysSucceeded：时限到点（会话仍在）落在
+// 镜像落地**之后** —— 时限记的是「我们不再等」，不是「它没干完」：完成的事实优先，
+// 终态 Done 项与 eof 照发（页面不会看到一条没有终态的流）。
+func TestPullImageDeadlineAfterImageLandedStaysSucceeded(t *testing.T) {
+	ch := make(chan PullProgress, 8)
+	api := &stubAPI{
+		pullCh:      ch,
+		pullErr:     errors.New("context deadline exceeded"),
+		imageRefIDs: []string{"", "sha256:landed"},
+	}
+	w, _, _, sink := newPullFixture(api)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Do(context.Background(), pullCmd())
+		done <- err
+	}()
+	ch <- PullProgress{ID: "aaa", Status: "Extracting", Current: 90, Total: 100}
+	close(ch) // 会话还在、以 pullErr 收场（真截止）
+
+	if err := pullResultOf(t, done); err != nil {
+		t.Fatalf("镜像已落地时真截止也必须按完成结算: %v", err)
+	}
+	fs := sink.all()
+	if len(fs) == 0 || !fs[len(fs)-1].EOF {
+		t.Fatal("完成档必须补发终态项与 eof")
+	}
+	term := pullLinesOf(t, fs[len(fs)-1])
+	if last := term[len(term)-1]; !last.Done {
+		t.Fatalf("终态项必须恰在流末且 Done: %+v", term)
+	}
+}
+
+// 反向守卫：真截止且没有落地证据 —— 结论句仍是失败（这是真失败/真截止的措辞，
+// 与取消分档），终态 Error 项挂流末。
+func TestPullImageDeadlineWithoutLandingStaysFailed(t *testing.T) {
+	ch := make(chan PullProgress, 8)
+	api := &stubAPI{
+		pullCh:      ch,
+		pullErr:     errors.New("context deadline exceeded"),
+		imageRefIDs: []string{"sha256:old", "sha256:old"},
+	}
+	w, _, _, sink := newPullFixture(api)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Do(context.Background(), pullCmd())
+		done <- err
+	}()
+	ch <- PullProgress{ID: "aaa", Status: "Downloading", Current: 10, Total: 100}
+	close(ch)
+
+	var ee *ExecError
+	if err := pullResultOf(t, done); !errors.As(err, &ee) || ee.Msg != "拉取镜像失败" ||
+		ee.Detail != "context deadline exceeded" {
+		t.Fatalf("无落地证据的真截止必须记失败（含 daemon 原文）: %v", err)
+	}
+	fs := sink.all()
+	if len(fs) == 0 || !fs[len(fs)-1].EOF {
+		t.Fatal("失败档的终态项与 eof 照发")
+	}
+	term := pullLinesOf(t, fs[len(fs)-1])
+	if last := term[len(term)-1]; last.Done || last.Error == "" {
+		t.Fatalf("终态项必须是 Error 档: %+v", term)
+	}
+}
+
+// TestSettlementEvidenceSurvivesExpiredCommandCtx：**真截止**（指令 ctx 就此作废）
+// 时结算判据必须仍然开得了口 —— 判据查询走 evidenceCtx（摘掉取消信号、只留自己的
+// 时限），而不是那条已经被时限作废的 ctx。
+//
+// 由来（本机真机 e2e 才暴露的缺陷）：真截止与结算发生在同一刻，判据的每一次查询
+// （ImageRefID / RepoDigests / tag 事件 / registry 探测）若沿用指令 ctx 会全部立刻
+// 失败，一场「时限到点时其实已经干完」的活被记成失败 —— 与迟到 cancel 那类不诚实
+// 正好反向。替身**尊重 ctx**（见 snapshot_test.go 的 stubAPI 说明）是这条守卫能成立
+// 的前提：不尊重 ctx 的替身让缺陷在单测里隐身。
+func TestSettlementEvidenceSurvivesExpiredCommandCtx(t *testing.T) {
+	ch := make(chan PullProgress, 8)
+	api := &stubAPI{
+		pullCh:      ch,
+		pullErr:     errors.New("context deadline exceeded"),
+		imageRefIDs: []string{"", "sha256:landed"},
+	}
+	w, _, _, _ := newPullFixture(api)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Do(ctx, pullCmd())
+		done <- err
+	}()
+	<-ctx.Done() // 时限到点：指令 ctx 就此作废
+	close(ch)    // 拉取以 ctx 错误收场，会话仍在（真截止）
+
+	if err := pullResultOf(t, done); err != nil {
+		t.Fatalf("真截止落在落地之后必须按成功结算（判据不能被作废的 ctx 掐死）: %v", err)
+	}
+	if len(api.imageRefCalls) != 2 {
+		t.Fatalf("判据必须真的查到两次（开工前 + 结算），实际 %d: %v", len(api.imageRefCalls), api.imageRefCalls)
 	}
 }

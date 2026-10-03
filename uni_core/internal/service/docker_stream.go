@@ -7,6 +7,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/agenthub"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/apperror"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockerstate"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockerstream"
@@ -109,8 +110,13 @@ func (s *DockerStreamService) AttachSession(sessionID string, userID, deviceID u
 	return sess, nil
 }
 
-// ReleaseSession 解除接入占用（连接升级失败等「还没开始流」的路径）：
-// 会话保留（agent 侧仍在跑），可凭下一次轮询签发的新票据重接。
+// ReleaseSession 解除接入占用、**保留会话**（agent 侧仍在跑，可再次接入）。
+//
+// 两条调用路径共用这一个动作：
+//   - 还没开始流（终端 WS 升级失败 / 接入的 kind 不符）；
+//   - **观看结束**（进度族 NDJSON 的客户端断开或写失败，本波的语义收口）：
+//     断流只是停止观看 —— 不发 cancel，任务照常跑完，会话留在注册表里等下一次
+//     接入（重进观看），寿命与指令同长（终态对账回收，见 Sweep）。
 func (s *DockerStreamService) ReleaseSession(sessionID string) {
 	s.sessions.Release(sessionID)
 }
@@ -124,6 +130,10 @@ func (s *DockerStreamService) FinishSession(sessionID string) {
 //
 // cancel 必须终止 agent 侧进程并释放会话槽位（plan §0 控制语义）；发送失败
 // （设备已离线等）只记日志 —— 注册表里的清理不依赖它，用户的「断开」必须立即生效。
+//
+// 谁有资格调它（本波语义收口后的完整枚举）：终端的 in-band 取消（用户点取消/
+// 关终端）、sweep 的空闲超时与设备离线，以及**显式取消端点的 CancelProgress**。
+// 观看面（进度流的断流）不再出现在这张名单上 —— 断流只是停止观看。
 func (s *DockerStreamService) CancelSession(ctx context.Context, sess *dockerstream.Session, reason string) {
 	if sess == nil {
 		return
@@ -136,6 +146,45 @@ func (s *DockerStreamService) CancelSession(ctx context.Context, sess *dockerstr
 			zap.Uint64("userId", sess.UserID()), zap.String("kind", sess.Kind().String()),
 			zap.String("reason", reason))
 	}
+}
+
+// CancelProgress 显式取消一条**进度族指令**（pull/build/push）：向 agent 下发
+// cancel 帧（best-effort）并移除注册表里的会话。
+//
+// 它是全系统**唯一**会为进度三族下发 cancel 的入口：观看面的断流不再触发它
+// （断流 ≠ 取消；取消 = 仅显式动作）。三条口径：
+//   - 只认进度三族（句柄由协议派生，见 progressSessionOf）：其余 action 返回
+//     (false, nil)，由调用方折成 400 —— 会话制的 exec 有自己的 WS cancel，
+//     普通写指令根本没有可取消的会话；
+//   - 注册表里有这条会话 → CancelSession（发帧 + 移除）；**没有也照样把帧发出去**
+//     （预登记失败、已被 sweep 清理、多实例下会话在别的实例上）：帧只需要设备与
+//     会话句柄，而 agent 对未知会话的 cancel 是幂等忽略（sessions.go 的 OnFrame）
+//     —— 「迟到的取消」本就无副作用，晚发的这一帧同理；
+//   - 发送失败（设备离线等）如实返回结论句：有会话时注册表已被 CancelSession
+//     清理，用户不该以为「点了取消就一定会截止」。
+//
+// 返回 false 表示这条指令不支持取消（调用方 400）；err != nil 表示帧未送达。
+func (s *DockerStreamService) CancelProgress(ctx context.Context, rec *dockerstate.CmdRecord, reason string) (bool, error) {
+	if rec == nil {
+		return false, nil
+	}
+	sessionID, _, ok := progressSessionOf(rec.Action, rec.Ref)
+	if !ok || sessionID == "" {
+		return false, nil
+	}
+	if sess := s.sessions.Get(sessionID); sess != nil {
+		s.CancelSession(ctx, sess, reason)
+		return true, nil
+	}
+	if err := s.sendFrame(ctx, rec.DeviceID, sessionID, agentproto.DockerFrameOpCancel, nil, 0, 0); err != nil {
+		if errors.Is(err, agenthub.ErrDeviceOffline) {
+			// 与 Send 的「设备离线」同一句话术族：用户立刻明白该去看设备，
+			// 而不是反复点一个送不出去的按钮。
+			return true, apperror.Internal("设备当前离线，取消未送达")
+		}
+		return true, apperror.Internal("取消未送达设备，请稍后重试")
+	}
+	return true, nil
 }
 
 // SendInput 把终端输入转发给 agent（input.data 必须以原样字节进协议载荷）。
@@ -151,7 +200,8 @@ func (s *DockerStreamService) SendResize(ctx context.Context, sess *dockerstream
 	return s.sendControl(ctx, sess, agentproto.DockerFrameOpResize, nil, cols, rows)
 }
 
-// sendControl 组一条 core.docker.frame 并发往会话所属设备。
+// sendControl 组一条 core.docker.frame 并发往会话所属设备（会话在本地时的入口：
+// 顺带刷新活动时刻 —— 终端上「用户在敲」与「有输出」同等说明会话还活着）。
 //
 // 载荷先过协议校验（protocol.CoreDockerFrame.Validate）：非法尺寸/空输入在这里被
 // 拦下，而不是让 agent 收到一帧它必须拒掉的东西（协议是两端共同的理解，core 不能
@@ -159,12 +209,24 @@ func (s *DockerStreamService) SendResize(ctx context.Context, sess *dockerstream
 //
 // ctx 不参与发送（SendToDevice 没有 ctx 参数）：调用方仍按惯例传 ctx，将来若发送面
 // 支持 ctx（例如带超时的队列投递）不必改签名。
-func (s *DockerStreamService) sendControl(_ context.Context, sess *dockerstream.Session,
+func (s *DockerStreamService) sendControl(ctx context.Context, sess *dockerstream.Session,
 	op string, data []byte, cols, rows int) error {
 	if sess == nil {
 		return errors.New("dockerstream: nil session")
 	}
-	frame := &agentproto.CoreDockerFrame{SessionID: sess.ID(), Op: op, Data: data, Cols: cols, Rows: rows}
+	sess.Touch()
+	return s.sendFrame(ctx, sess.DeviceID(), sess.ID(), op, data, cols, rows)
+}
+
+// sendFrame 是下行控制帧的**设备级**发送（不要求本地注册表里有这条会话）：
+// 帧的投递只需要「哪台设备 + 会话句柄」两个事实。
+//
+// 两种调用者：会话在本地（sendControl，先 Touch 再走这里）；会话不在本地
+// （CancelProgress 的兜底路径 —— 预登记失败/已被清理/多实例部署）。协议校验
+// 在这条窄腰上做一次，两条路径都不绕过。
+func (s *DockerStreamService) sendFrame(_ context.Context, deviceID uint64,
+	sessionID, op string, data []byte, cols, rows int) error {
+	frame := &agentproto.CoreDockerFrame{SessionID: sessionID, Op: op, Data: data, Cols: cols, Rows: rows}
 	if err := frame.Validate(); err != nil {
 		return err
 	}
@@ -172,14 +234,13 @@ func (s *DockerStreamService) sendControl(_ context.Context, sess *dockerstream.
 	if err != nil {
 		return err
 	}
-	sess.Touch()
 	if s.sender == nil {
 		return nil
 	}
-	if err := s.sender.SendToDevice(sess.DeviceID(), msg); err != nil {
+	if err := s.sender.SendToDevice(deviceID, msg); err != nil {
 		if s.log != nil {
 			s.log.Warn("docker stream control frame not delivered",
-				zap.String("session", sess.ID()), zap.String("op", op), zap.Error(err))
+				zap.String("session", sessionID), zap.String("op", op), zap.Error(err))
 		}
 		return err
 	}

@@ -533,7 +533,8 @@
         align-items: center;
         margin-left: 10px;
         line-height: 32px;
-        color: var(--theme-color);
+        // 主色文字对比度 AA（QA №9）：token 与数字见 @styles/core/aa-text.scss。
+        color: var(--aa-primary-text);
         cursor: pointer;
         transition: color 0.2s ease;
 

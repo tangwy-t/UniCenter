@@ -251,10 +251,6 @@
 <style lang="scss" scoped>
   @use '../views/overview-tokens' as t;
 
-  // 「清除筛选」默认档按钮的主色文字对比度 AA：病灶与处方见 overview-tokens
-  // 的 primary-text-aa（终审 QA D2·浅色实测 3.68:1）。
-  @include t.primary-text-aa;
-
   // 单根包装层：只为通过 single-root 守卫，不参与布局（display: contents 不产生盒）。
   .wkl-table {
     display: contents;

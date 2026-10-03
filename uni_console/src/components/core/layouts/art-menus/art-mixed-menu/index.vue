@@ -20,9 +20,9 @@
         <template v-for="item in processedMenuList" :key="item.meta.title">
           <div
             v-if="!item.meta.isHide"
-            class="menu-item relative flex-shrink-0 h-10 px-3 text-sm flex-c c-p hover:text-theme"
+            class="menu-item relative flex-shrink-0 h-10 px-3 text-sm flex-c c-p hover:text-theme-aa"
             :class="{
-              'menu-item-active text-theme': item.isActive
+              'menu-item-active text-theme-aa': item.isActive
             }"
             @click="handleMenuJump(item, true)"
           >
@@ -33,7 +33,7 @@
             />
             <span
               class="text-md text-g-700 dark:text-g-800"
-              :class="item.isActive && '!text-theme'"
+              :class="item.isActive && '!text-theme-aa'"
             >
               {{ item.formattedTitle }}
             </span>

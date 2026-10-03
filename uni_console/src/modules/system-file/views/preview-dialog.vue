@@ -425,7 +425,8 @@
 
   .pv-btn:hover:not(:disabled) {
     background: var(--art-hover-color);
-    color: var(--theme-color);
+    /* 主色文字对比度 AA（QA №9）：hover 档 token，见 @styles/core/aa-text.scss。 */
+    color: var(--aa-primary-text-hover);
   }
 
   .pv-btn:disabled {

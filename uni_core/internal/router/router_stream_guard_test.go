@@ -121,6 +121,33 @@ func TestTasksRouteMountedWithListPerm(t *testing.T) {
 	}
 }
 
+// 显式取消端点的**挂载位置**守卫（本波语义收口）：取消是「打断执行」的写动作，
+// 必须挂在 auth 组（JWT + 操作日志），与流端点/指令面同档 —— api 组连 JWT 都不认，
+// 挪过去等于对任何人开放（handler 层的测试挂裸引擎，挂错组照旧全绿，故用源码级
+// 断言）。两处刻意「不带」：
+//   - **不带静态 perm**：权限码按 action 变化（docker 指令面既有纪律），记录级的
+//     docker:manage + 发起人归属在处理器内判定（见 handler.CancelCmd）；
+//   - **不带 longLived**：它是一次短请求（202 即回），不是长活连接 —— 挂上会让
+//     nginx 长活白名单守卫连带要求改 nginx.conf，而它本就不需要长读超时。
+func TestCancelRouteMountedOnAuthGroup(t *testing.T) {
+	src, err := os.ReadFile("router.go")
+	if err != nil {
+		t.Fatalf("读取 router.go 失败: %v", err)
+	}
+	text := string(src)
+
+	const want = `docker.POST("/hosts/:id/cmds/:ref/cancel", deps.Docker.Hdl.CancelCmd)`
+	if !strings.Contains(text, want) {
+		t.Fatalf("显式取消端点必须以 %s 挂在 auth 组上（当前缺失）", want)
+	}
+	if off := `api.POST("/docker/hosts/:id/cmds/:ref/cancel"`; strings.Contains(text, off) {
+		t.Fatalf("显式取消端点不得挂进 api 组（%s）—— 取消是写动作，JWT 登录态是它的身份边界", off)
+	}
+	if ll := `docker.POST("/hosts/:id/cmds/:ref/cancel", longLived`; strings.Contains(text, ll) {
+		t.Fatalf("显式取消是一次短请求，不该挂 longLived（%s）", ll)
+	}
+}
+
 // 构建/推送进度流端点的**挂载位置**守卫（P2）。
 //
 // build/push 进度与 pull/stats/日志同族：走 fetch + ReadableStream（浏览器能带

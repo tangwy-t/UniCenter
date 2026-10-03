@@ -399,13 +399,15 @@
 
   .preset-chip:hover {
     border-color: var(--theme-color);
-    color: var(--theme-color);
+    /* 主色文字对比度 AA（QA №9）：hover 档 token，见 @styles/core/aa-text.scss。 */
+    color: var(--aa-primary-text-hover);
   }
 
   .preset-chip.active {
     border-color: var(--theme-color);
     background: color-mix(in srgb, var(--theme-color) 12%, transparent);
-    color: var(--theme-color);
+    /* 主色文字对比度 AA（QA №9）：token 与数字见 @styles/core/aa-text.scss。 */
+    color: var(--aa-primary-text);
     font-weight: 600;
   }
 
@@ -489,7 +491,8 @@
     padding: 1px 8px;
     border-radius: 4px;
     background: color-mix(in srgb, var(--theme-color) 10%, transparent);
-    color: var(--theme-color);
+    /* 主色文字对比度 AA（QA №9）：token 与数字见 @styles/core/aa-text.scss。 */
+    color: var(--aa-primary-text);
     font-family: ui-monospace, 'Fira Code', 'SF Mono', Consolas, monospace;
     font-size: 12px;
   }

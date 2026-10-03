@@ -301,7 +301,11 @@ describe('「打开工作台」（行上唯一的动作）', () => {
     }
     expect(vnode.props?.onClick, '工作台按钮应带跳转').toBeTruthy()
     vnode.props!.onClick!()
-    await new Promise((r) => setTimeout(r, 0))
+    // 等导航落定：判据用「路由到了」而不是「过了一轮宏任务」—— 导航管线多轮微任务，
+    // 负载下固定轮数会漂。
+    await vi.waitUntil(() => currentRouter!.currentRoute.value.name === 'DockerProjectWorkspace', {
+      timeout: 5000
+    })
 
     expect(currentRouter!.currentRoute.value.name).toBe('DockerProjectWorkspace')
     expect(currentRouter!.currentRoute.value.params.name).toBe('media-stack')

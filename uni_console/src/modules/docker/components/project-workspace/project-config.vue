@@ -129,7 +129,9 @@
 
   /** 打开编辑器（「编辑配置」/「＋添加服务」两个入口共用；权限门在模板上）。 */
   function openEditor(addService: boolean): void {
-    if (!props.project) return
+    if (!props.project) {
+      return
+    }
     editor.value = {
       visible: true,
       project: props.project.name,
@@ -184,10 +186,16 @@
 
   async function loadBackups(force = false): Promise<void> {
     const name = projectName.value
-    if (!name) return
+    if (!name) {
+      return
+    }
     const cur = backupState.value
-    if (cur?.loading) return
-    if (cur && !force) return
+    if (cur?.loading) {
+      return
+    }
+    if (cur && !force) {
+      return
+    }
     backupError.value = ''
     backupState.value = {
       loading: true,
@@ -318,10 +326,6 @@
 <style lang="scss" scoped>
   @use '@styles/core/breakpoints.scss' as *;
   @use '../../views/overview-tokens' as t;
-
-  // 「编辑 / ＋添加服务」（text 变体）与「重新加载」等默认档按钮的主色文字对比度 AA：
-  // 病灶与处方见 overview-tokens 的 primary-text-aa（终审 QA D2·浅色实测 3.68:1）。
-  @include t.primary-text-aa;
 
   .pwc__bar {
     display: flex;

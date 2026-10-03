@@ -1,6 +1,10 @@
 package request
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/app"
+)
 
 // DockerCmdReq 是一条 docker 指令的受理请求（形状对齐 spec §4.1）。
 //
@@ -95,7 +99,13 @@ type DockerWorkloadQuery struct {
 // 任务中心不需要按具体终态筛选（条目上的 status 字段已经细分）；action 是动作码
 // （如 image:pull），先在 service 与策略表对账（未登记即 400，与受理处同款）。
 // 非法值 400 结论句（与 Workloads 同一句纪律）。
+//
+// 分页（8d 起）：实时 ∪ 历史合并后整体分页，走全站统一的 app.PageRequest
+// （page/pageSize；绑定层已封顶 pageSize≤100、page≤10000，防天文偏移）。
+// 过滤是**并集语义**：pending 档只有实时面有内容（历史表只存终态），
+// done / 不筛时两条腿都参与合并。
 type DockerTasksQuery struct {
+	app.PageRequest
 	// HostID 限定单主机。0 = 跨主机（缺省）。
 	HostID uint64 `form:"hostId"`
 	// Status 过滤阶段：pending（仍在执行）/ done（一切终态）。

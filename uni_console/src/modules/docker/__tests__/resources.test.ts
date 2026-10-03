@@ -207,6 +207,16 @@ const flush = async () => {
   await nextTick()
 }
 
+/**
+ * 等 query.tab 落到期望值：tab→query 的写回是一次**异步导航**（watch → replace），
+ * 判据用「路由到没到」而不是「过了几轮宏任务」—— 管线里若有别的导航在飞，步数会漂。
+ */
+async function waitTab(router: Router, tab: string) {
+  await vi.waitUntil(() => String(router.currentRoute.value.query.tab ?? '') === tab, {
+    timeout: 5000
+  })
+}
+
 async function mountResources(query: Record<string, string> = { host: 'h1' }) {
   const router = await makeRouter(query)
   const wrapper = mount(Resources as unknown as Component, {
@@ -274,16 +284,19 @@ describe('tab 切换与 query 记忆', () => {
     expect(router.currentRoute.value.query.tab).toBeUndefined()
 
     await clickTab(w, '数据卷')
+    await waitTab(router, 'volumes')
     expect(router.currentRoute.value.query.tab).toBe('volumes')
     expect(w.findComponent({ name: 'DockerVolumesTab' }).exists()).toBe(true)
     // lazy 首挂后常驻：镜像 tab 已挂载过，切走只是 v-show 隐藏（实例还在）。
     expect(w.findComponent({ name: 'DockerImagesTab' }).exists()).toBe(true)
 
     await clickTab(w, '网络')
+    await waitTab(router, 'networks')
     expect(router.currentRoute.value.query.tab).toBe('networks')
     expect(w.findComponent({ name: 'DockerNetworksTab' }).exists()).toBe(true)
 
     await clickTab(w, '镜像')
+    await waitTab(router, 'images')
     expect(router.currentRoute.value.query.tab).toBe('images')
   })
 

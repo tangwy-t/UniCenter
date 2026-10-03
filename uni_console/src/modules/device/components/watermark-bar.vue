@@ -25,7 +25,9 @@
       <div class="wb__track" aria-hidden="true">
         <div class="wb__fill" :style="{ width: `${percent}%`, background: tone }" />
       </div>
-      <span class="wb__value" :style="{ color: tone }">{{ text }}</span>
+      <!-- 文字走 AA token（usageTextTone）：条=原值（非文本族），文字=达标档，
+           数值同源同分档，只有取色分工不同（数字见 @styles/core/aa-text.scss） -->
+      <span class="wb__value" :style="{ color: toneText }">{{ text }}</span>
     </template>
 
     <!--
@@ -40,7 +42,7 @@
 
 <script setup lang="ts">
   import { computed } from 'vue'
-  import { clampPercent, formatPercent, usageTone } from '../utils/display'
+  import { clampPercent, formatPercent, usageTextTone, usageTone } from '../utils/display'
 
   const props = defineProps<{
     /** 水位百分比；缺值（null/undefined/NaN）显示「—」。 */
@@ -53,6 +55,8 @@
   const text = computed(() => formatPercent(props.value))
   /** 与详情页健康卡、监控页同一套阈值配色，避免同一数值两种颜色。 */
   const tone = computed(() => usageTone(props.value))
+  /** 数值文字的 AA 档：与原值同分档、不同取色（token 单源见 display.ts / aa-text.scss）。 */
+  const toneText = computed(() => usageTextTone(props.value))
 </script>
 
 <style scoped lang="scss">
