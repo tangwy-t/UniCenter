@@ -127,6 +127,45 @@
   }
 }
 
+// ---------- 单滚动链（「沉浸」形态：短视口 / 表格全屏态） ----------
+//
+// 目标：**页面零滚动，滚动条只在表体里**（表底与行内滚动完全可达）。
+// 链：页根(.art-full-height，flex 列) → 页内包裹层 → 卡片(.art-table-card)
+//     → 卡体(.el-card__body) → 表(.art-table) → el-table 内滚。
+// 触发（同一份规则，两处入口）：
+//   - 短视口（高度 ≤ HEIGHT_BREAKPOINTS.short，见 breakpoints.ts）：与 ArtTable
+//     的默认安全阀「短视口档让位」配套（JS 侧，art-table/index.vue 的 maxHeight）——
+//     阀让位后表体高度改由本链决定；
+//   - 表格全屏态（.el-full-screen）：容器本来就是视口，链一路收到底 ——
+//     修复 844×390 下卡片按内容长高（8 行撑到 518px）越出视口、底部不可达的既有溢出。
+// 链断在哪里就退化成普通文档流：flex:1 落在无高度的包裹层里不生效，无害；
+// flex:1 落在无高度的 flex 容器里时，子项按内容高渲染，同样无害。
+@mixin art-single-scroll-chain {
+  > :where(.wkl-page__inner, .tk-inner) {
+    flex: 1 1 0;
+    min-height: 0;
+  }
+
+  .art-table-card {
+    flex: 1 1 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .art-table-card .el-card__body {
+    flex: 1 1 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .art-table {
+    flex: 1 1 0;
+    min-height: 0;
+  }
+}
+
 // 元素全屏
 .el-full-screen {
   position: fixed;
@@ -142,6 +181,46 @@
   background-color: var(--default-box-color);
   display: flex;
   flex-direction: column;
+
+  // 全屏态 = 「容器就是视口」的单滚动形态：链必须一路收到底，否则卡片按内容
+  // 长高（多行清单把卡片撑到视口之外），底部与表尾永远滚不到（844×390 实测
+  // 8 行时卡片 518px > 视口 390px）。
+  @include art-single-scroll-chain;
+
+  // 页根高度口径（fixed 元素的 100% 即视口）与内边距对齐：内容盒 = 视口 - 30。
+  // 页内任何消费 --art-full-height 的规则（如页根自身的 .art-full-height 高度）
+  // 在全屏态下也拿到同一口径。
+  --art-full-height: calc(100dvh - 30px);
+}
+
+// 容器全高
+.art-full-height {
+  height: var(--art-full-height);
+  display: flex;
+  flex-direction: column;
+
+  @include respond-at-most('phone') {
+    height: auto;
+  }
+
+  // 手机横屏紧凑档：页根直接钉到视口底。
+  // 应用头被同档定死在 48px（art-header-bar 的 h-15/leading-15 覆盖）、页签栏
+  // 同档收起，头高是常量，所以这里能直接算出来 —— 也就不再留 useLayoutHeight
+  // 的 15px 呼吸位（390 高的屏幕上那是 4% 的浪费，正好是一行表所需的高度差）。
+  // 只对 ≥phone 宽生效：≤640 宽（手机竖屏）仍走上面的 height:auto 分支 ——
+  // 那一档的页面是自然流（内容多就滚），钉死高度会把它逼进单滚动。
+  @include respond-height-at-most('phoneShort') {
+    @include respond-at-least('phone') {
+      height: calc(100dvh - 48px);
+    }
+  }
+}
+
+// ---------- 单滚动链：短视口入口（定义见上文「元素全屏」前） ----------
+@include respond-height-at-most('short') {
+  .art-full-height {
+    @include art-single-scroll-chain;
+  }
 }
 
 // 表格卡片
@@ -156,16 +235,19 @@
     height: 100%;
     overflow: hidden;
   }
+
+  // 手机横屏紧凑档：卡片让位于表 —— 上缘与内边距收到最小（内容不受影响，
+  // 卡片仍是同一张卡）。10px 内边距与「卡头 20→10」的落点一致。
+  // 变量槽落在 .el-card.art-table-card 上：EP 自己的 `.el-card { --el-card-padding: 20px }`
+  // 与单类选择器同权重，只写 .art-table-card 会被 EP 的源码序压掉（实测仍 20px）。
+  @include respond-height-at-most('phoneShort') {
+    margin-top: 0;
+  }
 }
 
-// 容器全高
-.art-full-height {
-  height: var(--art-full-height);
-  display: flex;
-  flex-direction: column;
-
-  @include respond-at-most('phone') {
-    height: auto;
+.el-card.art-table-card {
+  @include respond-height-at-most('phoneShort') {
+    --el-card-padding: 10px;
   }
 }
 

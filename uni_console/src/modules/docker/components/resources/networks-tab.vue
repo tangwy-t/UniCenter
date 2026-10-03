@@ -331,6 +331,13 @@
 <style lang="scss" scoped>
   @use '../../views/overview-tokens' as t;
 
+  /* 矮视口单滚动链的 tab 根段（链的其余部分：app.scss 的页根/卡片/表 +
+     resources.vue 的 ElTabs 两层）：让本组件根吃满 pane 的高度。 */
+  .docker-networks-tab {
+    @include t.fill-chain-root;
+  }
+
+
   // 空态渲染在本组件（ArtTable 不转发 `#empty`）：给它接近表格空态的留白。
   .docker-empty {
     padding: 56px 0;
@@ -361,4 +368,7 @@
     font-size: 12px;
     color: var(--el-text-color-secondary);
   }
+
+  /* 手机横屏紧凑档：底栏收薄（放在本块最后 = 同权重按源码序盖住上面的基础留白）。 */
+  @include t.compact-bottom-bars;
 </style>

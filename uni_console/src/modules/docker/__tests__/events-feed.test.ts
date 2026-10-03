@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
 /**
- * 活动流面板（overview-events-feed.vue）的组件级行为钉子：流消费（回放+实时+坏行）、
- * 滚动暂停与恢复、断流自动重连（含重放去重不重行）、致命失败（401）停机不重连、
- * keep-alive 失活断流/激活重连，以及总览页的集成（连接生命周期 = 页面激活期）。
+ * 活动流面板（overview-events-feed.vue）的组件级行为钉子：流消费（回放+实时+坏行+
+ * 首帧 sentinel）、滚动暂停与恢复、断流自动重连（含重放去重不重行）、致命失败（401）
+ * 停机不重连、keep-alive 失活断流/激活重连、**行增强**（类型徽标 / 原始动作码直显 /
+ * 退出码三值染色 / 悬停短 id 与绝对时刻 / 行点击就地展开原始事实），以及总览页的
+ * 集成（连接生命周期 = 页面激活期）。
  *
  * 沿用 page-render / host-state 的 vi.mock 模式（mock 整个 '../api'）—— 流端点用
  * 可控的假 NDJSON 响应（手写 reader 队列：push 喂行、end 收尾、abort 即收尾），
@@ -185,18 +187,132 @@ describe('活动流：回放 + 实时 + 坏行', () => {
     expect(rows[1].text()).toContain('frobnicate') // 表外词元原样显示
   })
 
-  it('health_status 后缀上屏为中文结论，daemon 原始短语进 title（可核对的事实）', async () => {
+  it('health_status 后缀上屏为中文结论，daemon 原始短语**直显**在旁（不再只悬停）', async () => {
     const w = mountFeed()
     await flush()
+    streams[0].push(evLine({ t: Date.now() - 3_000, action: 'health_status: unhealthy' }) + '\n')
+    await flush()
+
+    expect(w.find('.dov-feed__action').text()).toBe('健康检查异常')
+    // 原始短语（含检查结果）与中文并排显示：事实直显，排障引用不必悬停。
+    expect(w.find('.dov-feed__raw').text()).toBe('health_status: unhealthy')
+  })
+
+  it('类型徽标：四类订阅维度直显（图标 + 中文名），未知类型原样透传', async () => {
+    const w = mountFeed()
+    await flush()
+    const now = Date.now()
     streams[0].push(
-      evLine({ t: Date.now() - 3_000, action: 'health_status: unhealthy' }) + '\n'
+      [
+        evLine({ t: now - 4000, type: 'container', action: 'start' }),
+        evLine({ t: now - 3000, type: 'image', action: 'pull' }),
+        evLine({ t: now - 2000, type: 'volume', action: 'create' }),
+        evLine({ t: now - 1000, type: 'network', action: 'create' }),
+        evLine({ t: now, type: 'plugin', action: 'enable' })
+      ].join('\n') + '\n'
+    )
+    await flush()
+    const labels = w.findAll('.dov-feed__type-label').map((n) => n.text())
+    expect(labels).toEqual(['容器', '镜像', '卷', '网络', 'plugin'])
+  })
+
+  it('退出码：die 的 ≠0 红染、0 中性；nil（缺字段）不显示不猜', async () => {
+    const w = mountFeed()
+    await flush()
+    const now = Date.now()
+    streams[0].push(
+      [
+        evLine({ t: now - 3000, action: 'die', exit_code: 137 }),
+        evLine({ t: now - 2000, action: 'die', exit_code: 0 }),
+        evLine({ t: now - 1000, action: 'die', actor_id: 'sha256:9' })
+      ].join('\n') + '\n'
     )
     await flush()
 
-    const action = w.find('.dov-feed__action')
-    expect(action.text()).toBe('健康检查异常')
-    // 原始短语（含检查结果）不丢：悬停可取，排障引用靠它。
-    expect(action.attributes('title')).toBe('health_status: unhealthy')
+    const rows = w.findAll('.dov-feed__row')
+    expect(rows).toHaveLength(3)
+    // 行序：t 升序（旧在上）→ 137 → 0 → 无
+    const exits = w.findAll('.dov-feed__exit')
+    expect(exits).toHaveLength(2) // nil 那一行根本不出这一格
+    expect(exits[0].text()).toBe('exit 137')
+    expect(exits[0].classes()).toContain('is-danger')
+    expect(exits[1].text()).toBe('exit 0')
+    expect(exits[1].classes()).toContain('is-neutral')
+    expect(rows[2].find('.dov-feed__exit').exists()).toBe(false)
+  })
+
+  it('悬停补绝对时刻与主体短 ID（时间列给挂钟、对象列给短 id）', async () => {
+    const w = mountFeed()
+    await flush()
+    const t = Date.now() - 3000
+    streams[0].push(evLine({ t, actor_name: 'web', actor_id: 'sha256:abc123def456' }) + '\n')
+    await flush()
+    expect(w.find('.dov-feed__time').attributes('title')).toBe(eventClockTime(t))
+    expect(w.find('.dov-feed__actor').attributes('title')).toBe('web · abc123def456')
+  })
+
+  it('点击行**就地展开**全部原始事实（不开抽屉）；再点收起', async () => {
+    const w = mountFeed()
+    await flush()
+    streams[0].push(
+      evLine({
+        t: 1790600000000,
+        action: 'health_status: unhealthy',
+        actor_name: 'web',
+        actor_id: 'sha256:abc123def456',
+        exit_code: 137
+      }) + '\n'
+    )
+    await flush()
+    expect(w.find('.dov-feed__facts').exists()).toBe(false)
+
+    await w.find('.dov-feed__row').trigger('click')
+    const facts = w.find('.dov-feed__facts')
+    expect(facts.exists()).toBe(true)
+    const text = facts.text()
+    expect(text).toContain('动作原文')
+    expect(text).toContain('health_status: unhealthy')
+    expect(text).toContain('sha256:abc123def456') // 主体 ID 全值
+    expect(text).toContain('137') // 退出码原文
+    expect(text).toContain(eventClockTime(1790600000000)) // 绝对时刻
+
+    // 开关按钮（键盘可达的入口）同样收起。
+    await w.find('.dov-feed__toggle').trigger('click')
+    expect(w.find('.dov-feed__facts').exists()).toBe(false)
+  })
+
+  it('头部「查看全部」入口：有 docker:list 时渲染，点击进整页 /docker/events', async () => {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/', component: { template: '<div />' } },
+        { path: '/docker/events', name: 'DockerEvents', component: { template: '<div />' } }
+      ]
+    })
+    await router.push('/')
+    await router.isReady()
+    const w = mount(OverviewEventsFeed, { global: { plugins: [router] } })
+    mounted.push(w)
+    await flush()
+
+    const btn = w.findAll('button').find((b) => b.text() === '查看全部')
+    expect(btn, '活动流头部应有详版入口').toBeTruthy()
+    const pushSpy = vi.spyOn(router, 'push')
+    await btn!.trigger('click')
+    const pending = pushSpy.mock.results[0]?.value as Promise<unknown> | undefined
+    if (pending) await pending
+    await flush()
+    expect(router.currentRoute.value.name).toBe('DockerEvents')
+  })
+
+  it('流首帧 sentinel 被跳过：不计数、不渲染、不打断后续行', async () => {
+    const w = mountFeed()
+    await flush()
+    streams[0].push('{"kind":"opened"}\n' + evLine({ t: Date.now() - 1000 }) + '\n')
+    await flush()
+    expect(w.findAll('.dov-feed__row')).toHaveLength(1)
+    // 账目句只算事件（sentinel 不进累计）。
+    expect(w.find('.dov-feed__meta').text()).toBe('累计 1 条')
   })
 
   it('回放后也无事件：空态句与断流态区分（「舰队很安静」）', async () => {
@@ -285,10 +401,9 @@ describe('活动流：滚动暂停与恢复（log-viewer 同款语义）', () =>
     expect(el.scrollTop).toBe(100)
     // 等「新事件已入窗并计数」这个**事实**：从 push 到进窗是一串异步（读循环 →
     // 折叠 → 渲染），判据用事实（计数文案）而不是固定轮数的 flush。
-    await vi.waitUntil(
-      () => w.find('.dov-feed__paused-text').text().includes('新事件 1 条'),
-      { timeout: 5000 }
-    )
+    await vi.waitUntil(() => w.find('.dov-feed__paused-text').text().includes('新事件 1 条'), {
+      timeout: 5000
+    })
     let diag = ''
     if (!w.find('.dov-feed__paused-text').text().includes('新事件')) {
       diag =
@@ -317,6 +432,18 @@ describe('活动流：滚动暂停与恢复（log-viewer 同款语义）', () =>
     streams[0].push(evLine({ action: 'die' }) + '\n')
     await flush()
     expect(el.scrollTop).toBe(1000) // 恢复后继续跟随
+  })
+
+  it('位置没变的 scroll 事件不算「用户上滚」（展开行的布局补偿不弹暂停条）', async () => {
+    const w = mountFeed()
+    await flush()
+    const el = armScrollRegion(w, 1000, 400)
+    // 内容在下方长出时浏览器会补发 scroll 事件，但 scrollTop 一动没动（0 → 0）：
+    // 那不是人的动作，不该把「已暂停」凭空弹出来。
+    el.scrollTop = 0
+    el.dispatchEvent(new Event('scroll'))
+    await nextTick()
+    expect(w.find('.dov-feed__paused').exists()).toBe(false)
   })
 
   it('自己滚回底部也恢复（不必找按钮）', async () => {

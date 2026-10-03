@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/tangwy-t/UniCenter/uni_core/internal/middleware"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/response"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockerevents"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockerstate"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
@@ -247,25 +248,30 @@ func TestEventsStreamReplayFanoutAndRefCount(t *testing.T) {
 		t.Fatalf("退订必须下发 cancel: %v", got)
 	}
 
-	// 行形状与顺序：先回放的 start、后实时的 die，归属注入 host_id/hostname。
+	// 行形状与顺序：首帧 sentinel（kind=opened，消费端跳过）→ 回放的 start →
+	// 实时的 die；归属注入 host_id/hostname。
 	type line struct {
-		HostID    uint64 `json:"host_id"`
+		HostID    uint64 `json:"host_id,string"` // 流行是字符串形态的雪花 id（防 JS 精度丢失）
 		Hostname  string `json:"hostname"`
 		T         int64  `json:"t"`
 		Type      string `json:"type"`
 		Action    string `json:"action"`
 		ActorName string `json:"actor_name"`
+		ExitCode  *int32 `json:"exit_code"`
 	}
 	lines := w.lines()
-	if len(lines) != 2 {
-		t.Fatalf("应恰好两行 NDJSON，实际 %d: %q", len(lines), lines)
+	if len(lines) != 3 {
+		t.Fatalf("应恰好三行 NDJSON（sentinel + 两行数据），实际 %d: %q", len(lines), lines)
+	}
+	if lines[0] != `{"kind":"opened"}` {
+		t.Fatalf("首帧必须是 sentinel（流建立即发，代理据此放行响应头），实际 %q", lines[0])
 	}
 	var first, second line
-	if err := json.Unmarshal([]byte(lines[0]), &first); err != nil {
-		t.Fatalf("第 1 行不是合法 JSON: %v (%q)", err, lines[0])
-	}
-	if err := json.Unmarshal([]byte(lines[1]), &second); err != nil {
+	if err := json.Unmarshal([]byte(lines[1]), &first); err != nil {
 		t.Fatalf("第 2 行不是合法 JSON: %v (%q)", err, lines[1])
+	}
+	if err := json.Unmarshal([]byte(lines[2]), &second); err != nil {
+		t.Fatalf("第 3 行不是合法 JSON: %v (%q)", err, lines[2])
 	}
 	if first.Action != "start" || first.ActorName != "redis" || first.HostID != 7 || first.Hostname != "alpha" {
 		t.Fatalf("回放行不符: %+v", first)
@@ -278,6 +284,228 @@ func TestEventsStreamReplayFanoutAndRefCount(t *testing.T) {
 	}
 	if code := w.Code(); code != http.StatusOK {
 		t.Fatalf("status=%d", code)
+	}
+}
+
+// sentinel 的**病灶钉子**：保留窗口空 + 无任何事件时，流建立后仍必须立刻写出一帧
+// —— 一个字节都不发正是「经代理页面停『连接中…』」的根因（实测：直连 :8088 头 8ms
+// 即到，经 vite dev 代理则压到首字节才放行）。这条测试在无数据的静默流上断言
+// 首帧在建立后极短时间内可见。
+func TestEventsStreamSendsOpenedSentinelOnEmptyWindow(t *testing.T) {
+	env := newTestDockerHandler(t, []string{"docker:list"})
+	f := newEventsFixture(t, env)
+
+	w := newSyncRecorder()
+	c, _ := gin.CreateTestContext(w)
+	rctx, rcancel := context.WithCancel(context.Background())
+	defer rcancel()
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/docker/events", nil).WithContext(rctx)
+	c.Set(middleware.CtxClaims, testClaims(1))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.handler.EventsStream(c)
+	}()
+	// 转出事件（占位：夹具里没有任何事件，窗口是空的 —— 这正是病灶场景）。
+	waitFor(t, "空窗口流也必须立刻发出 sentinel", 3*time.Second, func() bool {
+		return len(w.lines()) >= 1
+	})
+	if got := w.lines(); len(got) != 1 || got[0] != `{"kind":"opened"}` {
+		t.Fatalf("空窗口流的首帧必须恰是 sentinel，实际 %q", got)
+	}
+	rcancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("端点处理器未随 ctx 断开退出")
+	}
+}
+
+// exit_code 透传：die 事件的退出码必须原样出现在流行上（前端红染事实源）；
+// nil（非 die / 旧 agent）**不出现在行里**（omitempty —— 消费侧不显示不猜）。
+func TestEventsStreamCarriesExitCode(t *testing.T) {
+	env := newTestDockerHandler(t, []string{"docker:list"})
+	f := newEventsFixture(t, env)
+	const sid = "sess-events-00000007"
+
+	c0 := f.mgr.Subscribe()
+	waitFor(t, "常驻订阅指令已下发", 3*time.Second, func() bool { return len(f.sender.cmdRefs()) == 1 })
+	f.mgr.OnEventsResult(7, &agentproto.DockerCmdResult{Ref: f.sender.cmdRefs()[0], OK: true, SessionID: sid})
+
+	code := int32(137)
+	raw, _ := json.Marshal(agentproto.DockerEventItem{
+		T: 1790000000000, Type: "container", Action: "die", ActorName: "web", ExitCode: &code,
+	})
+	if err := f.mgr.DeliverDockerFrame(context.Background(), 7,
+		&agentproto.DockerFrame{SessionID: sid, Seq: 1, Data: append(raw, '\n')}); err != nil {
+		t.Fatal(err)
+	}
+
+	w := newSyncRecorder()
+	c, _ := gin.CreateTestContext(w)
+	rctx, rcancel := context.WithCancel(context.Background())
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/docker/events", nil).WithContext(rctx)
+	c.Set(middleware.CtxClaims, testClaims(1))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.handler.EventsStream(c)
+	}()
+	waitFor(t, "带退出码的行已写出", 3*time.Second, func() bool { return len(w.lines()) >= 2 })
+	rcancel()
+	<-done
+	c0.Close()
+
+	lines := w.lines()
+	var got struct {
+		Action   string `json:"action"`
+		ExitCode *int32 `json:"exit_code"`
+	}
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &got); err != nil {
+		t.Fatalf("末行不是合法 JSON: %v (%q)", err, lines[len(lines)-1])
+	}
+	if got.Action != "die" || got.ExitCode == nil || *got.ExitCode != 137 {
+		t.Fatalf("die 的退出码必须原样透传: %+v", got)
+	}
+}
+
+// 历史查询端点：过滤 / 排序 / 游标分页 / total 的口径全在这一条上钉住（管理器
+// 侧的窗口裁剪与去重键在 dockerevents 的单测里）。
+func TestEventsHistoryQueryFiltersAndCursor(t *testing.T) {
+	env := newTestDockerHandler(t, []string{"docker:list"})
+	f := newEventsFixture(t, env)
+	const sid = "sess-events-00000007"
+
+	c0 := f.mgr.Subscribe()
+	waitFor(t, "常驻订阅指令已下发", 3*time.Second, func() bool { return len(f.sender.cmdRefs()) == 1 })
+	f.mgr.OnEventsResult(7, &agentproto.DockerCmdResult{Ref: f.sender.cmdRefs()[0], OK: true, SessionID: sid})
+
+	// 五条事件：t 递增（历史应按 t 降序返回），类型/主体名各不相同。
+	emitAt := func(seq uint64, at int64, typ, action, name string) {
+		raw, _ := json.Marshal(agentproto.DockerEventItem{T: at, Type: typ, Action: action, ActorName: name})
+		if err := f.mgr.DeliverDockerFrame(context.Background(), 7,
+			&agentproto.DockerFrame{SessionID: sid, Seq: seq, Data: append(raw, '\n')}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	emitAt(1, 1790000001000, "container", "start", "web")
+	emitAt(2, 1790000002000, "container", "die", "web")
+	emitAt(3, 1790000003000, "image", "pull", "redis:7")
+	emitAt(4, 1790000004000, "volume", "create", "data-vol")
+	emitAt(5, 1790000005000, "container", "restart", "api")
+	c0.Close()
+
+	get := func(query string) response.DockerEventHistoryResp {
+		t.Helper()
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/docker/events/history"+query, nil)
+		c.Set(middleware.CtxClaims, testClaims(1))
+		f.handler.EventsHistory(c)
+		if w.Code != http.StatusOK {
+			t.Fatalf("查询 %q 应 200，实际 %d (%s)", query, w.Code, w.Body.String())
+		}
+		var resp struct {
+			Data response.DockerEventHistoryResp `json:"data"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("响应不是合法 JSON: %v (%s)", err, w.Body.String())
+		}
+		return resp.Data
+	}
+
+	// 无过滤：全部 5 条、t 降序（最新在前）。
+	all := get("")
+	if all.Total != 5 || len(all.Items) != 5 {
+		t.Fatalf("无过滤应给全量 5 条，实际 total=%d items=%d", all.Total, len(all.Items))
+	}
+	if all.Items[0].Action != "restart" || all.Items[4].Action != "start" {
+		t.Fatalf("必须按 t 降序（最新在前）: %+v", all.Items)
+	}
+	if all.Items[0].HostID != 7 || all.Items[0].Hostname != "alpha" {
+		t.Fatalf("归属必须随行注入: %+v", all.Items[0])
+	}
+
+	// 类型过滤。
+	containers := get("?type=container")
+	if containers.Total != 3 || len(containers.Items) != 3 {
+		t.Fatalf("container 过滤应 3 条，实际 total=%d items=%d", containers.Total, len(containers.Items))
+	}
+	// 关键字过滤（大小写不敏感，主体名子串）。
+	web := get("?keyword=WEB")
+	if web.Total != 2 {
+		t.Fatalf("keyword=WEB 应命中 2 条（大小写不敏感），实际 %d", web.Total)
+	}
+	// 主机过滤（这台夹具只有 7）：命中；不存在的主机：空数组 + total 0。
+	if got := get("?hostId=7"); got.Total != 5 {
+		t.Fatalf("hostId=7 应 5 条，实际 %d", got.Total)
+	}
+	empty := get("?hostId=9")
+	if empty.Total != 0 || len(empty.Items) != 0 {
+		t.Fatalf("不存在的主机应给空数组，实际 total=%d items=%d", empty.Total, len(empty.Items))
+	}
+
+	// 游标分页：limit=2 翻三页 —— 不重不漏、total 恒为全量、末页无游标。
+	seen := []string{}
+	cursor := ""
+	pages := 0
+	for {
+		q := "?limit=2"
+		if cursor != "" {
+			q += "&cursor=" + cursor
+		}
+		page := get(q)
+		pages++
+		if page.Total != 5 {
+			t.Fatalf("翻页期间 total 必须恒为全量 5，实际 %d", page.Total)
+		}
+		for _, it := range page.Items {
+			seen = append(seen, it.Action)
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
+		if pages > 5 {
+			t.Fatal("游标分页未收敛（NextCursor 自循环）")
+		}
+	}
+	want := []string{"restart", "create", "pull", "die", "start"}
+	if len(seen) != len(want) {
+		t.Fatalf("分页后应恰好 5 条，实际 %d: %v", len(seen), seen)
+	}
+	for i := range want {
+		if seen[i] != want[i] {
+			t.Fatalf("分页顺序必须与单页一致: got %v want %v", seen, want)
+		}
+	}
+	if pages != 3 {
+		t.Fatalf("limit=2 应三页翻完，实际 %d 页", pages)
+	}
+
+	// 非法参数：类型 / 游标都 400（结论句而不是静默忽略）。
+	for _, q := range []string{"?type=banana", "?cursor=not-a-cursor", "?cursor=123"} {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/docker/events/history"+q, nil)
+		c.Set(middleware.CtxClaims, testClaims(1))
+		f.handler.EventsHistory(c)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("非法参数 %q 必须 400，实际 %d (%s)", q, w.Code, w.Body.String())
+		}
+	}
+}
+
+// 历史查询未装配：500 语义（与流端点同款降级）。
+func TestEventsHistoryNotWired(t *testing.T) {
+	env := newTestDockerHandler(t, []string{"docker:list"})
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/docker/events/history", nil)
+	c.Set(middleware.CtxClaims, testClaims(1))
+	env.handler.EventsHistory(c)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("未装配必须 500，实际 %d (%s)", w.Code, w.Body.String())
 	}
 }
 

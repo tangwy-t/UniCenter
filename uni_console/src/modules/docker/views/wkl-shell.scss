@@ -10,6 +10,7 @@
  * 类名一律走 wkl- 前缀，不与总览页的 dov-* 混用。
  */
 @use './overview-tokens' as t;
+@use '@styles/core/breakpoints.scss' as bp;
 
 @include t.rise-keyframes;
 
@@ -21,8 +22,26 @@
 }
 
 /* ---------- 页头（hero：对齐 overview.vue 的 dov-hero） ---------- */
+.wkl-hero {
+  /* 矮视口行内化（含 ≤short 的 margin 收紧）：标题/副题并成一行 —— 与
+     .wkl-hero__icon 的 hero-icon 同档，一起把 hero 从两行压到一行。 */
+  @include t.hero-collapse;
+}
+
 .wkl-hero__icon {
   @include t.hero-icon;
+}
+
+/* ---------- 手机横屏紧凑档（≤420 高）：收 chrome，不压行 ----------
+   只动页面级留白与间距（触靶 32px 与数据行高 49px 是红线，一律不碰）：
+   页内 padding 20/32 → 8/12、hero 与卡片的 16px 分区间距并进 hero 的
+   margin-bottom —— 390 高的屏幕上这几处合计让出 ~40px，正好是一行表。 */
+@include bp.respond-height-at-most('phoneShort') {
+  .wkl-page__inner {
+    padding: 8px;
+    padding-bottom: 12px;
+    gap: 0;
+  }
 }
 
 .live-dot {

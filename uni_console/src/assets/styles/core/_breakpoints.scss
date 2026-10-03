@@ -50,3 +50,47 @@ $breakpoints: (
     @content;
   }
 }
+
+// ---------------------------------------------------------------------------
+// 高度轴（独立一张表：阈值口径与「为什么另立」见 src/config/breakpoints.ts）。
+//
+// 样式侧必须用这张表 + respond-height-* 家族，别在组件里内联 max-height 阈值
+// （breakpoints.test.ts 的源码扫描会把内联的高度媒体查询当违规抓出来）。
+// 阈值本身用插值写，扫描正则只认字面量数字 —— 与宽度轴同一手法。
+// ---------------------------------------------------------------------------
+
+$height-breakpoints: (
+  'phoneShort': 420,
+  'short': 640
+);
+
+@function height-breakpoint($name) {
+  $value: map.get($height-breakpoints, $name);
+
+  @if $value == null {
+    @error '未知高度断点 `#{$name}`，可用断点：#{map.keys($height-breakpoints)}';
+  }
+
+  @return $value;
+}
+
+/// 视口高度 < 断点
+@mixin respond-height-below($name) {
+  @media only screen and (max-height: #{height-breakpoint($name) - 0.02}px) {
+    @content;
+  }
+}
+
+/// 视口高度 <= 断点
+@mixin respond-height-at-most($name) {
+  @media only screen and (max-height: #{height-breakpoint($name)}px) {
+    @content;
+  }
+}
+
+/// 视口高度 >= 断点
+@mixin respond-height-at-least($name) {
+  @media only screen and (min-height: #{height-breakpoint($name)}px) {
+    @content;
+  }
+}

@@ -103,3 +103,21 @@
     justify-content: center;
   }
 }
+
+// 手机横屏紧凑档（≤420 高）：表体挪到「零上边距 + 表头压薄」的档位 ——
+// 只动表头与表根的间距（表格 chrome），**不动数据行**（行高 49px 是底线：
+// 行内触靶 32px 已低于 44px 推荐线，再压就没法按了）。
+// 安全阀此时已由 JS 让位（art-table/index.vue 的短视口档），表体高度由页面
+// flex 链给（单滚动，见 app.scss 的 art-single-scroll-chain）。
+@include respond-height-at-most('phoneShort') {
+  // 与上面 `.art-table .el-table` 同权重才盖得住（scoped 编译后是
+  // `.art-table[data-v] .el-table`，只写 `.el-table` 权重不够，实测仍是 10px）。
+  .art-table .el-table {
+    margin-top: 0;
+  }
+
+  :deep(.el-table th.el-table__cell) {
+    padding-top: 5px;
+    padding-bottom: 5px;
+  }
+}

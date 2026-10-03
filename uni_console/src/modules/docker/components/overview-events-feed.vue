@@ -1,7 +1,7 @@
 <template>
   <!-- 单根（single-root 守卫在库：布局的 Transition 只支持单根，双根切页白屏）。 -->
   <div class="dov-card dov-feed">
-    <!-- 工具行：连接状态（结论句）+ 致命失败的重试 + 账目口径。 -->
+    <!-- 工具行：连接状态（结论句）+ 致命失败的重试 + 账目口径 + 详版入口。 -->
     <div class="dov-feed__head">
       <span class="dov-feed__status" :class="`is-${phase}`" role="status">
         <span class="dov-feed__dot" aria-hidden="true" />
@@ -15,6 +15,11 @@
         >重试</ElButton
       >
       <span class="dov-feed__meta">{{ hint }}</span>
+      <!-- 详版入口（/docker/events 整页）：面板只给最近一屏，整页有筛选、翻历史与
+           独立的 URL。权限与流同档（docker:list），无权限不渲染。 -->
+      <ElButton v-if="canList" size="small" class="dov-feed__all" @click="goAll">
+        查看全部
+      </ElButton>
     </div>
 
     <!-- 滚动区：live tail 的身体。新事件落底 + 自动贴底；上滚即暂停（见 onScroll）。 -->
@@ -27,19 +32,59 @@
       </div>
 
       <ul v-if="rows.length" class="dov-feed__list">
-        <li v-for="r in rows" :key="r.item.seq" class="dov-feed__row">
-          <ArtSvgIcon :icon="r.icon" class="dov-feed__type" :class="`is-${r.tone}`" />
-          <!-- action 显示中文化文案（映射表覆盖协议全词表，见 utils/events）；
-               原始短语进 title —— daemon 原文是事实不是解释（排障引用得靠它，
-               命令后缀 / 检查结果这类数据只此一份），悬停可取，不占版面。 -->
-          <span class="dov-feed__action" :title="r.rawAction">{{ r.action }}</span>
-          <span class="dov-feed__actor dov-mono" :title="r.actor">{{ r.actor }}</span>
+        <!-- 行整行可点 = 就地展开全部原始事实（不开抽屉：页面优先原则）；
+             展开态按到达序号记账（seq 是唯一稳定的行身份，见 utils/events）。 -->
+        <li
+          v-for="r in rows"
+          :key="r.item.seq"
+          class="dov-feed__row"
+          :class="{ 'is-open': isExpanded(r.item.seq) }"
+          @click="toggle(r.item.seq)"
+        >
+          <!-- 类型徽标：四类订阅维度直显（图标 + 中文名，色即类别）—— 原来只有一个
+               图标，读者得先记住「盒子=容器」才能读下去。 -->
+          <span class="dov-feed__type" :class="`is-${r.tone}`">
+            <ArtSvgIcon :icon="r.icon" />
+            <span class="dov-feed__type-label">{{ r.typeLabel }}</span>
+          </span>
+          <!-- 动作：中文文案 + **原始动作码直显**（小字等宽）—— daemon 的原文是事实
+               不是解释，中文只是它的读法；两条并排，排障引用不必再悬停。
+               health_status 的 ": unhealthy" 后缀就在原文里，异常与正常一眼可分。 -->
+          <span class="dov-feed__action">{{ r.action }}</span>
+          <span class="dov-feed__raw dov-mono">{{ r.rawAction }}</span>
+          <!-- 动作者名（悬停给主体短 ID：名字可能重、id 才是身份）；超长省略 -->
+          <span class="dov-feed__actor dov-mono" :title="r.actorTitle">{{ r.actor }}</span>
           <span class="dov-feed__host" :title="`主机 ${r.host}`">{{ r.host }}</span>
-          <!-- 相对时间随 1 秒心跳走；悬停给绝对时刻（title，最小侵入 —— 不加列）。
-               两个时间同源（r.tSec 由条目毫秒戳除千得来，见行模型）。 -->
+          <!-- 退出码（die 系才有）：0 中性、≠0 红染；**nil 不显示不猜**
+               （r.exitText 为空就不出这一格）。 -->
+          <span v-if="r.exitText" class="dov-feed__exit" :class="`is-${r.exitTone}`">
+            {{ r.exitText }}
+          </span>
+          <!-- 相对时间随 1 秒心跳走；悬停给绝对时刻（title）。两个时间同源
+               （r.tSec 由条目毫秒戳除千得来，见行模型）。 -->
           <span class="dov-feed__time" :title="r.clock">{{
             eventRelativeTime(r.tSec, nowSec)
           }}</span>
+          <!-- 展开开关：键盘可达的入口（行点击对键盘不可达，按钮补上 —— 与异常表
+               「名称单元格是真按钮」同一条无障碍纪律）。 -->
+          <button
+            type="button"
+            class="dov-feed__toggle"
+            :title="isExpanded(r.item.seq) ? '收起' : '展开原始事实'"
+            @click.stop="toggle(r.item.seq)"
+          >
+            <ArtSvgIcon
+              :icon="isExpanded(r.item.seq) ? 'ri:arrow-up-s-line' : 'ri:arrow-down-s-line'"
+            />
+          </button>
+          <!-- 展开区：**就地内联**（不开抽屉、不加跳转）的全部原始事实 ——
+               动作原文 / 主体 ID / 退出码 / 绝对时刻 / 主机 id，一次给全。 -->
+          <dl v-if="isExpanded(r.item.seq)" class="dov-feed__facts">
+            <template v-for="f in r.facts" :key="f.label">
+              <dt>{{ f.label }}</dt>
+              <dd class="dov-mono">{{ f.value }}</dd>
+            </template>
+          </dl>
         </li>
       </ul>
       <!-- 零条目时的说明：连接中 / 已断开 / 舰队安静各有其句，不给一块空框让人猜。 -->
@@ -67,6 +112,12 @@
    *      给绝对时刻（title）——「多久之前」与「哪一刻」两个问题都要有答案，
    *      后者是排障对账的引用钥匙。注意条目 t 是**毫秒**戳（core 透传 agent 的
    *      UnixMilli），相对文案前必须除千（行模型的 tSec），否则恒「刚刚」。
+   *
+   * 本波（事件增强）的四件，都落在**行的读法**上：类型徽标（四类直显）、原始动作码
+   * 直显（事实不再只藏在悬停里）、退出码（die 系；0 中性、≠0 红染、nil 不显示不猜）、
+   * 行点击**就地展开**全部原始事实（动作原文/主体 ID/退出码/绝对时刻/主机 id）——
+   * 展开是内联的，不开抽屉（页面优先原则）。头部另给详版页入口（/docker/events）：
+   * 面板只给最近一屏，整页有 URL、能筛选、能翻历史。
    */
   import {
     computed,
@@ -78,7 +129,11 @@
     ref,
     watch
   } from 'vue'
+  import { useRouter, type Router } from 'vue-router'
   import { ElButton } from 'element-plus'
+  import ArtSvgIcon from '@/components/core/base/art-svg-icon/index.vue'
+  import { useAuth } from '@/hooks/core/useAuth'
+  import { PermDockerList } from '@/enums/permission'
   import { openDockerEventsStream } from '../api'
   import {
     createEventsFeed,
@@ -86,7 +141,10 @@
     eventClockTime,
     eventFeedHint,
     eventRelativeTime,
+    eventTypeLabel,
     eventTypeMeta,
+    exitCodeText,
+    exitCodeTone,
     type DockerEventItem
   } from '../utils/events'
 
@@ -121,40 +179,97 @@
   )
 
   const bodyRef = ref<HTMLElement | null>(null)
+  /** 上一次 scroll 事件的 scrollTop（判「位置真的变了」用，见 onScroll）。 */
+  let lastScrollTop = 0
 
   /** 行的渲染模型：图标 / 色槽 / 文案在纯函数里算一次，模板不再逐行调函数。 */
   interface EventRow {
     item: DockerEventItem
     icon: string
     tone: string
+    /** 类型中文名（容器/镜像/卷/网络；表外类型原样透传）—— 类型徽标的文字半边。 */
+    typeLabel: string
     /** 中文化后的动作文案（映射覆盖协议全词表，含 health_status 后缀结论）。 */
     action: string
-    /** daemon 原始 action 短语（含 ": " 后缀原文）—— 悬停 title 的引用钥匙。 */
+    /** daemon 原始 action 短语（含 ": " 后缀原文）—— **直显**在中文旁（不再只悬停）。 */
     rawAction: string
     actor: string
+    /** 主体悬停文案：有名字有 id 时「名字 · 短 id」，只有其一时给完整值。 */
+    actorTitle: string
     host: string
+    /** 退出码文案（空 = 不显示 —— nil 不猜）；tone 决定中性/红染。 */
+    exitText: string
+    exitTone: string
     /** 相对时间的秒值（条目 t 是毫秒戳，这里除千 —— 曾按秒直减，「多久之前」恒「刚刚」）。 */
     tSec: number
-    /** 绝对时刻（悬停 title）：随条目定型，不随 1 秒心跳重算。 */
+    /** 绝对时刻（悬停 title 与展开区）：随条目定型，不随 1 秒心跳重算。 */
     clock: string
+    /** 展开区的全部原始事实（动作原文 / 主体 ID / 退出码 / 绝对时刻 / 主机 id）。 */
+    facts: Array<{ label: string; value: string }>
   }
+
+  /** 主体短 id（sha256: 前缀剥掉、截 12 位）：容器 id 与镜像摘要同一形态，模块惯例。 */
+  function shortActorId(id: string): string {
+    return id.replace(/^sha256:/, '').slice(0, 12)
+  }
+
   const rows = computed<EventRow[]>(() =>
     entries.value.map((e) => {
       const meta = eventTypeMeta(e.type)
+      const rawAction = e.action
+      const shortId = shortActorId(e.actorId)
       return {
         item: e,
         icon: meta.icon,
         tone: meta.tone,
+        typeLabel: eventTypeLabel(e.type),
         action: eventActionText(e.action),
-        rawAction: e.action,
+        rawAction,
         // 名字优先，其次短 id（sha256 前缀剥掉，容器 id 与镜像摘要同一形态）
-        actor: e.actorName || e.actorId.replace(/^sha256:/, '').slice(0, 12) || '—',
+        actor: e.actorName || shortId || '—',
+        // 悬停给**主体短 ID**（名字可能重，id 才是身份）；两者都有时并列给全。
+        actorTitle:
+          e.actorName && shortId ? `${e.actorName} · ${shortId}` : e.actorId || e.actorName || '—',
         host: e.hostname || `主机 ${e.hostId}`,
+        exitText: e.exitCode !== null ? exitCodeText(e.exitCode) : '',
+        exitTone: e.exitCode !== null ? exitCodeTone(e.exitCode) : 'neutral',
         tSec: e.t / 1000,
-        clock: eventClockTime(e.t)
+        clock: eventClockTime(e.t),
+        facts: [
+          { label: '动作原文', value: rawAction },
+          { label: '主体 ID', value: e.actorId || '—' },
+          { label: '退出码', value: e.exitCode !== null ? String(e.exitCode) : '—' },
+          { label: '时刻', value: eventClockTime(e.t) },
+          { label: '主机', value: `${e.hostname || '—'}（${e.hostId}）` }
+        ]
       }
     })
   )
+
+  // ── 就地展开（不开抽屉）────────────────────────────────────
+  // 展开态按**到达序号**记账（seq 是行的唯一稳定身份；按内容拼键会在同秒同动作
+  // 的多条上撞车）。可同时展开多行 —— 对照两条事件的原始事实是常见动作。
+  const expandedSeqs = ref<number[]>([])
+
+  function isExpanded(seq: number): boolean {
+    return expandedSeqs.value.includes(seq)
+  }
+
+  function toggle(seq: number) {
+    const i = expandedSeqs.value.indexOf(seq)
+    if (i >= 0) expandedSeqs.value.splice(i, 1)
+    else expandedSeqs.value.push(seq)
+  }
+
+  // ── 详版入口（/docker/events 整页）──────────────────────────
+  // 裸挂载（组件测试）没有 router 注入：类型上显式承认这一点（生产恒有）。
+  const router = useRouter() as Router | undefined
+  const { hasAuth } = useAuth()
+  const canList = computed(() => hasAuth(PermDockerList))
+
+  function goAll() {
+    void router?.push({ path: '/docker/events' })
+  }
 
   const statusText = computed(() => {
     if (phase.value === 'stopped')
@@ -323,10 +438,17 @@
   /**
    * 上滚即暂停。暂停只停自动滚动，不停流：新事件照常进窗口、照常计数 —— 落底的
    * 行在阅读位置下方，不顶走正在读的内容；「新事件 N 条」给出回来的理由。
+   *
+   * 只认**位置真的变了**的 scroll 事件（lastScrollTop 对比）：展开一行的原始事实
+   * 会让内容在下方长出来，浏览器随即补发一个 scroll 事件（滚动锚定/滚动补偿），
+   * 此时 scrollTop 没动 —— 按旧写法它会被判成「用户在翻历史」，一按展开就弹出
+   * 「已暂停」，而读者其实一行没滚。位置没变 = 不是人的动作。
    */
   function onScroll() {
     const el = bodyRef.value
     if (!el) return
+    if (el.scrollTop === lastScrollTop) return
+    lastScrollTop = el.scrollTop
     const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - SCROLL_BOTTOM_EPS
     if (atBottom) {
       paused.value = false
@@ -440,6 +562,12 @@
     margin-left: 2px;
   }
 
+  // 详版入口：头部右端的常规按钮（账目句之后）—— 与「重试」同一尺寸档，
+  // 不抢状态句的视觉（它是出口，不是结论）。
+  .dov-feed__all {
+    margin-left: 2px;
+  }
+
   .dov-feed__meta {
     margin-left: auto;
     // 账目口径句的对比度：placeholder 档（#a8abb2）在浅色主题下于白卡实测
@@ -500,15 +628,25 @@
     gap: 4px 8px;
     padding: 5px 10px;
     border-bottom: 1px solid var(--el-border-color-lighter);
+    // 整行可点 = 就地展开原始事实（cursor 是「这里有东西可点」的唯一提示）。
+    cursor: pointer;
+
+    &:hover {
+      background: var(--el-fill-color-light);
+    }
 
     &:last-child {
       border-bottom: none;
     }
   }
 
-  // 四类资源的语义色槽（未知走中性）：图标与 action 同槽同色，色即类别。
+  // 四类资源的语义色槽（未知走中性）：徽标图标与类型名同槽同色，色即类别。
+  // 徽标形态（图标 + 中文名）：四类订阅维度直显，读者不必先记住图标语义。
   .dov-feed__type {
+    display: inline-flex;
     flex: none;
+    align-items: center;
+    gap: 4px;
     font-size: 14px;
 
     &.is-container {
@@ -532,11 +670,95 @@
     }
   }
 
+  .dov-feed__type-label {
+    font-size: 12px;
+    line-height: 18px;
+  }
+
   .dov-feed__action {
     flex: none;
     color: var(--el-text-color-primary);
     font-size: 13px;
     font-weight: 500;
+  }
+
+  // 原始动作码（die / health_status: unhealthy / start…）：事实直显，不占主视觉。
+  // 等宽小字（等宽本身就是「这是原始码」的提示，与任务中心同款）；对比度走
+  // regular 档（placeholder 档在白卡/淡底上过不了 AA，见 aa-text 的收口批口径）。
+  .dov-feed__raw {
+    flex: none;
+    max-width: 14rem;
+    overflow: hidden;
+    color: var(--el-text-color-regular);
+    font-size: 10px;
+    line-height: 16px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  // 退出码（die 系）：0 中性、≠0 红染 —— 排障要找的就是红的那条。
+  .dov-feed__exit {
+    flex: none;
+    padding: 0 6px;
+    border-radius: 999px;
+    background: var(--el-fill-color);
+    font-size: 11px;
+    font-family: var(--el-font-family-mono, monospace);
+    line-height: 18px;
+
+    &.is-neutral {
+      color: var(--el-text-color-regular);
+    }
+
+    &.is-danger {
+      // 文字对比度 AA：语义色基色对淡底过不了线，走 token（见 aa-text.scss）。
+      color: var(--aa-danger-text);
+    }
+  }
+
+  // 展开开关：与行同高的小热区（图标按钮）；悬停/聚焦给主色。
+  .dov-feed__toggle {
+    display: flex;
+    flex: none;
+    width: 20px;
+    height: 20px;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: none;
+    background: none;
+    color: var(--el-text-color-secondary);
+    cursor: pointer;
+
+    &:hover,
+    &:focus-visible {
+      color: var(--el-color-primary);
+    }
+  }
+
+  // 展开区（就地内联）：两列事实表（标签 + 等宽原始值），整行宽（flex-basis 100%
+  // 让它在换行里独占一行）。缩进到行内文字起点，读起来仍属于这一行。
+  .dov-feed__facts {
+    display: grid;
+    flex-basis: 100%;
+    grid-template-columns: max-content 1fr;
+    gap: 2px 10px;
+    margin: 4px 0 2px;
+    padding: 6px 10px;
+    border-left: 2px solid var(--el-border-color);
+    background: var(--el-fill-color-lighter);
+    font-size: 12px;
+    line-height: 1.6;
+
+    dt {
+      color: var(--el-text-color-regular);
+    }
+
+    dd {
+      margin: 0;
+      overflow-wrap: anywhere;
+      color: var(--el-text-color-primary);
+    }
   }
 
   // 动作者名（容器名/镜像名）：吃掉剩余宽度，超长省略（全名进 title）

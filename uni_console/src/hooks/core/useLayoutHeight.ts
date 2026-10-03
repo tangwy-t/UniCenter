@@ -12,6 +12,14 @@
  * 4. 灵活配置 - 支持自定义间距、CSS 变量名等
  * 5. 自动查找模式 - 提供通过 ID 自动查找元素的便捷方式
  *
+ * ## 为什么用 dvh 而不是 vh
+ *
+ * 容器高度是 `calc(100dvh - 头部实测高度)`。真机浏览器（尤其手机横屏）的 `vh`
+ * 是**大视口**高度，地址栏/手势条会再吃掉 40-90px —— 用 vh 算出的页根比实际
+ * 可视区高，底部那一截永远滚不到；dvh 跟着可视视口走，与 `#app-main` 在
+ * compact 档的 `height: 100dvh` 同口径。桌面浏览器 dvh === vh，零差异；
+ * 头部高度本来由 ResizeObserver 实测，此改动不与之叠加。
+ *
  * @module useLayoutHeight
  * @author Art Design Pro Team
  */
@@ -45,7 +53,7 @@ export function useLayoutHeight(options: LayoutHeightOptions = {}) {
   // 计算容器最小高度（响应式）
   const containerMinHeight = computed(() => {
     const totalHeight = headerHeight.value + contentHeaderHeight.value + extraSpacing
-    return `calc(100vh - ${totalHeight}px)`
+    return `calc(100dvh - ${totalHeight}px)`
   })
 
   if (updateCssVar) {
@@ -100,7 +108,7 @@ export function useAutoLayoutHeight(
   // 计算容器最小高度（响应式）
   const containerMinHeight = computed(() => {
     const totalHeight = headerHeight.value + contentHeaderHeight.value + extraSpacing
-    return `calc(100vh - ${totalHeight}px)`
+    return `calc(100dvh - ${totalHeight}px)`
   })
 
   if (updateCssVar) {

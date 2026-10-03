@@ -125,6 +125,21 @@ const plugin: PluginManifest = {
       meta: { title: '任务中心', icon: 'ri:task-line', isHide: true, authMark: PermDockerList }
     },
     {
+      // 事件流详版页（本波）：活动流面板的整页形态 —— 历史查询（游标分页、服务端
+      // 过滤）+ 实时流一张表。入口长在总览页活动流面板的头部（「查看全部」），
+      // **不加后端菜单种子**（与任务中心同款裁定）。
+      //
+      // 形态与 /docker/tasks 逐条同源：RouteRegistry 只注册菜单树里出现的路由，
+      // 可见（非 isHide）且无菜单种子的插件路由根本进不了 menuList（既注册不了、
+      // 也过不了守卫的「路径在菜单权限内」检查 —— 直接输 URL 404）；isHide 的语义
+      // 恰好是「注册但不上侧边栏」。authMark 与两条端点（GET /docker/events 与
+      // /docker/events/history）的静态 perm 同档（docker:list）。
+      path: '/docker/events',
+      name: 'DockerEvents',
+      component: () => import('./views/events.vue'),
+      meta: { title: '事件流', icon: 'ri:pulse-line', isHide: true, authMark: PermDockerList }
+    },
+    {
       // 项目工作台（5b）：把项目升格为「变更工作台」（Dockge 的洞见嫁接）。
       // 隐藏路由，不在后端菜单里，isHide + authMark 过滤（权限码与 compose:logs /
       // 快照读取同档：docker:inspect）。

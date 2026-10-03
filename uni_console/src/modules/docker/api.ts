@@ -36,6 +36,8 @@ export type DockerTaskItem = Api.Docker.DockerTaskItem
 export type DockerTaskListResp = Api.Docker.DockerTaskListResp
 export type DockerStatsHistoryResp = Api.Docker.DockerStatsHistoryResp
 export type DockerStatsHistorySample = Api.Docker.DockerStatsHistorySample
+export type DockerEventHistoryResp = Api.Docker.DockerEventHistoryResp
+export type DockerEventHistoryItem = Api.Docker.DockerEventHistoryItem
 export type DockerBuildContextUploadResp = Api.Docker.DockerBuildContextUploadResp
 
 /**
@@ -503,6 +505,36 @@ export function openDockerEventsStream(signal: AbortSignal): Promise<Response> {
     method: 'GET',
     headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
     signal
+  })
+}
+
+/** 事件历史查询参数（形状对齐 uni_core 的 request.DockerEventHistoryQuery）。 */
+export interface DockerEventHistoryQuery {
+  /** 限定单主机（留空 = 跨主机聚合）。 */
+  hostId?: string
+  /** 资源类型过滤（container/image/volume/network；留空 = 全部）。 */
+  type?: string
+  /** 主体名 / 主体 id / 动作原文的子串（大小写不敏感；留空 = 不过滤）。 */
+  keyword?: string
+  /** 单页条数（服务端缺省 200、上限 500）。 */
+  limit?: number
+  /** 上一页返回的 nextCursor（原样回传；留空 = 从最新一条开始）。 */
+  cursor?: string
+}
+
+/**
+ * 事件历史（本波）：GET /docker/events/history —— 保留窗口（每主机最近 30 分钟
+ * 且至多 500 条）的一页，按 t 降序、游标分页。
+ *
+ * 不走的 showErrorMessage：这是**流/查询**族端点（与 fetchDockerTasks 同款）——
+ * 详版页四种态（首拉失败/空/静默刷新失败保留旧列表/正常）由页面自己编排，
+ * 结论句就地显示比 toast 更贴近正在看的列表。
+ */
+export function fetchDockerEventHistory(params: DockerEventHistoryQuery = {}) {
+  return request.get<DockerEventHistoryResp>({
+    url: `${PREFIX}/docker/events/history`,
+    params,
+    showErrorMessage: false
   })
 }
 

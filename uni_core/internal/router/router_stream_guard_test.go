@@ -68,6 +68,30 @@ func TestEventsStreamRouteMountedWithPerm(t *testing.T) {
 	}
 }
 
+// 事件历史路由的**挂载 + 权限**守卫（本波）。
+//
+// 与事件流同档 docker:list：它是同一份数据（管理器保留窗口）的另一个读面 ——
+// core 自己收下的舰队事实，没有会话归属可言（handler 不按记录校验）。丢了 perm
+// 或降了档就等于把全舰队的历史事件向任何登录用户敞开。
+// **不挂 longLived**：它是一次性短查询（内存快照即回），不是一个长活连接 ——
+// 挂上去会让这条短请求占着长活连接的写截止豁免，那是给流用的。
+func TestEventsHistoryRouteMountedWithListPerm(t *testing.T) {
+	src, err := os.ReadFile("router.go")
+	if err != nil {
+		t.Fatalf("读取 router.go 失败: %v", err)
+	}
+	text := string(src)
+
+	const want = `docker.GET("/events/history", perm(permission.PermDockerList), deps.Docker.Hdl.EventsHistory)`
+	if !strings.Contains(text, want) {
+		t.Fatalf("事件历史必须以 %s 挂在 auth 组并带静态 perm(docker:list)（当前缺失）", want)
+	}
+	const offAuth = `api.GET("/docker/events/history"`
+	if strings.Contains(text, offAuth) {
+		t.Fatalf("事件历史不得挂进 api 组（%s）—— 它走 axios/fetch，凭据是 JWT", offAuth)
+	}
+}
+
 // 凭据管理路由的**静态权限**守卫（4c）。
 //
 // 凭据是「分发」支柱的密钥材料（能解出私有镜像），CRUD 的权限码必须是

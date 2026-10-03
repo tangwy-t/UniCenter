@@ -1,6 +1,14 @@
 @import 'tailwindcss';
 @custom-variant dark (&:where(.dark, .dark *));
 
+/* 高度轴短视口变体（`max-short:hidden` 这类模板类用）。
+   为什么不用 --breakpoint-*：v4 的断点注册位只表达宽度（塞高度会污染
+   「@theme 无未知断点」断言，且 max-md 家族会跟着错位）；高度轴在 Tailwind
+   侧的唯一载体就是 @custom-variant。阈值镜像 src/config/breakpoints.ts 的
+   HEIGHT_BREAKPOINTS（420/640），一致性由 breakpoints.test.ts 断言。 */
+@custom-variant max-short (@media (max-height: 640px));
+@custom-variant max-phone-short (@media (max-height: 420px));
+
 /* ==================== Light Mode Variables ==================== */
 :root {
   /* Base Colors */

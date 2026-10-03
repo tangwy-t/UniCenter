@@ -19,7 +19,13 @@
         <div class="flex-1" />
       </div>
 
-      <ElTable v-loading="loading" :data="users" class="user-table">
+      <!-- 高度上限（报裁 2026-10「表格必须有高度上限」漏网补口）：取同族「封顶清单」
+           24rem 档（docker 异常表／活动流同一密度）。为什么是 24 而非 20/26：本抽屉
+           600px 宽、整屏高（1600×900 实测 body 内容区 722px），行带 30px 头像实高
+           52px；24rem 下表体内区 344px，默认 10 条页可见 6 行半（余下内滚可及），
+           抽屉本体与底部翻页、页脚全程不动；取 20rem 会把默认页藏掉近一半行，
+           白扔抽屉的纵向余量。 -->
+      <ElTable v-loading="loading" :data="users" class="user-table" max-height="24rem">
         <ElTableColumn label="用户" min-width="150">
           <template #default="{ row }">
             <div class="user-cell">
@@ -311,7 +317,11 @@
   .drawer-pagination {
     display: flex;
     justify-content: flex-end;
-    margin-top: 12px;
+    /* 表被 24rem 封顶后余下的空间归它：auto margin 把翻页钉回抽屉底（未封顶时
+       表 flex:1 已吃满余量、auto 归零，改由 padding 保住与表的 12px 间距——两种
+       状态各回原位，不互相借位）。 */
+    margin-top: auto;
+    padding-top: 12px;
   }
 
   .add-body {

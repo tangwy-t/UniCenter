@@ -156,6 +156,19 @@ describe('docker 模块路由', () => {
     expect(typeof r?.component).toBe('function')
   })
 
+  it('事件流详版页路由：/docker/events 隐藏注册 + docker:list（不加菜单种子，本波）', () => {
+    const r = routes.find((x) => x.path === '/docker/events')
+    expect(r, '缺少事件流详版页路由 /docker/events').toBeTruthy()
+    expect(r?.name).toBe('DockerEvents')
+    // 与两条端点（GET /docker/events 与 /docker/events/history）的静态 perm 同档；
+    // 入口（总览活动流面板头部的「查看全部」）也按它门控。
+    expect(r?.meta?.authMark).toBe('docker:list')
+    // 隐藏注册（不是菜单页）：menu path 期望集里没有它，MENU_PATHS 守卫不动。
+    expect(r?.meta?.isHide).toBe(true)
+    expect(MENU_PATHS).not.toContain('/docker/events')
+    expect(typeof r?.component).toBe('function')
+  })
+
   /* ── 路由匹配顺序：静态段优先 ──────────────────────────────────────
    * `/docker/containers/create` 与 `/docker/containers/:id` 是同层的静态段与参数段，
    * 后者会把「create」吃成 id —— gin 的路由树与 vue-router 的打分都是**静态段优先**，
@@ -193,6 +206,9 @@ describe('docker 模块路由', () => {
     it('列表页与任务中心照常命中（新路由没有抢走既有 path）', async () => {
       expect((await pushAndResolve('/docker/containers')).name).toBe('DockerContainers')
       expect((await pushAndResolve('/docker/tasks')).name).toBe('DockerTasks')
+      // 事件流详版页同理：/docker/events 是静态段，与 /docker 总览不互相抢。
+      expect((await pushAndResolve('/docker/events')).name).toBe('DockerEvents')
+      expect((await pushAndResolve('/docker')).name).toBe('DockerOverview')
     })
   })
 

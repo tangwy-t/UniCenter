@@ -168,6 +168,7 @@
   /* 页面骨架（hero/三态/动效降级）下沉在 views/wkl-shell.scss（本模块多页共用的
    * 范式样式）；这里只留本页特有的结构。 */
   @use './wkl-shell';
+  @use '@styles/core/breakpoints.scss' as bp;
 
   /* 次要文字对比度 AA（P2 打磨批，与总览页同款处置）：EP 默认
      --el-text-color-secondary(#909399) 对白底只有 3.08:1（QA 实测 2.97–3.08），低于
@@ -203,5 +204,35 @@
     display: inline-flex;
     gap: 6px;
     align-items: center;
+  }
+
+  /* 矮视口单滚动链的中段：页根 → 页内层（app.scss 的链给了 flex:1）之后还有
+     ElTabs 两层壳（tabs 根 → content → pane），把链一路接到 tab 组件根，
+     再往下由 app.scss 的 .art-table-card/.el-card__body/.art-table 接住。
+     触发档与 ArtTable 的阀让位同档（HEIGHT_BREAKPOINTS.short），两处必须同档：
+     阀让位而链不在 = 表体无上限；链在而阀不让位 = 表被 100vh-420 钉死。 */
+  @include bp.respond-height-at-most('short') {
+    .docker-resources-tabs {
+      display: flex;
+      flex-direction: column;
+      flex: 1 1 0;
+      min-height: 0;
+
+      :deep(.el-tabs__content) {
+        display: flex;
+        flex-direction: column;
+        flex: 1 1 0;
+        min-height: 0;
+      }
+
+      /* 非活动 pane 由 EP 的 v-show（内联 display:none）隐藏，内联样式优先级
+         高于本规则，不会把隐藏的 pane 显出来。 */
+      :deep(.el-tab-pane) {
+        display: flex;
+        flex-direction: column;
+        flex: 1 1 0;
+        min-height: 0;
+      }
+    }
   }
 </style>

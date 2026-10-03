@@ -477,4 +477,19 @@
       width: 40px;
     }
   }
+
+  /* 手机横屏紧凑档：应用头 60 → 48（h-15 / leading-15 是 Tailwind 的工具类，
+     这里在非层叠的 scoped 样式里覆盖 —— 普通声明下不受载的胜出）。
+     两行外层的行高一起压，否则内层 leading-15 的行盒（60px）会把 48px 顶回去。
+     48 这个值是常量：.art-full-height 的页根钉底（app.scss）按同档同值算高度，
+     两处必须一起改。 */
+  @include respond-height-at-most('phoneShort') {
+    .h-15 {
+      height: 48px;
+    }
+
+    .leading-15 {
+      line-height: 48px;
+    }
+  }
 </style>

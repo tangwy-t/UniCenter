@@ -577,6 +577,52 @@ type DockerStatsHistorySample struct {
 	MemLimitMB float64 `json:"memLimitMb"`
 }
 
+// ── 事件历史（本波：GET /docker/events/history）────────────────────────────
+
+// DockerEventHistoryResp 是事件历史查询的一页（跨主机聚合的**保留窗口**）。
+//
+// 窗口契约：每主机最近 30 分钟且至多 500 条（dockerevents 的 RetainWindow/
+// RetainDepth）。流（GET /docker/events）与查询读的是**同一个窗口** —— 流里回放
+// 不到的（超出窗口）这里也查不到，两个读面不给两套口径。**不报窗口宽度/容量
+// 字段**：那是后端容量决策（与 stats 历史响应同一条纪律），前端按「有什么画什么」
+// 渲染，承诺窗口形状反而会在容量调整时变成前端要适配的第二个口径。
+type DockerEventHistoryResp struct {
+	// Items 按 t **降序**（最新在前），同 t 按 core 到达序降序；空数组而非 null
+	//（「窗口里没有匹配」是正常答案，与 404 各说各的话）。
+	Items []DockerEventHistoryItem `json:"items"`
+	// Total 是本次过滤在窗口内的**全量**条数（不受 limit 与游标影响）——
+	// 页头「共 N 条」与「还有下一页」是两个事实，读的是同一个数字。
+	Total int `json:"total"`
+	// NextCursor 是取下一页的游标（**不透明字符串**，原样回传给同端点的 cursor
+	// 参数；空 = 已到窗口尽头）。形态不承诺：换编码是服务端的事，不换的是
+	// 「位置」这个语义（见 dockerevents.Query 的说明）。
+	NextCursor string `json:"nextCursor,omitempty"`
+}
+
+// DockerEventHistoryItem 是历史里的一行事件。
+//
+// 字段与实时流的 NDJSON 行**同字段同义**，差异只在命名形态（DTO 走全站惯例
+// camelCase + hostId 的 string 编码；NDJSON 行是打平的 snake_case）—— 两者是
+// 同一份事实的两种编码，消费端在自己的解析函数里归一化一次（前端 utils/events）。
+type DockerEventHistoryItem struct {
+	// HostID 是归属主机（雪花值，string 编码与全站同纪律）。
+	HostID uint64 `json:"hostId,string"`
+	// Hostname 是归属主机名（core 注入；设备已删时为空 —— hostId 仍是可导航主键）。
+	Hostname string `json:"hostname"`
+	// T 是事件时刻（unix 毫秒；agent 打戳、core 透传，与实时流行同源）。
+	T int64 `json:"t"`
+	// Type 是资源类型（container|image|volume|network）。
+	Type string `json:"type"`
+	// Action 是动作原文（daemon 的 Action，含 ": " 后缀的数据部分）。
+	Action string `json:"action"`
+	// ActorName / ActorID 是主体名与主体短 id（可为空）。
+	ActorName string `json:"actorName,omitempty"`
+	ActorID   string `json:"actorId,omitempty"`
+	// ExitCode 是 die 事件的退出码；nil = 不可考（非 die / 旧 agent / daemon 没给）
+	// —— 消费侧一律不显示、不猜（与协议 DockerEventItem.ExitCode 同一句话）。
+	ExitCode *int32 `json:"exitCode,omitempty"`
+}
+
 // ── 构建上下文上传（v1.3：POST /docker/hosts/:id/build-context）────────────
 
 // DockerBuildContextUploadResp 是构建上下文上传的响应：filename 是 image:build

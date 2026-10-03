@@ -35,7 +35,18 @@
     </div>
 
     <!-- 列表 -->
-    <el-table v-loading="loading" :data="userList" stripe class="read-users-table">
+    <!-- 高度上限（报裁 2026-10「表格必须有高度上限」漏网补口）：同 24rem「封顶清单」
+         档——本对话框 760px 宽、top 6vh，行单行 40px；24rem 下表体内区 344px，10 条/页
+         的默认页可见 8 行半（藏 1～2 行，内滚可及），对话框总高封在 634px（≈70vh
+         @1600×900），头、底部翻页、页脚全程在屏；页尺寸拨到 50 也只让表体滚，
+         不再把对话框拉长到需要整框跟着滚。 -->
+    <el-table
+      v-loading="loading"
+      :data="userList"
+      stripe
+      class="read-users-table"
+      max-height="24rem"
+    >
       <el-table-column type="index" label="序号" width="60" align="center" />
       <el-table-column prop="username" label="登录名称" align="center" show-overflow-tooltip />
       <el-table-column prop="realName" label="用户姓名" align="center" show-overflow-tooltip>

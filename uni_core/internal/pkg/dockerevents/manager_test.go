@@ -932,3 +932,237 @@ func TestResidentAndClientShareFanout(t *testing.T) {
 type Item = agentproto.DockerEventItem
 
 func itemOf(e Event) Item { return e.Item }
+
+// ── 保留窗口与历史查询（本波：/docker/events/history 的数据面）─────────────
+//
+// 四组口径逐条钉住：**双限**（容量/时长各自独立生效）、**回放与历史分家**
+//（回放只吐最近 ReplayDepth 条，历史看得到整个窗口）、**查询过滤与游标**
+//（不重不漏、total 恒为全量）、**同 t 决胜**（全序需要到达序兜底）。
+
+// newWindowManager 起一个窗口参数可精确注入的夹具（其余替身与主夹具同源）。
+func newWindowManager(t *testing.T, opts Options, okHosts ...uint64) *mgrEnv {
+	t.Helper()
+	clk := newTestClock()
+	sender := newFakeSender()
+	cmds := &fakeCmdStore{}
+	hosts := newFakeHosts(okHosts...)
+	online := map[uint64]bool{}
+	for _, id := range okHosts {
+		online[id] = true
+	}
+	opts.Now = clk.Now
+	opts.After = clk.After
+	if opts.ResultWait <= 0 {
+		opts.ResultWait = time.Hour
+	}
+	if opts.ReconcileInterval <= 0 {
+		opts.ReconcileInterval = time.Hour
+	}
+	m := NewManager(opts, sender, cmds, hosts,
+		func(_ context.Context, deviceID uint64) string {
+			return map[uint64]string{7: "alpha", 9: "beta"}[deviceID]
+		}, logger.NewNop())
+	m.WithOnline(func(deviceID uint64) bool { return online[deviceID] })
+	m.WithIDGen(func() string { return "179000000" + u64s(testRefSeq.Add(1)) })
+	return &mgrEnv{m: m, clk: clk, sender: sender, cmds: cmds, hosts: hosts, online: online}
+}
+
+// evAt 编一条指定时刻的测试事件（主夹具的 ev 固定 t，这里要按 t 排序）。
+func evAt(t int64, typ, action, name, id string) agentproto.DockerEventItem {
+	return agentproto.DockerEventItem{T: t, Type: typ, Action: action, ActorName: name, ActorID: id}
+}
+
+// windowEnv 把两台主机的订阅推到 active（emit 的前置），返回 env。
+func windowEnv(t *testing.T, opts Options, hosts ...uint64) *mgrEnv {
+	t.Helper()
+	env := newWindowManager(t, opts, hosts...)
+	env.m.Subscribe()
+	env.dol()
+	for _, id := range hosts {
+		env.m.OnEventsResult(id, resultOK(id, env.sender.cmdRefs(id)[0], sessionsOf(id)))
+	}
+	return env
+}
+
+func sessionsOf(deviceID uint64) string {
+	return "sess-events-0000000" + u64s(deviceID)
+}
+
+// 双限各自独立生效：容量先到 → 按容量截断；时长先到 → 按时长裁剪（且**静默主机**
+// 也照裁 —— 读侧的过滤与写侧的裁剪是同一把尺）。
+func TestRetainWindowDualLimits(t *testing.T) {
+	env := windowEnv(t, Options{ReplayDepth: 3, RetainDepth: 5, RetainWindow: time.Minute}, 7)
+	for i := 1; i <= 8; i++ {
+		env.emit(7, sessionsOf(7), uint64(i), evAt(int64(1790000000000+i*1000), "container", "start", "c"+u64s(uint64(i)), "id"))
+	}
+	page, err := env.m.Query(QueryFilter{}, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 5 || len(page.Items) != 5 {
+		t.Fatalf("容量限应为 5 条，实际 total=%d items=%d", page.Total, len(page.Items))
+	}
+	if page.Items[0].Item.ActorName != "c8" || page.Items[4].Item.ActorName != "c4" {
+		t.Fatalf("容量截断必须丢最旧（留最近 5 条）: %s … %s",
+			page.Items[0].Item.ActorName, page.Items[4].Item.ActorName)
+	}
+
+	// 时长限：推进 61 秒后（不产生新事件 —— 静默主机的窗口不主动清扫），
+	// 读侧照样把过期的全部过滤掉。
+	env.clk.Advance(61 * time.Second)
+	page, err = env.m.Query(QueryFilter{}, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 0 || len(page.Items) != 0 {
+		t.Fatalf("超时长的条目必须查不到（静默主机亦然），实际 total=%d", page.Total)
+	}
+	// 定时长判定走 **core 接收时刻**（假时钟推进即过期），不碰事件自带的 t。
+	if got := page.Items; len(got) != 0 {
+		t.Fatalf("过期条目不得留窗口: %+v", got)
+	}
+}
+
+// 回放与历史**分家**：回放只吐最近 ReplayDepth 条（打开页面不灌千行），
+// 历史查询看得到整个保留窗口。
+func TestReplayDepthApartFromRetainDepth(t *testing.T) {
+	env := windowEnv(t, Options{ReplayDepth: 2, RetainDepth: 10, RetainWindow: time.Hour}, 7)
+	for i := 1; i <= 6; i++ {
+		env.emit(7, sessionsOf(7), uint64(i), evAt(int64(1790000000000+i), "container", "start", "c"+u64s(uint64(i)), "id"))
+	}
+	cl := env.m.Subscribe()
+	got := []string{}
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		e, err := cl.Next(ctx)
+		cancel()
+		if err != nil {
+			break
+		}
+		got = append(got, e.Item.ActorName)
+	}
+	cl.Close()
+	if len(got) != 2 || got[0] != "c5" || got[1] != "c6" {
+		t.Fatalf("回放必须只给最近 2 条（c5,c6），实际 %v", got)
+	}
+	page, err := env.m.Query(QueryFilter{}, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 6 {
+		t.Fatalf("历史必须看得到整个窗口的 6 条，实际 %d", page.Total)
+	}
+}
+
+// 查询过滤：hostId / type / keyword 三项独立收窄（keyword 大小写不敏感，
+// 命中主体名 / 主体 id / 动作原文三处任一）。
+func TestQueryFilters(t *testing.T) {
+	env := windowEnv(t, Options{RetainWindow: time.Hour}, 7, 9)
+	env.emit(7, sessionsOf(7), 1, evAt(1790000001000, "container", "die", "web", "abcd1234"))
+	env.emit(7, sessionsOf(7), 2, evAt(1790000002000, "image", "pull", "redis:7", "sha256:beef"))
+	env.emit(9, sessionsOf(9), 1, evAt(1790000003000, "container", "start", "api", "9999"))
+
+	all, _ := env.m.Query(QueryFilter{}, 0, "")
+	if all.Total != 3 {
+		t.Fatalf("无过滤应 3 条，实际 %d", all.Total)
+	}
+	only7, _ := env.m.Query(QueryFilter{HostID: 7}, 0, "")
+	if only7.Total != 2 {
+		t.Fatalf("hostId=7 应 2 条，实际 %d", only7.Total)
+	}
+	images, _ := env.m.Query(QueryFilter{Type: "image"}, 0, "")
+	if images.Total != 1 || images.Items[0].Item.ActorName != "redis:7" {
+		t.Fatalf("type=image 应 1 条，实际 %+v", images)
+	}
+	byName, _ := env.m.Query(QueryFilter{Keyword: "WEB"}, 0, "")
+	if byName.Total != 1 || byName.Items[0].Item.ActorName != "web" {
+		t.Fatalf("keyword 必须命中主体名（大小写不敏感），实际 %+v", byName)
+	}
+	byId, _ := env.m.Query(QueryFilter{Keyword: "BEEF"}, 0, "")
+	if byId.Total != 1 || byId.Items[0].Item.ActorName != "redis:7" {
+		t.Fatalf("keyword 必须命中主体 id（大小写不敏感），实际 %+v", byId)
+	}
+	byAction, _ := env.m.Query(QueryFilter{Keyword: "start"}, 0, "")
+	if byAction.Total != 1 || byAction.Items[0].Hostname != "beta" {
+		t.Fatalf("keyword 必须命中动作原文，实际 %+v", byAction)
+	}
+	// 组合：先主机、再类型（逐层收窄的语义就在这一条上）。
+	combo, _ := env.m.Query(QueryFilter{HostID: 7, Type: "container"}, 0, "")
+	if combo.Total != 1 || combo.Items[0].Item.Action != "die" {
+		t.Fatalf("组合过滤应 1 条（7 上的 container），实际 %+v", combo)
+	}
+}
+
+// 游标分页：不重不漏、total 恒为全量、末页无游标；同 t 的并列条目由到达序决胜，
+// 不因分页边界重复或丢失。
+func TestQueryCursorPagination(t *testing.T) {
+	env := windowEnv(t, Options{RetainWindow: time.Hour}, 7)
+	// 10 条：其中两条同 t（第 5、6 条），用来钉同 t 决胜。
+	for i := 1; i <= 10; i++ {
+		at := int64(1790000000000 + i*1000)
+		if i == 6 {
+			at = 1790000005000 // 与第 5 条同 t
+		}
+		env.emit(7, sessionsOf(7), uint64(i), evAt(at, "container", "start", "c"+u64s(uint64(i)), "id"))
+	}
+	seen := []string{}
+	cursor := ""
+	pages := 0
+	for {
+		page, err := env.m.Query(QueryFilter{}, 3, cursor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pages++
+		if page.Total != 10 {
+			t.Fatalf("翻页期间 total 必须恒为全量 10，实际 %d", page.Total)
+		}
+		for _, e := range page.Items {
+			seen = append(seen, e.Item.ActorName)
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
+		if pages > 6 {
+			t.Fatal("游标分页未收敛")
+		}
+	}
+	if pages != 4 {
+		t.Fatalf("limit=3 翻 10 条应 4 页，实际 %d", pages)
+	}
+	if len(seen) != 10 {
+		t.Fatalf("分页合计必须恰 10 条（不重不漏），实际 %d: %v", len(seen), seen)
+	}
+	want := []string{"c10", "c9", "c8", "c7", "c6", "c5", "c4", "c3", "c2", "c1"}
+	for i := range want {
+		if seen[i] != want[i] {
+			t.Fatalf("分页顺序必须与单页一致（同 t 按到达序降序）: got %v want %v", seen, want)
+		}
+	}
+	// 游标越过窗口尽头（位置取最旧一条的 t 与更小的到达序）：空页且不再给游标
+	//（不给原地打转的入口）；total 仍是全量（「窗口里有多少」与「这页拿到什么」
+	// 是两个事实）。
+	tail, err := env.m.Query(QueryFilter{}, 3, "1790000001000:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tail.Items) != 0 || tail.NextCursor != "" || tail.Total != 10 {
+		t.Fatalf("游标越过尽头应空页 + 无游标 + total 全量，实际 %+v", tail)
+	}
+}
+
+// 非法游标：管理器给出可判别的错误（HTTP 层折成 400），不静默当成「从头开始」
+// —— 静默会把「翻页」悄悄变成「反复看第一页」。
+func TestQueryBadCursor(t *testing.T) {
+	env := windowEnv(t, Options{RetainWindow: time.Hour}, 7)
+	for _, bad := range []string{"abc", "123", ":5", "x:y", "12:", "12:9999999999999999999999"} {
+		if _, err := env.m.Query(QueryFilter{}, 0, bad); !errors.Is(err, ErrBadCursor) {
+			t.Fatalf("游标 %q 必须报 ErrBadCursor，实际 %v", bad, err)
+		}
+	}
+	// 合法游标（哪怕只剩空页）不得报错。
+	if _, err := env.m.Query(QueryFilter{}, 0, "1790000000000:1"); err != nil {
+		t.Fatalf("合法游标不得报错: %v", err)
+	}
+}

@@ -1,8 +1,11 @@
 <!-- 标签页 -->
 <template>
+  <!-- max-short:!hidden：手机横屏/矮窗（高度 ≤640，阈值见 HEIGHT_BREAKPOINTS）收起
+       整条页签栏 —— 390 高的横屏上它连栏带边距要 44px，正好是一行表；页签本身
+       是导航辅助（当前页在侧栏与标题里都写着），矮视口优先让位给数据。 -->
   <div
     v-if="showWorkTab"
-    class="box-border flex-b w-full px-5 mb-3 select-none max-sm:px-[15px]"
+    class="box-border flex-b w-full px-5 mb-3 select-none max-sm:px-[15px] max-short:!hidden"
     :class="[
       tabStyle === 'tab-card' ? 'py-1 border-b border-[var(--art-card-border)]' : '',
       tabStyle === 'tab-google' ? 'pt-1 pb-0 border-b border-[var(--art-card-border)]' : ''

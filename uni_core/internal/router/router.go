@@ -560,6 +560,13 @@ func Setup(deps Dependencies) *gin.Engine {
 			// 常驻订阅由 core 自己维护（首个客户端建立、末个客户端取消），处理器
 			// 不做按指令的归属校验。
 			docker.GET("/events", longLived, perm(permission.PermDockerList), deps.Docker.Hdl.EventsStream)
+			// 事件历史（本波）：与流**同一份数据**（管理器的保留窗口：每主机最近
+			// 30 分钟且至多 500 条）的历史读面 —— hostId/type/keyword 过滤 + 游标
+			// 分页，权限与流/读面其余端点同档 docker:list。为什么不挂 longLived：
+			// 它是一次短查询（内存快照即回），不是一个长活连接。
+			// 与流共用窗口是刻意的：流里回放不到的（超出窗口）这里也查不到，
+			// 两个读面不给两套口径。
+			docker.GET("/events/history", perm(permission.PermDockerList), deps.Docker.Hdl.EventsHistory)
 			// 跨主机统一工作负载表：API 路径与前端 /docker/containers 页面同形
 			//（复用既有菜单与路由 path，本切片只换页面背后的数据源 —— 从
 			// 单主机快照换成跨主机聚合），权限与读面其余端点同档 docker:list。

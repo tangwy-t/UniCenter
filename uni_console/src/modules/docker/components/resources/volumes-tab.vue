@@ -446,6 +446,13 @@
 <style lang="scss" scoped>
   @use '../../views/overview-tokens' as t;
 
+  /* 矮视口单滚动链的 tab 根段（链的其余部分：app.scss 的页根/卡片/表 +
+     resources.vue 的 ElTabs 两层）：让本组件根吃满 pane 的高度。 */
+  .docker-volumes-tab {
+    @include t.fill-chain-root;
+  }
+
+
   // 「清理未使用卷…」等 plain danger 按钮的对比度 AA（浅色实测 2.87:1）：
   // EP 默认配色的病灶与处方见 overview-tokens 的 danger-plain-aa。
   @include t.danger-plain-aa;
@@ -511,4 +518,7 @@
       font-size: 13px;
     }
   }
+
+  /* 手机横屏紧凑档：底栏收薄（放在本块最后 = 同权重按源码序盖住上面的基础留白）。 */
+  @include t.compact-bottom-bars;
 </style>

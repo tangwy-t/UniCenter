@@ -1233,6 +1233,23 @@ declare namespace Api {
       memLimitMb: number
     }
 
+    interface DockerEventHistoryResp {
+      items: Api.Docker.DockerEventHistoryItem[]
+      total: number
+      nextCursor?: string
+    }
+
+    interface DockerEventHistoryItem {
+      hostId: string
+      hostname: string
+      t: number
+      type: string
+      action: string
+      actorName?: string
+      actorId?: string
+      exitCode?: number | null
+    }
+
     interface DockerBuildContextUploadResp {
       filename: string
     }

@@ -114,6 +114,29 @@ type DockerTasksQuery struct {
 	Action string `form:"action"`
 }
 
+// ── 事件历史（本波：GET /docker/events/history）───────────────────────────
+
+// DockerEventHistoryQuery 是事件历史查询的参数（三项过滤可选且相互独立，
+// 与读面其余端点同款：先主机、再类型、再关键字，逐层收窄）。
+//
+// 与 /docker/tasks 的差别只有分页形态：历史是**追加型**数据（新事件持续落到
+// 窗口头部），偏移量会在两次请求之间漂移，故走**游标**（cursor 原样回传服务端
+// 给的不透明串）而不是页码；limit 是单页条数，服务端封顶（超限夹断而不是报错
+// —— 与 pageSize 的绑定层封顶同一条「上限是服务端的事」）。
+type DockerEventHistoryQuery struct {
+	// HostID 限定单主机。0 = 跨主机聚合（缺省）。
+	HostID uint64 `form:"hostId"`
+	// Type 过滤资源类型；空 = 全部。合法性在 handler 对协议白名单校验后给 400
+	//（静默忽略会让用户以为「筛了但没生效」，与 Workloads 的 state 同一句话）。
+	Type string `form:"type"`
+	// Keyword 是主体名 / 主体 id / 动作原文的大小写不敏感子串。
+	Keyword string `form:"keyword"`
+	// Limit 是单页条数（缺省 200、上限 500，见 dockerevents 的常量注释）。
+	Limit int `form:"limit"`
+	// Cursor 是上一页返回的 nextCursor（原样回传；缺省 = 从最新一条开始）。
+	Cursor string `form:"cursor"`
+}
+
 // ── 跨主机资源清单（9a：GET /docker/images|volumes|networks|projects）──────
 
 // DockerImageQuery 是跨主机镜像清单（GET /docker/images）的查询参数。

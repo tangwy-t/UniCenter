@@ -1,11 +1,15 @@
 <!-- 表格头部，包含表格大小、刷新、全屏、列设置、其他设置 -->
 <template>
-  <div class="flex-cb max-md:!block" id="art-table-header">
+  <!-- 短视口（手机横屏/矮窗）不做 max-md 的竖排换行：740 宽横屏下换行会把这条
+       头部从 32px 撑到 68px（左右两组各占一行），而矮视口最缺的就是高度 ——
+       「计数行 + 工具组」本来就能在一行里放下（表宽让位后更宽裕）。
+       换行只保留给真正的窄屏（宽度维度），由高度档位闸门控制。 -->
+  <div class="flex-cb" :class="{ 'max-md:!block': !isShortViewport }" id="art-table-header">
     <div class="flex-wrap">
       <slot name="left"></slot>
     </div>
 
-    <div class="flex-c md:justify-end max-md:mt-3 max-sm:!hidden">
+    <div class="flex-c md:justify-end max-sm:!hidden" :class="{ 'max-md:mt-3': !isShortViewport }">
       <div
         v-if="showSearchBar != null"
         class="button"
@@ -192,7 +196,10 @@
    * 列是否因当前视口低于 hideBelow 断点而暂不渲染
    * （用于在列设置里提示"勾选了但当前屏幕看不到"的原因）
    */
-  const { smaller } = useAppBreakpoints()
+  const { smaller, heightAtMost } = useAppBreakpoints()
+  /** 短视口（矮窗/手机横屏）：头部保持单行（不换行），阈值口径见 HEIGHT_BREAKPOINTS */
+  const isShortViewport = heightAtMost('short')
+
   const isViewportHidden = (col: ColumnOption): boolean =>
     isValidHideBelow(col.hideBelow) && smaller(col.hideBelow).value
 

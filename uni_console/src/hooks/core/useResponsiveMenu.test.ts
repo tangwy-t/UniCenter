@@ -21,19 +21,21 @@ const mediaController = vi.hoisted(() => {
   }
 
   const queries = new Map<string, Entry>()
-  let width = 1440
+  /** 视口尺寸（宽 + 高两轴：宽度驱动 isPhone，高度驱动矮视口图标栏） */
+  const viewport = { width: 1440, height: 900 }
 
-  const evaluate = (query: string, currentWidth: number): boolean => {
+  const evaluate = (query: string, size: { width: number; height: number }): boolean => {
     // 支持复合查询，例如 VueUse 的 between() 生成
-    // "(min-width: 768px) and (max-width: 1023.9px)"
-    const conditions = [...query.matchAll(/\((min|max)-width:\s*(-?[\d.]+)px\s*\)/g)]
+    // "(min-width: 768px) and (max-width: 1023.9px)"，以及高度轴的 "(max-height: 640px)"
+    const conditions = [...query.matchAll(/\((min|max)-(width|height):\s*(-?[\d.]+)px\s*\)/g)]
     if (conditions.length === 0) {
       return false
     }
 
-    return conditions.every(([, kind, value]) => {
+    return conditions.every(([, kind, axis, value]) => {
       const px = Number(value)
-      return kind === 'min' ? currentWidth >= px : currentWidth <= px
+      const current = axis === 'width' ? size.width : size.height
+      return kind === 'min' ? current >= px : current <= px
     })
   }
 
@@ -42,7 +44,7 @@ const mediaController = vi.hoisted(() => {
   const matchMedia = (query: string) => {
     let entry = queries.get(query)
     if (!entry) {
-      entry = { query, matches: evaluate(query, width), listeners: new Set() }
+      entry = { query, matches: evaluate(query, viewport), listeners: new Set() }
       queries.set(query, entry)
     }
     const current = entry
@@ -62,11 +64,20 @@ const mediaController = vi.hoisted(() => {
     }
   }
 
-  /** 改变视口宽度并触发已注册媒体查询的 change 事件 */
-  const setViewport = (nextWidth: number) => {
-    width = nextWidth
+  /**
+   * 改变视口尺寸并触发已注册媒体查询的 change 事件。
+   * 传数字 = 只改宽度（历史调用）；传对象 = 改指定轴。
+   */
+  const setViewport = (next: number | { width?: number; height?: number }) => {
+    if (typeof next === 'number') {
+      viewport.width = next
+    } else {
+      if (next.width !== undefined) viewport.width = next.width
+      if (next.height !== undefined) viewport.height = next.height
+    }
+
     for (const entry of queries.values()) {
-      const matches = evaluate(entry.query, nextWidth)
+      const matches = evaluate(entry.query, viewport)
       if (matches !== entry.matches) {
         entry.matches = matches
         entry.listeners.forEach((listener) => listener({ matches, media: entry.query }))
@@ -108,7 +119,8 @@ const mediaController = vi.hoisted(() => {
   }
   ;(globalThis as Record<string, unknown>).window = {
     matchMedia,
-    innerWidth: 1440,
+    innerWidth: viewport.width,
+    innerHeight: viewport.height,
     addEventListener: noop,
     removeEventListener: noop,
     setTimeout,
@@ -152,7 +164,7 @@ describe('useResponsiveMenu（响应式菜单派生状态）', () => {
   })
 
   beforeEach(() => {
-    mediaController.setViewport(1440)
+    mediaController.setViewport({ width: 1440, height: 900 })
     storeState.setMenuOpenCalls.length = 0
     const menuOpen = storeState.menuOpen as { value: boolean }
     menuOpen.value = true
@@ -227,5 +239,62 @@ describe('useResponsiveMenu（响应式菜单派生状态）', () => {
     closeMobileDrawer()
     expect(storeState.setMenuOpenCalls).toEqual([])
     expect(isMenuVisible.value).toBe(true)
+  })
+
+  // ── 横屏图标栏态（矮视口 + 窄桌面宽，844×390 手机横屏）──
+  // 该档此前是展开的 230px 侧栏，在 844 宽的横屏上吃掉约三分之一屏宽；
+  // 现在默认收为图标栏（宽度让给表），且与手机抽屉同一纪律：瞬态、不写偏好。
+
+  it('844×390 手机横屏：默认收为图标栏（渲染收起），不改写持久化偏好', async () => {
+    const { isIconBarViewport, isMenuVisible } = mount()
+    mediaController.setViewport({ width: 844, height: 390 })
+    await nextTick()
+
+    expect(isIconBarViewport.value).toBe(true)
+    expect(isMenuVisible.value).toBe(false) // 图标栏 = 收起态
+    expect(storeState.setMenuOpenCalls).toEqual([])
+    expect((storeState.menuOpen as { value: boolean }).value).toBe(true)
+  })
+
+  it('图标栏态下 toggle 只改瞬态展开：再点收回到图标栏，偏好始终不动', async () => {
+    const { isMenuVisible, toggleMenu } = mount()
+    mediaController.setViewport({ width: 844, height: 390 })
+    await nextTick()
+
+    toggleMenu()
+    expect(isMenuVisible.value).toBe(true) // 临时展开
+    toggleMenu()
+    expect(isMenuVisible.value).toBe(false) // 回到图标栏
+    expect(storeState.setMenuOpenCalls).toEqual([])
+  })
+
+  it('离开矮视口复位图标栏展开态；宽矮窗（1280×620）不算图标栏态', async () => {
+    const { isIconBarViewport, isMenuVisible, toggleMenu } = mount()
+    mediaController.setViewport({ width: 844, height: 390 })
+    await nextTick()
+    toggleMenu()
+    expect(isMenuVisible.value).toBe(true)
+
+    // 回到常规桌面：图标栏态解除，回到用户偏好；再进矮视口仍是收起的图标栏
+    mediaController.setViewport({ width: 1440, height: 900 })
+    await nextTick()
+    expect(isIconBarViewport.value).toBe(false)
+    expect(isMenuVisible.value).toBe(true) // 偏好（true）未被改写
+
+    mediaController.setViewport({ width: 844, height: 390 })
+    await nextTick()
+    expect(isMenuVisible.value).toBe(false)
+  })
+
+  it('宽矮窗（1280×620）：矮但够宽 —— 不抢用户偏好，侧栏照旧展开', async () => {
+    const { isIconBarViewport, isMenuVisible, toggleMenu } = mount()
+    mediaController.setViewport({ width: 1280, height: 620 })
+    await nextTick()
+
+    expect(isIconBarViewport.value).toBe(false)
+    expect(isMenuVisible.value).toBe(true) // 用户偏好照旧
+
+    toggleMenu()
+    expect(storeState.setMenuOpenCalls).toEqual([false]) // 走的是桌面语义（写偏好）
   })
 })

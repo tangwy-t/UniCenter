@@ -17,12 +17,19 @@
 // 事件注入 hostId/hostname 后才扇出：console 拿到的是带归属的聚合流；内部消费者
 // 拿到同样的带归属事件（节流与规则是其自己的事，管理器不替它过滤）。
 //
+// **历史与回放分家**（本波）：内存里每台主机维护一个**保留窗口**（容量 + 时长双限，
+// 见 defaultRetainDepth / defaultRetainWindow），它服务的是**历史查询**（Query：
+// /docker/events/history 的数据源）；而流的**连接回放**仍只吐最近 defaultReplayDepth
+// 条 —— 打开页面要的是「刚才发生了什么」，不是一份五分钟的流水账（千行灌顶会让
+// 首屏既慢又读不出重点）。两个数各自独立成档，是因为它们服务两个不同的读者：
+// 回放的读者是刚打开面板的人，查询的读者是翻历史的人。
+//
 // 三条不变式（测试逐条钉住）：
 //   - **投递绝不阻塞**：帧来自 agent 连接的唯一读循环，堵住它会连累指标/心跳 ——
-//     因此帧路径只在内存里动（JSON 解析 + 环形缓冲 + 分发），一切 Redis/网络 IO
+//     因此帧路径只在内存里动（JSON 解析 + 保留窗口 + 分发），一切 Redis/网络 IO
 //     都在对账循环的锁外段执行；
 //   - **常驻订阅有寿命**：两类消费者（HTTP 面 + 内部面）全部退出即全量退订；主机
-//     离开可管清单即退订且不留环形缓冲（设备删除后回放旧事件会让人误以为它还活着）；
+//     离开可管清单即退订且不留保留窗口（设备删除后回放旧事件会让人误以为它还活着）；
 //   - **失败是单台的**：一台主机的退避/断连不影响别的主机，也绝不升级成对客户端
 //     的错误 —— 活动流少一行（该主机的），好过整条流断掉。
 package dockerevents
@@ -34,6 +41,7 @@ import (
 	"errors"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -50,13 +58,35 @@ import (
 // ── 冻结常数与可注入参数 ─────────────────────────────────────────────────
 
 const (
-	// defaultRingDepth 是每台主机的回放缓冲条数。
+	// defaultReplayDepth 是每台主机**连接回放**的条数（保留窗口里取最近这些条）。
 	//
-	// 为什么按**主机**分而不是全局一条：归属在回放里就是语义 —— 全局环形会让一台
+	// 为什么按**主机**分而不是全局一条：归属在回放里就是语义 —— 全局一条窗口会让一台
 	// 高频主机把低频主机的历史全挤掉（「我看不到 B 主机发生了啥」），也压缩了
 	// 「按主机排序回放」的空间。50 条 ≈ 活动流面板一屏的量：打开即有内容，又不是
 	// 一份小日志。
-	defaultRingDepth = 50
+	defaultReplayDepth = 50
+	// defaultRetainDepth 是每台主机**保留窗口**的容量上限（条数）。
+	//
+	// 500 = 回放深度的 10 倍：一台 50 容器的宿主做一次整机重启，事件量级是
+	// 「每容器 die+stop+start+create ≈ 100~200 条」，500 条容得下这类风暴的完整
+	// 叙事（历史页要能回答「刚才那波重启里谁先谁后」）；再往上翻倍，收益只落在
+	// 「十分钟内上千条」的极端风暴上，而那时人已经不看逐条了（通知联动看的是实时）。
+	// 内存账：一条事件 ≈ 200~300B（名字/短 id + 结构体），500 条 ≈ 150KB/主机，
+	// 个位数宿主的舰队合计 < 1MB —— 对 core 是零头。
+	defaultRetainDepth = 500
+	// defaultRetainWindow 是保留窗口的时长上限：**每台主机只看最近 30 分钟**。
+	//
+	// 与容器 stats 留存（dockerstate.StatsHistoryKeep/TTL）同取 30 分钟，理由也
+	// 同源 —— 覆盖「注意到异常 → 翻刚才发生了什么」的排障时差；更长窗口的诉求
+	// 属于审计面（事件短历史是「刚才」的面板，不是审计账本，本域明确不做）。
+	// 它与容量上限是**双限**：时长管「多老的不再算数」，容量管「再密也不爆内存」
+	// —— 风暴日由容量截断（丢最旧），平静日由时长兜底。
+	defaultRetainWindow = 30 * time.Minute
+	// defaultQueryLimit / maxQueryLimit 是历史查询的分页条数（缺省与上限）。
+	// 200 恰是保留窗口的 40%：一页看掉小半窗，继续翻由游标接力；上限与容量上限
+	// 同量级（500）—— 「一次拉全窗」是合法诉求（导出/排查），只是不该是缺省。
+	defaultQueryLimit = 200
+	maxQueryLimit     = 500
 	// defaultResultWait 是订阅指令结果的等待窗口。建立订阅是本地操作（agent 打开
 	// daemon 事件流），10 秒拿不到 result 只可能是 agent 卡死/连接抖动 —— 与其死等，
 	// 不如退避后重试（重发是幂等的：agent 侧 events 槽位只有一条，重复订阅会被拒）。
@@ -85,7 +115,11 @@ const (
 
 // Options 是管理器的可注入参数（测试要确定性时钟、短间隔与确定的退避）。
 type Options struct {
-	RingDepth         int
+	// ReplayDepth 是连接回放的每主机条数（缺省 defaultReplayDepth）。
+	ReplayDepth int
+	// RetainDepth / RetainWindow 是保留窗口的双限（缺省见常量注释）。
+	RetainDepth       int
+	RetainWindow      time.Duration
 	ResultWait        time.Duration
 	ReconcileInterval time.Duration
 	RetryBase         time.Duration
@@ -97,8 +131,14 @@ type Options struct {
 }
 
 func (o Options) withDefaults() Options {
-	if o.RingDepth <= 0 {
-		o.RingDepth = defaultRingDepth
+	if o.ReplayDepth <= 0 {
+		o.ReplayDepth = defaultReplayDepth
+	}
+	if o.RetainDepth <= 0 {
+		o.RetainDepth = defaultRetainDepth
+	}
+	if o.RetainWindow <= 0 {
+		o.RetainWindow = defaultRetainWindow
 	}
 	if o.ResultWait <= 0 {
 		o.ResultWait = defaultResultWait
@@ -163,6 +203,28 @@ type Event struct {
 	Item     agentproto.DockerEventItem
 }
 
+// retained 是保留窗口里的一条账目：事件本体 + 两枚 core 侧记号。
+//
+// 为什么不让 Event 本体背这两枚记号：fan-out 的载荷（客户端队列 / 内部消费者）
+// 不该被历史记账的字段污染 —— 它们只在「保留与查询」这条链上有意义，
+// 多一个字段就要在每一处消费端解释一次「这个字段在你这儿没有用」。
+//
+// at 是 **core 收到该事件的时刻**（不是事件自带的 Item.T）：保留窗口的裁剪必须
+// 走 core 的挂钟 —— agent 时钟可以偏（stats 留存的同一条口径：偏快的主机会把
+// 「来自未来」的读数写进历史），拿不可信的钟去判「这条过没过期」等于让一台钟坏
+// 掉的主机把自己的历史全部冻结或全部清空。
+//
+// seq 是**进程内到达序号**（单调、唯一）：它只用于查询的排序决胜与游标 —— 事件
+// 没有天然唯一 id（同毫秒同动作可以合法地出现多条），而分页需要一个全序。刻意
+// **不外送**（wire 上没有这个字段）：它是进程寿命的计数（core 重启归零），一旦
+// 被消费端拿去当跨重启的身份键就会把重启后的新事件误当旧事件丢掉；去重交给
+// 内容复合键（前端），排序交给查询端点内部完成。
+type retained struct {
+	ev  Event
+	at  time.Time
+	seq uint64
+}
+
 // ResidentSink 是**常驻内部消费者**的事件入口（与 Client 并列的第二种消费端）。形态
 // 是同步回调而不是队列：管理器只在内存里调用它（emitLocked 的扇出段），所以它必须
 // **绝不阻塞** —— 帧路径是 agent 读循环，堵住会连累指标/心跳（包不变式第一条）；
@@ -224,7 +286,7 @@ type hostSub struct {
 // hostSub 的全部字段只在持有 m.mu 时被读写 —— runOnce 的锁外段从不直接摸它们，
 // 动作结果一律经 subscribeAttempt 回账（帧入口 DeliverDockerFrame 也因此无阻塞 IO）。
 
-// Manager 是事件流常驻订阅的管理者：主机面对账 + 引用计数 + 环形回放 + 扇出。
+// Manager 是事件流常驻订阅的管理者：主机面对账 + 引用计数 + 保留窗口（回放 + 历史查询）+ 扇出。
 type Manager struct {
 	sender   Sender
 	cmds     CmdRecorder
@@ -237,7 +299,8 @@ type Manager struct {
 
 	mu        sync.Mutex
 	subs      map[uint64]*hostSub
-	rings     map[uint64][]Event
+	rings     map[uint64][]retained
+	seq       uint64
 	clients   map[*Client]struct{}
 	residents map[string]ResidentSink
 	wake      chan struct{}
@@ -255,7 +318,7 @@ func NewManager(opts Options, sender Sender, cmds CmdRecorder, hosts HostsReader
 		idGen:     defaultRefGen,
 		opts:      opts.withDefaults(),
 		subs:      map[uint64]*hostSub{},
-		rings:     map[uint64][]Event{},
+		rings:     map[uint64][]retained{},
 		clients:   map[*Client]struct{}{},
 		residents: map[string]ResidentSink{},
 		wake:      make(chan struct{}, 1),
@@ -312,20 +375,26 @@ func (m *Manager) SubscribedHosts() int {
 
 // ── 引用计数与扇出 ───────────────────────────────────────────────────────
 
-// Subscribe 登记一个 console 客户端（引用计数 +1）：先把各主机环形缓冲**按序回放**
-// 进它的队列，之后实时事件经广播到达。首个客户端会踢醒对账循环（开始向全部可管
-// 主机订阅）；客户端读完或用完必须 Close（引用计数 -1）。
+// Subscribe 登记一个 console 客户端（引用计数 +1）：先把各主机保留窗口**最近
+// ReplayDepth 条**按序回放进它的队列，之后实时事件经广播到达。首个客户端会踢醒
+// 对账循环（开始向全部可管主机订阅）；客户端读完或用完必须 Close（引用计数 -1）。
 func (m *Manager) Subscribe() *Client {
 	c := &Client{m: m, depth: m.opts.ClientQueueDepth, wake: make(chan struct{}, 1)}
 	m.mu.Lock()
 	wasFirst := len(m.clients) == 0
 	m.clients[c] = struct{}{}
 	// 回放与广播共用这一把锁：先登记、再快照 —— 期间不可能有事件被广播
-	//（广播同样要这把锁），因此回放既不重复（先于登记的事件在环形里，登记后广播
-	// 不会再发一遍）也不漏（登记后的事件走广播，必然排在回放之后）。
+	//（广播同样要这把锁），因此回放既不重复（先于登记的事件在保留窗口里，登记后
+	// 广播不会再发一遍）也不漏（登记后的事件走广播，必然排在回放之后）。
 	for _, id := range m.sortedRingHostsLocked() {
-		for _, e := range m.rings[id] {
-			c.pushLocked(e)
+		ring := m.rings[id]
+		if over := len(ring) - m.opts.ReplayDepth; over > 0 {
+			// 回放只取最近 ReplayDepth 条（窗口里更老的那些是历史查询的菜，
+			// 不是「打开即有内容」的菜 —— 千行灌顶只会把首屏淹掉）。
+			ring = ring[over:]
+		}
+		for _, r := range ring {
+			c.pushLocked(r.ev)
 		}
 	}
 	m.mu.Unlock()
@@ -335,7 +404,7 @@ func (m *Manager) Subscribe() *Client {
 	return c
 }
 
-// sortedRingHostsLocked 返回有回放缓冲的主机 id（升序 —— 回放顺序稳定可复现）。
+// sortedRingHostsLocked 返回有保留窗口的主机 id（升序 —— 回放顺序稳定可复现）。
 func (m *Manager) sortedRingHostsLocked() []uint64 {
 	ids := make([]uint64, 0, len(m.rings))
 	for id := range m.rings {
@@ -350,13 +419,13 @@ func (m *Manager) sortedRingHostsLocked() []uint64 {
 // 关键语义（七期·通知联动的常驻闭环）：内部消费者**不计入 HTTP 面的归零判据** ——
 // 最后一个 console 客户端断开时，只要内部消费者还在，订阅**保持常开**（runOnce
 // 的消费端判据 = 两个面任一面非空）；只有两个面都空了，才会全量退订 ——「看的人
-// 走了」不再等于「没人需要它」。HTTP 端点、引用计数、环形回放的一切既有语义
+// 走了」不再等于「没人需要它」。HTTP 端点、引用计数、连接回放的一切既有语义
 // 不变（6b 测试面逐条钉住）。
 //
 // 名字是登记身份的键（日志/测试可辨），同名的后登记**替换**先登记（通知联动只有
 // 一个实例；替换是确定性的，也避免「重复登记漏注销」把同一消费者重复扇出）。
 //
-// 与 Subscribe() 的一个显式差别：**不做环形回放**。回放是「给人看的刚才」——
+// 与 Subscribe() 的一个显式差别：**不做连接回放**。回放是「给人看的刚才」——
 // 内部消费者要的是「从登记这一刻起的实时事实」，回放反而会让它把启动前的老事件
 // 再告警一遍（通知的节流账本从零开始，不该被历史污染）。
 func (m *Manager) RegisterResident(name string, sink ResidentSink) func() {
@@ -386,7 +455,7 @@ func (m *Manager) RegisterResident(name string, sink ResidentSink) func() {
 	}
 }
 
-// teardownAll 在两个面的消费端**都归零**时退订全部主机（**保留环形缓冲**：下一个
+// teardownAll 在两个面的消费端**都归零**时退订全部主机（**保留窗口**：下一个
 // 客户端打开活动流仍先看到「刚才发生了什么」）。HTTP 面单独归零不会走到这里 ——
 // 内部消费者还在时订阅保持常开（见 RegisterResident）。cancel 是锁外 best-effort ——
 // 发不出去只记日志，本地账目必须立即清掉（消费端退出后不得再挂着 daemon 侧的事件
@@ -419,7 +488,7 @@ func (m *Manager) teardownAll(reason string) {
 // ── 常驻会话的帧入口（agenthub.DockerFrameDeliverer 的窄接口实现）─────────
 
 // DeliverDockerFrame 处理一条 agent.docker.frame。**绝不阻塞**（它在 agent 连接的
-// 读循环里）：本方法只在内存里动 —— 解析、环形记账、向客户端队列分发（分发也不
+// 读循环里）：本方法只在内存里动 —— 解析、保留窗口记账、向客户端队列分发（分发也不
 // 阻塞：客户端队列满丢最旧）。
 //
 // 返回 ErrNotFound 表示「不是常驻订阅的帧」（给路由器的第二段判定用 —— 用户注册表
@@ -471,7 +540,7 @@ func (m *Manager) DeliverDockerFrame(_ context.Context, deviceID uint64, f *agen
 	return nil
 }
 
-// emitLocked 解码一帧里的 JSON 事件行：逐行校验 → 进环形缓冲 → 广播给全部客户端
+// emitLocked 解码一帧里的 JSON 事件行：逐行校验 → 进保留窗口 → 广播给全部客户端
 // （调用方必须持 m.mu）。
 func (m *Manager) emitLocked(sub *hostSub, f *agentproto.DockerFrame) {
 	for _, raw := range bytes.Split(f.Data, []byte{'\n'}) {
@@ -489,10 +558,11 @@ func (m *Manager) emitLocked(sub *hostSub, f *agentproto.DockerFrame) {
 			continue
 		}
 		e := Event{DeviceID: sub.deviceID, Hostname: sub.hostname, Item: item}
-		ring := append(m.rings[sub.deviceID], e)
-		if over := len(ring) - m.opts.RingDepth; over > 0 {
-			ring = ring[over:]
-		}
+		// 保留窗口记账（双限裁剪 + 到达序号）与扇出在同一把锁下：查询读到的一定是
+		// 「裁剪过、有序号」的一致快照，不存在「读到半条正在被裁的窗口」的窗口期。
+		m.seq++
+		ring := append(m.rings[sub.deviceID], retained{ev: e, at: m.opts.Now(), seq: m.seq})
+		ring = m.pruneLocked(ring)
 		m.rings[sub.deviceID] = ring
 		for c := range m.clients {
 			c.pushLocked(e)
@@ -503,6 +573,183 @@ func (m *Manager) emitLocked(sub *hostSub, f *agentproto.DockerFrame) {
 			r.DeliverDockerEvent(e)
 		}
 	}
+}
+
+// ── 保留窗口：裁剪与历史查询（/docker/events/history 的数据源）────────────
+//
+// 保留窗口与**流**是两个读面、一份数据：窗口在内存里按主机一条升序序列（追加在
+// 尾），流的回放取它的尾部 ReplayDepth 条，历史查询在它上面做过滤/排序/游标分页。
+// 两者共用同一个窗口意味着「流看不到的（超出窗口）查询也查不到」——不存在
+// 「翻历史能翻出流已经丢掉的东西」这种两套口径。
+
+// pruneLocked 按**双限**裁剪一台主机的保留窗口（调用方必须持 m.mu）：先按时长
+// （core 接收时刻早于窗口下界的，从头部摘掉），再按容量（仍超出 RetainDepth 的
+// 再从头部摘掉）。两步都从头部摘 —— 追加在尾部，窗口天然按到达序升序，
+// 「最老的在前」是这里唯一的顺序假设。
+func (m *Manager) pruneLocked(ring []retained) []retained {
+	now := m.opts.Now()
+	cut := 0
+	for cut < len(ring) && now.Sub(ring[cut].at) > m.opts.RetainWindow {
+		cut++
+	}
+	if over := len(ring) - cut - m.opts.RetainDepth; over > 0 {
+		cut += over
+	}
+	if cut == 0 {
+		return ring
+	}
+	return ring[cut:]
+}
+
+// QueryFilter 是历史查询的过滤条件（三项零值都 = 不过滤，逐层收窄）。
+type QueryFilter struct {
+	// HostID 限定单主机（0 = 跨主机；设备 id 是雪花值永不为 0，无需指针区分）。
+	HostID uint64
+	// Type 限定资源类型（container|image|volume|network）；空 = 全部。
+	// 合法性由调用方（HTTP 层）对协议的类型白名单校验后给 400 结论句 ——
+	// 管理器不认识「非法类型」，它只按值比较。
+	Type string
+	// Keyword 是主体名 / 主体 id / 动作原文的大小写不敏感子串。
+	Keyword string
+}
+
+// QueryPage 是历史查询的一页。
+type QueryPage struct {
+	// Items 按 **t 降序**（同 t 按到达序降序）；空时为空切片而非 nil。
+	Items []Event
+	// Total 是本次过滤条件在保留窗口内的**全量**条数（不受 limit 与游标影响）——
+	// 「翻到第几页」与「一共有多少」是两个事实，少一个都会让人以为看见的是全部。
+	Total int
+	// NextCursor 是取下一页的游标（空 = 已到窗口尽头）。
+	NextCursor string
+}
+
+// ErrBadCursor 表示游标形态非法（HTTP 层折成 400）。
+var ErrBadCursor = errors.New("dockerevents: 游标非法")
+
+// Query 在保留窗口里查一页历史（跨主机聚合，照读面其余端点的聚合模式）。
+//
+// 排序主键取 **t 降序**而不是到达序：列表与时间列必须是同一个口径 —— 主键取
+// 到达序会在一次补投/重放之后让「时间列忽上忽下」，而用户读这张表问的第一个
+// 问题就是「最新的在哪」。到达序只在同 t 时做决胜（全序需要它；同毫秒多条是
+// 合法事实：一次 compose up 里多个容器同一毫秒起停完全可能出现）。
+//
+// 游标是**不透明字符串**（形态 `t:seq`，客户端原样回传不解析）：分页位置必须是
+// 「位置」而不是「偏移量」—— 窗口在两次请求之间会被裁剪与追加，偏移量会漂移，
+// 而同 t + 到达序对是稳定身份（裁剪只摘更旧的一侧，游标之前的行不会因裁剪而
+// 换身份）。
+//
+// 锁纪律：只持锁做快照（窗口在锁下不可能被并发修改），排序与分页在锁外完成
+// —— 帧投递（DeliverDockerFrame）也在争这把锁，任何与扇出无关的耗时都不该占着它。
+func (m *Manager) Query(f QueryFilter, limit int, cursor string) (QueryPage, error) {
+	if limit <= 0 {
+		limit = defaultQueryLimit
+	}
+	if limit > maxQueryLimit {
+		limit = maxQueryLimit
+	}
+	var cursorT int64
+	var cursorSeq uint64
+	hasCursor := cursor != ""
+	if hasCursor {
+		t, s, err := parseCursor(cursor)
+		if err != nil {
+			return QueryPage{}, err
+		}
+		cursorT, cursorSeq = t, s
+	}
+
+	m.mu.Lock()
+	now := m.opts.Now()
+	all := make([]retained, 0, 64*len(m.rings))
+	for _, ring := range m.rings {
+		for _, r := range ring {
+			// 静默主机的窗口不主动清扫（省一次后台遍历），读侧按同一把尺过滤 ——
+			// 「窗口外不存在」是一条规则、两处执行，答案只可能一致。
+			if now.Sub(r.at) > m.opts.RetainWindow {
+				continue
+			}
+			if f.HostID != 0 && r.ev.DeviceID != f.HostID {
+				continue
+			}
+			if f.Type != "" && r.ev.Item.Type != f.Type {
+				continue
+			}
+			if f.Keyword != "" && !matchesKeyword(r.ev, f.Keyword) {
+				continue
+			}
+			all = append(all, r)
+		}
+	}
+	m.mu.Unlock()
+
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].ev.Item.T != all[j].ev.Item.T {
+			return all[i].ev.Item.T > all[j].ev.Item.T
+		}
+		return all[i].seq > all[j].seq
+	})
+
+	page := QueryPage{Items: []Event{}, Total: len(all)}
+	start := 0
+	if hasCursor {
+		for start < len(all) && !olderThan(all[start], cursorT, cursorSeq) {
+			start++
+		}
+	}
+	end := min(start+limit, len(all))
+	for i := start; i < end; i++ {
+		page.Items = append(page.Items, all[i].ev)
+	}
+	if end < len(all) && end > start {
+		// 还有下一页：游标取本页最后一条的位置。end == start（游标已越过窗口尽头）
+		// 时不给游标 —— 空页 + 有下一页的游标会让客户端原地打转。
+		page.NextCursor = formatCursor(all[end-1])
+	}
+	return page, nil
+}
+
+// olderThan 判断一条是否严格排在游标位置**之后**（更旧）。全序是 (t 降序, 到达序
+// 降序)，因此「更旧」= t 更小，或 t 相等而到达序更小。
+func olderThan(r retained, t int64, seq uint64) bool {
+	if r.ev.Item.T != t {
+		return r.ev.Item.T < t
+	}
+	return r.seq < seq
+}
+
+// formatCursor / parseCursor 是游标的编解码：`<t>:<seq>`（t 为 unix 毫秒）。
+// 形态简单到能人肉读，但**不是协议承诺** —— 客户端只该原样回传，换编码是服务端
+// 的事，不换的是「位置」这个语义。
+func formatCursor(r retained) string {
+	return strconv.FormatInt(r.ev.Item.T, 10) + ":" + strconv.FormatUint(r.seq, 10)
+}
+
+func parseCursor(s string) (int64, uint64, error) {
+	i := strings.IndexByte(s, ':')
+	if i <= 0 || i == len(s)-1 {
+		return 0, 0, ErrBadCursor
+	}
+	t, err := strconv.ParseInt(s[:i], 10, 64)
+	if err != nil {
+		return 0, 0, ErrBadCursor
+	}
+	seq, err := strconv.ParseUint(s[i+1:], 10, 64)
+	if err != nil {
+		return 0, 0, ErrBadCursor
+	}
+	return t, seq, nil
+}
+
+// matchesKeyword 判断一条事件是否命中关键字（大小写不敏感子串）：主体名 / 主体 id /
+// 动作原文三处任一命中即可 —— 与读面其余端点的 keyword 同句（那边是「容器名或
+// 镜像名」，这里是「谁 + 干了什么」）。刻意**不搜主机名**：主机维度有 hostId 过滤，
+// 关键字再兼一条维度会让「筛出了什么」变得难解释（与「hostname 已是一列」同理）。
+func matchesKeyword(e Event, kw string) bool {
+	kw = strings.ToLower(kw)
+	return strings.Contains(strings.ToLower(e.Item.ActorName), kw) ||
+		strings.Contains(strings.ToLower(e.Item.ActorID), kw) ||
+		strings.Contains(strings.ToLower(e.Item.Action), kw)
 }
 
 // ── 结果入口（agent_ingest.CompleteDockerCmd 的常驻分支调用）──────────────
@@ -651,7 +898,7 @@ func (m *Manager) runOnce(ctx context.Context) time.Duration {
 	defer m.mu.Unlock()
 	for _, lv := range leaves {
 		if m.subs[lv.sub.deviceID] == lv.sub {
-			// 设备删除/docker_ok 翻转：连环形缓冲一起清掉 —— 回放旧事件会让人
+			// 设备删除/docker_ok 翻转：连保留窗口一起清掉 —— 回放旧事件会让人
 			// 误以为它还在活动。
 			m.dropSubLocked(lv.sub, false)
 		}
@@ -804,11 +1051,11 @@ func (m *Manager) nextWakeLocked(now time.Time, next time.Duration) time.Duratio
 	return next
 }
 
-// dropSubLocked 移除一台主机的订阅账目（调用方必须持 m.mu）；keepRing=false 时
-// 连环形缓冲一并清除（主机不再可管）。
-func (m *Manager) dropSubLocked(sub *hostSub, keepRing bool) {
+// dropSubLocked 移除一台主机的订阅账目（调用方必须持 m.mu）；keepWindow=false 时
+// 连保留窗口一并清除（主机不再可管 —— 它的事件不再可查、不再回放）。
+func (m *Manager) dropSubLocked(sub *hostSub, keepWindow bool) {
 	delete(m.subs, sub.deviceID)
-	if !keepRing {
+	if !keepWindow {
 		delete(m.rings, sub.deviceID)
 	}
 	sub.pending = nil

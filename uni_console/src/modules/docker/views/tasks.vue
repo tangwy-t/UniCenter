@@ -517,6 +517,19 @@
   @use './wkl-shell';
   @use './overview-tokens' as t;
 
+  /* 矮视口 hero 行内化（与 containers/resources 同源 mixin：tk-hero 结构同款）。 */
+  .tk-hero {
+    @include t.hero-collapse;
+  }
+
+  /* 手机横屏紧凑档：页内留白收档（与 .wkl-page__inner 同款落点）。 */
+  @include respond-height-at-most('phoneShort') {
+    .tk-inner {
+      padding: 8px;
+      padding-bottom: 12px;
+    }
+  }
+
   // 「重试」等默认档按钮的主色文字对比度 AA：病灶与处方见 overview-tokens
   // 的 primary-text-aa（终审 QA D2·浅色实测 3.68:1）。
   @include t.primary-text-aa;
@@ -764,10 +777,14 @@
     }
   }
 
-  // 手机横屏（<768）：过滤/刷新工具行占满一行（hero 的动作组换行铺开，详情页同一口径）。
+  // 平板竖屏（<768 宽）：过滤/刷新工具行占满一行（hero 的动作组换行铺开，详情页同一口径）。
+  // 矮视口是例外：横屏时缺的是高度 —— 工具行再占一整行会多花一行（32+gap），那里让
+  // 它留在 hero 行内化后的同一行（宽度由侧栏图标栏让出来后够用）。
   @include respond-below('tablet') {
-    .tk-hero > .ml-auto {
-      width: 100%;
+    @include respond-height-at-least('short') {
+      .tk-hero > .ml-auto {
+        width: 100%;
+      }
     }
   }
 </style>
