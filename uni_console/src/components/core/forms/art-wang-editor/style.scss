@@ -120,8 +120,11 @@ $box-radius: calc(var(--custom-radius) / 3 + 2px);
     border-radius: $box-radius;
   }
 
+  // 内容区链接文字（收尾批）：原老字面量 #318ef4（白底 3.33）改走主色文字
+  // token（6.04，随主题自适应），数字见 @styles/core/aa-text.scss。
+  // （悬停描边/拖拽点 #318ef4 是非文本，维持。）
   a {
-    color: #318ef4;
+    color: var(--aa-primary-text);
   }
 
   .w-e-text-container {

@@ -107,7 +107,9 @@
         label: blocked ? `${entry.label}（需要更高权限）` : entry.label,
         icon: entry.icon,
         auth: entry.perm,
-        color: entry.danger === 'normal' ? undefined : 'var(--art-danger)',
+        // 文字对比度 AA（收尾批）：原 --art-danger（白底 3.29）改走 token，
+        // 数字见 @styles/core/aa-text.scss。
+        color: entry.danger === 'normal' ? undefined : 'var(--aa-danger-text)',
         disabled: pending || blocked || props.batchBusy
       }
     }

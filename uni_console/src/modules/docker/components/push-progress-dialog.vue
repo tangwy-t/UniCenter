@@ -772,7 +772,9 @@
     }
 
     &__error {
-      color: var(--el-color-danger);
+      // 文字对比度 AA（收尾批）：原 el-color-danger（白底 3.27）改走 token，
+      // 数字见 @styles/core/aa-text.scss。
+      color: var(--aa-danger-text);
     }
 
     &__hint {
@@ -831,7 +833,8 @@
 
     // 取消请求失败的就地结论句（与输入态错误句同一形态：红字）。
     &__error {
-      color: var(--el-color-danger);
+      // 文字对比度 AA（收尾批）：原 el-color-danger 改走 token。
+      color: var(--aa-danger-text);
     }
   }
 

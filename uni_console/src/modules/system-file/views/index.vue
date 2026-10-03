@@ -1148,7 +1148,9 @@
   }
 
   .chip.is-active .chip-count {
-    background: rgba(255, 255, 255, 0.24);
+    // 填充+白字 AA（收尾批）：白字对「24% 白叠 aa-primary-fill」只有 3.88，
+    // 叠白收敛到 15%（对白字 4.69），计数仍是「亮一档的胶囊」语义。
+    background: rgba(255, 255, 255, 0.15);
     color: #fff;
   }
 

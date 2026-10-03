@@ -213,23 +213,25 @@
     background: color-mix(in srgb, var(--el-color-primary) 7%, transparent);
   }
 
+  // 文字对比度 AA（收尾批）：类型徽章四档文字逐档收进 token（原 EP 基色对
+  // 各自淡染底 1.61–2.90），数字见 @styles/core/aa-text.scss；淡底维持字面（非文本）。
   .nd-type.is-warning {
-    color: var(--el-color-warning);
+    color: var(--aa-warning-text);
     background: color-mix(in srgb, var(--el-color-warning) 9%, transparent);
   }
 
   .nd-type.is-danger {
-    color: var(--el-color-danger);
+    color: var(--aa-danger-text);
     background: color-mix(in srgb, var(--el-color-danger) 8%, transparent);
   }
 
   .nd-type.is-success {
-    color: var(--el-color-success);
+    color: var(--aa-success-text);
     background: color-mix(in srgb, var(--el-color-success) 9%, transparent);
   }
 
   .nd-type.is-info {
-    color: var(--el-color-info);
+    color: var(--aa-info-text);
     background: color-mix(in srgb, var(--el-color-info) 8%, transparent);
   }
 
@@ -476,13 +478,15 @@
     animation: nd-seal-stamp 240ms cubic-bezier(0.2, 0.7, 0.3, 1.15) 120ms both;
   }
 
+  // 印章两档（收尾批）：urgent 走 error token、important 走 warning token
+  // （与类型徽章同族一档，数字见 @styles/core/aa-text.scss）。
   .nd-seal .is-urgent {
-    color: var(--el-color-error);
+    color: var(--aa-error-text);
     background: color-mix(in srgb, var(--el-color-error) 7%, transparent);
   }
 
   .nd-seal .is-important {
-    color: var(--el-color-warning);
+    color: var(--aa-warning-text);
     background: color-mix(in srgb, var(--el-color-warning) 9%, transparent);
   }
 

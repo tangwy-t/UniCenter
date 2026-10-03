@@ -792,7 +792,8 @@
     &__issue {
       font-size: 12px;
       line-height: 1.5;
-      color: var(--el-color-danger);
+      // 文字对比度 AA（收尾批）：原 el-color-danger（白底 3.27）改走 token。
+      color: var(--aa-danger-text);
     }
 
     &__hint {
@@ -864,7 +865,8 @@
       flex: 1 1 100%;
       font-size: 12px;
       line-height: 1.5;
-      color: var(--el-color-danger);
+      // 文字对比度 AA（收尾批）：同上（danger token）。
+      color: var(--aa-danger-text);
     }
   }
 

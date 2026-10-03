@@ -6,9 +6,10 @@
  *
  * 配色函数返回的是**字面色值**而非 CSS 变量:视图侧需要把它们
  * 拼进 style(如 `${color}14` 做浅底),CSS 变量无法参与字符串拼接。
- * 例外是 durTextTone:时长**文字**的对比度 AA 收口(走 token 层的
- * var(--aa-*-text)),它不做字符串拼接、只喂 color,故返回 token 引用;
- * durTone 的字面色值继续服务条形填充(非文本,不进文字族)。
+ * 例外是文字色的 AA 收口(走 token 层的 var(--aa-*-text)):durTextTone
+ * (时长**文字**)与 opBadgeStyle 的 color 槽——它们不做字符串拼接、只喂
+ * color,故返回 token 引用;durTone 与 OP_COLORS 的字面色值继续服务条形
+ * 填充/环图/徽标浅底(非文本,不进文字族)。
  */
 
 /** 未知 / 不适用时的中性灰(与视图中性色保持一致)。 */
@@ -85,6 +86,8 @@ export function durTextTone(ms: number, thr: number): string {
 /**
  * 各类 SQL 操作的徽标主色。
  * 逐字取自原 sql.vue,同时被操作徽标与占比环图复用(单一来源)。
+ * 注意:作为**文字**色的收官在 opBadgeStyle(见 OP_TEXT_TONE);本表的字面值
+ * 继续服务徽标浅底/描边与占比环图(非文本族,维持既有裁定)。
  */
 export const OP_COLORS: Record<string, string> = {
   SELECT: '#3b82f6',
@@ -97,10 +100,29 @@ export const OP_COLORS: Record<string, string> = {
 /** 操作维度列表(徽标/环图的展示顺序)。 */
 export const OPS = ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'OTHER'] as const
 
-/** 操作徽标内联样式:文字色 / 浅底 / 描边由主色派生。 */
+/**
+ * 徽标文字色的 AA 档:与 DUR_TEXT_TONE 同一处方(文字走 token、字面值留给
+ * 非文本),数字与理由见 @styles/core/aa-text.scss 文件头。
+ * 原值对白卡全部过不了线:#3b82f6 3.68、#10b981 2.54、#f59e0b 2.15、
+ * #dc2626 4.83(对自身 8% 淡染底只有 4.2x)、中性灰 #94a3b8 2.56;
+ * 换 token 后 5.15–6.04,中性档走 regular 文字色(白底 6.11、暗色随主题)。
+ * 未知档(表外颜色)兜底 regular,与 NEUTRAL 的处置一致。
+ */
+const OP_TEXT_TONE: Record<string, string> = {
+  '#3b82f6': 'var(--aa-primary-text)',
+  '#10b981': 'var(--aa-success-text)',
+  '#f59e0b': 'var(--aa-warning-text)',
+  '#dc2626': 'var(--aa-danger-text)'
+}
+
+/** 操作徽标内联样式:文字色走 AA token / 浅底 / 描边由主色派生(非文本)。 */
 export function opBadgeStyle(op: string): Record<string, string> {
   const color = OP_COLORS[op] ?? OP_COLORS.OTHER
-  return { color, background: `${color}14`, borderColor: `${color}33` }
+  return {
+    color: OP_TEXT_TONE[color] ?? 'var(--el-text-color-regular)',
+    background: `${color}14`,
+    borderColor: `${color}33`
+  }
 }
 
 /** MySQL 系统库查询(GORM 元数据反射等),非业务表。 */

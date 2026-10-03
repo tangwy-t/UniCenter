@@ -884,7 +884,9 @@
     /* 告警态：数值转红。服务监控的 KPI 不带告警色（它没有"异常计数"这类指标），
        故这一条是设备模块的**领域补充**，但只借用既有语义色，不新增调色板。 */
     &.is-alert {
-      color: var(--el-color-danger);
+      // 文字对比度 AA（收尾批）：原 el-color-danger（白底 3.27）改走 token，
+      // 数字见 @styles/core/aa-text.scss。
+      color: var(--aa-danger-text);
     }
   }
 
@@ -965,7 +967,8 @@
   }
 
   .do-issue {
-    color: var(--el-color-warning);
+    // 文字对比度 AA（收尾批）：原 el-color-warning（白底 1.85）改走 token。
+    color: var(--aa-warning-text);
     font-size: 12px;
   }
 

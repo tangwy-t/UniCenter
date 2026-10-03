@@ -792,8 +792,9 @@
     }
 
     // 「不能删除」的结论句：与陈旧标注同一套颜色语言（琥珀色 = 需要注意的结论）。
+    // 文字对比度 AA（收尾批）：原 el-color-warning（白底 1.85）改走 token。
     &__blocked {
-      color: var(--el-color-warning);
+      color: var(--aa-warning-text);
       font-size: 12px;
     }
   }
@@ -826,8 +827,9 @@
     }
 
     // 悬空是「可以回收」的信号，需要被看见（与容器详情的保护标记同一套颜色语言）。
+    // 文字对比度 AA（收尾批）：原 el-color-warning 改走 token。
     &__value.is-warn {
-      color: var(--el-color-warning);
+      color: var(--aa-warning-text);
     }
   }
 

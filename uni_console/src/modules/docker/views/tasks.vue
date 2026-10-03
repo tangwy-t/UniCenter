@@ -554,7 +554,9 @@
   // 静默刷新失败标注：琥珀即「需要注意」（与模块内陈旧/离线标注同一套颜色语言）。
   .tk-refresh-error {
     margin: 8px 0;
-    color: var(--el-color-warning);
+    // 文字对比度 AA（收尾批）：原 el-color-warning（白底 1.85）改走 token，
+    // 数字见 @styles/core/aa-text.scss。
+    color: var(--aa-warning-text);
     font-size: 12px;
     line-height: 1.6;
   }
@@ -703,12 +705,13 @@
     &__status {
       color: var(--el-text-color-secondary);
 
+      // 文字对比度 AA（收尾批）：原 EP 基色（白底 1.72/3.27）改走 token。
       &.is-ok {
-        color: var(--el-color-success);
+        color: var(--aa-success-text);
       }
 
       &.is-fail {
-        color: var(--el-color-danger);
+        color: var(--aa-danger-text);
       }
 
       // pending 保持次要色：旋转图标已经在说「在动」，文字再上色只会喧宾夺主。

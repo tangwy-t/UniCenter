@@ -217,8 +217,10 @@
     }
 
     // 暂停计数是「有东西在等着你」的提示：琥珀色即结论（与模块里的陈旧/保护同一套语言）。
+    // 文字对比度 AA（收尾批）：原 el-color-warning（白底 1.85）改走 token，
+    // 数字见 @styles/core/aa-text.scss。
     &__buffered {
-      color: var(--el-color-warning);
+      color: var(--aa-warning-text);
       font-size: 13px;
     }
 

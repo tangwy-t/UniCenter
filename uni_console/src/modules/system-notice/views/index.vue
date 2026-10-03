@@ -207,7 +207,9 @@
                     key: 'toggle',
                     label: '撤回',
                     icon: 'ri:file-reduce-line',
-                    color: '#e6a23c',
+                    // 文字对比度 AA（收尾批）：原老字面量 #e6a23c（旧 EP warning，
+                    // 白底 2.19）改走 token，数字见 @styles/core/aa-text.scss。
+                    color: 'var(--aa-warning-text)',
                     auth: 'system:notice:publish'
                   }
                 : {
@@ -220,7 +222,8 @@
                 key: 'delete',
                 label: '删除',
                 icon: 'ri:delete-bin-5-line',
-                color: 'var(--art-danger)',
+                // 文字对比度 AA（收尾批）：原 --art-danger（白底 3.29）改走 token。
+                color: 'var(--aa-danger-text)',
                 auth: 'system:notice:delete'
               }
             ],

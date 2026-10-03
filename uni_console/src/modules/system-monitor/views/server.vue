@@ -1516,13 +1516,12 @@
     border-radius: 999px;
     border: 1px solid rgba(220, 38, 38, 0.35);
     background: rgba(220, 38, 38, 0.1);
-    color: #dc2626;
+    // 文字对比度 AA（收尾批）：原 #dc2626 对 10% 淡染底仅 4.13 贴线，
+    // #fca5a5 暗色档一并收进 danger token（数字见 @styles/core/aa-text.scss）；
+    // 底/描边维持字面（非文本）。
+    color: var(--aa-danger-text);
     font-size: 11.5px;
     white-space: nowrap;
-  }
-
-  .dark .sv-warn {
-    color: #fca5a5;
   }
 
   /* ---------- 空状态 ---------- */

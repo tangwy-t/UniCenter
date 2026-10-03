@@ -1136,7 +1136,9 @@
     &__title {
       font-size: 14px;
       font-weight: 600;
-      color: var(--el-color-danger-dark-2);
+      // 文字对比度 AA（收尾批）：原 danger-dark-2 改走 danger token
+      // （数字见 @styles/core/aa-text.scss）。
+      color: var(--aa-danger-text);
     }
 
     &__hint {
@@ -1379,7 +1381,8 @@
 
     &__reason {
       font-size: 12px;
-      color: var(--el-color-danger);
+      // 文字对比度 AA（收尾批）：原 el-color-danger（白底 3.27）改走 token。
+      color: var(--aa-danger-text);
     }
 
     &__time {
@@ -1434,12 +1437,14 @@
 
     &__record-state {
       &.is-bad {
-        color: var(--el-color-danger);
+        // 文字对比度 AA（收尾批）：原 el-color-danger 改走 token。
+        color: var(--aa-danger-text);
       }
     }
 
     &__record-reason {
-      color: var(--el-color-danger);
+      // 文字对比度 AA（收尾批）：原 el-color-danger 改走 token。
+      color: var(--aa-danger-text);
     }
 
     &__empty {

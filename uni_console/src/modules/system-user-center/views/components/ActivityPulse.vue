@@ -180,7 +180,9 @@
   }
 
   .uc-vital-value--bad {
-    color: var(--art-danger);
+    /* 文字对比度 AA（收尾批）：原 --art-danger（白底 3.29）改走 danger token，
+       数字见 @styles/core/aa-text.scss。 */
+    color: var(--aa-danger-text);
   }
 
   .uc-vital-value--sm {

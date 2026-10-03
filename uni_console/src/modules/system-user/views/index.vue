@@ -472,7 +472,9 @@
                 key: 'toggle',
                 label: '停用',
                 icon: 'ri:shut-down-line',
-                color: '#e6a23c',
+                // 文字对比度 AA（收尾批）：原老字面量 #e6a23c（旧 EP warning，
+                // 白底 2.19）改走 token，数字见 @styles/core/aa-text.scss。
+                color: 'var(--aa-warning-text)',
                 auth: 'system:user:disable'
               }
             : { key: 'toggle', label: '启用', icon: 'ri:switch-line', auth: 'system:user:enable' },
@@ -480,7 +482,8 @@
             key: 'delete',
             label: '删除',
             icon: 'ri:delete-bin-4-line',
-            color: 'var(--art-danger)',
+            // 文字对比度 AA（收尾批）：原 --art-danger（白底 3.29）改走 token。
+            color: 'var(--aa-danger-text)',
             auth: 'system:user:delete'
           }
         ],
@@ -670,7 +673,9 @@
       padding: 0 2px;
 
       &:hover {
-        color: var(--el-color-primary-dark-2);
+        // 文字对比度 AA（收尾批）：原 primary-dark-2 收进 token 层统一档
+        // （hover 档，数字见 @styles/core/aa-text.scss）。
+        color: var(--aa-primary-text-hover);
       }
     }
   }
@@ -700,7 +705,8 @@
     font-size: 12px;
 
     &.on {
-      color: var(--el-color-success);
+      // 文字对比度 AA（收尾批）：原 el-color-success（白底 1.72）改走 token。
+      color: var(--aa-success-text);
     }
 
     &.off {

@@ -89,6 +89,33 @@ export function profileMetaOf(name: string): { icon: string; color: string } {
   }
 }
 
+/**
+ * 采样类型**文字**色(选中 chip 的文字)的 AA 档:同一「文字走 token、
+ * 字面值留给非文本」处方(数字与理由见 @styles/core/aa-text.scss)。
+ * 原值对白卡全部过不了线:#10b981 2.54 / #3b82f6 3.68 / #06b6d4 2.43 /
+ * #f59e0b 2.15 / #ec4899 3.53 / #7c3aed 5.70(暗色下 3.18 不达标) /
+ * #f97316 2.80 / #14b8a6 2.49;换 token 后 4.56–7.59(暗色 4.70+)。
+ * 色族合并:orange(#f97316)归琥珀族(profile 与 block 同走 warning token)、
+ * teal(#14b8a6)归青色族(trace 与 allocs 同走 cyan token)。
+ * PROFILE_COLORS 的字面值继续服务未选中 chip 的图标色与图例(非文本,
+ * 维持既有裁定);本函数只做「主色 → token」映射,不复制色值。
+ */
+const PROFILE_TEXT_TONE: Record<string, string> = {
+  '#10b981': 'var(--aa-success-text)',
+  '#3b82f6': 'var(--aa-primary-text)',
+  '#06b6d4': 'var(--aa-cyan-text)',
+  '#f59e0b': 'var(--aa-warning-text)',
+  '#ec4899': 'var(--aa-pink-text)',
+  '#7c3aed': 'var(--aa-violet-text)',
+  '#f97316': 'var(--aa-warning-text)',
+  '#14b8a6': 'var(--aa-cyan-text)'
+}
+
+export function profileTextTone(name: string): string {
+  const { color } = profileMetaOf(name)
+  return PROFILE_TEXT_TONE[color] ?? 'var(--el-text-color-regular)'
+}
+
 /** 采样类型图标(仅取图标部分)。 */
 export function profileIcon(name: string): string {
   return profileMetaOf(name).icon

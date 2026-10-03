@@ -399,8 +399,10 @@
     background: var(--el-color-info);
   }
 
+  /* 文字对比度 AA（收尾批）：重试状态与优先级签文字逐档收进 token
+     （原 EP 基色 1.85/3.27/3.08 全过不了线），数字见 @styles/core/aa-text.scss。 */
   .sub-status.is-retry {
-    color: var(--el-color-warning);
+    color: var(--aa-warning-text);
     cursor: pointer;
     text-decoration: underline;
     text-underline-offset: 3px;
@@ -519,12 +521,12 @@
 
   .priority-tag.is-warning {
     background: var(--el-color-warning-light-9);
-    color: var(--el-color-warning);
+    color: var(--aa-warning-text);
   }
 
   .priority-tag.is-danger {
     background: var(--el-color-danger-light-9);
-    color: var(--el-color-danger);
+    color: var(--aa-danger-text);
   }
 
   .empty-block {

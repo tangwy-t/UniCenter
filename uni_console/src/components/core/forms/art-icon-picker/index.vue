@@ -346,7 +346,8 @@
         // 警告文案比「存为：xxx」长，放宽上限，免得被截成「未随前端发…」
         .manual-value.is-offline-warn {
           max-width: 220px;
-          color: var(--el-color-warning);
+          // 文字对比度 AA（收尾批）：原 el-color-warning（白底 1.85）改走 token。
+          color: var(--aa-warning-text);
         }
       }
     }

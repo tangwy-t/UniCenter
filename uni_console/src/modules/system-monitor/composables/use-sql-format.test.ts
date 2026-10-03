@@ -134,16 +134,26 @@ describe('durTextTone', () => {
 })
 
 describe('opBadgeStyle', () => {
-  it('已知操作取对应主色并派生浅底/描边', () => {
+  // 文字色 AA 收口：color 槽走 token（数字见 use-sql-format 内注释与
+  // @styles/core/aa-text.scss），浅底/描边仍由字面主色派生（非文本）。
+  it('已知操作文字色走 token，浅底/描边由主色派生', () => {
     expect(opBadgeStyle('SELECT')).toEqual({
-      color: '#3b82f6',
+      color: 'var(--aa-primary-text)',
       background: '#3b82f614',
       borderColor: '#3b82f633'
     })
   })
 
-  it('未知操作回退到 OTHER 色', () => {
-    expect(opBadgeStyle('TRUNCATE').color).toBe(OP_COLORS.OTHER)
+  it('五档文字色一一落到各自 token', () => {
+    expect(opBadgeStyle('SELECT').color).toBe('var(--aa-primary-text)')
+    expect(opBadgeStyle('INSERT').color).toBe('var(--aa-success-text)')
+    expect(opBadgeStyle('UPDATE').color).toBe('var(--aa-warning-text)')
+    expect(opBadgeStyle('DELETE').color).toBe('var(--aa-danger-text)')
+  })
+
+  it('未知操作回退到 OTHER 色（文字档走 regular，中性灰原值白底仅 2.56:1）', () => {
+    expect(opBadgeStyle('TRUNCATE').color).toBe('var(--el-text-color-regular)')
+    expect(opBadgeStyle('TRUNCATE').background).toBe(`${OP_COLORS.OTHER}14`)
   })
 
   it('OPS 中每个操作都有配色(与环图共用同一来源)', () => {

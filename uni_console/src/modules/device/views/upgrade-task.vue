@@ -490,7 +490,9 @@
   .ut-done {
     margin-left: 6px;
     font-size: 11px;
-    color: var(--el-color-success);
+    // 文字对比度 AA（收尾批）：原 el-color-success（白底 1.72）改走 token，
+    // 数字见 @styles/core/aa-text.scss。
+    color: var(--aa-success-text);
   }
 
   /* ── 阶段轨（本页的签名元素）─────────────────────────────────────

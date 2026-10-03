@@ -743,14 +743,16 @@
       white-space: pre-wrap;
       word-break: break-all;
 
+      // 文字对比度 AA（收尾批）：diff 文字走 token（light-9 淡底维持，非文本）
+      // ——原 EP 基色对 light-9 底 1.61/2.90，token 后 5.07/5.15。
       &.is-add {
         background: var(--el-color-success-light-9);
-        color: var(--el-color-success);
+        color: var(--aa-success-text);
       }
 
       &.is-del {
         background: var(--el-color-danger-light-9);
-        color: var(--el-color-danger);
+        color: var(--aa-danger-text);
       }
     }
 

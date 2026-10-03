@@ -88,14 +88,29 @@
  *   （见 use-sql-format 的 durTextTone）、device 的 usageTone 数值文字
  *   （见 display.ts 的 usageTextTone）—— 组件只引用 token，不复制色值。
  *
- * ## 本层不负责的（刻意留白）
+ * ## 留白收尾批（上一批「刻意留白」的逐项处置，本批完成）
  *
- * - 「填充+白字」族：实心语义按钮的白字、深色 tag、alert 深色形态的底色
- *   填充（语义档归填充批次，与主色族的分工同）；
- * - 散点的 var(--el-color-*) 逐处文字引用与老字面量（device/docker 等组件
- *   的零散状态文字）：非本批裁定名单，留册待下一批定量收口；
- * - 主色「填充+白字」的按钮/单选填充（上一批已在 el-ui.scss 修过），本层只
- *   动分页活动页填充（上一批的例外，此前无人认领）。
+ * 1) 散点的 var(--el-color-*) 文字引用与老字面量（device/docker/system-* 等
+ *    模块的零散状态文字，含 opBadgeStyle 徽标、charts 色）：逐处核实后 ——
+ *    作文字色的一律收进本层 token（语义色/主色各归其位；#10b981/#f59e0b/
+ *    #dc2626/#059669/#d97706/#b45309/#ea580c 等老字面量按档归语义 token，
+ *    #94a3b8/#64748b 中性灰归 regular 文字色，var(--art-danger)/#e6a23c 归
+ *    语义 token）；身份色（violet/cyan/pink 三族，缓存类型分布/SQL 与 JSON
+ *    语法高亮/profile 选择器）新增「身份色文字族」小节，权重与数字在该节；
+ *    纯装饰/非文本项（图标/点/条/环/图表/固定深色面板）维持字面值，3:1
+ *    复核数字在该批各组件注释与本文件对应小节内注明。
+ * 2) 「填充+白字」族：dark tag 与 alert 深形态的底色槽收口到 fill token
+ *    （白字 5.68–6.67，见下方专节；实心主色按钮在上一批 el-ui.scss）。
+ * 3) 条/环/图表继续吃字面值：登记为非文本维持，复核后照留（不再改）——
+ *    含热力条/环图/折线/火花线/火焰帧/ECharts 系列与 diff 底色。
+ *
+ * 本批复核后明确「维持」的非文本字面值族（不再逐点重复）：
+ * - 装饰渐变图标与白字渐变徽章（kpi/hero 系列）：信息由同排文字承载，
+ *   白字对渐变 1.67–3.68 不等，按装饰性图形维持；
+ * - 固定深色面板（preview #c7c7d1 / pty #e6e6e6）：不随主题，对深底
+ *   11.4/14.8 达标维持；
+ * - SQL 热点排名奖牌（sql-hot__rank 白字对金/银/铜字面渐变 1.67–3.19）：
+ *   未登记进本批「填充+白字」名单，留册报 QA 裁定后处置。
  */
 
 html:root {
@@ -166,6 +181,33 @@ html:root {
   --aa-warning-fill: color-mix(in srgb, var(--el-color-warning) 50%, #000);
   --aa-danger-fill: color-mix(in srgb, var(--el-color-danger) 70%, #000);
   --aa-info-fill: color-mix(in srgb, var(--el-color-info) 70%, #000);
+  // error 的 fill 档（收尾批新增）：error 只进 alert/message/tag（EP 无 error 按钮），
+  // 此前无 fill 需求；本批 dark alert/tag 收口需要。取「白字 ≥6 的最贴近档」——
+  // 55% + 黑 对白字 6.67（60% 档只有 5.87，跌破 6 的家族线）。
+  --aa-error-fill: color-mix(in srgb, var(--el-color-error) 55%, #000);
+}
+
+// ==================== 身份色文字族（收尾批：类别/语法高亮色） ====================
+//
+// 类别身份色（缓存类型分布、SQL/JSON 语法高亮、profile 选择器）当文字色的收口。
+// 与语义族同一处方（身份色 × 正文色混色，随主题自适应），权重取「该色能过线的
+// 最大身份色权重」；浅色锚白底/页底/自 tint（8%–12% 淡染），暗色锚暗卡/暗 tint，
+// 两侧全 ≥4.5 才定档（violet 的约束端在暗色：75/25 时暗卡 4.68、暗 tint12 只剩
+// 4.31，故降到 70/30）。非语义身份色在 EP/主题色板无对应变量，字面值由本层唯一
+// 持有 —— 组件只引用 token、不复制色值（与全层同一条纪律）。
+//
+//   身份色          权重     浅色 白/自tint8/自tint12/灰底    暗色 暗卡/暗tint12
+//   violet #7c3aed  70/30    7.59 / 6.74 / 6.33 / 7.26     5.11 / 4.70
+//   cyan   #06b6d4  50/50    5.42 / 5.03 / 4.84 / 5.18    10.25 / 8.58
+//   pink   #ec4899  70/30    5.28 / 4.77 / 4.56 / 5.05     6.79 / 5.97
+//
+// 旧字面量对照（白底）：violet 5.70（暗色下 3.18 不达标）、cyan 2.43、
+// pink 3.53 —— 全部过不了线；换 token 后如上行。色彩家族归属：emerald/amber/
+// red 系老字面量不在此族（它们是语义色的旧写法，归语义 token）。
+html:root {
+  --aa-violet-text: color-mix(in srgb, #7c3aed 70%, var(--el-text-color-primary));
+  --aa-cyan-text: color-mix(in srgb, #06b6d4 50%, var(--el-text-color-primary));
+  --aa-pink-text: color-mix(in srgb, #ec4899 70%, var(--el-text-color-primary));
 }
 
 html:root {
@@ -349,6 +391,14 @@ html:root {
     color: var(--aa-info-text);
   }
 
+  // alert primary 档（收尾批补漏）：上一批覆盖了四语义档，primary 档（EP 的
+  // 第五种 alert type）漏在名单外；原值主色 3.68:1 过不了线，按同范式补上。
+  // 当前全站无渲染点（唯一 alert 是 warning），照 el-link 先例一并覆盖。
+  .el-alert--primary.is-light,
+  .el-alert--primary.is-light .el-alert__description {
+    color: var(--aa-primary-text);
+  }
+
   // ---- el-message：只换文字槽（图标/底纹是非文本，维持原值）----
   .el-message--success {
     --el-message-text-color: var(--aa-success-text);
@@ -385,5 +435,70 @@ html:root {
   .el-link--info {
     --el-link-text-color: var(--aa-info-text);
     --el-link-hover-text-color: var(--aa-info-text-hover);
+  }
+}
+
+// ==================== 填充+白字族（收尾批：EP 深形态底色） ====================
+//
+// dark tag 与 alert 深形态：EP 的白字直接坐在语义基色填充上（success 1.72 /
+// warning 1.85 / danger 3.27 / error 2.37 / info 3.08 / primary 3.68，全在
+// 4.5:1 线下）。按「与主色族分工同」的填充范式，只换底色槽（bg/border）到语义族
+// 既有 fill token —— 白字对填充 5.67–6.67；文本槽（白）保持 EP 原样，不动。
+// hover 槽（close 按钮底 = 基色 light-3）是装饰性反馈、不含文字，维持。
+// 当前两族全站无渲染点（tag 全走 light/plain，alert 唯一处为 warning 默认
+// light），照 el-link / el-tag--error 先例一并覆盖，避免后来者再开一轮。
+// 注意 alert 的 type 集是 primary/success/info/warning/error（无 danger），
+// tag 的 type 集多一个 danger（无 error 之外的差异以此为准）。
+html:root {
+  .el-tag--primary.el-tag--dark {
+    --el-tag-bg-color: var(--aa-primary-fill);
+    --el-tag-border-color: var(--aa-primary-fill);
+  }
+
+  .el-tag--success.el-tag--dark {
+    --el-tag-bg-color: var(--aa-success-fill);
+    --el-tag-border-color: var(--aa-success-fill);
+  }
+
+  .el-tag--warning.el-tag--dark {
+    --el-tag-bg-color: var(--aa-warning-fill);
+    --el-tag-border-color: var(--aa-warning-fill);
+  }
+
+  .el-tag--danger.el-tag--dark {
+    --el-tag-bg-color: var(--aa-danger-fill);
+    --el-tag-border-color: var(--aa-danger-fill);
+  }
+
+  .el-tag--info.el-tag--dark {
+    --el-tag-bg-color: var(--aa-info-fill);
+    --el-tag-border-color: var(--aa-info-fill);
+  }
+
+  .el-tag--error.el-tag--dark {
+    --el-tag-bg-color: var(--aa-error-fill);
+    --el-tag-border-color: var(--aa-error-fill);
+  }
+
+  // EP 的 is-dark 是直接落 background-color（不走变量槽），白字与 description
+  // 的白由 EP 的 when(dark) 规则给出 —— 只盖底色。
+  .el-alert--primary.is-dark {
+    background-color: var(--aa-primary-fill);
+  }
+
+  .el-alert--success.is-dark {
+    background-color: var(--aa-success-fill);
+  }
+
+  .el-alert--warning.is-dark {
+    background-color: var(--aa-warning-fill);
+  }
+
+  .el-alert--error.is-dark {
+    background-color: var(--aa-error-fill);
+  }
+
+  .el-alert--info.is-dark {
+    background-color: var(--aa-info-fill);
   }
 }

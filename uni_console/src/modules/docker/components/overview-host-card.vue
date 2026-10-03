@@ -112,17 +112,19 @@
     color: var(--el-text-color-secondary);
   }
 
+  // 文字对比度 AA（收尾批）：结论句两档 + 同步警示（原 EP 基色白底
+  // 1.72/3.27/1.85 全过不了线）逐档收进 token，数字见 @styles/core/aa-text.scss。
   .dov-host__verdict {
     margin-top: 8px;
     font-size: 13px;
     font-weight: 500;
 
     &.is-success {
-      color: var(--el-color-success);
+      color: var(--aa-success-text);
     }
 
     &.is-danger {
-      color: var(--el-color-danger);
+      color: var(--aa-danger-text);
     }
   }
 
@@ -132,7 +134,8 @@
     color: var(--el-text-color-secondary);
 
     &.is-warn {
-      color: var(--el-color-warning);
+      // 文字对比度 AA（收尾批）：同结论句两档（warning token）。
+      color: var(--aa-warning-text);
     }
   }
 

@@ -241,7 +241,9 @@
   }
 
   .dov-disk__go:hover {
-    color: var(--el-color-primary-light-3);
+    // 文字对比度 AA（收尾批）：原 primary-light-3（白底 2.40，方向比 resting 更浅）
+    // 改走 hover 档 token，数字见 @styles/core/aa-text.scss。
+    color: var(--aa-primary-text-hover);
   }
 
   .dov-disk__go:focus-visible {

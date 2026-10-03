@@ -1041,7 +1041,8 @@
 
     // 保护档结论句：与陈旧标注同一套颜色语言（琥珀色 = 需要注意的结论）。
     &__blocked {
-      color: var(--el-color-warning);
+      // 文字对比度 AA（收尾批）：原 el-color-warning（白底 1.85）改走 token。
+      color: var(--aa-warning-text);
       font-size: 12px;
     }
   }
@@ -1075,7 +1076,8 @@
 
     // 保护是这一屏唯一需要被「看见」的事实：琥珀色即结论（与陈旧标注同一套颜色语言）。
     &__value.is-warn {
-      color: var(--el-color-warning);
+      // 文字对比度 AA（收尾批）：原 el-color-warning 改走 token。
+      color: var(--aa-warning-text);
     }
   }
 
@@ -1139,7 +1141,8 @@
   }
 
   .cd-logs__error {
-    color: var(--el-color-danger);
+    // 文字对比度 AA（收尾批）：原 el-color-danger 改走 token。
+    color: var(--aa-danger-text);
     font-size: 13px;
   }
 

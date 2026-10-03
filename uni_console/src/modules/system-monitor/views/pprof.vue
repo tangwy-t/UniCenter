@@ -63,13 +63,9 @@
                 enabled ? '已开放' : '已锁定'
               }}</span>
             </div>
-            <div class="text-xs text-g-600">
-              {{
-                enabled
-                  ? '火焰图与原始数据均可正常访问'
-                  : '启用后方可采样查看火焰图、热点函数与原始数据'
-              }}
-            </div>
+            <!-- 原副行「火焰图与原始数据均可正常访问 / 启用后方可采样查看火焰图、热点函数与原始数据」
+                 属状态收益句，已按「零解释文案」终裁删除：状态由本行、页头状态文与 KPI 磁贴承载，
+                 启用动作由右上开关与锁定遮罩的「立即启用」承载，副行无独立功能。 -->
           </div>
         </div>
 
@@ -352,7 +348,8 @@
                 <ArtSvgIcon icon="ri:lock-2-line" />
               </div>
               <div class="pf-lock-mask__title">采集已停用，火焰图不可见</div>
-              <div class="pf-lock-mask__sub">启用后即可采样查看调用栈热点与函数级分布</div>
+              <!-- 原副行「启用后即可采样查看调用栈热点与函数级分布」属状态收益句，
+                   已按「零解释文案」终裁删除：状态由标题承载，恢复路径由下方 CTA 承载。 -->
               <button type="button" class="pf-lock-mask__cta" :disabled="busy" @click="enable">
                 <ArtSvgIcon icon="ri:play-circle-line" />
                 立即启用
@@ -600,6 +597,7 @@ go tool pprof -http=:8080 &lt;server 二进制&gt; {{ fileNameExample }}</pre>
     fmtValue,
     profileIcon,
     profileMetaOf,
+    profileTextTone,
     stamp
   } from '../composables/use-pprof-format'
 
@@ -841,7 +839,13 @@ go tool pprof -http=:8080 &lt;server 二进制&gt; {{ fileNameExample }}</pre>
   function chipStyle(p: PprofProfileEntry): Record<string, string> {
     const { color } = profileMetaOf(p.name)
     return selectedProfile.value === p.name
-      ? { color, background: `${color}14`, borderColor: `${color}55` }
+      ? {
+          // 文字走 AA token（profileTextTone，族合并与数字见 use-pprof-format
+          // 与 @styles/core/aa-text.scss）；淡底/描边维持字面主色（非文本）
+          color: profileTextTone(p.name),
+          background: `${color}14`,
+          borderColor: `${color}55`
+        }
       : {}
   }
 
@@ -1085,7 +1089,10 @@ go tool pprof -http=:8080 &lt;server 二进制&gt; {{ fileNameExample }}</pre>
     border-radius: 10px;
     border: 1px solid rgba(16, 185, 129, 0.4);
     background: rgba(16, 185, 129, 0.1);
-    color: #059669;
+    // 文字对比度 AA（收尾批）：原 #059669/#34d399、#dc2626/#f87171 两态
+    // 逐档收进 success/danger token（数字见 @styles/core/aa-text.scss）；
+    // 底/描边维持字面（非文本，呼吸点走 currentColor 同 token 着色）。
+    color: var(--aa-success-text);
     font-size: 13px;
     font-weight: 600;
     cursor: pointer;
@@ -1100,19 +1107,12 @@ go tool pprof -http=:8080 &lt;server 二进制&gt; {{ fileNameExample }}</pre>
   .pf-toggle.is-on {
     border-color: rgba(220, 38, 38, 0.4);
     background: rgba(220, 38, 38, 0.08);
-    color: #dc2626;
+    color: var(--aa-danger-text);
   }
 
   .pf-toggle.is-on:hover {
     background: rgba(220, 38, 38, 0.14);
     border-color: rgba(220, 38, 38, 0.7);
-  }
-
-  .dark .pf-toggle {
-    color: #34d399;
-  }
-  .dark .pf-toggle.is-on {
-    color: #f87171;
   }
 
   .pf-toggle__dot {
@@ -1169,11 +1169,13 @@ go tool pprof -http=:8080 &lt;server 二进制&gt; {{ fileNameExample }}</pre>
   .pf-ctl__chip.is-live {
     border-color: rgba(249, 115, 22, 0.45);
     background: rgba(249, 115, 22, 0.1);
-    color: #ea580c;
+    // 文字对比度 AA（收尾批）：原 #ea580c（白底 3.56）改走 warning token
+    // （橙归琥珀族，数字见 @styles/core/aa-text.scss）；底/描边维持字面（非文本）。
+    color: var(--aa-warning-text);
   }
 
   .pf-ctl__chip.is-live b {
-    color: #ea580c;
+    color: var(--aa-warning-text);
     font-size: 13px;
   }
 
@@ -1255,7 +1257,9 @@ go tool pprof -http=:8080 &lt;server 二进制&gt; {{ fileNameExample }}</pre>
     border-radius: 999px;
     border: 1px solid rgba(234, 179, 8, 0.4);
     background: rgba(234, 179, 8, 0.1);
-    color: #b45309;
+    // 文字对比度 AA（收尾批）：原 #b45309 对 10% 黄染底 4.58 贴线，
+    // 改走 warning token（5.18，数字见 @styles/core/aa-text.scss）。
+    color: var(--aa-warning-text);
     font-size: 11.5px;
   }
 
@@ -1483,7 +1487,9 @@ go tool pprof -http=:8080 &lt;server 二进制&gt; {{ fileNameExample }}</pre>
     padding: 2px 9px;
     border-radius: 999px;
     background: rgba(6, 182, 212, 0.12);
-    color: #0891b2;
+    // 文字对比度 AA（收尾批）：原 #0891b2（白底 3.68）改走 cyan 身份色 token
+    // （数字见 @styles/core/aa-text.scss）。火焰帧本体的字面色维持（图表族维持）。
+    color: var(--aa-cyan-text);
     font-size: 11.5px;
   }
 
@@ -1540,11 +1546,6 @@ go tool pprof -http=:8080 &lt;server 二进制&gt; {{ fileNameExample }}</pre>
     font-size: 14px;
     font-weight: 600;
     color: var(--el-text-color-primary);
-  }
-
-  .pf-lock-mask__sub {
-    font-size: 12px;
-    color: var(--el-text-color-secondary);
   }
 
   .pf-lock-mask__cta {
@@ -1629,8 +1630,10 @@ go tool pprof -http=:8080 &lt;server 二进制&gt; {{ fileNameExample }}</pre>
   }
 
   .pf-top__rank.is-top3 {
+    // 文字对比度 AA（收尾批，填充+白字同法）：白字对主色填充 3.68 过不了线，
+    // 填充换 --aa-primary-fill（白字 6.59，与按钮/分页批同范式）。
     color: #fff;
-    background: var(--el-color-primary);
+    background: var(--aa-primary-fill);
   }
 
   .pf-top__name {
@@ -1745,7 +1748,8 @@ go tool pprof -http=:8080 &lt;server 二进制&gt; {{ fileNameExample }}</pre>
   .pf-capture__btn.is-busy {
     border-color: rgba(249, 115, 22, 0.5);
     background: rgba(249, 115, 22, 0.12);
-    color: #ea580c;
+    // 文字对比度 AA（收尾批）：同 .pf-ctl__chip.is-live（warning token）。
+    color: var(--aa-warning-text);
   }
 
   .pf-download-line {

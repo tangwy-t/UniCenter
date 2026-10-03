@@ -326,7 +326,8 @@
   }
 
   .pwl__error {
-    color: var(--el-color-danger);
+    // 文字对比度 AA（收尾批）：原 el-color-danger（白底 3.27）改走 token。
+    color: var(--aa-danger-text);
     font-size: 13px;
   }
 

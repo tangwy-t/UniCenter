@@ -502,11 +502,15 @@
     font-size: 12px;
 
     &.on {
-      color: var(--el-color-success);
+      // 文字对比度 AA（收尾批）：原 el-color-success（白底 1.72）改走 token，
+      // 数字见 @styles/core/aa-text.scss。
+      color: var(--aa-success-text);
     }
 
     &.off {
-      color: var(--art-secondary);
+      // 文字对比度 AA（收尾批）：原 --art-secondary（亮蓝，白底仅 2.4）
+      // 按青色族收进身份色 token（数字见 @styles/core/aa-text.scss）。
+      color: var(--aa-cyan-text);
     }
   }
 </style>

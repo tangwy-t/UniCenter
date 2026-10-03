@@ -512,7 +512,9 @@
                     key: 'toggle',
                     label: '停用',
                     icon: 'ri:stop-circle-line',
-                    color: '#e6a23c',
+                    // 文字对比度 AA（收尾批）：原老字面量 #e6a23c（旧 EP warning，
+                    // 白底 2.19）改走 token，数字见 @styles/core/aa-text.scss。
+                    color: 'var(--aa-warning-text)',
                     auth: PermDeviceDisable
                   }
                 : {
@@ -525,7 +527,8 @@
                 key: 'delete',
                 label: '删除',
                 icon: 'ri:delete-bin-5-line',
-                color: 'var(--art-danger)',
+                // 文字对比度 AA（收尾批）：原 --art-danger（白底 3.29）改走 token。
+                color: 'var(--aa-danger-text)',
                 auth: PermDeviceDelete
               }
             ],
@@ -719,7 +722,9 @@
 
     &__arrow {
       font-size: 12px;
-      color: var(--el-color-warning);
+      // 文字对比度 AA（收尾批）：「→ 目标版本」是文字（非图标），原
+      // el-color-warning（白底 1.85）改走 token，数字见 @styles/core/aa-text.scss。
+      color: var(--aa-warning-text);
       font-variant-numeric: tabular-nums;
     }
   }

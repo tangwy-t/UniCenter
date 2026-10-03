@@ -103,7 +103,8 @@
       <div v-else class="rd-placeholder">
         <ArtSvgIcon icon="ri:cursor-line" />
         <p class="rd-placeholder__title">从左侧选择一项资源</p>
-        <p class="rd-placeholder__hint">选中后展示该资源的指标趋势。</p>
+        <!-- 原副行「选中后展示该资源的指标趋势」是对显而易见交互的结果复述，
+             已按「零解释文案」终裁删除（标题即空态引导）。 -->
       </div>
     </section>
   </div>
@@ -295,7 +296,9 @@
       gap: 8px;
       align-items: flex-start;
       font-size: 12px;
-      color: var(--el-color-danger);
+      // 文字对比度 AA（收尾批）：原 el-color-danger（白底 3.27）改走 token，
+      // 数字见 @styles/core/aa-text.scss。
+      color: var(--aa-danger-text);
     }
 
     &__group + &__group {
@@ -377,7 +380,10 @@
       flex-shrink: 0;
       padding: 0 4px;
       font-size: 11px;
-      color: var(--el-color-warning-dark-2);
+      // 文字对比度 AA（收尾批）：原 warning-dark-2（对 light-9 淡底 2.71）
+      // 改走 warning token（对淡底 5.21，见 @styles/core/aa-text.scss）；
+      // 淡底维持字面（非文本）。
+      color: var(--aa-warning-text);
       background: var(--el-color-warning-light-9);
       border-radius: 3px;
     }
@@ -407,7 +413,8 @@
 
     &__stale-hint {
       font-size: 12px;
-      color: var(--el-color-warning-dark-2);
+      // 文字对比度 AA（收尾批）：同 .rd-side__stale（warning token）。
+      color: var(--aa-warning-text);
     }
   }
 
@@ -424,13 +431,6 @@
     &__title {
       font-size: 14px;
       color: var(--el-text-color-secondary);
-    }
-
-    &__hint {
-      max-width: 420px;
-      font-size: 12px;
-      line-height: 1.6;
-      text-align: center;
     }
   }
 

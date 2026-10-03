@@ -115,17 +115,19 @@
     color: var(--el-text-color-placeholder);
   }
 
-  /* 分项语义色（EP 既有色，不新增调色板）：哪些数字上色由 utils/overview 决定 */
+  /* 分项语义色（文字对比度 AA 收尾批：原 EP 基色白底 1.72–3.27 全过不了线，
+     逐档收进 token，数字见 @styles/core/aa-text.scss）：哪些数字上色由
+     utils/overview 决定；tile 渐变（图标底）维持字面/变量（非文本）。 */
   .kpi-tile__seg.is-success {
-    color: var(--el-color-success);
+    color: var(--aa-success-text);
   }
 
   .kpi-tile__seg.is-warning {
-    color: var(--el-color-warning);
+    color: var(--aa-warning-text);
   }
 
   .kpi-tile__seg.is-danger {
-    color: var(--el-color-danger);
+    color: var(--aa-danger-text);
   }
 
   @include t.reduced-motion('.dov-kpi');

@@ -403,8 +403,11 @@
     gap: 6px;
     font-size: 12px;
 
+    // 文字对比度 AA（收尾批）：四态文字逐档收进 token（原 EP 基色白底
+    // 1.72/1.85/3.27 全过不了线），数字见 @styles/core/aa-text.scss；
+    // 状态点走 currentColor，同 token 着色（装饰，随文字档）。
     &.is-live {
-      color: var(--el-color-success);
+      color: var(--aa-success-text);
     }
 
     &.is-connecting {
@@ -412,11 +415,11 @@
     }
 
     &.is-reconnecting {
-      color: var(--el-color-warning);
+      color: var(--aa-warning-text);
     }
 
     &.is-stopped {
-      color: var(--el-color-danger);
+      color: var(--aa-danger-text);
     }
   }
 
@@ -474,7 +477,8 @@
   }
 
   .dov-feed__paused-text {
-    color: var(--el-color-warning);
+    // 文字对比度 AA（收尾批）：原 el-color-warning（对淡底 1.74）改走 token。
+    color: var(--aa-warning-text);
     font-size: 12px;
   }
 

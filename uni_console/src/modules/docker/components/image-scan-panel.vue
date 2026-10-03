@@ -231,7 +231,9 @@
     font-size: 12px;
     line-height: 1.6;
     border-radius: 4px;
-    color: var(--el-color-warning);
+    // 文字对比度 AA（收尾批）：原 el-color-warning（对淡底 1.74）改走 token；
+    // 淡底维持字面（非文本），数字见 @styles/core/aa-text.scss。
+    color: var(--aa-warning-text);
     background: var(--el-color-warning-light-9);
     word-break: break-all;
   }

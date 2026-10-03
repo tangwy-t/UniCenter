@@ -234,7 +234,9 @@
     // 输入档的就地错误句：与拉取对话框同一形态（红字、紧跟输入框）。
     &__error {
       margin-top: 6px;
-      color: var(--el-color-danger);
+      // 文字对比度 AA（收尾批）：原 el-color-danger（白底 3.27）改走 token，
+      // 数字见 @styles/core/aa-text.scss。
+      color: var(--aa-danger-text);
       font-size: 12px;
       line-height: 1.5;
     }

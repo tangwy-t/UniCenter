@@ -322,7 +322,8 @@
 
     // 有失败的波：如实用警示色（失败明细在批末汇总里，这里只挂「这波没全成」的旗）。
     &.is-failed {
-      color: var(--el-color-warning);
+      // 文字对比度 AA（收尾批）：原 el-color-warning（白底 1.85）改走 token。
+      color: var(--aa-warning-text);
     }
   }
 

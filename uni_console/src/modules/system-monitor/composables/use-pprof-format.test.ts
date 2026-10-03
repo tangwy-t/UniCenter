@@ -6,6 +6,7 @@ import {
   fmtValue,
   profileIcon,
   profileMetaOf,
+  profileTextTone,
   stamp
 } from './use-pprof-format'
 
@@ -111,6 +112,41 @@ describe('profileMetaOf / profileIcon', () => {
   it('profileIcon 等于 profileMetaOf().icon', () => {
     for (const name of ['goroutine', 'heap', 'allocs', 'block', 'mutex', 'threadcreate']) {
       expect(profileIcon(name)).toBe(profileMetaOf(name).icon)
+    }
+  })
+})
+
+describe('profileTextTone', () => {
+  // 文字色 AA 收口：选中 chip 的文字走 token（数字见 use-pprof-format 内注释
+  // 与 @styles/core/aa-text.scss）；色族合并 orange→warning、teal→cyan。
+  it('八个已知类型一一落到 token', () => {
+    expect(profileTextTone('goroutine')).toBe('var(--aa-success-text)')
+    expect(profileTextTone('heap')).toBe('var(--aa-primary-text)')
+    expect(profileTextTone('allocs')).toBe('var(--aa-cyan-text)')
+    expect(profileTextTone('block')).toBe('var(--aa-warning-text)')
+    expect(profileTextTone('mutex')).toBe('var(--aa-pink-text)')
+    expect(profileTextTone('threadcreate')).toBe('var(--aa-violet-text)')
+    expect(profileTextTone('profile')).toBe('var(--aa-warning-text)')
+    expect(profileTextTone('trace')).toBe('var(--aa-cyan-text)')
+  })
+
+  it('未知类型落 regular 文字色（原中性灰 #64748b 白底 4.76、其淡染底更低）', () => {
+    expect(profileTextTone('nope')).toBe('var(--el-text-color-regular)')
+  })
+
+  it('与 profileMetaOf 同档：每个返回的颜色都能映射（兜底非空）', () => {
+    for (const name of [
+      'goroutine',
+      'heap',
+      'allocs',
+      'block',
+      'mutex',
+      'threadcreate',
+      'profile',
+      'trace',
+      'nope'
+    ]) {
+      expect(profileTextTone(name)).toBeTruthy()
     }
   })
 })

@@ -759,7 +759,9 @@
     }
 
     &.is-missing {
-      color: var(--el-color-warning);
+      // 文字对比度 AA（收尾批）：原 el-color-warning（白底 1.85）改走 token，
+      // 数字见 @styles/core/aa-text.scss。
+      color: var(--aa-warning-text);
       text-decoration: line-through;
     }
 
@@ -793,7 +795,8 @@
 
     /* 与芯片上的同一字样（.mp-chip.is-missing）保持同一套语义色 */
     &__na {
-      color: var(--el-color-warning);
+      // 文字对比度 AA（收尾批）：同 .mp-chip.is-missing（warning token）。
+      color: var(--aa-warning-text);
     }
 
     /* 条目一律单行：换行会把菜单拉长，正是要修的毛病 */
@@ -812,7 +815,8 @@
     color: var(--el-text-color-secondary);
 
     &--tier {
-      color: var(--el-color-warning-dark-2);
+      // 文字对比度 AA（收尾批）：原 warning-dark-2（对白底 2.89）改走 warning token。
+      color: var(--aa-warning-text);
     }
 
     code {
@@ -847,7 +851,8 @@
     background: var(--el-bg-color);
 
     &--error {
-      color: var(--el-color-danger);
+      // 文字对比度 AA（收尾批）：原 el-color-danger（白底 3.27）改走 token。
+      color: var(--aa-danger-text);
     }
 
     &__spin {

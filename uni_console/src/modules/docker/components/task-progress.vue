@@ -370,7 +370,8 @@
     // 取消请求失败的就地结论句（与进度对话框同一形态：红字）。
     &__error {
       margin-bottom: 0;
-      color: var(--el-color-danger);
+      // 文字对比度 AA（收尾批）：原 el-color-danger（白底 3.27）改走 token。
+      color: var(--aa-danger-text);
     }
 
     // 操作行：取消按钮 + 收起语义的一句硬事实（收起就是收起，与取消是两件事）。

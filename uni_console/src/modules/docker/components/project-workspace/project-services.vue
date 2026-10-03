@@ -464,8 +464,9 @@
   }
 
   // 保护档结论句：与陈旧标注同一套颜色语言（琥珀色 = 需要注意的结论）。
+  // 文字对比度 AA（收尾批）：原 el-color-warning（白底 1.85）改走 token。
   .pws-card__blocked {
-    color: var(--el-color-warning);
+    color: var(--aa-warning-text);
     font-size: 12px;
   }
 

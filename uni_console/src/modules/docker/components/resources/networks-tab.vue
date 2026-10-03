@@ -351,7 +351,9 @@
   .docker-refresh-note {
     margin-left: 10px;
     font-size: 12px;
-    color: var(--el-color-warning);
+    // 文字对比度 AA（收尾批）：原 el-color-warning（白底 1.85）改走 token，
+    // 数字见 @styles/core/aa-text.scss。
+    color: var(--aa-warning-text);
   }
 
   .docker-hint {

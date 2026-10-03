@@ -1230,13 +1230,15 @@
     padding: 2px 8px;
     border-radius: 999px;
     background: rgba(220, 38, 38, 0.1);
-    color: #dc2626;
+    // 文字对比度 AA（收尾批）：原 #dc2626 白底 4.83、对 10% 淡染底 4.13，
+    // 均贴线；改走 danger token（白底 5.81、暗色自适应），
+    // 淡染底维持字面值（非文本）。
+    color: var(--aa-danger-text);
     font-size: 11px;
     font-weight: 600;
   }
 
   .dark .sql-heat__thr {
-    color: #fca5a5;
     background: rgba(220, 38, 38, 0.16);
   }
 
@@ -1473,12 +1475,11 @@
   }
 
   .sql-filterchip.is-slow {
-    color: #dc2626;
+    // 文字对比度 AA（收尾批）：原 #dc2626 白底 4.83、对淡红染底更低，暗色
+    // 另列 #fca5a5 才有档；改走 danger token（数字见 @styles/core/aa-text.scss）；
+    // 描边维持字面淡红（非文本）。
+    color: var(--aa-danger-text);
     border-color: rgba(220, 38, 38, 0.35);
-  }
-
-  .dark .sql-filterchip.is-slow {
-    color: #fca5a5;
   }
 
   .sql-slowscroll {
@@ -1591,27 +1592,19 @@
   }
 
   .sql-slow__sql :deep(.sql-kw--dml) {
-    color: #7c3aed;
+    // 语法高亮文字色 AA（收尾批）：三档老字面量收进 token 层
+    // （violet/cyan 为身份色文字族新增，weight 与数字见 @styles/core/aa-text.scss；
+    // 原 #7c3aed 暗色 3.18 不达标、#0ea5e9 2.77、#d97706 3.19）。暗色档不再单列 ——
+    // 身份色 token 随主题自适应（与语义族同范式）。
+    color: var(--aa-violet-text);
   }
 
   .sql-slow__sql :deep(.sql-kw--clause) {
-    color: #0ea5e9;
+    color: var(--aa-cyan-text);
   }
 
   .sql-slow__sql :deep(.sql-kw--fn) {
-    color: #d97706;
-  }
-
-  .dark .sql-slow__sql :deep(.sql-kw--dml) {
-    color: #a78bfa;
-  }
-
-  .dark .sql-slow__sql :deep(.sql-kw--clause) {
-    color: #38bdf8;
-  }
-
-  .dark .sql-slow__sql :deep(.sql-kw--fn) {
-    color: #fbbf24;
+    color: var(--aa-warning-text);
   }
 
   .sql-slow__flag {
@@ -1619,13 +1612,14 @@
     padding: 1px 6px;
     border-radius: 6px;
     background: rgba(220, 38, 38, 0.12);
-    color: #dc2626;
+    // 文字对比度 AA（收尾批）：原 #dc2626/#fca5a5 改走 danger token
+    // （白底 5.81、对 12% 淡染底 4.82、暗色自适应）；底维持字面红染（非文本）。
+    color: var(--aa-danger-text);
     font-size: 10px;
     font-weight: 700;
   }
 
   .dark .sql-slow__flag {
-    color: #fca5a5;
     background: rgba(220, 38, 38, 0.18);
   }
 
@@ -1674,13 +1668,10 @@
     padding: 2px 10px;
     border-radius: 999px;
     background: rgba(220, 38, 38, 0.12);
-    color: #dc2626;
+    // 文字对比度 AA（收尾批）：同 .sql-slow__flag，改走 danger token。
+    color: var(--aa-danger-text);
     font-size: 12px;
     font-weight: 600;
-  }
-
-  .dark .sql-drawer__flag {
-    color: #fca5a5;
   }
 
   .sql-drawer__flag--err {
@@ -1748,28 +1739,17 @@
   }
 
   .sql-drawer__code :deep(.sql-kw--dml) {
-    color: #7c3aed;
+    // 语法高亮文字色 AA（收尾批）：同 slow 列表三档，收进 token 层。
+    color: var(--aa-violet-text);
     font-weight: 600;
   }
 
   .sql-drawer__code :deep(.sql-kw--clause) {
-    color: #0ea5e9;
+    color: var(--aa-cyan-text);
   }
 
   .sql-drawer__code :deep(.sql-kw--fn) {
-    color: #d97706;
-  }
-
-  .dark .sql-drawer__code :deep(.sql-kw--dml) {
-    color: #a78bfa;
-  }
-
-  .dark .sql-drawer__code :deep(.sql-kw--clause) {
-    color: #38bdf8;
-  }
-
-  .dark .sql-drawer__code :deep(.sql-kw--fn) {
-    color: #fbbf24;
+    color: var(--aa-warning-text);
   }
 
   /* ---------- 空状态 / 占位 ---------- */

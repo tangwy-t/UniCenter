@@ -145,7 +145,12 @@
                 :class="{ 'is-active': activeType === 'all' }"
                 :style="
                   activeType === 'all'
-                    ? { color: '#3b82f6', background: '#3b82f614', borderColor: '#3b82f655' }
+                    ? {
+                        // 文字走 AA token（原主色 3.68 过不了线）；淡底/描边维持字面（非文本）
+                        color: 'var(--aa-primary-text)',
+                        background: '#3b82f614',
+                        borderColor: '#3b82f655'
+                      }
                     : undefined
                 "
                 @click="activeType = 'all'"
@@ -159,7 +164,12 @@
                 :class="{ 'is-active': activeType === g.type }"
                 :style="
                   activeType === g.type
-                    ? { color: g.color, background: `${g.color}14`, borderColor: `${g.color}55` }
+                    ? {
+                        // 文字走身份色 token（typeTextTone）；淡底/描边维持原字面（非文本）
+                        color: typeTextTone(g.type),
+                        background: `${g.color}14`,
+                        borderColor: `${g.color}55`
+                      }
                     : undefined
                 "
                 @click="activeType = g.type"
@@ -191,7 +201,7 @@
                     <span class="cache-section__count">{{ g.keys.length }}</span>
                   </div>
                   <div class="flex items-center gap-3">
-                    <span class="cache-section__share" :style="{ color: g.color }"
+                    <span class="cache-section__share" :style="{ color: typeTextTone(g.type) }"
                       >{{ shareOf(g) }}%</span
                     >
                     <ArtSvgIcon
@@ -359,7 +369,7 @@
         <div class="flex min-w-0 items-center gap-3 pr-8">
           <span
             class="cache-type-chip flex items-center gap-1.5"
-            :style="{ color: valueMeta.color, background: `${valueMeta.color}14` }"
+            :style="{ color: valueMetaTone, background: `${valueMeta.color}14` }"
           >
             <ArtSvgIcon :icon="valueMeta.icon" />
             {{ valueMeta.label }}
@@ -377,7 +387,7 @@
         <div class="cache-value__meta flex flex-wrap items-center gap-2">
           <span
             class="cache-value__chip flex items-center gap-1"
-            :style="{ color: ttlMeta.color, background: `${ttlMeta.color}14` }"
+            :style="{ color: ttlMeta.tone, background: `${ttlMeta.color}14` }"
           >
             <ArtSvgIcon icon="ri:time-line" /> TTL {{ ttlMeta.text }}
           </span>
@@ -603,7 +613,9 @@
   // 页头图标与侧边栏/页签同源（取菜单图标，改「菜单管理」即同步；见 usePageIcon）
   const pageIcon = usePageIcon('ri:database-2-line')
 
-  /** Redis 值类型 → 视觉身份（图标 / 颜色 / 文案），UI 层独立维护 */
+  /** Redis 值类型 → 视觉身份（图标 / 颜色 / 文案），UI 层独立维护。
+   * color 继续服务图标/圆点/堆叠条（非文本族，维持字面值）；文字侧
+   * 一律走 TYPE_TEXT_TONE 的 token 档（见下），两者同键分档不漂移。 */
   interface TypeMeta {
     label: string
     icon: string
@@ -619,6 +631,26 @@
     stream: { label: '流', icon: 'ri:water-flash-line', color: '#06b6d4' },
     none: { label: '已过期', icon: 'ri:time-line', color: '#94a3b8' },
     unknown: { label: '其他类型', icon: 'ri:more-2-fill', color: '#64748b' }
+  }
+
+  /** 类型身份色的「文字」档（收尾批 AA 收口）：TYPE_META 的字面主色当文字
+   * 全部过不了线（白底 1.85–3.68，暗色 violet 一档 3.6），逐档映射到 token
+   * （violet/cyan/pink 为身份色文字族新增，权重与数字见 @styles/core/aa-text.scss）；
+   * 中性档（已过期/其他类型）归 regular 文字色（原 #94a3b8 白底 2.56、
+   * #64748b 4.76 均贴线或线下）。 */
+  const TYPE_TEXT_TONE: Record<string, string> = {
+    string: 'var(--aa-primary-text)',
+    hash: 'var(--aa-violet-text)',
+    list: 'var(--aa-success-text)',
+    set: 'var(--aa-warning-text)',
+    zset: 'var(--aa-pink-text)',
+    stream: 'var(--aa-cyan-text)',
+    none: 'var(--el-text-color-regular)',
+    unknown: 'var(--el-text-color-regular)'
+  }
+
+  function typeTextTone(type: string): string {
+    return TYPE_TEXT_TONE[type] ?? 'var(--el-text-color-regular)'
   }
 
   const NS_COLORS = ['#3b82f6', '#7c3aed', '#10b981', '#f59e0b', '#ec4899', '#06b6d4']
@@ -735,14 +767,24 @@
     return TYPE_META[type] ?? TYPE_META.unknown!
   }
   const valueMeta = computed(() => typeMetaOf((pager.page?.type || 'unknown').toLowerCase()))
+  /** 弹窗头部类型 chip 的「文字」档（同分档见 typeTextTone）。 */
+  const valueMetaTone = computed(() => typeTextTone((pager.page?.type || 'unknown').toLowerCase()))
 
-  /** TTL 徽标：-2 已过期 / -1 不过期 / Ns */
+  /** TTL 徽标：-2 已过期 / -1 不过期 / Ns。
+   * color 服务淡底与图标（非文本），tone 是徽标文字的 AA 档
+   * （原 #94a3b8 2.56 / #dc2626 4.28(对 8% 淡底) / #10b981 2.54 / #f59e0b 2.15 /
+   * #3b82f6 3.68 逐档收口，数字见 @styles/core/aa-text.scss）。 */
   const ttlMeta = computed(() => {
     const ttl = pager.page?.ttl
-    if (ttl === null || ttl === undefined) return { text: '-', color: '#94a3b8' }
-    if (ttl === -2) return { text: '已过期', color: '#dc2626' }
-    if (ttl === -1) return { text: '不过期', color: '#10b981' }
-    return { text: `${ttl}s`, color: ttl < 60 ? '#f59e0b' : '#3b82f6' }
+    if (ttl === null || ttl === undefined)
+      return { text: '-', color: '#94a3b8', tone: 'var(--el-text-color-regular)' }
+    if (ttl === -2) return { text: '已过期', color: '#dc2626', tone: 'var(--aa-danger-text)' }
+    if (ttl === -1) return { text: '不过期', color: '#10b981', tone: 'var(--aa-success-text)' }
+    return {
+      text: `${ttl}s`,
+      color: ttl < 60 ? '#f59e0b' : '#3b82f6',
+      tone: ttl < 60 ? 'var(--aa-warning-text)' : 'var(--aa-primary-text)'
+    }
   })
 
   const valueType = computed(() => (pager.page?.type || '').toLowerCase())
@@ -1134,12 +1176,11 @@
     border-radius: 999px;
     border: 1px solid rgba(245, 158, 11, 0.35);
     background: rgba(245, 158, 11, 0.12);
-    color: #b45309;
+    // 文字对比度 AA（收尾批）：原 #b45309/#fbbf24 两档收进 warning token
+    // （对 12% 琥珀淡底 5.18、暗色自适应，数字见 @styles/core/aa-text.scss）；
+    // 淡底/描边维持字面（非文本）。
+    color: var(--aa-warning-text);
     white-space: nowrap;
-  }
-
-  .dark .cache-limit-chip {
-    color: #fbbf24;
   }
 
   /* ---------- 类型筛选 pill ---------- */
@@ -1484,36 +1525,27 @@
     color: var(--el-text-color-primary);
   }
 
+  /* JSON 语法着色：文字色 AA 收口（收尾批）—— 逐档收进 token 层
+     （violet/cyan 为身份色文字族新增，数字见 @styles/core/aa-text.scss；
+     原 #7c3aed 暗色 3.18 不达标、#059669 3.77、#d97706 3.19、#0891b2 3.68、
+     #64748b 4.76 贴线）。暗色档单列规则删除：token 随主题自适应。 */
   .tok-key {
-    color: #7c3aed;
+    color: var(--aa-violet-text);
   }
   .tok-str {
-    color: #059669;
+    color: var(--aa-success-text);
   }
   .tok-num {
-    color: #d97706;
+    color: var(--aa-warning-text);
   }
   .tok-kw {
-    color: #0891b2;
+    color: var(--aa-cyan-text);
   }
   .tok-punct {
-    color: #64748b;
+    color: var(--el-text-color-regular);
   }
   .tok-plain {
     color: var(--el-text-color-primary);
-  }
-
-  .dark .tok-key {
-    color: #a78bfa;
-  }
-  .dark .tok-str {
-    color: #34d399;
-  }
-  .dark .tok-num {
-    color: #fbbf24;
-  }
-  .dark .tok-kw {
-    color: #22d3ee;
   }
 
   /* hash：双列表格（field | value） */
@@ -1532,12 +1564,10 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Fira Code', monospace;
     font-size: 12.5px;
     font-weight: 600;
-    color: #7c3aed;
+    // 文字对比度 AA（收尾批）：原 #7c3aed/#a78bfa 改走 violet token（数字见
+    // @styles/core/aa-text.scss），暗色档随 token 自适应。
+    color: var(--aa-violet-text);
     word-break: break-all;
-  }
-
-  .dark .cache-hash__field {
-    color: #a78bfa;
   }
 
   .cache-hash__cell {
@@ -1568,13 +1598,11 @@
     font-size: 11px;
     line-height: 20px;
     text-align: center;
-    color: #059669;
+    // 文字对比度 AA（收尾批）：原 #059669/#34d399 改走 success token
+    // （对 10% 绿染底 4.94，见 @styles/core/aa-text.scss）；淡底维持字面（非文本）。
+    color: var(--aa-success-text);
     background: rgba(16, 185, 129, 0.1);
     font-variant-numeric: tabular-nums;
-  }
-
-  .dark .cache-list__index {
-    color: #34d399;
   }
 
   .cache-list__value {
@@ -1647,13 +1675,11 @@
     font-size: 11px;
     line-height: 20px;
     text-align: center;
-    color: #db2777;
+    // 文字对比度 AA（收尾批）：原 #db2777/#f472b6 改走 pink token
+    // （对 12% 粉染底 4.56，见 @styles/core/aa-text.scss）；淡底维持字面（非文本）。
+    color: var(--aa-pink-text);
     background: rgba(236, 72, 153, 0.12);
     font-variant-numeric: tabular-nums;
-  }
-
-  .dark .cache-zset__rank {
-    color: #f472b6;
   }
 
   .cache-zset__member {
@@ -1672,13 +1698,10 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Fira Code', monospace;
     font-size: 11.5px;
     font-weight: 600;
-    color: #db2777;
+    // 文字对比度 AA（收尾批）：同 .cache-zset__rank（pink token）。
+    color: var(--aa-pink-text);
     background: rgba(236, 72, 153, 0.12);
     font-variant-numeric: tabular-nums;
-  }
-
-  .dark .cache-zset__score {
-    color: #f472b6;
   }
 
   /* stream：暂不支持提示 */
@@ -1824,13 +1847,11 @@
     border: 1px solid rgba(245, 158, 11, 0.4);
     background: transparent;
     font-size: 12px;
-    color: #b45309;
+    // 文字对比度 AA（收尾批）：原 #b45309/#fbbf24 改走 warning token
+    // （见 @styles/core/aa-text.scss），暗色档随 token 自适应；描边维持字面（非文本）。
+    color: var(--aa-warning-text);
     cursor: pointer;
     transition: opacity 0.15s ease;
-  }
-
-  .dark .cache-string-more {
-    color: #fbbf24;
   }
 
   .cache-string-more:disabled {

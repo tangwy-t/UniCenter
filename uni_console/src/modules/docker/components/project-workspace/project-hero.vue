@@ -249,13 +249,15 @@
     font-size: 12px;
 
     // 陈旧：琥珀即结论（与模块内陈旧/保护标注同一套颜色语言）。
+    // 文字对比度 AA（收尾批）：三处琥珀结论句（原 el-color-warning，白底
+    // 1.85）改走 token，数字见 @styles/core/aa-text.scss。
     &.pwh__sync--warn {
-      color: var(--el-color-warning);
+      color: var(--aa-warning-text);
     }
   }
 
   .pwh__offline {
-    color: var(--el-color-warning);
+    color: var(--aa-warning-text);
     font-size: 12px;
   }
 
@@ -268,7 +270,7 @@
 
   // 保护档结论句：与陈旧标注同一套颜色语言（琥珀色 = 需要注意的结论）。
   .pwh__blocked {
-    color: var(--el-color-warning);
+    color: var(--aa-warning-text);
     font-size: 12px;
   }
 

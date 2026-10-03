@@ -662,7 +662,9 @@
         label: '删除（需先删除使用该镜像的容器）',
         icon: entry?.icon ?? 'ri:delete-bin-5-line',
         auth: entry?.perm ?? PermDockerDelete,
-        color: 'var(--art-danger)',
+        // 文字对比度 AA（收尾批）：原 --art-danger（白底 3.29）改走 token
+        // （禁用态本可豁免，收进 token 层保持全族一档）。
+        color: 'var(--aa-danger-text)',
         disabled: true
       })
     } else {
@@ -843,7 +845,9 @@
   .docker-refresh-note {
     margin-left: 10px;
     font-size: 12px;
-    color: var(--el-color-warning);
+    // 文字对比度 AA（收尾批）：原 el-color-warning（白底 1.85）改走 token，
+    // 数字见 @styles/core/aa-text.scss。
+    color: var(--aa-warning-text);
   }
 
   // 底栏合计：主行（可见清单的合计）与副行（后端账目的可回收量）同一行、副行弱化。

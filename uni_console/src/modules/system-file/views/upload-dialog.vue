@@ -14,7 +14,8 @@
         </span>
         <div class="head-text">
           <p class="head-title">上传文件</p>
-          <p class="head-sub">拖拽或选择文件,支持批量上传</p>
+          <!-- 原副行「拖拽或选择文件,支持批量上传」与下方拖拽区的操作指引、格式约束逐句重复，
+               已按「零解释文案」终裁删除。 -->
         </div>
       </div>
     </template>
@@ -374,12 +375,6 @@
     font-weight: 500;
     line-height: 20px;
     color: var(--art-gray-900);
-  }
-
-  .head-sub {
-    margin-top: 1px;
-    font-size: 12px;
-    color: var(--art-gray-500);
   }
 
   .dropzone {
