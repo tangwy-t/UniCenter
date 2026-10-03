@@ -209,7 +209,7 @@
                   <div class="text-sm font-semibold text-[var(--el-text-color-primary)]"
                     >操作类型分布</div
                   >
-                  <div class="sql-card__sub">累计执行次数占比（悬停查看明细）</div>
+                  <div class="sql-card__sub">累计执行次数占比</div>
                 </div>
               </div>
             </div>
@@ -440,9 +440,7 @@
                   <div class="text-sm font-semibold text-[var(--el-text-color-primary)]"
                     >慢查询实录</div
                   >
-                  <div class="sql-card__sub"
-                    >按耗时降序 · 环形缓冲最近 100 条 · 点击行查看完整 SQL</div
-                  >
+                  <div class="sql-card__sub">按耗时降序 · 环形缓冲最近 100 条</div>
                 </div>
               </div>
               <div class="flex flex-wrap items-center gap-1">
@@ -604,14 +602,6 @@
           />
         </div>
         <pre class="sql-drawer__code"><code v-html="highlightSQL(drawerEntry.sql)" /></pre>
-
-        <div class="sql-drawer__hint">
-          <ArtSvgIcon icon="ri:information-line" />
-          <span
-            >定位慢查询：将 SQL 粘贴到数据库客户端执行
-            <b>EXPLAIN</b>，关注索引命中与扫描行数。</span
-          >
-        </div>
       </template>
     </ElDrawer>
   </div>
@@ -1773,25 +1763,6 @@
 
   .dark .sql-drawer__code :deep(.sql-kw--fn) {
     color: #fbbf24;
-  }
-
-  .sql-drawer__hint {
-    display: flex;
-    align-items: flex-start;
-    gap: 7px;
-    margin-top: 12px;
-    padding: 9px 12px;
-    border-radius: 10px;
-    background: var(--el-color-primary-light-9);
-    color: var(--el-text-color-secondary);
-    font-size: 12px;
-    line-height: 1.6;
-  }
-
-  .sql-drawer__hint :deep(svg) {
-    margin-top: 1px;
-    flex: none;
-    color: var(--el-color-primary);
   }
 
   /* ---------- 空状态 / 占位 ---------- */

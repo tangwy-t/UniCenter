@@ -54,7 +54,8 @@ export interface OverviewKpiTile {
   to?: string
   /** 本页锚点（与 to 互斥）：主机/磁盘磁贴没有「主机列表页」，下钻目标是下方面板。 */
   anchor?: string
-  /** 悬停说明：把「点了会发生什么」写出来（磁贴整块可点，需要预告去向）。 */
+  /** 悬停说明：只写账目口径（这块数字是什么账）。原「点击进入/滚动到…」去向句已按
+   * 「零解释文案」纪律删除 —— 磁贴整块可点，去向由点击行为本身表达，不需要文案预告。 */
   title: string
 }
 
@@ -98,7 +99,7 @@ export function buildOverviewKpis(fleet: Api.Docker.DockerOverviewFleet): Overvi
         { text: `受保护 ${fleet.containers.protected}` }
       ],
       to: '/docker/containers',
-      title: '跨全部主机合计的容器账目 —— 点击进入容器列表'
+      title: '跨全部主机合计的容器账目'
     },
     {
       key: 'images',
@@ -110,7 +111,7 @@ export function buildOverviewKpis(fleet: Api.Docker.DockerOverviewFleet): Overvi
       // 7a：三个旧列表页收敛为 /docker/resources 的 tab，下钻地址带 ?tab=（字符串
       // 里的 query 由 router.push 解析；磁贴不带 host —— 账目本来就是跨主机合计）。
       to: '/docker/resources?tab=images',
-      title: '跨全部主机合计的镜像账目 —— 点击进入镜像表'
+      title: '跨全部主机合计的镜像账目'
     },
     {
       key: 'volumes',
@@ -120,7 +121,7 @@ export function buildOverviewKpis(fleet: Api.Docker.DockerOverviewFleet): Overvi
       label: '数据卷',
       sub: [{ text: `未使用 ${volumesUnused}`, tone: volumesUnused > 0 ? 'warning' : undefined }],
       to: '/docker/resources?tab=volumes',
-      title: '跨全部主机合计的数据卷账目 —— 点击进入数据卷表'
+      title: '跨全部主机合计的数据卷账目'
     },
     {
       key: 'networks',
@@ -130,7 +131,7 @@ export function buildOverviewKpis(fleet: Api.Docker.DockerOverviewFleet): Overvi
       label: '网络',
       sub: [],
       to: '/docker/resources?tab=networks',
-      title: '跨全部主机合计的网络数 —— 点击进入网络表'
+      title: '跨全部主机合计的网络数'
     },
     {
       key: 'projects',
@@ -145,7 +146,7 @@ export function buildOverviewKpis(fleet: Api.Docker.DockerOverviewFleet): Overvi
         }
       ],
       to: '/docker/projects',
-      title: '跨全部主机合计的编排项目 —— 点击进入项目列表'
+      title: '跨全部主机合计的编排项目'
     },
     {
       key: 'hosts',
@@ -155,7 +156,7 @@ export function buildOverviewKpis(fleet: Api.Docker.DockerOverviewFleet): Overvi
       label: '主机',
       sub: [{ text: `可用 ${hostsOk}`, tone: hostsOk < fleet.hosts.total ? 'warning' : 'success' }],
       anchor: 'dov-hosts',
-      title: '可管主机数 —— 点击滚动到下方的主机卡片'
+      title: '可管主机数'
     },
     {
       key: 'disk',
@@ -175,7 +176,7 @@ export function buildOverviewKpis(fleet: Api.Docker.DockerOverviewFleet): Overvi
             ]
           : [{ text: '数据不可用', tone: 'warning' }],
       anchor: 'dov-disk',
-      title: '已上报主机的镜像/卷/构建缓存占用合计 —— 点击滚动到磁盘面板'
+      title: '已上报主机的镜像/卷/构建缓存占用合计'
     }
   ]
 }
@@ -267,7 +268,9 @@ export function overviewSubtitle(
   hasError: boolean,
   autoRefresh: boolean
 ): string {
-  if (hasError) return '总览拉取失败 —— 点击右侧刷新重试'
+  // 原「点击右侧刷新重试」去向/定位句已按「零解释文案」纪律删除（右侧刷新按钮
+  // 本身即入口，副标题只留失败结论）。
+  if (hasError) return '总览拉取失败'
   if (!resp) return loading ? '正在拉取舰队总览…' : '暂无数据'
   const parts = [
     `共 ${resp.fleet.hosts.total} 台主机 · ${resp.fleet.hosts.dockerOk} 台可用`,

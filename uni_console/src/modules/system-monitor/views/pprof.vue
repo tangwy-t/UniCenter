@@ -212,12 +212,9 @@
                       profileLabel
                     }}</span>
                   </div>
-                  <div class="pf-card__sub">
-                    <template v-if="flameData">
-                      {{ fmtValue(flameData.totalValue) }} {{ unitLabel }} ·
-                      {{ flameData.sampleCount }} 条采样 · 点击帧下钻
-                    </template>
-                    <template v-else>按调用栈宽度呈现热点占比</template>
+                  <div v-if="flameData" class="pf-card__sub">
+                    {{ fmtValue(flameData.totalValue) }} {{ unitLabel }} ·
+                    {{ flameData.sampleCount }} 条采样
                   </div>
                 </div>
               </div>
@@ -237,11 +234,7 @@
                 <ArtButtonTable
                   icon="ri:file-download-line"
                   iconClass="bg-theme/12 text-theme"
-                  :title="
-                    selectedProfile === 'profile' || selectedProfile === 'trace'
-                      ? '采集类请到右侧按需采集'
-                      : `下载 ${selectedProfile} 原始数据`
-                  "
+                  :title="isSnapshot ? `下载 ${selectedProfile} 原始数据` : undefined"
                   @click="downloadProfile"
                 />
                 <ArtButtonTable
@@ -309,7 +302,7 @@
                 <div class="pf-flame-legend">
                   <span class="pf-flame-legend__gradient" />
                   <span class="text-[11px] text-g-600">
-                    颜色随调用深度加深 · 帧宽 = 采样值占比 · 悬停高亮调用链 · 点击下钻 · 最深 48 层
+                    颜色随调用深度加深 · 帧宽 = 采样值占比 · 最深 48 层
                   </span>
                   <span v-if="searchHits" class="pf-flame-legend__hit">
                     <ArtSvgIcon icon="ri:search-line" />
@@ -381,7 +374,7 @@
                   <div class="text-sm font-semibold text-[var(--el-text-color-primary)]"
                     >热点函数 Top {{ topN }}</div
                   >
-                  <div class="pf-card__sub">flat 自身采样值 · 点击行定位火焰图 · 列表内滚动</div>
+                  <div class="pf-card__sub">flat 自身采样值</div>
                 </div>
               </div>
               <div
@@ -456,7 +449,6 @@
                 <div class="text-sm font-semibold text-[var(--el-text-color-primary)]"
                   >采集与下载</div
                 >
-                <div class="pf-card__sub">原始数据可交给 go tool pprof 离线分析</div>
               </div>
             </div>
 
@@ -467,7 +459,7 @@
                     class="flex items-center gap-1.5 whitespace-nowrap text-xs text-[var(--el-text-color-regular)]"
                   >
                     <ArtSvgIcon icon="ri:scan-2-line" class="shrink-0" style="color: #f97316" />
-                    <b>CPU profile</b>· CPU 使用热点采样
+                    <b>CPU profile</b>
                   </div>
                   <div class="pf-card__sub">服务端阻塞采集,期间请保持页面等待</div>
                 </div>
@@ -510,9 +502,8 @@
                     class="flex items-center gap-1.5 whitespace-nowrap text-xs text-[var(--el-text-color-regular)]"
                   >
                     <ArtSvgIcon icon="ri:pulse-line" class="shrink-0" style="color: #14b8a6" />
-                    <b>trace</b>· Go 执行跟踪
+                    <b>trace</b>
                   </div>
-                  <div class="pf-card__sub">go tool trace 分析调度与延迟</div>
                 </div>
                 <div class="pf-actions">
                   <div class="pf-seg flex items-center gap-0.5">
@@ -576,10 +567,6 @@
             </div>
             <pre class="pf-note__code font-mono">
 go tool pprof -http=:8080 &lt;server 二进制&gt; {{ fileNameExample }}</pre>
-            <div class="pf-note__hint">
-              火焰图 / 热点函数为在线速览;CPU、trace 与各快照均可下载原始数据,用官方 pprof
-              工具做深度分析。
-            </div>
           </div>
         </div>
       </div>
@@ -844,7 +831,7 @@ go tool pprof -http=:8080 &lt;server 二进制&gt; {{ fileNameExample }}</pre>
   }
 
   function topRowTitle(r: PprofTopFunc): string {
-    return `${r.fn}\n${r.file}:${r.line}\nflat ${fmtValue(r.flat)} · cum ${fmtValue(r.cum)} · 点击定位火焰图`
+    return `${r.fn}\n${r.file}:${r.line}\nflat ${fmtValue(r.flat)} · cum ${fmtValue(r.cum)}`
   }
 
   // ---------- 格式化 ----------
@@ -1808,13 +1795,6 @@ go tool pprof -http=:8080 &lt;server 二进制&gt; {{ fileNameExample }}</pre>
     word-break: break-all;
   }
 
-  .pf-note__hint {
-    margin-top: 8px;
-    font-size: 11px;
-    line-height: 1.6;
-    color: var(--el-text-color-secondary);
-  }
-
   /* 动画停用收敛到共享 mixin(其余视图曾各自重写同一媒体查询) */
   @include t.reduced-motion('.pf-card', '.live-dot', '.pf-toggle__dot');
   @media (prefers-reduced-motion: reduce) {
@@ -1828,8 +1808,7 @@ go tool pprof -http=:8080 &lt;server 二进制&gt; {{ fileNameExample }}</pre>
     .pf-top__row,
     .pf-top__bar,
     .pf-capture__btn,
-    .pf-download-line__btn,
-    .pf-note__hint {
+    .pf-download-line__btn {
       transition: none;
     }
   }

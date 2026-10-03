@@ -616,6 +616,257 @@ func TestBuildProgressFrameCarriesNoContextSecrets(t *testing.T) {
 	}
 }
 
+// ── 取消/完成的竞态（B4 同款扩面：build / push）──────────────────────────────
+//
+// 背景与 pull 的 B4 同一场景：用户在构建/推送进行中切页/关对话框 → 前端断流 →
+// core 下发 cancel 帧；若 daemon 恰在同时把活干完，旧实现按「ctx 被中断」把一场
+// **已经完成**的活记成失败（任务中心红字，而产物/清单其实都已落地）。用例把结算
+// 规则钉死：完成的事实优先于迟到的取消，且**只有**各自的完成证据能翻案（防止顺手
+// 把真取消也放行）。
+
+// build 的完成证据：目标 tag 的本机镜像 ID 变了（构建前后各问一次 ImageRefID）——
+// 独立于流的事实，产物从无到有（空串 → 非空）也算变。
+func TestBuildImageCancelAfterProductLandedStaysSucceeded(t *testing.T) {
+	dir := t.TempDir()
+	ch := make(chan BuildProgress, 8)
+	// 观测序列：构建前（第一问）= 目标 tag 本机没有；取消结算时（第二问）= 产物已落地。
+	api := &stubAPI{buildCh: ch, imageRefIDs: []string{"", "sha256:built"}}
+	w, m, clk, sink := newPullFixture(api)
+	w.SetTransferDir(dir)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Do(context.Background(), buildCmd(t, dir, "", "app:1"))
+		done <- err
+	}()
+
+	ch <- BuildProgress{Stream: "#6 exporting layers"}
+	advanceUntil(t, clk, 50*time.Millisecond, 400*time.Millisecond, func() bool { return sink.count() >= 1 })
+
+	// 用户切页 → core 下发 cancel → 会话收摊 → buildCtx 被中断，ImageBuild 以 ctx
+	// 错误返回（替身与 SDK 同款）。
+	m.OnFrame(&agentproto.CoreDockerFrame{
+		SessionID: agentproto.DockerBuildSessionID(buildRef), Op: agentproto.DockerFrameOpCancel,
+	})
+
+	if err := pullResultOf(t, done); err != nil {
+		t.Fatalf("产物已落地（目标 tag 从无到有）必须按成功结算，实际: %v", err)
+	}
+	if got := m.count(); got != 0 {
+		t.Fatalf("取消必须立刻释放槽位: %d", got)
+	}
+	if len(api.imageRefCalls) != 2 {
+		t.Fatalf("完成判据必须做构建前后两次对照，实际 %d 次: %v", len(api.imageRefCalls), api.imageRefCalls)
+	}
+}
+
+// 反向守卫：重构建一个**本机已有**的 tag、被取消且 ID 没变 —— 不得因为「现在有这个
+// tag」就说成功（那是反向的不诚实：这次构建的产物并没有兑现）。
+func TestBuildImageCancelWithPreexistingTagStaysCanceled(t *testing.T) {
+	dir := t.TempDir()
+	ch := make(chan BuildProgress, 8)
+	api := &stubAPI{buildCh: ch, imageRefIDs: []string{"sha256:old1", "sha256:old1"}}
+	w, m, clk, sink := newPullFixture(api)
+	w.SetTransferDir(dir)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Do(context.Background(), buildCmd(t, dir, "", "app:1"))
+		done <- err
+	}()
+
+	ch <- BuildProgress{Stream: "#2 [1/2] RUN make"}
+	advanceUntil(t, clk, 50*time.Millisecond, 400*time.Millisecond, func() bool { return sink.count() >= 1 })
+
+	m.OnFrame(&agentproto.CoreDockerFrame{
+		SessionID: agentproto.DockerBuildSessionID(buildRef), Op: agentproto.DockerFrameOpCancel,
+	})
+
+	var ee *ExecError
+	if err := pullResultOf(t, done); !errors.As(err, &ee) || ee.Msg != "构建已取消" {
+		t.Fatalf("tag 没变（旧产物仍在）时必须记取消，实际: %v", err)
+	}
+}
+
+// 反向守卫：构建前查不了（daemon 抖动）= 没有对照基线 —— 单看「现在有这个 tag」不可
+// 作判据（那可能是本来就有的），落回「取消」而不是编一条完成。
+func TestBuildImageCancelWithUnknownBaselineStaysCanceled(t *testing.T) {
+	dir := t.TempDir()
+	ch := make(chan BuildProgress, 8)
+	api := &stubAPI{buildCh: ch, imageRefErr: errors.New("daemon busy"), imageRefIDs: []string{"sha256:any"}}
+	w, m, clk, sink := newPullFixture(api)
+	w.SetTransferDir(dir)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Do(context.Background(), buildCmd(t, dir, "", "app:1"))
+		done <- err
+	}()
+
+	ch <- BuildProgress{Stream: "#2 [1/2] RUN make"}
+	advanceUntil(t, clk, 50*time.Millisecond, 400*time.Millisecond, func() bool { return sink.count() >= 1 })
+
+	m.OnFrame(&agentproto.CoreDockerFrame{
+		SessionID: agentproto.DockerBuildSessionID(buildRef), Op: agentproto.DockerFrameOpCancel,
+	})
+
+	var ee *ExecError
+	if err := pullResultOf(t, done); !errors.As(err, &ee) || ee.Msg != "构建已取消" {
+		t.Fatalf("没有构建前基线时不得凭「现在有 tag」判完成，实际: %v", err)
+	}
+}
+
+// push 的完成证据一：daemon 的收尾行（"<tag>: digest: …" = 清单已提交进 registry）
+// 已经到达读循环 —— 此后到达的 cancel 是 no-op，终态按完成结算。顺带钉住短路：
+// 收尾行已到时**不再**问第二问（本机 digest 对照），结算不多花一次 daemon 调用。
+func TestPushImageCancelAfterDaemonCompletedStaysSucceeded(t *testing.T) {
+	ch := make(chan PullProgress, 8)
+	api := &stubAPI{pushCh: ch}
+	w, m, clk, sink := newPullFixture(api)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Do(context.Background(), pushCmd(nil))
+		done <- err
+	}()
+
+	ch <- PullProgress{Status: "The push refers to repository [harbor.example.com/app]"}
+	ch <- PullProgress{ID: "aaa", Status: "Pushed"}
+	ch <- PullProgress{Status: "1: digest: sha256:deadbeef size: 1234"}
+	advanceUntil(t, clk, 50*time.Millisecond, 400*time.Millisecond, func() bool { return sink.count() >= 1 })
+
+	m.OnFrame(&agentproto.CoreDockerFrame{
+		SessionID: agentproto.DockerPushSessionID(pushRef), Op: agentproto.DockerFrameOpCancel,
+	})
+
+	if err := pullResultOf(t, done); err != nil {
+		t.Fatalf("daemon 已完成的推送在迟到 cancel 后必须按成功结算，实际: %v", err)
+	}
+	if got := m.count(); got != 0 {
+		t.Fatalf("取消必须立刻释放槽位: %d", got)
+	}
+	if len(api.repoDigestCalls) != 1 {
+		t.Fatalf("收尾行已到即已结算，不应再问本机 digest 对照（只该有一次推送前基线），实际 %d 次: %v",
+			len(api.repoDigestCalls), api.repoDigestCalls)
+	}
+}
+
+// push 的完成证据二：收尾行随中断的连接一起丢了（ctx 取消直接关连接，缓冲里的尾数据
+// 不复存在）—— 用独立于流的事实补判：推送前后本机给这个镜像记的 canonical 引用
+// 多了一条（daemon 在清单提交成功后落的笔）。
+func TestPushImageCancelAfterDigestRefLandedStaysSucceeded(t *testing.T) {
+	ch := make(chan PullProgress, 8)
+	// 观测序列：推送前（第一问）= 只有上次留下的旧 digest 引用；结算时（第二问）= 多了一条。
+	api := &stubAPI{pushCh: ch, repoDigests: [][]string{
+		{"app@sha256:old"},
+		{"app@sha256:old", "app@sha256:new"},
+	}}
+	w, m, clk, sink := newPullFixture(api)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Do(context.Background(), pushCmd(nil))
+		done <- err
+	}()
+
+	ch <- PullProgress{ID: "aaa", Status: "Pushing", Current: 90, Total: 100}
+	advanceUntil(t, clk, 50*time.Millisecond, 400*time.Millisecond, func() bool { return sink.count() >= 1 })
+
+	m.OnFrame(&agentproto.CoreDockerFrame{
+		SessionID: agentproto.DockerPushSessionID(pushRef), Op: agentproto.DockerFrameOpCancel,
+	})
+
+	if err := pullResultOf(t, done); err != nil {
+		t.Fatalf("本机 digest 引用多了一条（清单已提交的本地痕迹）必须按成功结算，实际: %v", err)
+	}
+	if len(api.repoDigestCalls) != 2 {
+		t.Fatalf("完成判据必须做推送前后两次对照，实际 %d 次: %v", len(api.repoDigestCalls), api.repoDigestCalls)
+	}
+}
+
+// 反向守卫：重推**同一份内容**（daemon 不会再落一笔 digest 引用）、被取消且引用集合
+// 没变 —— 不得因为「本机有 digest 引用」就说成功（那是反向的不诚实：重推并没有兑现）；
+// 收尾行没到（被截断）时落回「取消」。
+func TestPushImageCancelWithUnchangedDigestRefsStaysCanceled(t *testing.T) {
+	ch := make(chan PullProgress, 8)
+	api := &stubAPI{pushCh: ch, repoDigests: [][]string{
+		{"app@sha256:same"},
+		{"app@sha256:same"},
+	}}
+	w, m, clk, sink := newPullFixture(api)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Do(context.Background(), pushCmd(nil))
+		done <- err
+	}()
+
+	ch <- PullProgress{ID: "aaa", Status: "Pushing", Current: 10, Total: 100}
+	advanceUntil(t, clk, 50*time.Millisecond, 400*time.Millisecond, func() bool { return sink.count() >= 1 })
+
+	m.OnFrame(&agentproto.CoreDockerFrame{
+		SessionID: agentproto.DockerPushSessionID(pushRef), Op: agentproto.DockerFrameOpCancel,
+	})
+
+	var ee *ExecError
+	if err := pullResultOf(t, done); !errors.As(err, &ee) || ee.Msg != "推送已取消" {
+		t.Fatalf("digest 引用没变（可能是上次留下的）时必须记取消，实际: %v", err)
+	}
+}
+
+// 反向守卫：推送前查不了（daemon 抖动）= 没有对照基线 —— 单看「现在有 digest 引用」
+// 不可作判据（那可能是本来就有的），落回「取消」而不是编一条完成。
+func TestPushImageCancelWithUnknownDigestBaselineStaysCanceled(t *testing.T) {
+	ch := make(chan PullProgress, 8)
+	api := &stubAPI{pushCh: ch, repoDigestErr: errors.New("daemon busy"), repoDigests: [][]string{{"app@sha256:any"}}}
+	w, m, clk, sink := newPullFixture(api)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Do(context.Background(), pushCmd(nil))
+		done <- err
+	}()
+
+	ch <- PullProgress{ID: "aaa", Status: "Pushing", Current: 10, Total: 100}
+	advanceUntil(t, clk, 50*time.Millisecond, 400*time.Millisecond, func() bool { return sink.count() >= 1 })
+
+	m.OnFrame(&agentproto.CoreDockerFrame{
+		SessionID: agentproto.DockerPushSessionID(pushRef), Op: agentproto.DockerFrameOpCancel,
+	})
+
+	var ee *ExecError
+	if err := pullResultOf(t, done); !errors.As(err, &ee) || ee.Msg != "推送已取消" {
+		t.Fatalf("没有推送前基线时不得凭「现在有 digest 引用」判完成，实际: %v", err)
+	}
+}
+
+// isPushCompletionLine 是推送完成判据的**唯一**解析口（纯函数，逐条钉住形态）：
+// 只认无层 id 的 "<tag>: digest: …" 消息行 —— 带 id 的层行（"Pushed" /
+// "Layer already exists" 整场都在发）与起手消息行都不算，pull 的大写 "Digest:" 行
+// 与推送的收尾行形近（都含 sha256）也刻意不误命中。
+func TestIsPushCompletionLine(t *testing.T) {
+	cases := []struct {
+		name string
+		in   PullProgress
+		want bool
+	}{
+		{"daemon 的收尾行", PullProgress{Status: "latest: digest: sha256:abc size: 1234"}, true},
+		{"无 tag 推送时按 tag 名发的收尾行", PullProgress{Status: "v1.2: digest: sha256:abc size: 9"}, true},
+		{"pull 的大写 Digest 行不算", PullProgress{Status: "Digest: sha256:abc"}, false},
+		{"层行不算（即使状态含 digest）", PullProgress{ID: "aaa", Status: "latest: digest: sha256:abc size: 1"}, false},
+		{"层行的 Pushed 不算", PullProgress{ID: "aaa", Status: "Pushed"}, false},
+		{"Layer already exists 不算", PullProgress{ID: "aaa", Status: "Layer already exists"}, false},
+		{"起手消息行不算", PullProgress{Status: "The push refers to repository [harbor.example.com/app]"}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isPushCompletionLine(c.in); got != c.want {
+				t.Fatalf("isPushCompletionLine(%+v) = %v, want %v", c.in, got, c.want)
+			}
+		})
+	}
+}
+
 // （原 TestBuildPushWithoutSessionsFallsBackToBlackBox 已随 7c 删除：它钉住的
 // 「流通道未装配 = 黑盒快路径」分支已从 buildImage/pushImage 删除，构造契约改为
 // 必须非 nil（见 write.go 的 SetSessions 与 pull_progress_test 的

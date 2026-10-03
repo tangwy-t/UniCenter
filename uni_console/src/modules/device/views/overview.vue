@@ -162,7 +162,8 @@
           <ArtSvgIcon icon="ri:loader-4-line" class="do-empty__spin" />
         </div>
         <div class="text-sm font-medium text-[var(--el-text-color-regular)]">正在加载设备指标…</div>
-        <div class="text-xs text-g-600">首次加载需要聚合全部设备，请稍候</div>
+        <!-- 原副行「首次加载需要聚合全部设备，请稍候」属解释句，已按「零解释文案」
+             纪律删除（主行即朴素加载文案，副行只会与它重复）。 -->
       </div>
 
       <!-- ============ 错误 ============ -->

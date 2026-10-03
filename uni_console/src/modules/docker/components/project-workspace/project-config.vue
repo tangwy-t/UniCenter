@@ -316,6 +316,7 @@
 </script>
 
 <style lang="scss" scoped>
+  @use '@styles/core/breakpoints.scss' as *;
   @use '../../views/overview-tokens' as t;
 
   // 「编辑 / ＋添加服务」（text 变体）与「重新加载」等默认档按钮的主色文字对比度 AA：
@@ -361,8 +362,8 @@
     color: var(--el-text-color-primary);
   }
 
-  // 手机横屏（<768）：文件名独占一行，动作按钮换到第二行（不再互相挤压）。
-  @media (width < 768px) {
+  // 手机横屏（窄于 tablet 断点 768）：文件名独占一行，动作按钮换到第二行（不再互相挤压）。
+  @include respond-below('tablet') {
     .pwc__files {
       flex: 1 1 100%;
     }

@@ -319,7 +319,8 @@ describe('总览纯函数（口径错了只表现为页面说错话，必须钉�
 
   it('副标题：舰队摘要一句 + 自动刷新标记；无数据不编造', () => {
     expect(overviewSubtitle(null, true, false, false)).toBe('正在拉取舰队总览…')
-    expect(overviewSubtitle(null, false, true, false)).toBe('总览拉取失败 —— 点击右侧刷新重试')
+    // 「点击右侧刷新重试」去向句已按「零解释文案」纪律删除（副标题只留失败结论）。
+    expect(overviewSubtitle(null, false, true, false)).toBe('总览拉取失败')
     expect(overviewSubtitle(makeOverview(), false, false, true)).toBe(
       '共 3 台主机 · 2 台可用 · 容器 12（运行 9 / 停止 3） · 每 10 秒自动刷新'
     )

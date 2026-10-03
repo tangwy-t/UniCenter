@@ -480,6 +480,22 @@ func (a *sdkAdapter) ImageRefID(ctx context.Context, ref string) (string, error)
 	return v.ID, nil
 }
 
+// ImageRepoDigests 读一个镜像的 canonical 引用列表（repo@sha256:…）—— 推送完成判据
+// 的对照项（契约与「为什么推送要它」见 DockerAPI.ImageRepoDigests）。
+//
+// 与 ImageRefID 同一形态：走 inspect（一次调用带回该镜像的全部引用名），404 折成
+// nil 切片而不是错误 —— 「本机没有这个引用」是事实，「查不了」才不是。
+func (a *sdkAdapter) ImageRepoDigests(ctx context.Context, ref string) ([]string, error) {
+	v, err := a.cli.ImageInspect(ctx, ref)
+	if err != nil {
+		if errdefs.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return v.RepoDigests, nil
+}
+
 func (a *sdkAdapter) ImageInspect(ctx context.Context, ref string) (ImageDetail, error) {
 	v, err := a.cli.ImageInspect(ctx, ref)
 	if err != nil {

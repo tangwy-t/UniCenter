@@ -119,7 +119,9 @@ func shortName(handler string) string {
 // router.go 源码**推导**全部 longLived 挂载点，实例化成样例 URL 后按 nginx 的
 // location 选择顺序（先 = 精确，再按出现序的第一个匹配正则，最后最长前缀）求出
 // 真正命中的 location，断言：GET 长活（流/下载/慢采集）带够长的
-// proxy_read_timeout 且禁止缓冲；POST 长活（上传）带够长的 proxy_send_timeout。
+// proxy_read_timeout 且禁止缓冲；POST 长活（上传）带够长的 proxy_send_timeout
+// 且禁止请求体缓冲（proxy_request_buffering off —— 请求体在反代层落临时盘会
+// 击穿「core 中转零落盘」语义）。
 // 增删长活端点而不同步 nginx.conf，这里就红。
 func TestNginxLongLivedLocationsMatchRouterMounts(t *testing.T) {
 	conf, err := os.ReadFile("../../../uni_console/nginx.conf")
@@ -293,9 +295,10 @@ func nginxWinner(locs []nginxLoc, port int, url string) *nginxLoc {
 }
 
 // checkNginxCovers 断言样例端点在指定 server 块里命中的 location 带足了长超时：
-// GET（流/下载/慢采集）看 proxy_read_timeout，POST（上传）看 proxy_send_timeout；
-// GET 还要求 proxy_buffering off（流式响应不许在反代层攒缓冲）。命中 /api/ 兜底
-// （60s）或除 location / 外没命中，都按漏配报出。
+// GET（流/下载/慢采集）看 proxy_read_timeout 且要求 proxy_buffering off（流式
+// 响应不许在反代层攒缓冲）；POST（上传）看 proxy_send_timeout 且要求
+// proxy_request_buffering off（请求体不许在反代层落临时盘，要逐段直通上游）。
+// 命中 /api/ 兜底（60s）或除 location / 外没命中，都按漏配报出。
 func checkNginxCovers(t *testing.T, locs []nginxLoc, port int, ep llSample) {
 	t.Helper()
 	loc := nginxWinner(locs, port, ep.url)
@@ -316,6 +319,11 @@ func checkNginxCovers(t *testing.T, locs []nginxLoc, port int, ep llSample) {
 	if ep.method == "GET" && !strings.Contains(loc.body, "proxy_buffering off") {
 		t.Errorf(":%d 的长活流 %s 命中 location %q 缺 proxy_buffering off —— "+
 			"流式响应会在反代层被攒缓冲，逐行即到被破坏", port, ep.url, loc.pattern)
+	}
+	if ep.method == "POST" && !strings.Contains(loc.body, "proxy_request_buffering off") {
+		t.Errorf(":%d 的长活上传 %s 命中 location %q 缺 proxy_request_buffering off —— "+
+			"请求体会先在反代层落一份临时盘拷（512MB 构建上下文 = 512MB 临时落盘），"+
+			"击穿「core 中转零落盘」语义，且上游要等 body 收满才能开始处理", port, ep.url, loc.pattern)
 	}
 }
 

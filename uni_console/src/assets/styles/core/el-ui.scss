@@ -34,6 +34,51 @@ html:root {
   }
 }
 
+// ==================== 对比度 AA（全站批·QA 浅色实测，门槛 4.5:1） ====================
+
+// 实心主色按钮白字（QA 实测 3.68:1）。病根在 EP 的按钮变量槽：primary 档的填充槽
+// resting 直吃 --el-color-primary（#3B82F6），hover 更浅（--el-color-primary-light-3，白字 2.43:1）。
+// 这里只重定义 primary 档的「填充」变量槽，品牌主色 --el-color-primary 本身不动
+// （非按钮场景不受影响），元素样式/布局零改动。
+// 值取 EP 主色深档：dark-N 由主题工具（colors.ts getDarkColor，品牌色 ×(1-N/10)）随品牌色重算，
+// 两种主题同值，白字实测 resting/dark-2 5.39:1、hover/dark-3 6.59:1、active/dark-4 8.13:1。
+// resting 不能取更浅的档：主色提浅任一档白字都 <4.5（light-1 实测 4.43:1）。
+// hover 由「提浅」翻转成「加深一档」——白字前提下唯一能保住 ≥4.5 的悬停反馈
+// （暗色主题的 light-3 槽本来就被主题工具算成深色，此翻转对暗色是同一值的延续）。
+// :not(...) 三重排除 plain/text/link：它们的填充/文字由 EP 的 button-plain 单独映射
+// （light-9 底、主色文字），归 docker 侧已验收的 primary-text-aa 管辖，本档规则不得越权；
+// 各 type 档（danger/success/warning/info）有自己的变量槽，不受影响（选择器只含 --primary）。
+// 禁用态不走这些槽（EP is-disabled 直接落属性），外观不变。
+// html:root 前缀抬高特异性：EP 组件 CSS 经 unplugin 随异步 chunk 后注入，同优先级会被反超。
+html:root {
+  .el-button--primary:not(.is-plain):not(.is-text):not(.is-link) {
+    --el-button-bg-color: var(--el-color-primary-dark-2);
+    --el-button-border-color: var(--el-color-primary-dark-2);
+    --el-button-hover-bg-color: var(--el-color-primary-dark-3);
+    --el-button-hover-border-color: var(--el-color-primary-dark-3);
+    --el-button-active-bg-color: var(--el-color-primary-dark-4);
+    --el-button-active-border-color: var(--el-color-primary-dark-4);
+  }
+
+  // radio-button 选中态与实心按钮同源（白字对主色填充 3.68:1）：只换选中档的两个填充槽，
+  // 文字槽（白）与其余状态不动。
+  .el-radio-button {
+    --el-radio-button-checked-bg-color: var(--el-color-primary-dark-2);
+    --el-radio-button-checked-border-color: var(--el-color-primary-dark-2);
+  }
+}
+
+// 输入框 placeholder（QA 实测 2.3:1）。改总闸 --el-text-color-placeholder：
+// input/select/textarea/date 的占位色都经 --el-input-placeholder-color →
+// var(--el-text-color-placeholder) 间接引用，一线全收。
+// 值取 art-gray-600 七五 + art-gray-900 二五 的混色 ≈ #67728d：对白底 4.81:1、
+// 对页面底 #fafbfc 4.64:1，且留在本应用的灰度调色板内。
+// 只限浅色（:not(.dark)）：暗色 EP 自带 #8d9095（对暗框 #161618 5.64:1）本就达标；
+// 排除暗色既保不回归，也把暗色归属确定化（不受注入顺序影响）。
+html:root:not(.dark) {
+  --el-text-color-placeholder: color-mix(in srgb, var(--art-gray-600) 75%, var(--art-gray-900));
+}
+
 // 优化 el-form-item 标签高度
 .el-form-item__label {
   height: var(--el-component-custom-height) !important;

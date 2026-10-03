@@ -573,7 +573,7 @@
         kind: 'percent' as const,
         label: '磁盘使用率',
         icon: 'ri:hard-drive-2-line',
-        tip: '整机聚合口径（所有挂载点合计），逐挂载点请看资源下钻',
+        tip: '整机聚合口径（所有挂载点合计）',
         value: d?.diskUsedPercent ?? null,
         hasValue: typeof d?.diskUsedPercent === 'number',
         text: formatPercent(d?.diskUsedPercent),

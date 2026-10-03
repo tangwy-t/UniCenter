@@ -10,13 +10,16 @@
         <div
           :class="
             isClickable(item, index)
-              ? 'c-p py-1 rounded tad-200 hover:bg-active-color hover:[&_span]:text-g-600'
+              ? 'c-p py-1 rounded tad-200 hover:bg-active-color hover:[&_span]:text-g-700'
               : ''
           "
           @click="handleBreadcrumbClick(item, index)"
         >
+          <!-- 对比度 AA（QA 浅色实测 3.5:1）：g-600（#7987a1）对页底 #fafbfc 仅 3.50:1，
+               收敛为 g-700（#4d5875）≈6.8:1（hover 底 #f2f4f5 上 6.4:1）。
+               暗色侧沿用 g-800（#c7c7d1 对页底 ≈12:1），只升不降。 -->
           <span
-            class="block max-w-46 overflow-hidden text-ellipsis whitespace-nowrap px-1.5 text-sm text-g-600 dark:text-g-800"
+            class="block max-w-46 overflow-hidden text-ellipsis whitespace-nowrap px-1.5 text-sm text-g-700 dark:text-g-800"
             >{{ formatMenuTitle(item.meta?.title as string) }}</span
           >
         </div>

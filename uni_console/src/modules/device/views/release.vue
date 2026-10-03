@@ -8,7 +8,6 @@
         </div>
         <div class="min-w-0">
           <h2 class="text-lg font-semibold text-[var(--el-text-color-primary)]">Agent 版本</h2>
-          <p class="mt-0.5 text-xs text-g-600">程序包发布与全站目标版本</p>
         </div>
         <div class="ml-auto flex items-center gap-1">
           <ArtButtonTable
@@ -71,7 +70,6 @@
         <div class="dr-list__head">
           <div>
             <span class="dr-title">程序包</span>
-            <span class="dr-hint">上传后需「发布」才能被选为目标版本</span>
           </div>
           <ElButton v-if="canUpload" size="small" type="primary" @click="uploadVisible = true">
             上传新版本
@@ -185,9 +183,6 @@
             :on-exceed="onExceed"
           >
             <div class="dr-upload__text">拖入或用下方按钮选择 agent 二进制</div>
-            <template #tip>
-              <div class="dr-upload__tip">上传后为草稿态，需在列表里点「发布」</div>
-            </template>
           </ElUpload>
         </ElFormItem>
         <ElFormItem v-if="uploading" label="进度">
@@ -608,12 +603,6 @@
   .dr-upload__text {
     font-size: 13px;
     color: var(--el-text-color-regular);
-  }
-
-  .dr-upload__tip {
-    margin-top: 4px;
-    font-size: 11px;
-    color: var(--el-text-color-secondary);
   }
 
   .dr-gdialog__hint {

@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -110,10 +111,27 @@ func run() error {
 	// 下载客户端要与 WS 用**同一份 CA 信任**：切到 wss 之后产物地址由 wss→https 推导
 	//（config.DownloadBaseURL），服务端仍是那张自签证书 —— 只给 WS 配 CA 而漏了这里，
 	// 症状是「连接一直正常，但下一次升级永远失败在 x509」，且失败出现在升级链路上。
-	downloadClient, err := transport.CAClient(cfg.CAFile, 5*time.Minute)
+	//
+	// 超时为什么是 30 分钟：http.Client.Timeout 是**整条请求**（建连 + 收完响应体）
+	// 的绝对上限，不是 nginx 那种「空闲多久算死」—— 5 分钟会让弱网下仍在推进的慢下载
+	// 死在 agent 侧，而反代（nginx 3600s 空闲超时）与 core（LongLived 滚动截止，
+	// 无整条请求总时限）都已放行了它，症状是「升级永远下不完」。也不能干脆取消总时限：
+	// download 的调用上下文由 upgrade.run 内部构造（Background，无取消源），没有总时限
+	// 时一条半死连接（连着但不再来数据）会把升级事务永久卡在 downloading（running
+	// 单飞还会连带挡掉后续所有指令）。30 分钟对默认上限 ≤200MB 的程序包 ≈ 均速
+	// 114KiB/s 即可完成；更慢的链路走 download_failed 上报 + 重试，好过把状态机挂死。
+	const downloadTimeout = 30 * time.Minute
+	downloadClient, err := transport.CAClient(cfg.CAFile, downloadTimeout)
 	if err != nil {
 		// 不阻断启动：指数上报是主链路，升级是可选能力（与 downloadBase 推导失败同一取向）。
 		log.Warn("cannot build download client with CA, auto-upgrade may fail", "err", err.Error())
+	}
+	if downloadClient == nil {
+		// CAFile 为空（或无 CA 可加载）时 CAClient 契约返回 nil = 用系统信任库；
+		// 而 upgrade.New 对 nil 客户端的兜底默认同样是 5 分钟 —— 同一条「慢下载死在
+		// 总时限」缺陷的另一半（无 CA 链路）。显式补一个同口径的客户端：信任库语义
+		// 不变（nil Transport = 系统信任库），只把两条下载链路的时限对齐。
+		downloadClient = &http.Client{Timeout: downloadTimeout}
 	}
 	upgradeRuntime := upgrade.NewForProcess(upgrade.Deps{
 		Version:      cfg.AgentVersion,

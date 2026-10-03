@@ -337,6 +337,25 @@ type DockerAPI interface {
 	// （err != nil）严格分开：拉取的完成判据（pull_progress.go 的 pullLanded）拿它
 	// 做「拉取前后镜像有没有变」的对照，「没有」是事实，「查不了」不可作判据。
 	ImageRefID(ctx context.Context, ref string) (string, error)
+	// ImageRepoDigests 读一个镜像引用在本机记录的 **canonical 引用**列表
+	// （repo@sha256:… 形态，daemon 的 digest 引用名）。契约与 ImageRefID 同款：
+	// 本机没有这个引用 → (nil, nil)（不是错误）；查询本身失败 → err != nil
+	//（同样不可作判据）。
+	//
+	// 为什么推送的完成判据要它（build_push.go 的 pushLanded 拿它做「推送前后
+	// digest 引用有没有多」的对照）：daemon 在**把清单真正提交进 registry 之后**
+	// 会在本机落一笔 digest 引用 —— classic 存储里是 distribution/push_v2.go 的
+	// pushTag 在 manSvc.Put 成功后调 addDigestReference（写进 referenceStore，
+	// 经 daemon/images/image_inspect.go 的 repoDigests 露出）。这是推送侧唯一
+	// 「独立于流」的完成痕迹：收尾行（"<tag>: digest: …"）可能随被中断的连接丢在
+	// 缓冲里，这笔本地落笔带不走。
+	//
+	// 口径边界（**依赖镜像存储实现**）：containerd 存储的 RepoDigests 是由本地
+	// tag **合成**的（daemon/containerd/image_inspect.go 的 collectRepoTagsAndDigests
+	// 对每个 tag 名拼出 name@target.Digest），推送不改变它 —— 在那种主机上这条判据
+	// 恒不开火，完成结算由收尾行那半承担。恒不开火是**保守方向**：判不出就不判，
+	// 绝不误判完成（误报成功的代价比漏救大）。
+	ImageRepoDigests(ctx context.Context, ref string) ([]string, error)
 	// ComposeVersion 探测 compose 形态与版本（单一 flavor 纪律：只在进程内第一次调用时真正执行）。
 	ComposeVersion(ctx context.Context) (flavor, version string, err error)
 

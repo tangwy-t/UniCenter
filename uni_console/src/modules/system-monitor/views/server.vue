@@ -170,7 +170,7 @@
                   </div>
                 </div>
                 <div v-if="!perCore.length" class="sv-panel-empty">每核心负载暂不可用</div>
-                <div class="sv-cores-note">每个纵条代表一个逻辑核心 · 悬停查看明细</div>
+                <div class="sv-cores-note">每个纵条代表一个逻辑核心</div>
               </div>
             </div>
           </div>
@@ -264,9 +264,7 @@
                   <div class="text-sm font-semibold text-[var(--el-text-color-primary)]"
                     >历史趋势</div
                   >
-                  <div class="sv-card__sub"
-                    >最近 {{ rangeLabel }} · Redis 持久化 · 刷新/重启不丢</div
-                  >
+                  <div class="sv-card__sub">最近 {{ rangeLabel }} · 刷新/重启不丢</div>
                 </div>
               </div>
               <div class="flex flex-wrap items-center gap-2">

@@ -69,9 +69,17 @@ type stubAPI struct {
 	imageRefErr   error
 	imageRefN     int
 	imageRefCalls []string
-	tagged        []tagCall
-	saved         []saveCall
-	loaded        []string
+	// repoDigests / repoDigestErr 是 ImageRepoDigests 的替身面（推送完成判据的对照项，
+	// 与 imageRefIDs 同一形态）：repoDigests 是**逐次调用的观测序列**（用尽后沿用最后
+	// 一项）—— 推送路径会先问「推送前有哪些 digest 引用」（第一项），结算时再问
+	// 「现在有哪些」（第二项）；repoDigestErr 注入「查询本身失败」（不可作判据的那一档）。
+	repoDigests     [][]string
+	repoDigestErr   error
+	repoDigestN     int
+	repoDigestCalls []string
+	tagged          []tagCall
+	saved           []saveCall
+	loaded          []string
 	// P2·分发面：build/push 的**定型记录 + 进度流替身**（与 pull 同款语义：
 	// buildCh/pushCh 非 nil 时逐条交给 emit，关闭返回 buildErr/pushErr；
 	// nil = 一次性成功/失败）。
@@ -344,6 +352,22 @@ func (s *stubAPI) ImageRefID(_ context.Context, ref string) (string, error) {
 		s.imageRefN++
 	}
 	return id, nil
+}
+
+// ImageRepoDigests 按观测序列给答案（见 repoDigests 的说明）；序列用尽后沿用最后一项。
+func (s *stubAPI) ImageRepoDigests(_ context.Context, ref string) ([]string, error) {
+	s.repoDigestCalls = append(s.repoDigestCalls, ref)
+	if s.repoDigestErr != nil {
+		return nil, s.repoDigestErr
+	}
+	if len(s.repoDigests) == 0 {
+		return nil, nil
+	}
+	d := s.repoDigests[s.repoDigestN]
+	if s.repoDigestN < len(s.repoDigests)-1 {
+		s.repoDigestN++
+	}
+	return d, nil
 }
 func (s *stubAPI) ComposeVersion(context.Context) (string, string, error) {
 	return s.flavor, s.flavorVer, nil

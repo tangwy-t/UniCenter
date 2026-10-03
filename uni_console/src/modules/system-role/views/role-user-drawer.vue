@@ -115,10 +115,6 @@
             :value="u.id"
           />
         </ElSelect>
-        <div class="add-tip">
-          <ArtSvgIcon icon="ri:information-line" class="tip-icon" />
-          选择后点击「确定」，将用户分配为「{{ roleName }}」角色成员
-        </div>
       </div>
       <template #footer>
         <div class="art-dialog-footer">
@@ -146,7 +142,6 @@
   import { ElMessage, ElMessageBox } from 'element-plus'
   import defaultAvatar from '@imgs/user/avatar.webp'
   import ArtButtonTable from '@/components/core/forms/art-button-table/index.vue'
-  import ArtSvgIcon from '@/components/core/base/art-svg-icon/index.vue'
   import { fetchUsers } from '@/modules/system-user/api'
   import { useDictStore } from '@/store/modules/dict'
   import { fetchRoleUsers, addRoleUsers, removeRoleUsers } from '../api'
@@ -322,19 +317,6 @@
   .add-body {
     .candidate-select {
       width: 100%;
-    }
-
-    .add-tip {
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      margin-top: 12px;
-      font-size: 12px;
-      color: var(--el-text-color-secondary);
-
-      .tip-icon {
-        font-size: 14px;
-      }
     }
   }
 </style>
