@@ -81,7 +81,7 @@ export function useAppBreakpoints() {
      *
      * 为什么不用 useBreakpoints：它只生成 min/max-**width** 查询，高度轴塞不进去。
      * useMediaQuery 的取值在视口高度变化（旋转、拉窗口）时自动更新 —— 依赖它的
-     * computed（阀让位、侧栏态）随之响应，keep-alive 的缓存页面也不会停在旧档。
+     * computed（侧栏态）随之响应，keep-alive 的缓存页面也不会停在旧档。
      */
     heightAtMost(name: HeightBreakpointName): Ref<boolean> {
       return heightAtMostCache.get(name)!

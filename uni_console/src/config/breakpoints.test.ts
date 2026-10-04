@@ -94,8 +94,8 @@ describe('断点单一事实源（TS ↔ SCSS）', () => {
 
 // 高度轴（矮视口/手机横屏）与宽度轴分开成表：这里是它的 TS ↔ SCSS 一致性断言，
 // 外加「阈值自校准」——校准口径写死在用例里（390/360 档必中、620 视需要、900 不中），
-// 任何一侧无声漂移都会在这里失败（例如有人把 short 调到 600，620 矮窗就悄悄失去
-// 安全阀让位；调到 960，900 高的常规桌面会平白变形）。
+// 任何一侧无声漂移都会在这里失败（例如有人把 short 调到 960，900 高的常规桌面
+// 会平白变形）。
 describe('高度轴断点单一事实源（TS ↔ SCSS）', () => {
   const scssHeightBreakpoints = parseScssHeightBreakpoints(readFileSync(scssPath, 'utf8'))
   const tsHeightBreakpoints: Record<string, number> = { ...HEIGHT_BREAKPOINTS }
@@ -124,7 +124,6 @@ describe('高度轴断点单一事实源（TS ↔ SCSS）', () => {
     // 手机横屏实测档（本批的验收尺寸）
     expect(atMost('phoneShort', 390), '844×390 必须落在 phoneShort 档').toBe(true)
     expect(atMost('phoneShort', 360), '740×360 必须落在 phoneShort 档').toBe(true)
-    // 矮桌面窗：安全阀让位的目标档（1280×620 期望 4 行 → ~6 行）
     expect(atMost('short', 620), '1280×620 必须落在 short 档').toBe(true)
     // 常规桌面：两档都不中，桌面零回归
     expect(atMost('short', 900), '900 高的常规桌面不得落入 short 档').toBe(false)

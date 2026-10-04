@@ -208,9 +208,7 @@
 
   /* 矮视口单滚动链的中段：页根 → 页内层（app.scss 的链给了 flex:1）之后还有
      ElTabs 两层壳（tabs 根 → content → pane），把链一路接到 tab 组件根，
-     再往下由 app.scss 的 .art-table-card/.el-card__body/.art-table 接住。
-     触发档与 ArtTable 的阀让位同档（HEIGHT_BREAKPOINTS.short），两处必须同档：
-     阀让位而链不在 = 表体无上限；链在而阀不让位 = 表被 100vh-420 钉死。 */
+     再往下由 app.scss 的 .art-table-card/.el-card__body/.art-table 接住。 */
   @include bp.respond-height-at-most('short') {
     .docker-resources-tabs {
       display: flex;

@@ -1,21 +1,23 @@
 // @vitest-environment jsdom
 /**
- * ArtTable 默认限高策略的回归守卫（报裁 2026-10「表格必须有高度上限」）。
+ * ArtTable 高度口径的回归守卫。
  *
  * 钉住的语义（都是组件级真渲染断言，不做源码扫描）：
- * 1. 有行且未指定高度：ElTable 只拿 max-height（默认安全阀），拿不到 height ——
- *    两者若同时下发，EP 的内滚会整个失效（scrollbarStyle 取 height 分支），
- *    这正是本策略最容易回归的点；
- * 2. 空/加载中（一行都没有）：走旧口径（emptyHeight / '100%'），默认安全阀不插手；
- * 3. 显式 height：页面接管高度权，默认安全阀让位（逃生门）；
- * 4. **短视口档（本批）**：视口高度 ≤ short（640）时默认阀整体让位 ——
- *    ElTable 拿 height（fill）、不拿 max-height，表体高度交给页面 flex 链
- *    （单滚动的档位开关，见 index.vue 的 maxHeight）。
+ * 1. 有行且未指定高度：默认**无上限** —— ElTable 不拿 max-height、走原生 height
+ *    口径（100%，表随内容增高、页面滚动）；
+ * 2. 空/加载中（一行都没有）：走旧口径（emptyHeight / '100%'），同样无 max-height；
+ * 3. 显式 max-height：原样透传，且此时**撤掉 height** —— 两者若同时下发，EP 的
+ *    内滚会整个失效（scrollbarStyle 取 height 分支），这是显式上限最容易回归的点；
+ * 4. 显式 height：页面接管高度口径（两种定高机制互斥）；
+ * 5. **短视口填充档（移动 A+B）**：≤ short（640，手机横屏/矮桌面窗）与常规档同为
+ *    填充口径（height 100%、无 max-height）—— 填充是本默认口径 + 页面单
+ *    滚动链的产物；档位翻转（旋转/拉窗）不得引入默认上限或口径残留；
+ * 6. 显式上限/显式 height 在短视口仍优先（页面自定口径 > 档位）。
  *
- * jsdom 没有 matchMedia（真实环境里 useMediaQuery 恒 false），短视口档必须能
- * 注入桩才测得到：下面把可控桩装在**所有 mount 之前**（模块级单例订阅只认
- * 第一份桩），再用 setViewport 的高度驱动档位翻转 —— 顺带把「旋转/拉窗时阀
- * 跟着换档」的响应式一起钉住。
+ * jsdom 没有 matchMedia（真实环境里 useMediaQuery 恒 false），断点判定与档位
+ * 翻转必须能注入桩才测得到：下面把可控桩装在**所有 mount 之前**（useAppBreakpoints
+ * 的模块级单例订阅只认第一份桩），再用 setViewport 驱动档位翻转 —— 顺带把
+ * 「旋转/拉窗不产生口径残留」一起钉住。
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createPinia } from 'pinia'
@@ -118,16 +120,16 @@ afterEach(() => {
   mediaController.reset()
 })
 
-describe('ArtTable 默认限高策略', () => {
-  it('有数据且未指定高度：只下发 max-height（默认安全阀），不下发 height', async () => {
+describe('ArtTable 默认高度口径（无上限、随内容增高）', () => {
+  it('有数据且未指定高度：不下发 max-height，走原生 height 口径（100%）', async () => {
     const wrapper = mountArtTable({ data: [{ a: 1 }, { a: 2 }] })
     const el = await settle(wrapper)
-    expect(el.style.maxHeight).toContain('100vh')
-    expect(el.style.height).toBe('')
+    expect(el.style.maxHeight).toBe('')
+    expect(el.style.height).toBe('100%')
     wrapper.unmount()
   })
 
-  it('空数据（非加载）：不设默认安全阀，仍走 emptyHeight 口径', async () => {
+  it('空数据（非加载）：无 max-height，仍走 emptyHeight 口径', async () => {
     const wrapper = mountArtTable({ data: [] })
     const el = await settle(wrapper)
     expect(el.style.maxHeight).toBe('')
@@ -135,7 +137,7 @@ describe('ArtTable 默认限高策略', () => {
     wrapper.unmount()
   })
 
-  it('加载中且无行：不设默认安全阀（旧口径 height 100%）', async () => {
+  it('加载中且无行：无 max-height（旧口径 height 100%）', async () => {
     const wrapper = mountArtTable({ data: [], loading: true })
     const el = await settle(wrapper)
     expect(el.style.maxHeight).toBe('')
@@ -143,7 +145,7 @@ describe('ArtTable 默认限高策略', () => {
     wrapper.unmount()
   })
 
-  it('显式 height：页面接管高度口径，默认安全阀让位', async () => {
+  it('显式 height：页面接管高度口径，不下发 max-height', async () => {
     const wrapper = mountArtTable({ data: [{ a: 1 }], height: '320px' })
     const el = await settle(wrapper)
     expect(el.style.height).toBe('320px')
@@ -151,7 +153,7 @@ describe('ArtTable 默认限高策略', () => {
     wrapper.unmount()
   })
 
-  it('显式 max-height：覆盖默认安全阀原样透传', async () => {
+  it('显式 max-height：原样透传，且撤掉 height（EP 两种定高机制互斥）', async () => {
     const wrapper = mountArtTable({ data: [{ a: 1 }], maxHeight: '26rem' })
     const el = await settle(wrapper)
     expect(el.style.maxHeight).toBe('26rem')
@@ -160,19 +162,19 @@ describe('ArtTable 默认限高策略', () => {
   })
 })
 
-describe('ArtTable 短视口档：默认阀让位（单滚动的档位开关）', () => {
-  it('手机横屏（844×390）：默认阀让位 —— 只给 height（fill），不给 max-height', async () => {
+describe('ArtTable 短视口填充档（移动 A+B：≤640 的单滚动链组件侧口径）', () => {
+  it('手机横屏（844×390）：填充口径 —— 只给 height（100%），不给 max-height', async () => {
     mediaController.setViewport({ width: 844, height: 390 })
     const wrapper = mountArtTable({ data: [{ a: 1 }, { a: 2 }] })
     const el = await settle(wrapper)
 
-    // 让位口径 = fill：height 100%（表体高度交给页面 flex 链），默认阀不插手
+    // 填充口径：height 100%（表体高度交给页面 flex 链），默认上限不存在
     expect(el.style.maxHeight).toBe('')
     expect(el.style.height).toBe('100%')
     wrapper.unmount()
   })
 
-  it('矮桌面窗（1280×620）：同样让位（4 行 → ~6 行的来源）', async () => {
+  it('矮桌面窗（1280×620）：同样填充口径', async () => {
     mediaController.setViewport({ width: 1280, height: 620 })
     const wrapper = mountArtTable({ data: [{ a: 1 }] })
     const el = await settle(wrapper)
@@ -182,20 +184,21 @@ describe('ArtTable 短视口档：默认阀让位（单滚动的档位开关）'
     wrapper.unmount()
   })
 
-  it('常规视口（1600×900）：默认阀在原位（桌面零回归）', async () => {
+  it('常规视口（1600×900）：与短视口同口径（默认无上限，桌面零回归）', async () => {
     mediaController.setViewport({ width: 1600, height: 900 })
     const wrapper = mountArtTable({ data: [{ a: 1 }] })
     const el = await settle(wrapper)
 
-    expect(el.style.maxHeight).toContain('100vh')
-    expect(el.style.height).toBe('')
+    expect(el.style.maxHeight).toBe('')
+    expect(el.style.height).toBe('100%')
     wrapper.unmount()
   })
 
-  it('档位翻转是响应式的：900 → 390 让位，回到 900 阀复位', async () => {
+  it('档位翻转（900 → 390 → 900）不产生口径残留：全程填充', async () => {
     const wrapper = mountArtTable({ data: [{ a: 1 }] })
     const el = await settle(wrapper)
-    expect(el.style.maxHeight).toContain('100vh')
+    expect(el.style.maxHeight).toBe('')
+    expect(el.style.height).toBe('100%')
 
     mediaController.setViewport({ height: 390 })
     await settle(wrapper)
@@ -204,12 +207,12 @@ describe('ArtTable 短视口档：默认阀让位（单滚动的档位开关）'
 
     mediaController.setViewport({ height: 900 })
     await settle(wrapper)
-    expect(el.style.maxHeight).toContain('100vh')
-    expect(el.style.height).toBe('')
+    expect(el.style.maxHeight).toBe('')
+    expect(el.style.height).toBe('100%')
     wrapper.unmount()
   })
 
-  it('显式 max-height 在短视口仍优先（逃生门 > 档位）', async () => {
+  it('显式 max-height 在短视口仍优先（页面自定上限 > 填充口径）', async () => {
     mediaController.setViewport({ width: 844, height: 390 })
     const wrapper = mountArtTable({ data: [{ a: 1 }], maxHeight: '26rem' })
     const el = await settle(wrapper)
@@ -219,7 +222,7 @@ describe('ArtTable 短视口档：默认阀让位（单滚动的档位开关）'
     wrapper.unmount()
   })
 
-  it('显式 height 在短视口仍接管高度口径（逃生门 > 档位）', async () => {
+  it('显式 height 在短视口仍接管高度口径（页面自定口径 > 填充口径）', async () => {
     mediaController.setViewport({ width: 844, height: 390 })
     const wrapper = mountArtTable({ data: [{ a: 1 }], height: '320px' })
     const el = await settle(wrapper)
@@ -229,7 +232,7 @@ describe('ArtTable 短视口档：默认阀让位（单滚动的档位开关）'
     wrapper.unmount()
   })
 
-  it('空态让位分支与短视口档一致：仍走 emptyHeight 旧口径', async () => {
+  it('空态在短视口与常规档一致：仍走 emptyHeight 旧口径、无 max-height', async () => {
     mediaController.setViewport({ width: 844, height: 390 })
     const wrapper = mountArtTable({ data: [] })
     const el = await settle(wrapper)

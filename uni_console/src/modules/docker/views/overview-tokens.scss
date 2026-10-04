@@ -151,8 +151,7 @@
 
 /// 矮视口单滚动链的「tab 根」段：resources 页里表格卡不在页内层的直下，
 /// 中间还隔着 ElTabs（页内层的链在 app.scss，tabs 两层的链在 resources.vue，
-/// 这里把最后一段接到 tab 组件根）。触发档与 ArtTable 的阀让位同档
-/// （HEIGHT_BREAKPOINTS.short）—— 阀让位而链缺席 = 表体无上限。
+/// 这里把最后一段接到 tab 组件根）。
 @mixin fill-chain-root {
   @include bp.respond-height-at-most('short') {
     display: flex;

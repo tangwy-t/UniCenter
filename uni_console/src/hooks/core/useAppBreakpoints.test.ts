@@ -5,8 +5,8 @@ import { effectScope, nextTick, type EffectScope } from 'vue'
 //
 // 覆盖的约定：
 // 1. heightAtMost 走独立的 max-height 查询（不借用宽度轴的 useBreakpoints）；
-// 2. 档位随视口高度变化即时翻转（旋转/拉窗口）——依赖它的 JS 闸门（阀让位、
-//    侧栏图标栏态）才会响应；
+// 2. 档位随视口高度变化即时翻转（旋转/拉窗口）——依赖它的 JS 闸门（侧栏
+//    图标栏态）才会响应；
 // 3. 判定结果按名字缓存（同一 ref），避免每处调用新建一组 matchMedia 订阅。
 //
 // node 环境没有 matchMedia：与 useResponsiveMenu.test.ts 同一手法，用内存替身，

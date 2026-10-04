@@ -136,13 +136,13 @@
     /** 空数据表格高度 */
     emptyHeight?: string
     /**
-     * 表格最大高度（超限表体内滚）。默认安全阀见 DEFAULT_MAX_HEIGHT；
-     * 显式传入即覆盖默认（页面自定上限的逃生门）。
+     * 表格最大高度（超限表体内滚）。默认不设上限（表随内容增高、页面滚动）；
+     * 显式传入即由页面自定上限 —— 短视口/常规档一视同仁。
      */
     maxHeight?: string | number
     /**
-     * 表格高度（定高语义）。显式传入即由页面接管高度口径：
-     * 默认安全阀不再生效 —— 需要「填满容器」旧口径的页面传 height="100%"。
+     * 表格高度（定高语义）。显式传入即由页面接管高度口径，此时显式 max-height
+     * 让位（EP 的 height / max-height 是互斥的两种表体定高机制，只能二选一）。
      */
     height?: string | number
     /** 空数据时显示的文本 */
@@ -150,34 +150,6 @@
     /** 是否开启 ArtTableHeader，解决表格高度自适应问题 */
     showTableHeader?: boolean
   }
-
-  /**
-   * 数据表的默认最大高度（全站表格统一的安全阀，报裁 2026-10「表格必须有高度
-   * 上限」）：表体超限内滚、页面永不被清单行数无限撑高；未超限的短表按内容
-   * 高度渲染，分毫不受影响。取值口径（1600×900 实测量校准）：
-   *
-   * - `calc(100vh - 420px)`：把页面上下固定开销整个扣掉。实测 docker 列表页
-   *   表根上方 328px（应用头 60 + 页内上留白 20 + hero 64 + 卡片头 44 + 卡片
-   *   上缘 32 + 表格上边距 10 等）、下方 141px（底部合计 33 + 操作栏 46 + 卡片
-   *   与页尾留白 62）。取 420：表满格时底部合计与操作栏**全部留在首屏**，页面
-   *   仅余 ~43px（页尾留白的滚动余量）；开销更小的页面（无 hero / 无底栏）这个
-   *   值只会更宽裕——多扣的余量仅让长表更早内滚，不会破相。
-   * - `max(240px, …)` 下限：兜住矮视口（手机横屏）——不设下限时 100vh-420
-   *   在 375px 高的横屏上只剩负值，表体整个塌掉。
-   *
-   * **短视口档（阀让位）**：视口高度 ≤ HEIGHT_BREAKPOINTS.short（640，手机横屏
-   * 与矮桌面窗）时默认阀整体让位（见 maxHeight 的短视口分支）——表体高度改由
-   * 页面的 flex 链决定（「沉浸」形态：页面零滚动、表体接管滚动）。矮桌面窗由此
-   * 从 4 行（阀 100vh-420 的产物）回到容器自然高度（1280×620 实测 ~6 行）。
-   * 为什么用让位而不是再调一个 `calc(100dvh - N)`：固定 N 在 390 高的屏上会把
-   * 表压到 2-3 行（页面上方的 chrome 高度不是常数），让容器 flex 链说话才恒等于
-   * 「剩余高度」。
-   *
-   * 逃生门（页面接管高度口径，安全阀自动让位）：显式 `height`（含恢复旧
-   * 「填满容器」语义的 height="100%"）、显式 `max-height`（自定上限；短视口也
-   * 照从 —— 它是页面主动要的上限，优先级高于默认档位）。
-   */
-  const DEFAULT_MAX_HEIGHT = 'max(240px, calc(100vh - 420px))'
 
   const props = withDefaults(defineProps<ArtTableProps>(), {
     columns: () => [],
@@ -200,13 +172,7 @@
   }
 
   // 分页布局随断点表切换（阈值见 src/config/breakpoints.ts）
-  const { smaller, greaterOrEqual, heightAtMost } = useAppBreakpoints()
-
-  /**
-   * 短视口（矮窗/手机横屏，阈值口径见 HEIGHT_BREAKPOINTS）：
-   * 默认安全阀让位、表体高度交给容器 flex 链的档位开关（见 maxHeight）。
-   */
-  const isShortViewport = heightAtMost('short')
+  const { smaller, greaterOrEqual } = useAppBreakpoints()
 
   const layout = computed(() => {
     if (smaller('tablet').value) {
@@ -309,27 +275,23 @@
   })
 
   /**
-   * 实际生效的 max-height：显式 max-height > 短视口让位 > 默认安全阀（见
-   * DEFAULT_MAX_HEIGHT）。
+   * 实际生效的 max-height：仅显式传入的 max-height（默认不设上限）。
    *
-   * 谁不设上限（返回 undefined，回到「填满容器」旧口径）：
-   * - 全屏态：容器就是视口，条目本来就该占满；
-   * - 页面显式接管高度（传了 height）：高度口径归页面，默认阀不插手；
+   * 为什么默认无上限：表随内容增高、页面滚动（height 默认 100%，见上）。
+   * 短视口档的「填充」形态是本默认口径 + 页面单滚动链（app.scss 的
+   * art-single-scroll-chain）的产物，不依赖任何 JS 档位开关。
+   *
+   * 谁会让位（返回 undefined，走原生 height 口径）：
+   * - 全屏态：容器就是视口，占满语义优先；
+   * - 页面显式接管高度（传了 height）：两种定高机制互斥，height 优先；
    * - 空/加载中（一行都没有）：没有可滚的行，旧口径照旧（此时是 emptyHeight /
-   *   '100%' 的地盘，加了上限只会让空态塌缩）；
-   * - 短视口（阈值见 HEIGHT_BREAKPOINTS.short）：矮视口里 100vh-420 这个固定
-   *   扣法会把表压到 2-3 行（390 高横屏上 100vh-420 只剩个位数），默认阀整体
-   *   让位、由页面 flex 链把「剩余高度」交给表 —— 这就是单滚动（页面零滚动、
-   *   表体接管滚动）的档位开关。显式 max-height 是页面主动要的上限，仍优先于
-   *   本档位（逃生门 > 档位）。
+   *   '100%' 的地盘，加了上限只会让空态塌缩）。
    */
   const maxHeight = computed(() => {
     if (isFullScreen.value) return undefined
     if (props.height) return undefined
     if (isEmpty.value) return undefined
-    if (props.maxHeight != null) return props.maxHeight
-    if (isShortViewport.value) return undefined
-    return DEFAULT_MAX_HEIGHT
+    return props.maxHeight ?? undefined
   })
 
   /**
@@ -339,8 +301,8 @@
    * table-body 滚动条样式按 props.height 优先取 `{ height: '100%' }`
    * （style-helper.scrollbarStyle 的两个分支互斥），有 height 时 max-height 只留在
    * 表根的 CSS 上、内滚条不生效 —— 表体会被裁掉且没有滚动条。两者是互斥的两种
-   * 「表体定高」机制，这里显式二选一：有上限走 max-height（内容不足随内容收缩，
-   * 超限内滚），无上限才回落到旧的填满语义。
+   * 「表体定高」机制，这里显式二选一：显式 max-height 走 max-height（内容不足
+   * 随内容收缩，超限内滚），否则走原生 height 口径（默认 100%）。
    */
   const tableHeight = computed(() => {
     if (maxHeight.value != null) return undefined
@@ -351,10 +313,10 @@
    * 清理另一侧的内联样式残留。
    *
    * ElTable 的 layout.setHeight/setMaxHeight 只在「有值」时写内联样式，prop 置空
-   * 时不回收（源码：setHeight 里 null 直接返回）——模式切换后（全屏开关、空态与
-   * 有数据互切）旧的那一侧会留下来作祟：例如全屏时残留的 max-height 会把占满
-   * 视口的表又钉回 100vh-420。这里在每次模式求值后把「当前不该存在」的一侧删掉；
-   * 当前生效的一侧保持 ElTable 自己写的值。
+   * 时不回收（源码：setHeight 里 null 直接返回）——模式切换后（显式上限页开关
+   * 全屏、空态与有数据互切）旧的那一侧会留下来作祟：例如全屏时残留的 max-height
+   * 会把占满视口的表又钉回页面自定的上限。这里在每次模式求值后把「当前不该存在」
+   * 的一侧删掉；当前生效的一侧保持 ElTable 自己写的值。
    */
   watch(
     [tableHeight, maxHeight],

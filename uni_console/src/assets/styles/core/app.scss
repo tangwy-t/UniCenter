@@ -133,9 +133,8 @@
 // 链：页根(.art-full-height，flex 列) → 页内包裹层 → 卡片(.art-table-card)
 //     → 卡体(.el-card__body) → 表(.art-table) → el-table 内滚。
 // 触发（同一份规则，两处入口）：
-//   - 短视口（高度 ≤ HEIGHT_BREAKPOINTS.short，见 breakpoints.ts）：与 ArtTable
-//     的默认安全阀「短视口档让位」配套（JS 侧，art-table/index.vue 的 maxHeight）——
-//     阀让位后表体高度改由本链决定；
+//   - 短视口（高度 ≤ HEIGHT_BREAKPOINTS.short，见 breakpoints.ts）：表体高度
+//     由本链决定；
 //   - 表格全屏态（.el-full-screen）：容器本来就是视口，链一路收到底 ——
 //     修复 844×390 下卡片按内容长高（8 行撑到 518px）越出视口、底部不可达的既有溢出。
 // 链断在哪里就退化成普通文档流：flex:1 落在无高度的包裹层里不生效，无害；
