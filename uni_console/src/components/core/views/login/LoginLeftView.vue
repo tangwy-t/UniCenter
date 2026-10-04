@@ -10,11 +10,6 @@
       <ThemeSvg :src="loginIcon" size="100%" />
     </div>
 
-    <div class="text-wrap">
-      <h1> 一款兼具设计美学与高效开发的后台系统 </h1>
-      <p> 美观实用的界面，经过视觉优化，确保卓越的用户体验 </p>
-    </div>
-
     <!-- 几何装饰元素 -->
     <div class="geometric-decorations">
       <!-- 基础几何形状 -->
@@ -74,11 +69,6 @@
   import AppConfig from '@/config'
   import loginIcon from '@imgs/svg/login_icon.svg'
   import { themeAnimation } from '@/utils/ui/animation'
-
-  // 定义 props
-  defineProps<{
-    hideContent?: boolean // 是否隐藏内容，只显示 logo
-  }>()
 </script>
 
 <style lang="scss" scoped>
@@ -95,6 +85,19 @@
   $bg-mix-light-9: color-mix(in srgb, $primary-light-9 100%, $main-bg);
   $bg-mix-light-8: color-mix(in srgb, $primary-light-8 80%, $main-bg);
   $bg-mix-light-7: color-mix(in srgb, $primary-light-7 80%, $main-bg);
+
+  // 短横档：视口矮（≤ short）而横向还放得下两栏（≥ phone）
+  //
+  // 为什么是「高度轴 × 宽度轴」的交集：纵向吃紧时品牌列要么换横向短版式、要么消失；
+  // 但「消失」正是这次的病灶 —— 品牌列一收，页面只剩表单列 + 左上角一枚孤零零的 logo。
+  // 所以矮视口下品牌列改走**品牌栏**（同底色、同插画、同在左侧，只是收窄成一条竖版）。
+  @mixin short-rail {
+    @include respond-height-at-most('short') {
+      @include respond-at-least('phone') {
+        @content;
+      }
+    }
+  }
 
   .login-left-view {
     position: relative;
@@ -125,26 +128,6 @@
       width: 40%;
       margin: auto;
       animation: slideInLeft 0.6s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards;
-    }
-
-    .text-wrap {
-      position: absolute;
-      bottom: 80px;
-      width: 100%;
-      text-align: center;
-      animation: slideInLeft 0.6s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards;
-
-      h1 {
-        font-size: 24px;
-        font-weight: 400;
-        color: var(--art-gray-900) !important;
-      }
-
-      p {
-        margin-top: 10px;
-        font-size: 14px;
-        color: var(--art-gray-600) !important;
-      }
     }
 
     .geometric-decorations {
@@ -488,27 +471,74 @@
 
     @include respond-at-most('xwide') {
       width: 60vw;
+    }
 
-      .text-wrap {
-        bottom: 40px;
+    // 宽矮档（宽 ≥ xl 且高 ≤ short）：品牌列还在，垂直余量却压到 640 以下 ——
+    // 插画换成按高度轴取值：矮画幅里 60vh 宽的扁底本身就像一片空场，插画再按宽度的
+    // 40% 缩一档就真的没主心骨了，这里改成**跟着可用高度长**（盒高 = 视口高 - 6%），
+    // 由 svg 的 preserveAspectRatio 在其中居中适配，宽高两头都不溢出。
+    @include respond-at-least('xl') {
+      @include respond-height-at-most('short') {
+        .left-img {
+          inset: 0 0 6%;
+          width: 55vh;
+        }
       }
     }
 
+    // 极矮档（高 ≤ phoneShort）：定距装饰（140px 的点、140px 的方块组）在这么扁的画幅里
+    // 只会跟插画叠在一起，退场。
+    @include respond-at-least('xl') {
+      @include respond-height-at-most('phoneShort') {
+        .geometric-decorations {
+          .dot,
+          .squares-group {
+            display: none;
+          }
+        }
+      }
+    }
+
+    // 宽度紧凑档（≤ compact）：品牌列让位给表单列（表单列独占整页，居中一行）
     @include respond-at-most('compact') {
       width: auto;
       height: auto;
       padding: 0;
-      // 隐藏背景和其他内容，只保留 logo
       background: transparent;
 
       .left-img,
-      .text-wrap,
       .geometric-decorations {
         display: none;
       }
 
       .logo {
         display: none;
+      }
+
+      // 窄 + 矮：不把品牌整个丢掉，改走**品牌栏**。
+      // 同底色、同插画、同一条左栏位置 —— 大画幅的三档呼吸，这一档只是把画幅收窄成一条。
+      @include short-rail {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        width: clamp(232px, 30vw, 340px);
+        height: 100%;
+        padding: 22px 20px;
+        background-color: $bg-mix-light-9;
+        border-right: 1px solid var(--art-card-border);
+
+        .logo {
+          display: flex;
+        }
+
+        .left-img {
+          position: static;
+          display: block;
+          width: 100%;
+          max-width: 230px;
+          margin: 26px auto 0;
+          animation: none;
+        }
       }
     }
   }
@@ -519,6 +549,12 @@
 
     @include respond-at-most('compact') {
       background: transparent;
+
+      // 品牌栏在暗色下同样要留住底色（同款 color-mix，只是与 #070707 混合），
+      // 否则一行 .dark 规则的优先级会把栏底抹平（.dark 前缀多一级，写在上面挡不住）。
+      @include short-rail {
+        background-color: color-mix(in srgb, $primary-light-9 60%, #070707);
+      }
     }
 
     .geometric-decorations {

@@ -1,8 +1,8 @@
 @reference '@styles/core/tailwind.css';
 
-/* 授权页右侧区域 */
+/* 授权页右侧表单列（档位：桌面 / 宽矮 / 短横，见 index.vue 的 scss 块） */
 .auth-right-wrap {
-  @apply absolute inset-0 w-[440px] h-[650px] py-[5px] m-auto overflow-hidden
+  @apply absolute inset-0 w-[440px] h-[650px] max-h-full py-[5px] m-auto overflow-hidden
     max-sm:px-7 max-sm:w-full
     animate-[slideInRight_0.6s_cubic-bezier(0.25,0.46,0.45,0.94)_forwards]
     max-md:animate-none;
@@ -15,12 +15,10 @@
     @apply text-g-900 text-4xl font-semibold max-md:text-3xl max-sm:pt-10;
   }
 
-  .sub-title {
-    @apply mt-[10px] text-g-600 text-sm;
-  }
-
+  /* 表单控件（输入框外壳）高度。按钮不吃这条 —— el-ui 用 !important 把按钮钉在
+     --el-component-custom-height 上，登录页改那个变量（见 index.vue 的 scss 块）。 */
   .custom-height {
-    @apply !h-[40px];
+    @apply h-[40px];
   }
 }
 

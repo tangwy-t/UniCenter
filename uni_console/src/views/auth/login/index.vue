@@ -7,20 +7,19 @@
   >
     <LoginLeftView />
 
-    <div class="relative flex-1">
+    <div class="auth-pane relative flex-1">
       <AuthTopBar />
 
       <div class="auth-right-wrap">
         <div class="form">
           <h3 class="title">{{ '欢迎回来' }}</h3>
-          <p class="sub-title">{{ '输入您的账号和密码登录' }}</p>
 
           <ElForm
             ref="formRef"
+            class="login-form"
             :model="formData"
             :rules="rules"
             @keyup.enter="handleSubmit"
-            style="margin-top: 25px"
           >
             <ElFormItem prop="username">
               <ElInput
@@ -62,7 +61,7 @@
               <ElCheckbox v-model="remember">{{ '记住密码' }}</ElCheckbox>
             </ElFormItem>
 
-            <div style="margin-top: 30px">
+            <div class="submit-row">
               <ElButton
                 class="w-full custom-height"
                 type="primary"
@@ -238,6 +237,128 @@
 </style>
 
 <style lang="scss" scoped>
+  @use '@styles/core/breakpoints.scss' as *;
+
+  /* 表单列的三档版式（与 LoginLeftView 的品牌画幅同一条高度轴呼吸）
+   *
+   * 桌面（高 > short）：440×650 的两列构图，表单列在右半区居中
+   * 宽矮（高 ≤ short）：650 的**定高**在矮视口里是病的根 —— `inset-0 + m-auto` 会把
+   *   650 高的盒子居中到视口外（844×390 实测 top = -130px），标题被裁到屏幕上方，
+   *   底部又空出一大截。这一档改由内容定高，并交给 .auth-pane 在纵向居中
+   *   （只把定高拆掉还不够：内容一路贴顶、底部空出一整屏，同样是「节奏散」）。
+   * 短横（高 ≤ short 且宽 ≤ compact 且 ≥ phone）：品牌列收成左栏（见 LoginLeftView），
+   *   表单列在剩下的右栏居中，并让开顶栏那一行控件。
+   * 手机横屏（高 ≤ phoneShort）：触屏触靶 —— 输入框 / 登录键 / 记住密码行一律 44px。 */
+  .auth-pane {
+    @include respond-height-at-most('short') {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    @include respond-height-at-most('short') {
+      @include respond-at-most('compact') {
+        @include respond-at-least('phone') {
+          // 顶栏（18px 顶距 + 32/44px 行高）之下再让 8px 呼吸，底部留 12px。
+          // 写成**容器内边距**而不是表单列的 top/bottom：居中带随之内收，
+          // 表单列在「顶栏之下、屏幕底之上」这条带里居中，两头都不贴边。
+          padding-top: 58px;
+          padding-bottom: 12px;
+        }
+      }
+    }
+  }
+
+  .auth-right-wrap {
+    /* 组件高度旋钮（el-ui 的 `.el-button--default` 用 !important 吃这个变量：
+       桌面 36 / 触屏 40）。登录页要让按钮对齐输入框的 40，手机横屏再抬到 44 ——
+       在本列内重设变量即可，不必再写一条 !important 去跟全局拼优先级。 */
+    --el-component-custom-height: 40px;
+
+    /* 桌面档节奏：模板里原有两条内联间距（标题→表单 25px、记住密码→登录 30px），
+       收进样式表以便按高度档覆盖，桌面取值与原来一致。 */
+    .login-form {
+      margin-top: 25px;
+    }
+
+    .submit-row {
+      margin-top: 30px;
+    }
+
+    @include respond-height-at-most('short') {
+      position: relative; // 脱离绝对定位，改由 .auth-pane 的 flex 居中（不占 transform，入场滑入不受影响）
+      inset: auto;
+      margin: 0;
+      height: auto;
+      max-height: 100%;
+      overflow-x: hidden;
+      overflow-y: auto;
+
+      .form {
+        height: auto;
+        padding: 8px 0;
+      }
+
+      .title {
+        font-size: 30px;
+        line-height: 1.25;
+      }
+
+      .login-form {
+        margin-top: 18px;
+      }
+
+      .submit-row {
+        margin-top: 20px;
+      }
+
+      @include respond-at-most('compact') {
+        @include respond-at-least('phone') {
+          // 品牌栏已占去左侧，表单列不再吃满整页；两侧各留 16px 兜底窄视口
+          max-width: calc(100% - 32px);
+        }
+      }
+    }
+
+    @include respond-height-at-most('phoneShort') {
+      --el-component-custom-height: 44px;
+
+      .form {
+        padding: 0;
+      }
+
+      .title {
+        font-size: 24px;
+      }
+
+      .login-form {
+        margin-top: 14px;
+      }
+
+      .custom-height {
+        height: 44px;
+      }
+
+      :deep(.el-input__wrapper),
+      .captcha-img {
+        height: 44px;
+      }
+
+      :deep(.el-checkbox) {
+        height: 44px;
+      }
+
+      :deep(.el-form-item) {
+        margin-bottom: 12px;
+      }
+    }
+
+    // 动效可关：入场滑入是装饰性的，用户声明「减少动态效果」时不播放
+    @media (prefers-reduced-motion: reduce) {
+      animation: none !important;
+    }
+  }
+
   :deep(.el-input__wrapper) {
     height: 40px;
   }

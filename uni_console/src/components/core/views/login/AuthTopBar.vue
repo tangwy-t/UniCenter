@@ -1,14 +1,12 @@
 <!-- 授权页右上角组件 -->
 <template>
-  <div
-    class="absolute w-full flex-cb top-4.5 z-10 flex-c !justify-end max-compact:!justify-between"
-  >
-    <div class="flex-cc !hidden max-compact:!flex ml-2 max-sm:ml-6">
+  <div class="absolute w-full flex-c top-4.5 z-10 justify-end">
+    <div class="auth-topbar-brand flex-cc ml-2 max-sm:ml-6">
       <ArtLogo class="icon" size="46" />
       <h1 class="text-xl ont-mediumf ml-2">{{ AppConfig.systemInfo.name }}</h1>
     </div>
 
-    <div class="flex-cc gap-1.5 mr-2 max-sm:mr-5">
+    <div class="auth-topbar-actions flex-cc gap-1.5 mr-2 max-sm:mr-5">
       <div class="color-picker-expandable relative flex-c max-sm:!hidden">
         <div
           class="color-dots absolute right-0 rounded-full flex-c gap-2 rounded-5 px-2.5 py-2 pr-9 pl-2.5 opacity-0"
@@ -67,7 +65,43 @@
   }
 </script>
 
-<style scoped>
+<style lang="scss" scoped>
+  @use '@styles/core/breakpoints.scss' as *;
+
+  /* 顶栏品牌（logo + 系统名）只在「品牌列已被 compact 收起」的窄视口出现，
+     且短横档例外 —— 那一档品牌由 LoginLeftView 的品牌栏承载，顶栏再挂一枚就是重复。
+
+     为什么品牌用 mr-auto 把自己顶到左边（而不是给容器加 justify-between）：
+     品牌一藏（短横档/宽视口），space-between 会把仅剩的一组控件甩到左边去，
+     而 mr-auto 的容器永远 justify-end —— 控件钉在右上，与品牌在不在无关。 */
+  .auth-topbar-brand {
+    display: none;
+    margin-right: auto;
+
+    @include respond-at-most('compact') {
+      display: flex;
+
+      @include respond-height-at-most('short') {
+        @include respond-at-least('phone') {
+          display: none;
+        }
+      }
+    }
+  }
+
+  /* 手机横屏：主色/主题两个圆钮的触靶从 32 提到 44（图标尺寸不变） */
+  @include respond-height-at-most('phoneShort') {
+    .auth-topbar-actions {
+      gap: 12px;
+      margin-right: 12px;
+
+      .btn {
+        width: 44px;
+        height: 44px;
+      }
+    }
+  }
+
   .color-dots {
     pointer-events: none;
     backdrop-filter: blur(10px);
