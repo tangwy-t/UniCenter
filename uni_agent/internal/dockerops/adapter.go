@@ -1544,6 +1544,7 @@ func toPorts(in []container.Port) []PortInfo {
 }
 
 // toMounts 逐项映射 SDK 的挂载点到本域类型（字段同名同义，不做任何加工）。
+// Name 一并带出（volume 型挂载的卷名）：它是卷的身份，Source 对卷只是宿主路径。
 func toMounts(in []container.MountPoint) []MountInfo {
 	if len(in) == 0 {
 		return nil
@@ -1552,6 +1553,7 @@ func toMounts(in []container.MountPoint) []MountInfo {
 	for _, m := range in {
 		out = append(out, MountInfo{
 			Type:        string(m.Type),
+			Name:        m.Name,
 			Source:      m.Source,
 			Destination: m.Destination,
 			Mode:        m.Mode,

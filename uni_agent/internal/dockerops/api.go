@@ -46,8 +46,13 @@ type PortInfo struct {
 }
 
 // MountInfo 是一条挂载。
+//
+// Name 是 volume 型挂载的**卷名**（命名卷与匿名卷 daemon 都会给）：卷的身份是它，
+// 不是 Source —— Source 对卷是宿主存储路径（/var/lib/docker/volumes/<名>/_data），
+// bind/tmpfs 挂载没有卷名（Name 为空）。「哪些容器挂了哪个卷」必须按 Name 聚合。
 type MountInfo struct {
 	Type        string
+	Name        string
 	Source      string
 	Destination string
 	Mode        string

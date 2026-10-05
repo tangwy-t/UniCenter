@@ -663,6 +663,41 @@ func imageSortKeys(is []agentproto.DockerImage) []string {
 	return out
 }
 
+// volumeConsumers 的键必须是**卷名**（MountInfo.Name）而不是宿主路径（Source）——
+// 消费端（Collect 里 mountedBy[v.Name]）按卷名查，键错位则永不命中、全部卷误判「未使用」。
+// 四类事实各钉一条：命名卷被挂载命中、未挂载不出现、bind 不混入、匿名卷（Source 无身份、
+// 有 Name）同样计入；宿主路径永远不得成为键。
+func TestVolumeConsumersKeysByVolumeName(t *testing.T) {
+	cs := []ContainerInfo{
+		{Name: "mysql", Mounts: []MountInfo{
+			{Type: "volume", Name: "mysql-data", Source: "/var/lib/docker/volumes/mysql-data/_data",
+				Destination: "/var/lib/mysql", RW: true},
+			{Type: "bind", Name: "", Source: "/data/conf", Destination: "/etc/conf", RW: true},
+		}},
+		{Name: "redis", Mounts: []MountInfo{
+			// 匿名卷：daemon 同样给 Name（卷名），Source 在旧口径里为空会把它 skip。
+			{Type: "volume", Name: "f0a9b1c2d3e4", Source: "", Destination: "/data", RW: true},
+		}},
+		{Name: "idle", Mounts: nil},
+	}
+	got := volumeConsumers(cs)
+	if want := []string{"mysql"}; !slices.Equal(got["mysql-data"], want) {
+		t.Fatalf("命名卷必须按卷名命中并给出挂载它的容器: %+v", got)
+	}
+	if want := []string{"redis"}; !slices.Equal(got["f0a9b1c2d3e4"], want) {
+		t.Fatalf("匿名卷（Source 无身份、有 Name）必须按 Name 计入: %+v", got)
+	}
+	if _, ok := got["/var/lib/docker/volumes/mysql-data/_data"]; ok {
+		t.Fatalf("宿主路径不得成为键: %+v", got)
+	}
+	if _, ok := got["/data/conf"]; ok {
+		t.Fatalf("bind 挂载不得混入: %+v", got)
+	}
+	if len(got) != 2 {
+		t.Fatalf("恰好两个卷有消费者（未挂载的卷不出现），实际 %+v", got)
+	}
+}
+
 // 不可达时必须是**能力信号**：docker_ok=false + 结论句 + 空清单（协议强制），
 // 且采集绝不能返回 nil（调用方会直接把它发出去）。
 func TestSnapshotDockerUnavailable(t *testing.T) {
@@ -693,8 +728,11 @@ func TestSnapshotCollectsEverything(t *testing.T) {
 				State: "running", Status: "Up 16 hours", Created: 1789000000,
 				Labels: map[string]string{composeProjectLabel: "uni-center", composeServiceLabel: "uni_core",
 					composeConfigFilesLabel: "/data/UniCenter/docker-compose.yml"},
-				Ports:  []PortInfo{{Private: 8088, Public: 20080, Type: "tcp"}},
-				Mounts: []MountInfo{{Type: "volume", Source: "uni-center-uploads", Destination: "/app/uploads", RW: true}}},
+				Ports: []PortInfo{{Private: 8088, Public: 20080, Type: "tcp"}},
+				// Source 是宿主存储路径（daemon 实态），卷的身份是 Name —— 端到端钉住
+				// 「InUse 按卷名命中」：若消费端再按 Source 查这个夹具就会落空判 false。
+				Mounts: []MountInfo{{Type: "volume", Name: "uni-center-uploads",
+					Source: "/var/lib/docker/volumes/uni-center-uploads/_data", Destination: "/app/uploads", RW: true}}},
 			{ID: "c2", Name: "mysql", Image: "mysql:8.0.22", ImageID: "sha256:bbb",
 				State: "running", Status: "Up 3 months", Created: 1770000000},
 			{ID: "c3", Name: "zentao", Image: "zentao:21.7", ImageID: "sha256:ccc",
@@ -773,8 +811,8 @@ func TestSnapshotCollectsEverything(t *testing.T) {
 	if uploads.SizeMB == nil || *uploads.SizeMB == 0 {
 		t.Fatalf("有用量数据的卷必须带上体积: %+v", uploads)
 	}
-	if other := findVolume(t, st.Volumes, "other"); other.SizeMB != nil || other.Protected {
-		t.Fatalf("用量未知必须是 nil（页面显示「—」而不是 0），未列出的卷不得被标记: %+v", other)
+	if other := findVolume(t, st.Volumes, "other"); other.SizeMB != nil || other.Protected || other.InUse || len(other.MountedBy) != 0 {
+		t.Fatalf("用量未知必须是 nil（页面显示「—」而不是 0），未列出的卷不得被标记、未被任何容器挂载不得判在用: %+v", other)
 	}
 	if !uploads.InUse || uploads.MountedBy[0] != "uni-center-core" {
 		t.Fatalf("被挂载的卷必须标记在用并给出容器名: %+v", uploads)

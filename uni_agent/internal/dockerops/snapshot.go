@@ -524,10 +524,14 @@ func imageConsumers(cs []ContainerInfo) map[string][]string {
 	return sortedSets(acc)
 }
 
-// volumeConsumers 按挂载来源聚合「哪些容器挂了这个卷」。
+// volumeConsumers 按挂载的**卷名**聚合「哪些容器挂了这个卷」。
 //
-// 只认 Type == "volume"：bind 挂载的 Source 是**宿主路径**而不是具名资源，
-// 混进来会让「卷的列表」里出现一堆目录名，而删卷的判断（in_use）也会张冠李戴。
+// 键必须是 Name 而不是 Source：消费端（Collect 里 mountedBy[v.Name]）是按卷名查的，
+// 而 Source 对卷是宿主存储路径（/var/lib/docker/volumes/<名>/_data）—— 曾误用 Source
+// 当键，查询永不命中，全部卷被误判「未使用」。
+//
+// 只认 Type == "volume"：bind 挂载没有卷名（Name 为空），混进来会让删卷的
+// in_use 判断张冠李戴。匿名卷在 Docker 里同样有 Name，命名/匿名一视同仁计入。
 func volumeConsumers(cs []ContainerInfo) map[string][]string {
 	acc := map[string]map[string]bool{}
 	for _, c := range cs {
@@ -535,13 +539,13 @@ func volumeConsumers(cs []ContainerInfo) map[string][]string {
 			continue
 		}
 		for _, m := range c.Mounts {
-			if m.Type != "volume" || m.Source == "" {
+			if m.Type != "volume" || m.Name == "" {
 				continue
 			}
-			if acc[m.Source] == nil {
-				acc[m.Source] = map[string]bool{}
+			if acc[m.Name] == nil {
+				acc[m.Name] = map[string]bool{}
 			}
-			acc[m.Source][c.Name] = true
+			acc[m.Name][c.Name] = true
 		}
 	}
 	return sortedSets(acc)

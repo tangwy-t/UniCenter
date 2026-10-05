@@ -17,7 +17,8 @@ func TestReadExecutorPayloads(t *testing.T) {
 	api := &stubAPI{}
 	api.containerDetail = ContainerDetail{ID: "c1", Name: "mysql", Image: "mysql:8.0.22", State: "running",
 		Env: []string{"MYSQL_ROOT_PASSWORD=***"}, Entrypoint: []string{"docker-entrypoint.sh"},
-		Mounts: []MountInfo{{Type: "volume", Source: "mysql-data", Destination: "/var/lib/mysql", RW: true}}}
+		Mounts: []MountInfo{{Type: "volume", Name: "mysql-data", Source: "/var/lib/docker/volumes/mysql-data/_data",
+			Destination: "/var/lib/mysql", RW: true}}}
 	api.logLines = "2026-09-24T15:30:32 server starting\n"
 	api.imageDetail = ImageDetail{ID: "sha256:545b", SizeBytes: 545 << 20,
 		History: []ImageLayer{{SizeBytes: 12 << 20, CreatedBy: "CMD [\"mysqld\"]"}, {SizeBytes: 0, CreatedBy: "ENV x=1", EmptyLayer: true}}}

@@ -306,7 +306,10 @@ func (e *StreamExecutor) copyEvents(sess *streamSession, ch <-chan EventItem) {
 			ExitCode:  ev.ExitCode,
 		}
 		if err := item.Validate(); err != nil {
-			sess.mgr.cfg.log.Warn("docker event dropped (invalid)", "session", sess.ID(), "err", err.Error())
+			// 词表外的动作（connect/disconnect 等）是协议词表**刻意策展**的结果，不是异常：
+			// 每次 docker run 都会产出两条，属预期常态 —— 降 Debug 避免刷屏；丢弃行为
+			// 本身不变（core 侧整行丢弃仍是不变的第二道闸）。
+			sess.mgr.cfg.log.Debug("docker event dropped (invalid)", "session", sess.ID(), "err", err.Error())
 			continue
 		}
 		b, err := json.Marshal(item)

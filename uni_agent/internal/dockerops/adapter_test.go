@@ -57,9 +57,20 @@ func TestToMounts(t *testing.T) {
 		}}},
 		// daemon 不给 Mode 时就是空串：不要替它脑补 "ro" —— 只读与否只看 RW。
 		{"volume 挂载（无 Mode）", []container.MountPoint{{
-			Type: mount.TypeVolume, Source: "/var/lib/docker/volumes/x/_data", Destination: "/data", RW: false,
+			Type: mount.TypeVolume, Name: "x", Source: "/var/lib/docker/volumes/x/_data", Destination: "/data", RW: false,
 		}}, []MountInfo{{
-			Type: "volume", Source: "/var/lib/docker/volumes/x/_data", Destination: "/data", RW: false,
+			Type: "volume", Name: "x", Source: "/var/lib/docker/volumes/x/_data", Destination: "/data", RW: false,
+		}}},
+		// 匿名卷：daemon 同样给 Name（64 位 hex 卷名），Source 是宿主存储路径 ——
+		// Name 必须带出（卷的身份），Source 不参与身份判断。
+		{"匿名卷（Name 为 64 位 hex）", []container.MountPoint{{
+			Type: mount.TypeVolume, Name: "f0a9b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0",
+			Source:      "/var/lib/docker/volumes/f0a9b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0/_data",
+			Destination: "/data", RW: true,
+		}}, []MountInfo{{
+			Type: "volume", Name: "f0a9b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0",
+			Source:      "/var/lib/docker/volumes/f0a9b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0/_data",
+			Destination: "/data", RW: true,
 		}}},
 		{"tmpfs（无 Source）", []container.MountPoint{{
 			Type: mount.TypeTmpfs, Destination: "/tmp", RW: true,
