@@ -7,10 +7,12 @@
  *   - 数据源是 GET /docker/containers（服务端过滤，参数从筛选表单来）而不是
  *     单主机快照 —— 没有「当前主机」与「主机切换重置」的概念，host 从页面级
  *     上下文降为筛选参数之一；
- *   - 失败口径沿用 D-1 的精神但形状不同：首拉失败 → 整页错误态 + 重试（没有
- *     旧数据可保）；其后静默刷新失败 → 保留最后已知数据并在页头标注
+ *   - 失败口径沿用 D-1 的精神但形状不同：首拉失败 → 紧凑失败态 + 重试（没有
+ *     旧数据可保）；其后静默刷新失败 → 保留最后已知数据并在工具条标注
  *     （「数据获取失败」与「上次数据仍在」是两种事实，不共用一句话）；
  *   - total 如实报全量、items 截 500：truncated 结论交给页面说出口。
+ *（原「页头副标题」随列表页纯化删除：hero 已整块移除，页面直接消费 refreshError
+ * 在工具条渲染刷新失败标注；本 composable 不再产出展示文案。）
  *
  * 自动刷新的清理覆盖两种「离开」：整页卸载与 keep-alive 失活（worktab 缓存页面
  * 实例）。onActivated 回来时重启计时器并补一次静默拉取 —— 后台标签页的
@@ -45,7 +47,7 @@ export function useWorkloadList(options: UseWorkloadListOptions) {
   const hosts = ref<DockerHostItem[]>([])
   const loading = ref(false)
   const hostsLoading = ref(false)
-  /** 首拉失败（还没有任何数据可给）：整页错误态 + 重试。 */
+  /** 首拉失败（还没有任何数据可给）：页面的紧凑失败态 + 重试。 */
   const hasError = ref(false)
   /** 是否曾成功拉到过数据：其后静默刷新失败时保留最后已知数据并标注。 */
   const hasData = ref(false)
@@ -63,13 +65,6 @@ export function useWorkloadList(options: UseWorkloadListOptions) {
     // 两个数据源都说没有：主机清单与容器计数一致指向「没有可管主机」。
     if (!hasData.value && hosts.value.length === 0 && total.value === 0) return 'empty'
     return 'ready'
-  })
-
-  /** 页头副标题：三种事实（在拉 / 刷新失败 / 正常），与总览页 subtitle 同一取向。 */
-  const subtitle = computed(() => {
-    if (pageState.value === 'loading') return '正在拉取容器清单'
-    if (refreshError.value) return '上次数据仍在，本次刷新失败'
-    return `跨 ${hosts.value.length} 台主机`
   })
 
   /**
@@ -180,7 +175,6 @@ export function useWorkloadList(options: UseWorkloadListOptions) {
     refreshError,
     truncated,
     pageState,
-    subtitle,
     autoRefresh,
     /** 拉一次（搜索/筛选变化、手动刷新走它）。 */
     load,

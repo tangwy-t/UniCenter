@@ -5,14 +5,19 @@ import { PermDockerInspect, PermDockerList, PermDockerManage } from '@/enums/per
  * Docker 管理模块（路由挂载靠目录约定：src/modules/<name>/index.ts 默认导出
  * PluginManifest，由 framework/plugin/manager.ts 的 import.meta.glob 收集）。
  *
- * 四个可导航页面的 path 必须与后端 v015 种子菜单**逐字一致**（7a 后 v015 直种子
- * 最终菜单面：总览 /docker、容器 /docker/containers、镜像与存储 /docker/resources、
- * 项目 /docker/projects）—— 菜单模式下 MenuProcessor 用菜单 path 去插件路由表取
- * 组件，差一个字符该菜单就会被判定为「无对应前端页面」而**整条消失**（无报错、
- * 无日志）。该约束由 uni_core 的 v015_seed_docker_frontend_test.go 做字面量比对钉住。
+ * 六个可导航页面的 path 必须与后端 v015 种子菜单**逐字一致**（菜单平铺后的最终
+ * 菜单面：总览 /docker、容器 /docker/containers、镜像 /docker/images、
+ * 数据卷 /docker/volumes、网络 /docker/networks、项目 /docker/projects）——
+ * 菜单模式下 MenuProcessor 用菜单 path 去插件路由表取组件，差一个字符该菜单就会
+ * 被判定为「无对应前端页面」而**整条消失**（无报错、无日志）。该约束由 uni_core
+ * 的 v015_seed_docker_frontend_test.go 做字面量比对钉住。
  *
- * 7a 旧页收敛：/docker/images、/docker/volumes、/docker/networks 三个列表路由与
- * 三个旧 view **整体删除**（不做 redirect，站内深链一律改指 /docker/resources?tab=…）。
+ * 拆分切片（本波）：原「镜像与存储」收敛页 /docker/resources 与其 ElTabs 三 tab
+ * **整体删除**（不做 redirect，`?tab=` 语义整体消灭，站内深链一律改指三个新页）——
+ * 镜像/数据卷/网络各自平铺为独立整页列表（views/images.vue / volumes.vue /
+ * networks.vue，路径与被 7a 收敛前的三条旧列表路由同名复活）。三个新页同时按
+ * 「系统管理」形态收口：ArtSearchBar + art-table-card + ArtTableHeader 工具条
+ * （计数/合计/动作全在 #left）。
  *
  * 7b 详情面收敛：/docker/container-detail/:id 路由与 view **整体删除** —— 能力
  * （概览/日志/终端/环境）收敛到统一表页的 workload-drawer，深链一律改指
@@ -50,14 +55,27 @@ const plugin: PluginManifest = {
       meta: { title: '容器', icon: 'ri:ship-line', authMark: PermDockerList }
     },
     {
-      // 镜像与存储（7a 收敛页）：镜像 / 数据卷 / 网络三张旧列表页收敛为一个
-      // tab 容器页。页面级共享一个主机上下文（切 tab 不换主机），当前 tab 记在
-      // query（?tab=images|volumes|networks，深链/刷新可还原）。
-      // 旧三页的 path 已删除：总览磁盘面板、镜像详情返回链路都改指本页 + tab。
-      path: '/docker/resources',
-      name: 'DockerResources',
-      component: () => import('./views/resources.vue'),
-      meta: { title: '镜像与存储', icon: 'ri:database-2-line', authMark: PermDockerList }
+      // 镜像列表页（拆分切片）：原「镜像与存储」收敛页的镜像 tab 升格为独立整页
+      // （菜单平铺），path 与 v015 种子菜单**逐字一致**。与容器页同档形态：
+      // 跨主机聚合表（GET /docker/images）、`?host=` 深链作主机筛选初始值。
+      path: '/docker/images',
+      name: 'DockerImages',
+      component: () => import('./views/images.vue'),
+      meta: { title: '镜像', icon: 'ri:box-1-line', authMark: PermDockerList }
+    },
+    {
+      // 数据卷列表页（拆分切片）：原收敛页的数据卷 tab 升格为独立整页。
+      path: '/docker/volumes',
+      name: 'DockerVolumes',
+      component: () => import('./views/volumes.vue'),
+      meta: { title: '数据卷', icon: 'ri:hard-drive-3-line', authMark: PermDockerList }
+    },
+    {
+      // 网络列表页（拆分切片）：原收敛页的网络 tab 升格为独立整页。
+      path: '/docker/networks',
+      name: 'DockerNetworks',
+      component: () => import('./views/networks.vue'),
+      meta: { title: '网络', icon: 'ri:share-forward-line', authMark: PermDockerList }
     },
     {
       path: '/docker/projects',

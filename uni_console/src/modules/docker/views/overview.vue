@@ -142,11 +142,6 @@
         <section class="dov-section">
           <div class="dov-section__head">
             <span class="dov-section__title">活动流</span>
-            <!-- 「回放…后进入实时」是防误读口径句（旧事件先出现），按①/②纪律留在
-               待裁清单里不擅删；「连接随页面激活期」是机制解释，已删。 -->
-            <span class="dov-section__sub">
-              跨主机 docker 事件 · 回放各主机最近 50 条后进入实时
-            </span>
           </div>
           <OverviewEventsFeed />
         </section>
@@ -317,20 +312,21 @@
     void router.push({ path: '/docker/containers', query: { host: String(host.id) } })
   }
 
-  /** 磁盘面板行 → 该主机的镜像表（7a：三个旧列表页收敛为 /docker/resources 的
-   *  tab；清理悬空镜像的确认档流在镜像 tab 底栏）。tab 进 query：深链/刷新还原。 */
+  /** 磁盘面板行 → 该主机的镜像表（拆分切片：镜像已是独立整页 /docker/images；
+   *  host 进 query 作该页筛选初始值 —— 清理悬空镜像的确认档流在镜像页工具条上）。 */
   function goHostImages(host: DockerHostItem) {
     void router.push({
-      path: '/docker/resources',
-      query: { host: String(host.id), tab: 'images' }
+      path: '/docker/images',
+      query: { host: String(host.id) }
     })
   }
 
-  /** 磁盘面板行 → 该主机的卷表（volume:prune 的确认档流在数据卷 tab 底栏）。 */
+  /** 磁盘面板行 → 该主机的卷表（拆分切片：数据卷已是独立整页；volume:prune 的
+   *  确认档流在数据卷页工具条上）。 */
   function goHostVolumes(host: DockerHostItem) {
     void router.push({
-      path: '/docker/resources',
-      query: { host: String(host.id), tab: 'volumes' }
+      path: '/docker/volumes',
+      query: { host: String(host.id) }
     })
   }
 

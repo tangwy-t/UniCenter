@@ -68,14 +68,15 @@ function taskResp(items: DockerTaskItem[], total: number = items.length, page = 
   return { items, total, page, pageSize }
 }
 
-/** Art* 全局组件替身：保留 slot，页面内容仍会被渲染。 */
+/** Art* 全局组件替身：保留 slot（default + left —— 工具条内容在 ArtTableHeader 的
+ *  #left 里，替身不渲染它的话过滤/返回控件整块看不见）。 */
 const passthrough = (name: string) =>
   defineComponent({
     name,
     setup:
       (_, { slots }) =>
       () =>
-        h('div', { 'data-stub': name }, [slots.default?.()])
+        h('div', { 'data-stub': name }, [slots.default?.(), slots.left?.()])
   })
 
 const mounted: VueWrapper[] = []
@@ -114,6 +115,7 @@ async function mountTasks() {
     global: {
       plugins: [router],
       stubs: {
+        ArtTableHeader: passthrough('ArtTableHeader'),
         ArtButtonTable: passthrough('ArtButtonTable'),
         ArtSvgIcon: passthrough('ArtSvgIcon')
       }
@@ -133,11 +135,17 @@ async function clickFilter(w: VueWrapper, label: string) {
 }
 
 describe('任务中心页 · QA 路 1 的前端三处', () => {
-  it('挂载冒烟：页面与页头（任务中心）渲染到位', async () => {
+  it('挂载冒烟：页面与工具条（返回 + 状态过滤）渲染到位', async () => {
     api.fetchDockerTasks.mockResolvedValue(taskResp([taskItem()]))
     const w = await mountTasks()
     expect(w.find('.docker-tasks').exists()).toBe(true)
-    expect(w.text()).toContain('任务中心')
+    // 列表页纯化后页头（hero：图标+标题）已删：页面的身份由工具条的返回钮与
+    // 状态过滤（全部/进行中/已结束）承载。
+    expect(w.findAll('.el-radio-button').map((b) => b.text())).toEqual(['全部', '进行中', '已结束'])
+    const back = w
+      .findAll('[data-stub="ArtButtonTable"]')
+      .find((b) => b.attributes('title') === '返回上一页')
+    expect(back, '工具条应有返回钮').toBeTruthy()
   })
 
   it('时间列：毫秒除千的浮点秒整段取整，「4.41100001335144 秒前」不再出现', async () => {
@@ -203,7 +211,7 @@ describe('展开行的取消入口（观看与执行解耦：取消是独立动�
     await flush()
   }
 
-  it('自己的在途任务 + docker:manage：展开后出现取消入口（收起说明同时在场）', async () => {
+  it('自己的在途任务 + docker:manage：展开后出现取消入口（收起语义收在展开开关的 title）', async () => {
     authState.perms = ['docker:manage']
     userState.username = 'alice'
     api.fetchDockerTasks.mockResolvedValue(taskResp([taskItem({ status: 'pending' })]))
@@ -212,7 +220,9 @@ describe('展开行的取消入口（观看与执行解耦：取消是独立动�
     await expandFirst(w)
 
     expect(w.text()).toContain('取消拉取')
-    expect(w.text()).toContain('收起不取消任务')
+    // 「收起不取消任务」的语义在展开开关的 title 上（可见正文不再重复一句）。
+    expect(w.find('.tk-item__toggle').attributes('title')).toBe('收起（不取消任务）')
+    expect(w.text()).not.toContain('收起不取消任务')
   })
 
   it('别人的在途任务：进度照看，但不给取消入口（服务端归属校验的可见性一档）', async () => {
@@ -336,11 +346,13 @@ describe('分页（8d：服务端分页 + total 报价）', () => {
     expect(w.text()).not.toContain('没有已结束的任务')
   })
 
-  it('空列表：不出分页条；副标题报「共 0 条」（硬事实）—— 三档空态话术不受影响', async () => {
+  it('空列表：不出分页条；机制说明句（跨主机/自动刷新节拍）随 hero 删除 —— 三档空态话术不受影响', async () => {
     api.fetchDockerTasks.mockResolvedValue(taskResp([]))
     const w = await mountTasks()
     expect(w.find('.el-pagination').exists()).toBe(false)
     expect(w.find('.el-empty__description').text()).toBe('还没有受理过任何任务')
-    expect(w.text()).toContain('跨主机 · 共 0 条 · 每 5 秒自动刷新')
+    // 零解释文案纪律：页面上不再有「跨主机 · 每 5 秒自动刷新」这类机制句。
+    expect(w.text()).not.toContain('跨主机')
+    expect(w.text()).not.toContain('自动刷新')
   })
 })

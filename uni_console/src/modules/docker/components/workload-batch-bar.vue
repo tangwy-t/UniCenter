@@ -286,7 +286,7 @@
     display: contents;
   }
 
-  // 勾选栏：与底栏合计同一套留白，只有选中时出现。
+  // 勾选栏：只有选中时出现（随勾选在表下展开）。
   .wkl-batch {
     display: flex;
     flex-wrap: wrap;

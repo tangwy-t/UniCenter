@@ -1,10 +1,8 @@
 <template>
   <!-- 单根（single-root 守卫在库：布局的 Transition 只支持单根，双根切页白屏）。
-       本组件是 resources 页「数据卷」tab 的内容（9b 起为跨主机聚合表）：主机清单
-       经 props 由页面下发（页面级一份，三 tab 共用），清单数据走自己的聚合端点
-       （GET /docker/volumes，服务端过滤）；本组件只持有卷表自己的筛选、行内删除
-       与底栏清理。 -->
-  <div class="docker-volumes-tab">
+       本页是「数据卷」整页列表（原「镜像与存储」收敛页的数据卷 tab 平移）：搜索栏在
+       卡片外，动作工具条与表格在卡片内；确认弹窗随页收在同一根里。 -->
+  <div class="docker-volumes-page art-full-height">
     <ArtSearchBar
       v-show="showSearchBar"
       v-model="searchForm"
@@ -13,33 +11,63 @@
       @reset="onReset"
     />
 
-    <!-- 结构沿用收敛页范式：搜索栏在卡片外，表格与页脚在卡片内。 -->
     <ElCard class="art-table-card" shadow="never">
-      <ArtTableHeader v-model:showSearchBar="showSearchBar" :loading="loading" @refresh="refresh">
+      <ArtTableHeader
+        v-model:columns="columnChecks"
+        v-model:showSearchBar="showSearchBar"
+        :loading="loading"
+        @refresh="refreshAll"
+      >
         <template #left>
-          <!-- total 如实报全量、items 截 500：截断必须说出口（与容器/镜像页同一句）。 -->
-          <span class="docker-count">
-            共 {{ total }} 个数据卷<template v-if="truncated">
-              · 列表显示前 {{ rows.length }} 条</template
-            >
-          </span>
-          <!-- 静默刷新失败：保留最后已知清单并说出口（与容器页副标题同一口径）。 -->
-          <span v-if="refreshError" class="docker-refresh-note">刷新失败，正在显示上次结果</span>
+          <div class="toolbar-left">
+            <!-- 常驻动作（权限门控：不渲染 ≠ 禁用）：清理未使用卷是强档（弹窗里逐字
+                 输入 DELETE，由组件的确认档推导）；该动作没有 options 变体，弹窗里
+                 不放任何勾选项。跨主机表没有「当前主机」：整体动作面向**主机筛选
+                 选定的那台**（没选且全场只有一台可管主机时就是它；否则禁用，禁用
+                 理由写进 title —— 不设常驻提示句）。 -->
+            <ArtButtonTable
+              v-if="canDelete"
+              icon="ri:brush-line"
+              iconClass="bg-danger/12 text-danger"
+              :disabled="hostActionDisabled"
+              :title="pruneTitle"
+              @click="openPrune"
+            />
+
+            <!-- 硬数据文本：计数（total 如实报全量、items 截 500，截断必须说出口）+
+                 合计（与表格里的行同源）+ 用量补充结论（未知/未使用）+ 静默刷新失败标注。
+                 「未知」与「未使用」是两件不同的事，分开计数：前者是**量不出来**，
+                 后者是**没人用**（可回收的候选），有才出现，避免常驻一串 0。
+                 计数/合计/补充结论只在 pageState=ready（握有数据）时报 —— 首拉/失败/
+                 无可管主机时报「共 0 个」是假话（数据面不得伪装新鲜）；刷新失败标注
+                 不受它管（那是「上次数据仍在」的另一种事实）。 -->
+            <span v-if="pageState === 'ready'" class="docker-count">
+              共 {{ total }} 个数据卷<template v-if="truncated">
+                · 列表显示前 {{ rows.length }} 条</template
+              >
+            </span>
+            <span v-if="pageState === 'ready'" class="docker-total">
+              合计 {{ totals.count }} 个 · {{ formatByUnit('MB', totals.totalMB) }}
+            </span>
+            <span v-if="pageState === 'ready' && totalsNote" class="docker-total__sub">{{
+              totalsNote
+            }}</span>
+            <span v-if="refreshError" class="docker-refresh-note">
+              刷新失败，正在显示上次结果
+            </span>
+          </div>
         </template>
       </ArtTableHeader>
 
-      <!-- 首拉失败（还没有任何行可给）：结论句 + 重试，不显示旧数据。 -->
-      <div v-if="pageState === 'error'" class="docker-tab-error">
-        <ElResult icon="error" title="数据卷清单获取失败" sub-title="统一清单接口暂时不可用">
-          <template #extra>
-            <ElButton type="primary" @click="reloadAll">重试</ElButton>
-          </template>
-        </ElResult>
-      </div>
+      <!-- 首拉失败（还没有任何行可给）：空态区里的紧凑失败态 —— 结论句 + 重试，
+           不显示旧数据（失败不得伪装成新鲜）。 -->
+      <ElEmpty v-if="pageState === 'error'" class="docker-empty" description="数据卷清单获取失败">
+        <ElButton size="small" @click="reloadAll">重试</ElButton>
+      </ElEmpty>
 
       <template v-else>
         <!-- 两种空态分开：没有可管主机 vs 筛选没命中（后者给「清除筛选」）。
-             纪律与容器/镜像页一致；空态渲染在本组件、不写进 ArtTable 的 `#empty`
+             纪律与容器/镜像页一致；空态渲染在本页、不写进 ArtTable 的 `#empty`
              插槽（ArtTable 不转发该插槽，写进去会被静默丢弃）。 -->
         <ArtTable v-if="showTable" :loading="listLoading" :data="rows" :columns="columns" />
         <ElEmpty
@@ -51,35 +79,6 @@
           <ElButton size="small" @click="onReset">清除筛选</ElButton>
         </ElEmpty>
         <ElEmpty v-else class="docker-empty" description="还没有数据卷" />
-
-        <!-- 底部合计跟着**当前清单**走（服务端过滤后的这批；截断时 header 已另行
-             说明）：底栏与表格里的行必须自洽。「未知」与「未使用」是两件不同的事，
-             分开计数：前者是**量不出来**（旧版 Docker 没给用量），后者是**没人用**
-             （可回收的候选）。 -->
-        <div class="docker-total">
-          <span>合计 {{ totals.count }} 个 · {{ formatByUnit('MB', totals.totalMB) }}</span>
-          <span v-if="totalsNote" class="docker-total__sub">{{ totalsNote }}</span>
-        </div>
-
-        <!-- 底栏写操作（spec §11.3 的分期矩阵）：清理未使用卷是强档（弹窗里逐字
-             输入 DELETE，由组件的确认档推导）；该动作没有 options 变体，弹窗里
-             不放任何勾选项。跨主机表没有「当前主机」：整体动作面向**主机筛选选定的
-             那台**（没选且全场只有一台可管主机时就是它；否则禁用 + 结论句）。
-             指令在途时禁用，防重复提交。 -->
-        <div v-if="canDelete" class="docker-bar">
-          <ElButton
-            size="small"
-            type="danger"
-            plain
-            :disabled="busy || !targetHostId"
-            @click="openPrune"
-          >
-            清理未使用卷…
-          </ElButton>
-          <span v-if="!targetHostId" class="docker-bar__hint">
-            清理未使用卷需先在「主机」筛选中选定一台主机
-          </span>
-        </div>
       </template>
     </ElCard>
 
@@ -100,45 +99,39 @@
 
 <script setup lang="ts">
   /**
-   * 数据卷 tab（9b：跨主机化，同容器统一表范式）。
+   * 数据卷列表页（由「镜像与存储」收敛页的数据卷 tab 平移为独立整页，菜单平铺）。
    *
-   * 数据源从「页面级共享的单主机快照 + 本地过滤」换成 GET /docker/volumes
-   * （跨主机聚合、服务端过滤）。主机维度从页面级上下文降为**筛选下拉**的一项；
-   * 行归属由新增的主机列给出；`/docker/resources?host=` 深链照旧有效（作为
-   * 主机筛选初始值 —— 总览磁盘面板的 goHostVolumes 既有链路不动）。
+   * 数据源 GET /docker/volumes（跨主机聚合、服务端过滤）。主机维度是**筛选下拉**
+   * 的一项；行归属由主机列给出；`?host=` 深链作主机筛选初始值（单向：用户改筛选
+   * 不回写 query）。
    *
    * 删除按**行主机**派发（指令通道 hostId 绑定该行）；清理未使用卷（无行目标）
-   * 面向主机筛选选定的那台（没选且只有一台可管主机时就是它，否则禁用 + 结论句）。
-   * 一次操作属于发起时锁定的那台主机 —— 没有「切了主机要清什么」的重置纪律。
+   * 面向主机筛选选定的那台（没选且只有一台可管主机时就是它，否则禁用 + title 里
+   * 的禁用理由）。一次操作属于发起时锁定的那台主机 —— 没有「切了主机要清什么」
+   * 的重置纪律。
    */
   import { computed, h, ref, watch } from 'vue'
   import { useRoute } from 'vue-router'
-  import { ElButton, ElCard, ElEmpty, ElMessage, ElResult } from 'element-plus'
+  import { ElButton, ElCard, ElEmpty, ElMessage } from 'element-plus'
   import { useAuth } from '@/hooks/core/useAuth'
+  import { useTableColumns } from '@/hooks/core/useTableColumns'
   import { PermDockerDelete, PermDockerExec } from '@/enums/permission'
   import { formatByUnit } from '@/modules/device/utils/display'
+  import ArtButtonTable from '@/components/core/forms/art-button-table/index.vue'
   import ArtSearchBar from '@/components/core/forms/art-search-bar/index.vue'
   import ArtSvgIcon from '@/components/core/base/art-svg-icon/index.vue'
   import ArtTable from '@/components/core/tables/art-table/index.vue'
   import ArtTableHeader from '@/components/core/tables/art-table-header/index.vue'
-  import DockerActionConfirm from '../action-confirm.vue'
-  import DockerActionMenu from '../action-menu.vue'
-  import type { ColumnOption } from '@/types/component'
-  import { fetchDockerVolumes, type DockerHostItem, type DockerVolumeListItem } from '../../api'
-  import { runErrorMessage, useDockerCmds } from '../../composables/useDockerCmds'
-  import { useResourceList } from '../../composables/useResourceList'
-  import { protectedGate } from '../../utils/actions'
-  import { volumeTotals } from '../../utils/snapshot'
-  import { hostLabel } from '../../utils/host'
+  import DockerActionConfirm from '../components/action-confirm.vue'
+  import DockerActionMenu from '../components/action-menu.vue'
+  import { fetchDockerVolumes, type DockerVolumeListItem } from '../api'
+  import { runErrorMessage, useDockerCmds } from '../composables/useDockerCmds'
+  import { useHostList, useResourceList } from '../composables/useResourceList'
+  import { protectedGate } from '../utils/actions'
+  import { volumeTotals } from '../utils/snapshot'
+  import { hostLabel } from '../utils/host'
 
-  defineOptions({ name: 'DockerVolumesTab' })
-
-  const props = defineProps<{
-    /** 页面级主机清单（resources.vue 的 useHostList，三 tab 共用）。 */
-    hosts: DockerHostItem[]
-    /** 主机清单在拉：首拉期间不能先喊「没有」（那时还不知道有没有主机）。 */
-    hostsLoading: boolean
-  }>()
+  defineOptions({ name: 'DockerVolumes' })
 
   const route = useRoute()
   const { hasAuth } = useAuth()
@@ -148,6 +141,9 @@
 
   const canDelete = computed(() => hasAuth(PermDockerDelete))
   const canExec = computed(() => hasAuth(PermDockerExec))
+
+  // ── 可管主机清单（筛选下拉与「尚无可管主机」判定）────────────────────
+  const { hosts, hostsLoading, loadHosts } = useHostList()
 
   // ── 数据源（跨主机聚合端点；服务端过滤，参数从筛选表单现取）──────────
 
@@ -177,19 +173,18 @@
       keyword: searchForm.value.keyword,
       unused: searchForm.value.unusedOnly === true ? true : undefined
     }),
-    hosts: () => props.hosts,
-    hostsLoading: () => props.hostsLoading
+    hosts: () => hosts.value,
+    hostsLoading: () => hostsLoading.value
   })
 
   /** 表格的加载态：清单在拉，或主机清单还没到。 */
-  const listLoading = computed(() => loading.value || props.hostsLoading)
+  const listLoading = computed(() => loading.value || hostsLoading.value)
 
   /** 有命中行就渲染表格；纯加载中也用表格的 loading 遮罩，空态只在加载结束后判断。 */
   const showTable = computed(() => listLoading.value || rows.value.length > 0)
 
-  // `/docker/resources?host=` 深链兼容（总览磁盘面板的既有链路）：query 里的主机
-  // 作为**主机筛选初始值** —— 单向（用户改筛选不回写 query）。watch 同时兜住
-  // worktab 缓存实例的「带 host 返回」场景。
+  // `?host=` 深链：query 里的主机作为**主机筛选初始值** —— 单向（用户改筛选不回写
+  // query）。watch 同时兜住 worktab 缓存实例的「带 host 返回」场景。
   watch(
     () => route.query.host,
     (raw, old) => {
@@ -201,7 +196,7 @@
     { immediate: true }
   )
 
-  const hostOptions = computed(() => props.hosts.map((h) => ({ label: hostLabel(h), value: h.id })))
+  const hostOptions = computed(() => hosts.value.map((h) => ({ label: hostLabel(h), value: h.id })))
 
   const searchItems = computed(() => [
     {
@@ -213,7 +208,7 @@
     },
     { key: 'unusedOnly', label: '未被使用', type: 'switch' },
     {
-      // 主机维度从页面级上下文（HostSwitcher）降为筛选项：全部主机 + 各台。
+      // 主机维度是筛选项：全部主机 + 各台。
       // filterable：主机多了要能敲名字找（QA 实测不可搜），与容器/镜像/网络/项目页同款。
       key: 'host',
       label: '主机',
@@ -232,10 +227,10 @@
       Boolean(searchForm.value.host)
   )
 
-  /** 底栏合计：与表格里的行同源（服务端过滤后的这批；截断口径见 header 计数）。 */
+  /** 工具条合计：与表格里的行同源（服务端过滤后的这批；截断口径见计数文本）。 */
   const totals = computed(() => volumeTotals(rows.value))
 
-  /** 补充结论：有未知用量/有未使用才出现，避免底栏常驻一串 0。 */
+  /** 补充结论：有未知用量/有未使用才出现，避免工具条常驻一串 0。 */
   const totalsNote = computed(() => {
     const notes: string[] = []
     if (totals.value.unknownSizeCount) notes.push(`· ${totals.value.unknownSizeCount} 个大小未知`)
@@ -251,6 +246,16 @@
   function onReset() {
     searchForm.value = {}
     void load()
+  }
+
+  /**
+   * 工具条刷新（内置钮）：刷新 = 把眼前这页看新 —— 主机筛选源与清单一起重拉
+   * （主机可能刚入库，只看清单会留下过期的筛选源；旧资源页 hero 的刷新即此语义）。
+   * 清单走非静默 refresh：表头 loading 语义不变。
+   */
+  function refreshAll() {
+    void loadHosts()
+    void refresh()
   }
 
   /**
@@ -274,12 +279,22 @@
 
   /**
    * 无行目标的整体动作（清理未使用卷）面向哪台主机：主机筛选选定的那台；
-   * 没选且全场只有一台可管主机时就是它；否则留空 —— 按钮禁用，结论句由
-   * 按钮旁的 hint 给出。行内删除不吃它（行自带 hostId）。
+   * 没选且全场只有一台可管主机时就是它；否则留空 —— 按钮禁用，禁用理由写进
+   * title（悬浮说明），页面不设常驻提示句。行内删除不吃它（行自带 hostId）。
    */
   const targetHostId = computed(() => {
     if (searchForm.value.host) return searchForm.value.host
-    return props.hosts.length === 1 ? props.hosts[0]!.id : ''
+    return hosts.value.length === 1 ? hosts.value[0]!.id : ''
+  })
+
+  /** 清理未使用卷的禁用门槛：指令在途，或没选定主机。 */
+  const hostActionDisabled = computed(() => busy.value || !targetHostId.value)
+
+  /** 清理未使用卷的 title：禁用理由随禁用状态写进悬浮说明。 */
+  const pruneTitle = computed(() => {
+    if (busy.value) return '清理未使用卷…（指令在途，暂不可用）'
+    if (!targetHostId.value) return '清理未使用卷…（需先在「主机」筛选中选定一台主机）'
+    return '清理未使用卷…'
   })
 
   /** 指令通道的主机来源：行目标动作在**入口处锁定到该行的 hostId**（一次操作属于发起时锁定的那台主机）。 */
@@ -358,21 +373,19 @@
 
   // ── 表格列 ──
 
-  const columns = computed<ColumnOption<DockerVolumeListItem>[]>(() => {
-    // 显式建立依赖：行内菜单的禁用态与保护结论来自这些信号，而 formatter 要到表格
-    // 渲染时才执行 —— 不在这里读一次，列配置就不会随它们变化而重算（表格会停在旧状态）。
-    void pendingId.value
-    void busy.value
-    void canExec.value
+  // 列设置经 useTableColumns（对齐系统管理，列弹层可用）：工厂只在 setup 求值一次
+  //（权限在会话内不变化）；行内菜单的禁用态/保护结论由 formatter 在渲染时读取
+  // pendingId/busy —— 每次指令完成后 refreshSilent 重拉清单，表格随之重渲染。
+  const { columns, columnChecks } = useTableColumns<DockerVolumeListItem>(() => {
     // 列优先级：手机横屏（<768）只留「名称 / 使用 / 操作」，序号让位；
     // 平板竖屏（>=768）补上主机（跨主机表的行归属）与安全标记（保护）——「使用」是
-    // 卷的状态与回收决策依据；驱动与大小是摘要元数据（合计在底栏），桌面（>=1024）
+    // 卷的状态与回收决策依据；驱动与大小是摘要元数据（合计在工具条），桌面（>=1024）
     // 才展示。数据列一律 minWidth，固定宽度只留给 index/操作这类结构性列。
     return [
       { type: 'index' as const, width: 60, label: '序号', hideBelow: 'tablet' },
       { prop: 'name', label: '名称', minWidth: 240, showOverflowTooltip: true },
       {
-        // 主机列是跨主机表的核心新增：同名卷可能散在多台机器，排查时
+        // 主机列是跨主机表的核心：同名卷可能散在多台机器，排查时
         // 「先定位在哪台」是第一句（与容器统一表同一档：平板竖屏起可见）。
         prop: 'hostname',
         label: '主机',
@@ -393,7 +406,7 @@
         prop: 'sizeMb',
         label: '大小',
         minWidth: 120,
-        // 大小是元数据（合计在底栏，未知用量另有计数），桌面才展示。
+        // 大小是元数据（合计在工具条，未知用量另有计数），桌面才展示。
         hideBelow: 'desktop',
         // 未知用量显示「—」而不是 0：0 与「量不出来」在「空间去哪了」上是相反的结论。
         formatter: (row: DockerVolumeListItem) =>
@@ -438,87 +451,58 @@
         : [])
     ]
   })
-
-  // 页面级刷新入口（resources.vue 的 hero 刷新按钮对当前 tab 调它）。
-  defineExpose({ refresh, reloadAll })
 </script>
 
 <style lang="scss" scoped>
-  @use '../../views/overview-tokens' as t;
+  .docker-volumes-page {
+    /* 次要文字对比度 AA（逐页口径，与收敛页同款处置）：EP 默认
+       --el-text-color-secondary(#909399) 对白底只有 3.08:1，低于 AA 正文线 →
+       页面范围内把它升到 regular 档（浅色 6.1:1、暗色随主题同样达标）。 */
+    --el-text-color-secondary: var(--el-text-color-regular);
 
-  /* 矮视口单滚动链的 tab 根段（链的其余部分：app.scss 的页根/卡片/表 +
-     resources.vue 的 ElTabs 两层）：让本组件根吃满 pane 的高度。 */
-  .docker-volumes-tab {
-    @include t.fill-chain-root;
-  }
+    // 工具条：动作钮 + 硬数据文本同排，换行不挤压。
+    .toolbar-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
 
-
-  // 「清理未使用卷…」等 plain danger 按钮的对比度 AA（浅色实测 2.87:1）：
-  // EP 默认配色的病灶与处方见 overview-tokens 的 danger-plain-aa。
-  @include t.danger-plain-aa;
-
-  // 空态渲染在本组件（ArtTable 不转发 `#empty`）：给它接近表格空态的留白。
-  .docker-empty {
-    padding: 56px 0;
-  }
-
-  // 首拉失败的错误块：ElResult 自带留白，这里只补卡片内边距。
-  .docker-tab-error {
-    padding: 12px 0;
-  }
-
-  // 表头计数：辅助信息，小号次要色（与容器页的 docker-count 同款）。
-  .docker-count {
-    font-size: 12px;
-    color: var(--el-text-color-secondary);
-  }
-
-  // 保护列的锁 + 文字（图标与文字一条基线 —— 取代旧 🔒 emoji 的豆腐块风险；
-  // formatter vnode 在 ArtTable 的渲染上下文里取不到 scope id，走 :global）。
-  :global(.dv-lock) {
-    display: inline-flex;
-    gap: 4px;
-    align-items: center;
-  }
-
-  // 静默刷新失败标注：琥珀即「需要注意」（与模块内陈旧/离线标注同一套颜色语言）。
-  .docker-refresh-note {
-    margin-left: 10px;
-    font-size: 12px;
-    // 文字对比度 AA（收尾批）：原 el-color-warning（白底 1.85）改走 token，
-    // 数字见 @styles/core/aa-text.scss。
-    color: var(--aa-warning-text);
-  }
-
-  // 底栏合计：主数字（总量）与补充结论（未知/未使用）同一行、补充结论弱化。
-  .docker-total {
-    display: flex;
-    align-items: baseline;
-    gap: 12px;
-    padding: 12px 16px 0;
-    font-size: 14px;
-
-    &__sub {
-      // Element Plus 的次要文字色：补充结论是解释，不与主数字争夺注意力。
+    // 表头计数：辅助信息，小号次要色。
+    .docker-count {
+      font-size: 12px;
       color: var(--el-text-color-secondary);
+    }
+
+    // 合计（主数字）与补充结论（未知/未使用）随工具条同排、补充结论弱化。
+    .docker-total {
       font-size: 13px;
     }
-  }
 
-  // 底栏操作区：与合计同一套留白，按钮换行不挤压。
-  .docker-bar {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    align-items: center;
-    padding: 10px 16px 12px;
-
-    &__hint {
+    .docker-total__sub {
+      font-size: 12px;
       color: var(--el-text-color-secondary);
-      font-size: 13px;
+    }
+
+    // 静默刷新失败标注：琥珀即「需要注意」（与模块内陈旧/离线标注同一套颜色语言）。
+    .docker-refresh-note {
+      font-size: 12px;
+      // 文字对比度 AA（收尾批）：原 el-color-warning（白底 1.85）改走 token，
+      // 数字见 @styles/core/aa-text.scss。
+      color: var(--aa-warning-text);
+    }
+
+    // 保护列的锁 + 文字（图标与文字一条基线 —— 取代旧 🔒 emoji 的豆腐块风险；
+    // formatter vnode 在 ArtTable 的渲染上下文里取不到 scope id，走 :global）。
+    :global(.dv-lock) {
+      display: inline-flex;
+      gap: 4px;
+      align-items: center;
+    }
+
+    // 空态渲染在本页（ArtTable 不转发 `#empty`）：给它接近表格空态的留白。
+    .docker-empty {
+      padding: 56px 0;
     }
   }
-
-  /* 手机横屏紧凑档：底栏收薄（放在本块最后 = 同权重按源码序盖住上面的基础留白）。 */
-  @include t.compact-bottom-bars;
 </style>

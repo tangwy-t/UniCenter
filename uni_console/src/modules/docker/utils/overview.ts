@@ -108,9 +108,9 @@ export function buildOverviewKpis(fleet: Api.Docker.DockerOverviewFleet): Overvi
       value: fleet.images.total,
       label: '镜像',
       sub: [{ text: `未使用 ${imagesUnused}`, tone: imagesUnused > 0 ? 'warning' : undefined }],
-      // 7a：三个旧列表页收敛为 /docker/resources 的 tab，下钻地址带 ?tab=（字符串
-      // 里的 query 由 router.push 解析；磁贴不带 host —— 账目本来就是跨主机合计）。
-      to: '/docker/resources?tab=images',
+      // 拆分切片：镜像已是独立整页 /docker/images，下钻直达（磁贴不带 host ——
+      // 账目本来就是跨主机合计，进入后是全部主机视图）。
+      to: '/docker/images',
       title: '跨全部主机合计的镜像账目'
     },
     {
@@ -120,7 +120,7 @@ export function buildOverviewKpis(fleet: Api.Docker.DockerOverviewFleet): Overvi
       value: fleet.volumes.total,
       label: '数据卷',
       sub: [{ text: `未使用 ${volumesUnused}`, tone: volumesUnused > 0 ? 'warning' : undefined }],
-      to: '/docker/resources?tab=volumes',
+      to: '/docker/volumes',
       title: '跨全部主机合计的数据卷账目'
     },
     {
@@ -130,7 +130,7 @@ export function buildOverviewKpis(fleet: Api.Docker.DockerOverviewFleet): Overvi
       value: fleet.networks.total,
       label: '网络',
       sub: [],
-      to: '/docker/resources?tab=networks',
+      to: '/docker/networks',
       title: '跨全部主机合计的网络数'
     },
     {

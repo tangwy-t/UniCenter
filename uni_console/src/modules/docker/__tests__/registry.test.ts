@@ -135,20 +135,18 @@ describe('仓库凭据 CRUD 封装（api.ts）', () => {
   })
 })
 
-describe('镜像 tab 入口的门控（源码守卫）', () => {
+describe('镜像页入口的门控（源码守卫）', () => {
   it('「仓库凭据…」按钮只对 docker:config 渲染（不渲染 ≠ 禁用）', () => {
-    // 7a：镜像页收敛为 resources 页的镜像 tab，门控逻辑平移零改动，扫描目标随迁。
-    const src = readFileSync(
-      new URL('../components/resources/images-tab.vue', import.meta.url).pathname,
-      'utf8'
-    )
+    // 拆分切片：镜像升格为独立整页 views/images.vue，门控逻辑平移零改动，扫描目标随迁。
+    const src = readFileSync(new URL('../views/images.vue', import.meta.url).pathname, 'utf8')
     expect(src).toContain('仓库凭据…')
     expect(
       /canConfig\s*=\s*computed\(\s*\(\)\s*=>\s*hasAuth\(PermDockerConfig\)\s*\)/.test(src)
     ).toBe(true)
     expect(/v-if="canConfig"/.test(src)).toBe(true)
-    // 底栏的渲染条件并入了 canConfig：只有凭据权限（无 manage/delete）的账号
-    // 也要进得了这条入口 —— 凭据入口不被镜像写权限档顺带挡掉。
-    expect(/v-if="canWrite \|\| canConfig"/.test(src)).toBe(true)
+    // 工具条逐钮门控（没有整体渲染条件）：凭据入口只吃 canConfig
+    // —— 只有凭据权限（无 manage/delete）的账号也进得了这条入口，不被镜像写权限档
+    // 顺带挡掉（条目自身的 v-if 与 title 在同一元素上，见模板）。
+    expect(/v-if="canConfig"[\s\S]{0,400}?仓库凭据…/.test(src)).toBe(true)
   })
 })

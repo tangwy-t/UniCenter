@@ -649,6 +649,9 @@ describe('总览页集成：面板就位、生命周期随页面', () => {
     const { wrapper, toggle } = await mountOverviewInKeepAlive()
     await flush(14)
     expect(wrapper.text()).toContain('活动流')
+    // 分区副标题（「回放各主机最近 50 条后进入实时」的常驻口径句）已删：
+    // 分区头只有标题，口径回放事实由面板本身的行为承担。
+    expect(wrapper.text()).not.toContain('回放各主机最近')
     expect(wrapper.find('.dov-feed').exists()).toBe(true)
     expect(api.openDockerEventsStream).toHaveBeenCalledTimes(1)
 

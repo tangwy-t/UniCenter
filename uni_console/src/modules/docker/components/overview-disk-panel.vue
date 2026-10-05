@@ -96,7 +96,7 @@
   /** 行序即后端行序（hosts 列表顺序），不重排 —— 与主机卡片区同一来源同一顺序。 */
   const rows = computed<DiskRowModel[]>(() => diskRowModels(props.hosts))
 
-  // 清理入口的权限门（与镜像/卷列表页底栏的清理按钮同档 docker:delete）：无权限
+  // 清理入口的权限门（与镜像/卷列表页工具条的清理按钮同档 docker:delete）：无权限
   // 不渲染 ——「不渲染 ≠ 禁用」（分期控件矩阵纪律，与同页 hero 任务中心入口同一口径）。
   const { hasAuth } = useAuth()
   const canReclaim = computed(() => hasAuth(PermDockerDelete))

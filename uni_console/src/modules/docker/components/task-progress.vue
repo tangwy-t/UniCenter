@@ -58,20 +58,14 @@
          终态，这里只说「流这边怎么了」，结论句以任务行的 summary 为准。 -->
     <p v-if="hint" class="tp__hint">{{ hint }}</p>
 
-    <!-- 取消：独立于观看的动作（调显式取消端点）。收起本行只是收起 —— 任务照常跑；
-         这里下发的是向 agent 的 cancel 帧（best-effort，能否真被截止以任务行结论
-         为准，故措辞是「已请求取消」）。 -->
-    <div class="tp__ops">
-      <ElButton
-        v-if="canCancel"
-        size="small"
-        :loading="canceling"
-        :disabled="cancelRequested"
-        @click="cancelTask"
-      >
+    <!-- 取消：独立于观看的动作（调显式取消端点）。收起本行只是收起 —— 任务照常跑
+         （这层语义在任务页展开开关的 title 上，不占展开区正文）；这里下发的是向
+         agent 的 cancel 帧（best-effort，能否真被截止以任务行结论为准，故措辞是
+         「已请求取消」）。 -->
+    <div v-if="canCancel" class="tp__ops">
+      <ElButton size="small" :loading="canceling" :disabled="cancelRequested" @click="cancelTask">
         {{ cancelRequested ? '已请求取消' : cancelLabel }}
       </ElButton>
-      <span class="tp__collapse-note">收起不取消任务。</span>
     </div>
     <!-- 取消请求失败的就地结论句（403 无权取消 / 409 该任务已结束 / 500 未送达）。 -->
     <p v-if="cancelError" class="tp__error">{{ cancelError }}</p>
@@ -346,8 +340,7 @@
     &__summary,
     &__empty,
     &__hint,
-    &__error,
-    &__collapse-note {
+    &__error {
       margin: 0 0 4px;
       font-size: 12px;
       line-height: 1.6;
@@ -374,20 +367,14 @@
       color: var(--aa-danger-text);
     }
 
-    // 操作行：取消按钮 + 收起语义的一句硬事实（收起就是收起，与取消是两件事）。
-    // 收起说明用 regular 档（AA：placeholder 档 #a8abb2 对浅灰底仅 ≈2.1:1，升档
-    // 口径与终审 QA D2 同批；「最弱化」由位置与字号承载，不再用低对比色承载）。
+    // 操作行：只放取消按钮 —— 「收起不取消任务」的语义由任务页展开开关的 title
+    // 承载（可见正文不再重复一句）。
     &__ops {
       display: flex;
       flex-wrap: wrap;
       gap: 8px;
       align-items: center;
       margin: 6px 0 2px;
-    }
-
-    &__collapse-note {
-      margin: 0;
-      color: var(--el-text-color-regular);
     }
   }
 

@@ -92,12 +92,9 @@
               <!-- 合计只列、不与镜像大小混为一谈：两者**不是同一口径** —— 各层大小是解压后的
                    差值，共享层会被多个镜像共用，镜像的存储体积还经过压缩。
                    实测（本机 mysql:8.0）：分层合计 812MB，镜像 223MB，合计**偏大**。
-                   这句话必须写出来，否则「层加起来 ≠ 镜像大小」会被当成数据错。 -->
+                   口径由「层大小（解压差值）」列头承载，不另起说明句。 -->
               <div v-if="layerRows.length" class="imd-total">
                 <span>分层合计 {{ layersTotalText }}（镜像 {{ sizeText }}）</span>
-                <span class="imd-total__sub"
-                  >各层大小是解压后的差值，合计与镜像大小不是同一口径</span
-                >
               </div>
             </template>
           </ElTabPane>
@@ -363,7 +360,8 @@
   // 数据列用 minWidth（列宽口径见 responsive-columns.ts：只有结构性列用固定 width）；
   // 「时间」列在手机横屏（<768）隐藏，保留「层大小（标识）+ 指令（内容）」。
   const layerColumns = [
-    { prop: 'sizeText', label: '层大小', minWidth: 130 },
+    // 解压差值的口径在列头 —— 合计与镜像大小不同口径这件事，跟着数字所在的列说。
+    { prop: 'sizeText', label: '层大小（解压差值）', minWidth: 150 },
     { prop: 'timeText', label: '时间', minWidth: 130, hideBelow: 'tablet' as const },
     {
       prop: 'createdBy',
@@ -518,10 +516,12 @@
     }
   }
 
-  /** 返回镜像表（7a：三个旧列表页收敛为 /docker/resources 的 tab）：带上当前
-   *  主机与镜像 tab，资源页据此还原到「同一台机器的那张表」。 */
+  /** 返回镜像表（拆分切片：镜像已是独立整页 /docker/images）：带上当前主机 ——
+   *  镜像页据此把主机筛选还原到「同一台机器的那张表」。
+   *  跳转走 **path**：菜单页由框架按菜单树注册为 `menu-<menuId>`，插件声明的 name
+   *  没进 router，命名跳转会静默失败（页面不动）—— 由 routes.test.ts 的守卫钉住。 */
   function back() {
-    router.push({ name: 'DockerResources', query: { host: ctx.hostId, tab: 'images' } })
+    router.push({ path: '/docker/images', query: { host: ctx.hostId } })
   }
 
   /** 跳关联容器的详情页（8a：深链指 /docker/containers/:id，host 随行；容器 id 与
@@ -875,7 +875,7 @@
     }
   }
 
-  // 分层合计：主数字与结论说明分成两行，结论弱化（它是口径说明，不是数字）。
+  // 分层合计：只报数字 —— 解压差值的口径由「层大小（解压差值）」列头承载。
   .imd-total {
     display: flex;
     flex-wrap: wrap;
@@ -883,11 +883,6 @@
     align-items: baseline;
     padding: 12px 0 0;
     font-size: 14px;
-
-    &__sub {
-      color: var(--el-text-color-secondary);
-      font-size: 13px;
-    }
   }
 
   /* ── 响应式 ─────────────────────────────────────── */

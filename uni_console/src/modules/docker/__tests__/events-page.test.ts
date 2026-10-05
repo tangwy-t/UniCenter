@@ -5,7 +5,7 @@
  *   - 列的事实（绝对 + 相对时刻 / 类型徽标 / 中文 + 原始动作码 / 对象 / 主机 / 退出码染色）；
  *   - 服务端过滤（主机/类型/关键字透传）＋ 实时行的客户端过滤（流是全量的）；
  *   - 实时跟随 / 暂停（冻结列表 + 计数 + 恢复合并）；
- *   - 游标翻页与账目句（已加载 N 条 · 窗口共 M 条）；
+ *   - 游标翻页与账目句（已加载 N 条 · 窗口共 M 条；「窗口共」以历史首拉落定为闸）；
  *   - 四态（首拉失败/空态/静默刷新失败）与致命失败（401）停机；
  *   - keep-alive：失活断流、激活重连并补拉历史。
  *
@@ -106,15 +106,23 @@ function evLine(overrides: Record<string, unknown> = {}): string {
   })
 }
 
-/** Art* 全局组件替身：保留 slot，页面内容仍会被渲染。 */
+/** Art* 全局组件替身：保留 slot（default + left —— 工具条内容在 ArtTableHeader 的
+ *  #left 里，替身不渲染它的话连接态/暂停/重试控件整块看不见）。 */
 const passthrough = (name: string) =>
   defineComponent({
     name,
     setup:
       (_, { slots }) =>
       () =>
-        h('div', { 'data-stub': name }, [slots.default?.()])
+        h('div', { 'data-stub': name }, [slots.default?.(), slots.left?.()])
   })
+
+/** 三个 Art* 替身的统一桩面（三处挂载共用一份）。 */
+const STUBS = {
+  ArtTableHeader: passthrough('ArtTableHeader'),
+  ArtButtonTable: passthrough('ArtButtonTable'),
+  ArtSvgIcon: passthrough('ArtSvgIcon')
+}
 
 const mounted: VueWrapper[] = []
 
@@ -148,20 +156,23 @@ async function flush(rounds = 14) {
   }
 }
 
-async function mountEvents() {
+/** 已就绪的路由（页面只借它做 router.back 与 route.query）。 */
+async function readyRouter() {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [{ path: '/', component: { template: '<div />' } }]
   })
   await router.push('/')
   await router.isReady()
+  return router
+}
+
+async function mountEvents() {
+  const router = await readyRouter()
   const w = mount(EventsPage, {
     global: {
       plugins: [router],
-      stubs: {
-        ArtButtonTable: passthrough('ArtButtonTable'),
-        ArtSvgIcon: passthrough('ArtSvgIcon')
-      }
+      stubs: STUBS
     }
   })
   mounted.push(w as VueWrapper)
@@ -186,23 +197,19 @@ function mountInKeepAlive(child: Component) {
   const wrapper = mount(host, {
     global: {
       plugins: [router],
-      stubs: {
-        ArtButtonTable: passthrough('ArtButtonTable'),
-        ArtSvgIcon: passthrough('ArtSvgIcon')
-      }
+      stubs: STUBS
     }
   })
   mounted.push(wrapper)
   return { wrapper, toggle }
 }
 
-/** 点 hero 的刷新入口（ArtButtonTable 的桩：data-stub 标记 + title）。 */
+/** 触发工具条内置刷新（ArtTableHeader 的 @refresh —— 原 hero 刷新钮语义的继承者；
+ *  ArtTableHeader 是透传替身，直接 $emit 走页面的 manualRefresh 链）。 */
 async function clickRefresh(w: VueWrapper) {
-  const btn = w
-    .findAll('[data-stub="ArtButtonTable"]')
-    .find((b) => b.attributes('title') === '刷新')
-  expect(btn, '应存在刷新入口').toBeTruthy()
-  await btn!.trigger('click')
+  const header = w.findComponent({ name: 'ArtTableHeader' })
+  expect(header.exists(), '页内应有 ArtTableHeader（刷新的唯一入口）').toBe(true)
+  header.vm.$emit('refresh')
   await flush()
 }
 
@@ -427,13 +434,54 @@ describe('事件流详版页：游标翻页与账目', () => {
     // 游标走完：翻页按钮消失（不给假动作）。
     expect(w.findAll('button').find((b) => b.text() === '加载更早')).toBeUndefined()
   })
+
+  it('账目句以历史首拉落定为闸：未落定不报「窗口共」；落定后两数并列自洽', async () => {
+    // 首拉挂在半空（可控 deferred）：「历史未落定」的窗口由用例精确持有。
+    let release!: (v: unknown) => void
+    api.fetchDockerEventHistory.mockImplementation(
+      () =>
+        new Promise((res) => {
+          release = res
+        })
+    )
+    const router = await readyRouter()
+    // 同步挂载后（骨架重渲染尚未冲刷）就是「落定前」的真实一帧：账目句在场，
+    // 但不报「窗口共 N」（total 在历史落定前是缺位事实，初值 0 报出来就是
+    // 「已加载 N · 窗口共 0」的当场矛盾）。
+    const w = mount(EventsPage, { global: { plugins: [router], stubs: STUBS } })
+    mounted.push(w as VueWrapper)
+    const before = w.find('.ev-more__hint')
+    expect(before.exists()).toBe(true)
+    expect(before.text()).toContain('已加载 0 条')
+    expect(before.text()).not.toContain('窗口共')
+
+    // 首拉在飞（骨架态）：账目句整句不渲染（历史仍在路上时的主形态）。
+    await flush()
+    expect(w.find('.ev-more__hint').exists()).toBe(false)
+
+    // 落定：两数并列，且与响应自洽（已加载 = 页内行数、窗口共 = total）。
+    release(
+      historyResp(
+        [
+          historyItem({ t: BASE_SEC * 1000 - 1_000, action: 'die' }),
+          historyItem({ t: BASE_SEC * 1000 - 2_000, action: 'stop' })
+        ],
+        3,
+        '1790600000000:2'
+      )
+    )
+    await flush()
+    expect(w.find('.ev-more__hint').text()).toContain('已加载 2 条 · 窗口共 3 条')
+  })
 })
 
 describe('事件流详版页：四态与致命失败', () => {
-  it('首拉失败：错误态 + 重试；重试成功后回到列表', async () => {
+  it('首拉失败：紧凑失败态（ElEmpty）+ 重试；重试成功后回到列表', async () => {
     api.fetchDockerEventHistory.mockRejectedValueOnce(new Error('boom'))
     const w = await mountEvents()
-    expect(w.find('.ev-state').text()).toContain('事件历史获取失败')
+    // 列表页纯化：失败态是紧凑 ElEmpty（wkl 卡外观已删），结论句 + 重试钮。
+    expect(w.find('.docker-empty').exists()).toBe(true)
+    expect(w.text()).toContain('事件历史获取失败')
 
     api.fetchDockerEventHistory.mockResolvedValue(historyResp([historyItem({ action: 'start' })]))
     const retry = w.findAll('button').find((b) => b.text() === '重试')
@@ -441,6 +489,29 @@ describe('事件流详版页：四态与致命失败', () => {
     await retry!.trigger('click')
     await flush()
     expect(w.findAll('.ev-raw').map((n) => n.text())).toEqual(['start'])
+  })
+
+  it('历史拉取失败但实时流正常：失败态照旧（不报账目句、不假装有列表）；重试落定后账目自洽', async () => {
+    api.fetchDockerEventHistory.mockRejectedValueOnce(new Error('boom'))
+    const w = await mountEvents()
+    // 失败态是结论句 + 重试；实时流仍在后台收行，但不在失败态里混进账目句。
+    expect(w.find('.docker-empty').exists()).toBe(true)
+    expect(w.find('.ev-more__hint').exists()).toBe(false)
+    streams[0].push(evLine({ action: 'die', t: BASE_SEC * 1000 - 5_000 }) + '\n')
+    await flush()
+    expect(w.find('.ev-more__hint').exists()).toBe(false)
+
+    // 重试成功：历史落定，账目句重启且与事实自洽 —— 失败期间实时接受的
+    // 那条（die）也进了时间轴，窗口共 = 新抓取时刻的窗口全量（2）。
+    api.fetchDockerEventHistory.mockResolvedValue(
+      historyResp([historyItem({ t: BASE_SEC * 1000 - 60_000, action: 'start' })], 2)
+    )
+    const retry = w.findAll('button').find((b) => b.text() === '重试')
+    expect(retry, '失败态应给重试入口').toBeTruthy()
+    await retry!.trigger('click')
+    await flush()
+    expect(w.findAll('.ev-raw').map((n) => n.text())).toEqual(['die', 'start'])
+    expect(w.find('.ev-more__hint').text()).toContain('已加载 2 条 · 窗口共 2 条')
   })
 
   it('静默刷新失败：保留旧列表并标注（不整页切错误屏）', async () => {

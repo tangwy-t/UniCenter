@@ -126,7 +126,7 @@ async function mountPage(query: Record<string, string> = {}): Promise<VueWrapper
       // container-detail-page.test.ts / page-transition.test.ts 里钉）。
       { path: '/docker/containers/create', component: { template: '<div />' } },
       { path: '/docker/containers/:id', component: { template: '<div />' } },
-      // 8c 任务中心（容器页 hero 入口移栽后的目标页）。
+      // 8c 任务中心（容器页工具条入口移栽后的目标页）。
       { path: '/docker/tasks', component: { template: '<div />' } }
     ]
   })
@@ -150,18 +150,22 @@ async function waitRoute(path: string) {
   await nextTick()
 }
 
-/** hero 簇里的图标钮（ArtButtonTable 替身，title 经 attrs fallthrough 到根 div）。 */
-function findHeroButton(w: VueWrapper, title: string) {
+/** 工具条（ArtTableHeader #left）里的图标钮：ArtButtonTable 替身，title 经 attrs
+ *  fallthrough 到根 div（列表页纯化后页面级动作都在工具条，不再有 hero）。 */
+function findToolbarButton(w: VueWrapper, title: string) {
   return w
     .findAllComponents({ name: 'ArtButtonTable' })
     .find((b) => b.attributes('title') === title)
 }
 
-/** 页面 hero 的刷新按钮。 */
-function findRefreshButton(w: VueWrapper) {
-  const btn = findHeroButton(w, '刷新')
-  expect(btn, 'hero 上应有一个「刷新」按钮').toBeTruthy()
-  return btn!
+/** 触发工具条内置刷新（ArtTableHeader 的 @refresh —— 原 hero 刷新钮语义的继承者；
+ *  ArtTableHeader 是透传替身，直接 $emit 走页面的 refresh 处理链）。 */
+async function clickHeaderRefresh(w: VueWrapper) {
+  const header = w.findComponent({ name: 'ArtTableHeader' })
+  expect(header.exists(), '页内应有 ArtTableHeader（刷新的唯一入口）').toBe(true)
+  header.vm.$emit('refresh')
+  await new Promise((r) => setTimeout(r, 0))
+  await nextTick()
 }
 
 /** 页面传给 ArtTable 的行（替身把 data 落在 $attrs）。 */
@@ -366,13 +370,14 @@ describe('首拉失败的口径（统一表自己的 D-1 对应面）', () => {
     await nextTick()
     expect(tableRows(w)).toHaveLength(2)
 
-    // 此后的刷新失败（已握有数据）：表格不清空，页头标注「本次刷新失败」
+    // 此后的刷新失败（已握有数据）：表格不清空，工具条标注「刷新失败，正在显示上次结果」
+    // 刷新 = 把眼前这页看新：主机清单（筛选源）与本页清单一起重拉（reloadAll）。
+    const hostsBefore = api.fetchDockerHosts.mock.calls.length
     api.fetchDockerContainers.mockRejectedValueOnce(new Error('network down'))
-    await findRefreshButton(w).trigger('click')
-    await new Promise((r) => setTimeout(r, 0))
-    await nextTick()
+    await clickHeaderRefresh(w)
+    expect(api.fetchDockerHosts.mock.calls.length).toBe(hostsBefore + 1)
     expect(tableRows(w)).toHaveLength(2)
-    expect(w.html()).toContain('上次数据仍在，本次刷新失败')
+    expect(w.html()).toContain('刷新失败，正在显示上次结果')
   })
 })
 
@@ -380,7 +385,7 @@ describe('首拉失败的口径（统一表自己的 D-1 对应面）', () => {
  * 7b 的「本页读 ?id 打开详情抽屉」是 ?id= 唯一的落点，抽屉与语义一起删。文字层的
  * 锚在 routes.test.ts（本页源码不得再出现 query.id），这里钉行为层：带着 ?id= 进来
  * 不打开任何东西、也不清 query —— 一条过期的站外深链不该静默变成另一种界面。
- * 创建入口（8b）则相反，是要**跳走**的那一类：hero 的创建钮把当前筛选主机随行
+ * 创建入口（8b）则相反，是要**跳走**的那一类：工具条的创建钮把当前筛选主机随行
  * 交给创建页（跨主机表没有「当前主机」的概念，筛选就是最近的意图）；任务中心
  * （8c）入口同属跳走的那一类（移栽自被删的 docker-page 主机条）。
  */
@@ -398,28 +403,28 @@ describe('详情/创建入口：一律整页路由（8a/8b）', () => {
     expect(api.sendDockerCmd).not.toHaveBeenCalled()
   })
 
-  it('hero 的创建钮 → 创建页 path，host 取当前筛选（没筛选就不带）', async () => {
+  it('工具条的创建钮 → 创建页 path，host 取当前筛选（没筛选就不带）', async () => {
     const withHost = await mountPage({ host: 'h2' })
-    const btn = findHeroButton(withHost, '创建容器')
-    expect(btn, 'hero 上应有「创建容器」入口').toBeTruthy()
+    const btn = findToolbarButton(withHost, '创建容器')
+    expect(btn, '工具条上应有「创建容器」入口').toBeTruthy()
     await btn!.trigger('click')
     await waitRoute('/docker/containers/create')
     expect(currentRouter!.currentRoute.value.path).toBe('/docker/containers/create')
     expect(currentRouter!.currentRoute.value.query).toEqual({ host: 'h2' })
 
     const noHost = await mountPage()
-    const btn2 = findHeroButton(noHost, '创建容器')
-    expect(btn2, 'hero 上应有「创建容器」入口').toBeTruthy()
+    const btn2 = findToolbarButton(noHost, '创建容器')
+    expect(btn2, '工具条上应有「创建容器」入口').toBeTruthy()
     await btn2!.trigger('click')
     await waitRoute('/docker/containers/create')
     expect(currentRouter!.currentRoute.value.path).toBe('/docker/containers/create')
     expect(currentRouter!.currentRoute.value.query).toEqual({})
   })
 
-  it('hero 的任务中心钮 → /docker/tasks（入口移栽自被删的 docker-page 主机条）', async () => {
+  it('工具条的任务中心钮 → /docker/tasks（入口移栽自被删的 docker-page 主机条）', async () => {
     const w = await mountPage()
-    const btn = findHeroButton(w, '任务中心')
-    expect(btn, 'hero 上应有任务中心入口').toBeTruthy()
+    const btn = findToolbarButton(w, '任务中心')
+    expect(btn, '工具条上应有任务中心入口').toBeTruthy()
     await btn!.trigger('click')
     await waitRoute('/docker/tasks')
     expect(currentRouter!.currentRoute.value.path).toBe('/docker/tasks')

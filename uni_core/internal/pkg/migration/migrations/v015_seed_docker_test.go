@@ -16,7 +16,7 @@ import (
 // 真正落库的验证在既有 v002_seed_menu_perm_test（权限双向）与集成测试里；
 // 这里守的是「定义写对了」这件事，让错误在单测阶段就暴露。
 func TestDockerMenuDefinitionsAreComplete(t *testing.T) {
-	// 一个目录 + 四个页面（总览/容器/镜像与存储/项目 —— 7a 最终面）
+	// 一个目录 + 六个页面（总览/容器/镜像/数据卷/网络/项目 —— 拆分平铺后的最终面）
 	var menus, dirs, btns int
 	keys := map[string]bool{}
 	for _, d := range dockerMenuDefinitions {
@@ -53,8 +53,8 @@ func TestDockerMenuDefinitionsAreComplete(t *testing.T) {
 			t.Fatalf("未知菜单类型 %q", d.Type)
 		}
 	}
-	if dirs != 1 || menus != 4 {
-		t.Fatalf("应为 1 个目录 + 4 个页面菜单，实际 %d + %d", dirs, menus)
+	if dirs != 1 || menus != 6 {
+		t.Fatalf("应为 1 个目录 + 6 个页面菜单，实际 %d + %d", dirs, menus)
 	}
 	if btns != 5 {
 		t.Fatalf("应为 5 个按钮权限节点，实际 %d", btns)
@@ -77,12 +77,12 @@ func TestDockerMenuDefinitionsAreComplete(t *testing.T) {
 }
 
 // TestDockerMenuSortOrder 钉住最终菜单面的排序关系（原 v016 的排序守卫随定义并入）：
-// 总览（控制塔首页）→ 容器 → 镜像与存储 → 项目。Sort 是侧边栏的呈现顺序，
+// 总览（控制塔首页）→ 容器 → 镜像 → 数据卷 → 网络 → 项目。Sort 是侧边栏的呈现顺序，
 // 错位「不报错、只是看起来像产品设计如此」，必须靠测试钉住。
 //
 // 期望序列用键名书写而不是硬编码 Sort 数字：任何一边改了排号，本测试都能抓住。
 func TestDockerMenuSortOrder(t *testing.T) {
-	wantOrder := []string{"docker:overview", "docker:containers", "docker:resources", "docker:projects"}
+	wantOrder := []string{"docker:overview", "docker:containers", "docker:images", "docker:volumes", "docker:networks", "docker:projects"}
 	var got []int
 	var gotKeys []string
 	for _, want := range wantOrder {
@@ -105,31 +105,43 @@ func TestDockerMenuSortOrder(t *testing.T) {
 	}
 }
 
-// TestDockerResourcesMenuShape 钉住 7a 新增的「镜像与存储」行的形状：这是收敛后的
-// 唯一新页面入口，path/组件/权限任何一处漂移都是「侧边栏静默消失」或「看得到点不进」。
-func TestDockerResourcesMenuShape(t *testing.T) {
-	for _, d := range dockerMenuDefinitions {
-		if d.Key != "docker:resources" {
-			continue
-		}
-		if d.Parent != "docker" {
-			t.Fatalf("菜单 %s 的 Parent = %q, want %q（应挂在 Docker 管理目录下）", d.Key, d.Parent, "docker")
-		}
-		if d.Path != "/docker/resources" {
-			t.Fatalf("菜单 %s 的 Path = %q, want %q（与前端 docker 插件路由逐字一致）", d.Key, d.Path, "/docker/resources")
-		}
-		if d.Component != "docker/resources" {
-			t.Fatalf("菜单 %s 的 Component = %q, want %q", d.Key, d.Component, "docker/resources")
-		}
-		if d.Perms != permission.PermDockerList {
-			t.Fatalf("菜单 %s 的 Perms = %q, want %q（与其余列表页同档）", d.Key, d.Perms, permission.PermDockerList)
-		}
-		if d.Type != "menu" || d.Name != "镜像与存储" {
-			t.Fatalf("菜单定义与规格不符: %+v", d)
-		}
-		return
+// TestDockerResourceMenusShape 钉住拆分切片复活的三条资源列表行（镜像/数据卷/网络）：
+// 这是 /docker/resources 收敛页被拆回独立整页后的三个新入口，path/组件/权限任何
+// 一处漂移都是「侧边栏静默消失」或「看得到点不进」。三条与 7a 前的旧行逐字一致
+// （同名复活），故对它们的守卫等价于钉住「复活没有复活走样」。
+func TestDockerResourceMenusShape(t *testing.T) {
+	wants := []struct{ key, name, path string }{
+		{"docker:images", "镜像", "/docker/images"},
+		{"docker:volumes", "数据卷", "/docker/volumes"},
+		{"docker:networks", "网络", "/docker/networks"},
 	}
-	t.Fatal("最终菜单面缺少 docker:resources（7a 收敛的目标入口）")
+	for _, w := range wants {
+		var found *menuDef
+		for i := range dockerMenuDefinitions {
+			if dockerMenuDefinitions[i].Key == w.key {
+				found = &dockerMenuDefinitions[i]
+				break
+			}
+		}
+		if found == nil {
+			t.Fatalf("最终菜单面缺少 %s（拆分切片的目标入口）", w.key)
+		}
+		if found.Parent != "docker" {
+			t.Fatalf("菜单 %s 的 Parent = %q, want %q（应挂在 Docker 管理目录下）", found.Key, found.Parent, "docker")
+		}
+		if found.Path != w.path {
+			t.Fatalf("菜单 %s 的 Path = %q, want %q（与前端 docker 插件路由逐字一致）", found.Key, found.Path, w.path)
+		}
+		if want := strings.TrimPrefix(w.path, "/"); found.Component != want {
+			t.Fatalf("菜单 %s 的 Component = %q, want %q", found.Key, found.Component, want)
+		}
+		if found.Perms != permission.PermDockerList {
+			t.Fatalf("菜单 %s 的 Perms = %q, want %q（与其余列表页同档）", found.Key, found.Perms, permission.PermDockerList)
+		}
+		if found.Type != "menu" || found.Name != w.name {
+			t.Fatalf("菜单定义与规格不符: %+v", *found)
+		}
+	}
 }
 
 // 默认保护清单必须包含底座（它一旦为空，uni-center 自己的容器就成了可删对象）。
@@ -252,7 +264,7 @@ func TestV015ReplayIsIdempotent(t *testing.T) {
 //
 // 真实库里根目录不止一个（v002 的「服务监控」等 dir 的 perms 也是**空串**）。
 // 若 dir 沿用 menuExists 的「Path 为空 → 比 perms」分支，查重会命中别人的目录
-// → docker 目录永不创建 → 5 个子菜单紧接着报「父节点 docker 尚未创建」→ 整条
+// → docker 目录永不创建 → 6 个子菜单紧接着报「父节点 docker 尚未创建」→ 整条
 // 迁移失败。本测试先播一个外来根目录，再跑 seedDocker。
 func TestV015DirDedupIgnoresForeignRootDirs(t *testing.T) {
 	db := newDockerSeedTestDB(t)

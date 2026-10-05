@@ -336,9 +336,11 @@
     return res
   }
 
-  /** 返回项目列表：带上当前主机，列表页据此还原到同一台机器。 */
+  /** 返回项目列表：带上当前主机，列表页据此还原到同一台机器。
+   *  跳转走 **path**：菜单页的注册名是 `menu-<menuId>`（框架按菜单树注册），插件
+   *  声明的 name 没进 router —— 命名跳转静默失败（routes.test.ts 守卫钉住）。 */
   function back() {
-    void router.push({ name: 'DockerProjects', query: { host: ctx.hostId } })
+    void router.push({ path: '/docker/projects', query: { host: ctx.hostId } })
   }
 </script>
 

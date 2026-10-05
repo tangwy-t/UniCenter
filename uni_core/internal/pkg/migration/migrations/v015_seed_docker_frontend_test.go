@@ -20,11 +20,12 @@ import (
 //
 // 本测试直接读前端源文件比对，故它同时守住「有人在一边改了 path / 换了页面文件」。
 //
-// 7a 后本守卫覆盖**最终菜单面**（v015 直种子最终集，原 v016 的总览菜单已并入）：
-// 总览 /docker、容器 /docker/containers、镜像与存储 /docker/resources、项目
-// /docker/projects。images/volumes/networks 三个旧列表路由已在前端整体删除
-// （不做 redirect），若有人把旧 path 加回路由表，本测试不会拦 —— 「旧 path 清零」
-// 由前端 routes.test.ts 的源码扫描守卫负责。
+// 本守卫覆盖**最终菜单面**（v015 直种子最终集，原 v016 的总览菜单已并入；
+// 拆分切片把 /docker/resources 收敛页拆回三个独立整页）：
+// 总览 /docker、容器 /docker/containers、镜像 /docker/images、数据卷 /docker/volumes、
+// 网络 /docker/networks、项目 /docker/projects。旧收敛页 /docker/resources 与其
+// 前端路由已整体删除（不做 redirect），若有人把旧 path 加回路由表，本测试不会拦 ——
+// 「旧 path 清零」由前端 routes.test.ts 的源码扫描守卫负责。
 //
 // 隔离副本（scripts/release-precheck.sh 的 .tmp-iso/）里没有前端树：repoRoot 找不到
 // 仓库根时自身 t.Skipf —— 这正是 v012/v013 守卫留下的先例（被比对的另一半不在这台
@@ -48,7 +49,7 @@ func TestV015DockerMenuPathsMatchFrontendRoutes(t *testing.T) {
 		routes[m[1]] = m[2]
 	}
 
-	// 最终菜单面的四个 type=menu 定义（1 dir + 4 menu + 5 btn）。
+	// 最终菜单面的六个 type=menu 定义（1 dir + 6 menu + 5 btn）。
 	checked := 0
 	for _, d := range dockerMenuDefinitions {
 		if d.Type != "menu" {
@@ -70,7 +71,7 @@ func TestV015DockerMenuPathsMatchFrontendRoutes(t *testing.T) {
 		}
 		checked++
 	}
-	if checked != 4 {
-		t.Fatalf("本迁移应恰有 4 个页面菜单（type=menu，7a 最终面），实得 %d", checked)
+	if checked != 6 {
+		t.Fatalf("本迁移应恰有 6 个页面菜单（type=menu，拆分平铺后的最终面），实得 %d", checked)
 	}
 }

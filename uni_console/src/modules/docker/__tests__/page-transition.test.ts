@@ -4,8 +4,9 @@
  *
  * ── 故障形态 ────────────────────────────────────────────────────────
  *
- * 侧边栏在 总览(/docker)、容器(/docker/containers)、镜像与存储(/docker/resources)、
- * 项目(/docker/projects) 之间切换时，内容区整块空白：URL 已变、侧边栏与面包屑还在、
+ * 侧边栏在 总览(/docker)、容器(/docker/containers)、镜像(/docker/images)、
+ * 数据卷(/docker/volumes)、网络(/docker/networks)、项目(/docker/projects)
+ * 六个平铺页之间切换时，内容区整块空白：URL 已变、侧边栏与面包屑还在、
  * 控制台**零报错**、F5 刷新立即恢复。无头浏览器实证定位到布局的页面过渡
  *（components/core/layouts/art-page-content）：
  *

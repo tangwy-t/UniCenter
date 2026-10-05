@@ -298,10 +298,10 @@ describe('分类控件矩阵：action 字面量全在白名单内', () => {
     expect(tasksSrc).toContain('TaskProgress')
   })
 
-  it('P2 分发面已接线：构建入口在镜像 tab 底栏（manage 门控），推送入口在镜像详情页头（manage 门控、预填镜像）', () => {
-    // 镜像 tab 层：底栏「构建镜像…」只对 docker:manage 渲染，挂构建进度对话框；
+  it('P2 分发面已接线：构建入口在镜像页工具条（manage 门控），推送入口在镜像详情页头（manage 门控、预填镜像）', () => {
+    // 镜像页工具条：「构建镜像…」只对 docker:manage 渲染，挂构建进度对话框；
     // 主机切换把它与拉取对话框一起关掉（一场构建属于受理它的那台主机）。
-    const tabSrc = readFileSync(join(ROOT, 'components/resources/images-tab.vue'), 'utf8')
+    const tabSrc = readFileSync(join(ROOT, 'views/images.vue'), 'utf8')
     expect(tabSrc).toContain('BuildProgressDialog')
     expect(tabSrc).toContain('构建镜像…')
     expect(tabSrc).toMatch(/v-if="canManage"/)
@@ -345,7 +345,7 @@ describe('分类控件矩阵：action 字面量全在白名单内', () => {
     expect(panelSrc).toContain('parseDockerScanReport')
     // 列表层：行 ⋯ 菜单的 actions 含扫描条目（注册表驱动）—— 行内就近触发，
     // 分钟级的进行态由任务中心呈现（只受理不轮询，见组件内 onScanImage 注释）。
-    const tabSrc = readFileSync(join(ROOT, 'components/resources/images-tab.vue'), 'utf8')
+    const tabSrc = readFileSync(join(ROOT, 'views/images.vue'), 'utf8')
     expect(tabSrc).toContain("'image:scan'")
     expect(tabSrc).toContain('onScanImage')
   })

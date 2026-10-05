@@ -26,7 +26,7 @@ const api = vi.hoisted(() => ({
   fetchDockerHosts: vi.fn(),
   fetchDockerState: vi.fn(),
   fetchDockerContainers: vi.fn(),
-  // 9b：资源三 tab 与项目索引的跨主机聚合端点。
+  // 9b：镜像/卷/网络三页与项目索引的跨主机聚合端点。
   fetchDockerImages: vi.fn(),
   fetchDockerVolumes: vi.fn(),
   fetchDockerNetworks: vi.fn(),
@@ -55,7 +55,9 @@ vi.mock('@/hooks/core/useAuth', () => ({
 }))
 
 import Containers from '../views/containers.vue'
-import Resources from '../views/resources.vue'
+import Images from '../views/images.vue'
+import Volumes from '../views/volumes.vue'
+import Networks from '../views/networks.vue'
 import Projects from '../views/projects.vue'
 import ImageDetail from '../views/image-detail.vue'
 import { BREAKPOINTS } from '@/config/breakpoints'
@@ -160,25 +162,27 @@ const STUBS = {
   ArtButtonMore: passthrough('ArtButtonMore'),
   ArtIconButton: passthrough('ArtIconButton'),
   ArtPageContent: passthrough('ArtPageContent'),
-  // resources 页 tab 标签里的图标（真组件靠 unplugin 注册；替身只保留占位 DOM）。
+  // 图标（真组件靠 unplugin 注册；替身只保留占位 DOM）。
   ArtSvgIcon: passthrough('ArtSvgIcon')
 }
 
-async function makeRouter(query: Record<string, string> = {}): Promise<Router> {
+async function makeRouter(query: Record<string, string> = {}, path = '/'): Promise<Router> {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
       { path: '/', component: { template: '<div />' } },
       { path: '/docker/containers', component: Containers },
-      // 7a：镜像/数据卷/网络三页收敛为 /docker/resources 的三个 tab（query.tab 记当前 tab）。
-      { path: '/docker/resources', component: Resources },
+      // 拆分切片：镜像/数据卷/网络是三条独立整页（原收敛页的资源三 tab 已删）。
+      { path: '/docker/images', component: Images },
+      { path: '/docker/volumes', component: Volumes },
+      { path: '/docker/networks', component: Networks },
       { path: '/docker/image-detail/:id', component: ImageDetail },
       { path: '/docker/projects', component: Projects }
     ]
   })
   // 先落定路由再挂载：主机 id 来自 route.query（host-context 的唯一事实源），
   // 没 ready 时 query 还是空的，断言会读到 ''（主机上下文尚未落定）。
-  await router.push({ path: '/', query })
+  await router.push({ path, query })
   await router.isReady()
   return router
 }
@@ -268,9 +272,14 @@ afterEach(() => {
   for (const w of mounted.splice(0)) w.unmount()
 })
 
-/** 列表页的共同挂法：路由 query 带主机 id（host-context 的唯一事实源）。 */
-async function mountPage(component: Component, query: Record<string, string> = { host: 'h1' }) {
-  const router = await makeRouter(query)
+/** 列表页的共同挂法：路由 query 带主机 id（host-context 的唯一事实源）；
+ *  详情页可给 path（id 走 route.params，如山镜像详情）。 */
+async function mountPage(
+  component: Component,
+  query: Record<string, string> = { host: 'h1' },
+  path = '/'
+) {
+  const router = await makeRouter(query, path)
   const wrapper = mount(component, {
     global: { plugins: [router], stubs: STUBS }
   })
@@ -288,23 +297,39 @@ describe('页面渲染冒烟（挂载即验证，白屏类故障的守卫）', (
     expect(w.html()).toContain('个容器') // 计数文案在，说明模板渲染到了表格上方
   })
 
-  it('镜像与存储页（7a）：挂载成功并渲染出页面与镜像 tab（默认）', async () => {
-    const w = await mountPage(Resources)
-    expect(w.find('.docker-resources-page').exists()).toBe(true)
-    // 三个 tab 的导航条在（图标 + 文案），默认激活镜像 tab。
-    const labels = w.findAll('.docker-resources-tab-label').map((n) => n.text())
-    expect(labels).toEqual(['镜像', '数据卷', '网络'])
-    expect(w.findComponent({ name: 'DockerImagesTab' }).exists()).toBe(true)
+  it('镜像页（拆分切片）：挂载成功并在新形态工具条上渲染出计数与动作', async () => {
+    const w = await mountPage(Images)
+    expect(w.find('.docker-images-page').exists()).toBe(true)
+    // 新形态（对齐系统管理）：hero 页头整块退场，工具条（#left）承载动作与硬数据文本。
+    expect(w.find('.wkl-hero').exists()).toBe(false)
+    expect(w.find('.toolbar-left').exists()).toBe(true)
+    expect(w.text()).toContain('共 1 个镜像')
+    // 常驻动作是 ArtButtonTable 图标钮（title 即悬浮说明）。
+    const titles = w.findAllComponents({ name: 'ArtButtonTable' }).map((b) => b.attributes('title'))
+    expect(titles).toContain('拉取镜像…')
+    // 行数据进了表（jsdom 里 ElTable 不渲染行单元格，从传给 ArtTable 的 data 断言）。
+    const table = w.findComponent({ name: 'ArtTable' })
+    const rows = ((table.vm as unknown as { $attrs: Record<string, unknown> }).$attrs.data ??
+      []) as { id?: string }[]
+    expect(rows.map((r) => r.id)).toEqual(['i1'])
   })
 
-  it('镜像与存储页：query.tab=volumes/networks 落到对应 tab（深链/刷新还原）', async () => {
-    const w = await mountPage(Resources, { host: 'h1', tab: 'volumes' })
-    expect(w.findComponent({ name: 'DockerVolumesTab' }).exists()).toBe(true)
-    // lazy：未激活的 tab 不渲染（镜像 tab 此刻只是导航条上的一个名字）。
-    expect(w.findComponent({ name: 'DockerImagesTab' }).exists()).toBe(false)
+  it('数据卷页（拆分切片）：挂载成功并在工具条上渲染出清理入口与合计', async () => {
+    const w = await mountPage(Volumes)
+    expect(w.find('.docker-volumes-page').exists()).toBe(true)
+    expect(w.find('.wkl-hero').exists()).toBe(false)
+    expect(w.find('.toolbar-left').exists()).toBe(true)
+    expect(w.text()).toContain('共 1 个数据卷')
+    const titles = w.findAllComponents({ name: 'ArtButtonTable' }).map((b) => b.attributes('title'))
+    expect(titles).toContain('清理未使用卷…')
+  })
 
-    const w2 = await mountPage(Resources, { host: 'h1', tab: 'networks' })
-    expect(w2.findComponent({ name: 'DockerNetworksTab' }).exists()).toBe(true)
+  it('网络页（拆分切片）：挂载成功并渲染出计数（网络没有整体动作）', async () => {
+    const w = await mountPage(Networks)
+    expect(w.find('.docker-networks-page').exists()).toBe(true)
+    expect(w.find('.wkl-hero').exists()).toBe(false)
+    expect(w.find('.toolbar-left').exists()).toBe(true)
+    expect(w.text()).toContain('共 1 个网络')
   })
 
   it('项目页（7b 薄索引 → 9b 跨主机）：挂载成功并渲染出页面与行数据', async () => {
@@ -319,21 +344,38 @@ describe('页面渲染冒烟（挂载即验证，白屏类故障的守卫）', (
     expect(rows.map((r) => r.name)).toEqual(['uni-center'])
   })
 
-  it('镜像详情页：挂载成功', async () => {
-    const w = await mountPage(ImageDetail, { host: 'h1', id: 'i1' })
+  it('镜像详情页：挂载成功，分层列头承载解压差值口径（说明句不占版面）', async () => {
+    // 分层表要真渲染：给一次成功的 inspect 结果（带两层历史）。
+    api.fetchDockerCmdResult.mockResolvedValue({
+      status: 'succeeded',
+      payload: {
+        history: [
+          { size_bytes: 12 * 1024 * 1024, created_by: 'ADD file' },
+          { size_bytes: 89 * 1024 * 1024, created_by: 'RUN npm install' }
+        ]
+      }
+    })
+    const w = await mountPage(ImageDetail, { host: 'h1' }, '/docker/image-detail/i1')
     expect(w.html().length).toBeGreaterThan(0)
     expect(w.find('.imd').exists()).toBe(true)
+    // 口径在列头（解压差值）；独立说明句不再出现在页面文字里（负断言）。
+    const table = w.findComponent({ name: 'ArtTable' })
+    expect(table.exists(), '有历史层时分层表应渲染').toBe(true)
+    const columns = ((table.vm as unknown as { $attrs: Record<string, unknown> }).$attrs.columns ??
+      []) as { label?: string }[]
+    expect(columns.map((c) => c.label)).toContain('层大小（解压差值）')
+    expect(w.text()).not.toContain('解压后的差值')
   })
 })
 
-/* ── 失败不得伪装成新鲜（D-1 的 9b 落点）──────────────────────────
+/* ── 失败不得伪装成新鲜（D-1 的 9b 落点，拆分切片后）─────────────────
  * 修复前：loadState 失败把 state 清成 null，页头回落到「刚刚同步」——网络失败
  * 被渲染成最新鲜状态。9b 起 resources/projects 换跨主机聚合端点（单主机快照
  * 页头退场），D-1 的精神（失败不得伪装成新鲜、刷新失败保留最后已知数据）落在
  * 两个面：
- *   - tab 层（镜像/卷/网络）：首拉失败 → 错误块 + 重试；刷新失败 → 保留行并标注
- *     —— 行为守卫在 resources.test.ts；
- *   - 页层（projects）：首拉失败 → 整页错误态；刷新失败 → 副标题标注且行不清空
+ *   - 三个资源页（镜像/卷/网络）：首拉失败 → 紧凑失败态 + 重试；刷新失败 →
+ *     保留行并在工具条标注 —— 行为守卫在 resources.test.ts；
+ *   - 页层（projects）：首拉失败 → 整页错误态；刷新失败 → 工具条标注且行不清空
  *     —— 下面两条从**真正挂起来的页面**上钉住页层口径。
  */
 describe('项目页的失败口径（D-1 在 9b 的页层落点）', () => {
@@ -346,20 +388,19 @@ describe('项目页的失败口径（D-1 在 9b 的页层落点）', () => {
     expect(w.findComponent({ name: 'ArtTable' }).exists()).toBe(false)
   })
 
-  it('② 刷新失败：副标题标注本次失败，表格保留最后已知数据', async () => {
+  it('② 刷新失败：工具条标注本次失败，表格保留最后已知数据', async () => {
     const w = await mountPage(Projects) // 首拉成功（beforeEach 的聚合替身）
-    // hero 的刷新按钮（ArtButtonTable 替身；title 经 attrs fallthrough 到根节点）。
-    const refreshBtn = w
-      .findAllComponents({ name: 'ArtButtonTable' })
-      .find((b) => b.attributes('title') === '刷新')
-    expect(refreshBtn, 'hero 上应有刷新按钮').toBeTruthy()
+    // 刷新入口是 ArtTableHeader 内置刷新钮（替身只保留占位 DOM，点不了）——
+    // 直接发 refresh 事件（与真组件点击同一处理链）。
+    const header = w.findComponent({ name: 'ArtTableHeader' })
+    expect(header.exists(), '页面应有 ArtTableHeader 工具条').toBe(true)
 
     api.fetchDockerProjects.mockRejectedValueOnce(new Error('network down'))
-    await refreshBtn!.trigger('click')
+    header.vm.$emit('refresh')
     await new Promise((r) => setTimeout(r, 0))
     await nextTick()
 
-    expect(w.text()).toContain('上次数据仍在，本次刷新失败')
+    expect(w.text()).toContain('刷新失败，正在显示上次结果')
     // 清单未被清空：喂给表格的仍是上一批数据（最后已知数据）。jsdom 里 ElTable
     // 不渲染行单元格，故从页面传给 ArtTable 的 data 断言（labelsAt 同款口径）。
     const table = w.findComponent({ name: 'ArtTable' })
@@ -430,23 +471,23 @@ describe('列集合随视口分档（hideBelow 的不变量守卫）', () => {
     expect(labelsAt(w, 1024)).toContain('网络')
   })
 
-  it('镜像 tab：仓库:标签/使用/操作恒在，大小与创建时间窄屏让位', async () => {
-    const w = (await mountPage(Resources)) as VueWrapper
+  it('镜像页：仓库:标签/使用/操作恒在，大小与创建时间窄屏让位', async () => {
+    const w = (await mountPage(Images)) as VueWrapper
     assertInvariants(w, ['仓库:标签', '使用', '操作'])
     expect(labelsAt(w, 640)).not.toContain('大小')
     expect(labelsAt(w, 640)).not.toContain('创建于')
     expect(labelsAt(w, 1024)).toContain('大小')
   })
 
-  it('数据卷 tab：名称/使用/操作恒在，驱动与大小窄屏让位', async () => {
-    const w = (await mountPage(Resources, { host: 'h1', tab: 'volumes' })) as VueWrapper
+  it('数据卷页：名称/使用/操作恒在，驱动与大小窄屏让位', async () => {
+    const w = (await mountPage(Volumes)) as VueWrapper
     assertInvariants(w, ['名称', '使用', '操作'])
     expect(labelsAt(w, 640)).not.toContain('驱动')
     expect(labelsAt(w, 1024)).toContain('驱动')
   })
 
-  it('网络 tab：名称/内部网络/操作恒在（内部网络决定容器能否出网）', async () => {
-    const w = (await mountPage(Resources, { host: 'h1', tab: 'networks' })) as VueWrapper
+  it('网络页：名称/内部网络/操作恒在（内部网络决定容器能否出网）', async () => {
+    const w = (await mountPage(Networks)) as VueWrapper
     assertInvariants(w, ['名称', '内部网络', '操作'])
     expect(labelsAt(w, 640)).not.toContain('容器数')
     expect(labelsAt(w, 640)).not.toContain('驱动')

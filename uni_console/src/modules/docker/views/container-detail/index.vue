@@ -817,9 +817,11 @@
     if (!logsFollowing.value && (logsPulled.value || activeTab.value === 'logs')) void loadLogs()
   }
 
-  /** 返回容器列表：带上当前主机，列表页据此还原到同一台机器。 */
+  /** 返回容器列表：带上当前主机，列表页据此还原到同一台机器。
+   *  跳转走 **path**：菜单页的注册名是 `menu-<menuId>`（框架按菜单树注册），插件
+   *  声明的 name 没进 router —— 命名跳转静默失败（routes.test.ts 守卫钉住）。 */
   function back() {
-    void router.push({ name: 'DockerContainers', query: { host: ctx.hostId } })
+    void router.push({ path: '/docker/containers', query: { host: ctx.hostId } })
   }
 
   // ── 写操作（头部按钮区）：确认档/保护档复用列表页的同一套判定 ──

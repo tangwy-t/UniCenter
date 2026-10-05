@@ -127,10 +127,8 @@
 /// 页头主图标方块（形态同 device-tokens 的 hero-icon / 服务监控 .sv-hero__icon：
 /// 渐变底 + 同色投影；色值改走 EP/theme 变量，见文件头「刻意差异」）。
 ///
-/// 矮视口紧凑档（`hero 行内化` 的一半）：图标 44 → 28 —— 与 hero-collapse 的
-/// 行内化同档（阈值取自 HEIGHT_BREAKPOINTS.short，两处共用同一张高度断点表）。
-/// 为什么在 mixin 里而不是各页各写：总览页与列表页消费同一个 mixin，
-/// 令牌一改两处同步（这正是本文件存在的理由，重复副本改一处不会传播）。
+/// 矮视口紧凑档：图标 44 → 28（阈值取自 HEIGHT_BREAKPOINTS.short）。
+/// 现消费方只剩总览页 —— 列表页消费方（wkl-shell）随「列表页纯化」整块删除。
 @mixin hero-icon {
   width: 44px;
   height: 44px;
@@ -146,73 +144,6 @@
     height: 28px;
     border-radius: 9px;
     font-size: 15px;
-  }
-}
-
-/// 矮视口单滚动链的「tab 根」段：resources 页里表格卡不在页内层的直下，
-/// 中间还隔着 ElTabs（页内层的链在 app.scss，tabs 两层的链在 resources.vue，
-/// 这里把最后一段接到 tab 组件根）。
-@mixin fill-chain-root {
-  @include bp.respond-height-at-most('short') {
-    display: flex;
-    flex-direction: column;
-    flex: 1 1 0;
-    min-height: 0;
-  }
-}
-
-/// 手机横屏紧凑档：表格卡下方的「合计行 + 操作栏」收成一薄条。
-/// 合计是数据行（收字号与留白即可）；操作栏是一排既有 small 按钮 ——
-/// **不动按钮尺寸**（触靶红线：32px 已在 44px 线下，再压就没法按了），
-/// 只去掉换行：改横向滚动，按钮 flex:none 不被压扁。带底栏的页面（镜像/数据卷）
-/// 里，表格能分到多少高度直接取决于这一条有多薄。
-@mixin compact-bottom-bars {
-  @include bp.respond-height-at-most('phoneShort') {
-    .docker-total {
-      padding: 6px 10px 0;
-      font-size: 12px;
-
-      &__sub {
-        font-size: 12px;
-      }
-    }
-
-    .docker-bar {
-      flex-wrap: nowrap;
-      gap: 6px;
-      padding: 6px 10px 8px;
-      overflow-x: auto;
-
-      // 全部子项 flex:none —— 按钮不被压扁（触靶尺寸原样），hint 不被挤成竖排
-      // （可收缩的窄列会把一行提示拆成十几行，实测把整条栏撑到 159px）。
-      :deep(.el-button),
-      &__hint {
-        flex: none;
-        white-space: nowrap;
-      }
-    }
-  }
-}
-
-/// 矮视口 hero 行内化（`hero 行内化` 的另一半，配合 hero-icon 的 28px 图标）：
-/// 把 hero 从「图标 + 竖排标题/副题」压成一行 —— 标题块里的标题与副题（计数行：
-/// live-dot + 跨 N 台主机）并成同一行，hero 高度由 46px 落到一行文字高。
-/// 应用在 hero 根元素上（.wkl-hero / .tk-hero / .ev-hero 皆可）。
-/// 副题只改行内排布、不删句：零解释文案纪律管的是「解释句」，跨 N 台主机是事实。
-@mixin hero-collapse {
-  @include bp.respond-height-at-most('short') {
-    margin-bottom: 2px;
-
-    > .min-w-0 {
-      display: flex;
-      align-items: baseline;
-      gap: 8px;
-      min-width: 0;
-    }
-
-    > .min-w-0 > p {
-      margin-top: 0;
-    }
   }
 }
 
@@ -277,7 +208,11 @@
   // 默认档（无 type）：含 text 变体（它无类型 class，同样吃默认槽）。
   // :not() 排除各 type 档 —— 主色档单独走下一段；danger/success 等档各有自己的
   // 变量槽（danger plain 归 danger-plain-aa），本覆盖不得越权波及。
-  :deep(.el-button:not(.el-button--primary):not(.el-button--success):not(.el-button--warning):not(.el-button--danger):not(.el-button--info)) {
+  :deep(
+    .el-button:not(.el-button--primary):not(.el-button--success):not(.el-button--warning):not(
+        .el-button--danger
+      ):not(.el-button--info)
+  ) {
     --el-button-text-color: var(--aa-primary-text);
     --el-button-hover-text-color: var(--aa-primary-text);
     --el-button-active-text-color: var(--aa-primary-text);

@@ -1,153 +1,120 @@
 <template>
   <!-- 单根（single-root 守卫在库：布局的 Transition 只支持单根，双根切页白屏）。 -->
-  <div class="docker-containers-page art-full-height overflow-y-auto">
-    <div class="wkl-page__inner p-4 pb-8 md:p-5">
-      <!-- ============ 页头：图标 + 标题 + 副标题 + 自动刷新（对齐 overview.vue）============ -->
-      <div class="wkl-hero mb-4 flex flex-wrap items-center gap-3">
-        <div class="wkl-hero__icon flex-cc">
-          <ArtSvgIcon :icon="pageIcon" />
-        </div>
-        <div class="min-w-0">
-          <h2 class="text-lg font-semibold text-[var(--el-text-color-primary)]">容器</h2>
-          <p class="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-g-600">
-            <span
-              class="live-dot inline-block h-1.5 w-1.5 rounded-full bg-success"
-              :class="{ 'is-loading': loading }"
+  <div class="docker-containers-page art-full-height">
+    <ArtSearchBar
+      v-show="showSearchBar"
+      v-model="searchForm"
+      :items="searchItems"
+      @search="onSearch"
+      @reset="onReset"
+    />
+
+    <ElCard class="art-table-card" shadow="never">
+      <!-- 工具条刷新（内置钮）：刷新 = 把眼前这页看新 —— 主机清单（筛选源）与
+           本页清单一起重拉（reloadAll = loadHosts + load；主机可能刚入库，
+           旧资源页 hero 的刷新即此语义）。:loading 语义不变：重拉走非静默档，
+           表头转圈照旧。 -->
+      <!-- :layout 显式去掉 columns 段（组件默认含）：本页列集合在子组件
+           WorkloadTable 里，工具条拿不到列 —— 保留列设置钮只会开出空弹层
+           （死控件）；其余段与组件默认一致。 -->
+      <ArtTableHeader
+        v-model:showSearchBar="showSearchBar"
+        :loading="loading"
+        layout="search,refresh,size,fullscreen,settings"
+        @refresh="reloadAll"
+      >
+        <template #left>
+          <div class="toolbar-left">
+            <!-- 创建容器（4a 创建面）：从本地镜像到运行容器的入口；与启停同级
+                 docker:manage 门控（无权限不渲染 —— 分期控件矩阵的取向）。
+                 形态收进 ArtButtonTable 家族（布局族统一，与任务中心/自动刷新同族）；
+                 语义不变：仍是创建入口、同一门控、同一 openCreate（带当前筛选主机）。
+                 禁用理由写进 title（写指令在途 busy 或批量在途 batchBusy 时不可并发创建）。 -->
+            <ArtButtonTable
+              v-if="canManage"
+              type="add"
+              title="创建容器"
+              :disabled="busy || batchBusy"
+              @click="openCreate"
             />
-            <span>{{ subtitle }}</span>
-          </p>
-        </div>
-        <div class="ml-auto flex items-center gap-1">
-          <!-- 创建容器（4a 创建面）：从本地镜像到运行容器的入口；与启停同级
-               docker:manage 门控（无权限不渲染 —— 分期控件矩阵的取向）。
-               形态收进 ArtButtonTable 家族（布局族统一）：此前是 primary small 的
-               ElButton —— 24px 高/基础圆角 vs 两枚圆钮的 32px/6px，高度、圆角与
-               视觉重量都异族（投诉截图）；本模块列表页 hero 的按钮簇只有一个家族
-               （对齐总览 hero 的三枚图标钮）。语义不变：仍是创建入口、同一门控、
-               同一 openCreate（带当前筛选主机）。 -->
-          <ArtButtonTable
-            v-if="canManage"
-            type="add"
-            title="创建容器"
-            :disabled="busy || batchBusy"
-            @click="openCreate"
-          />
-          <!-- 任务中心入口（移栽自被删的 docker-page 主机条，8c 整页路由）：长任务的
-               跨主机收口页，与总览 hero 的入口同一形态、同一权限档（docker:list ——
-               GET /docker/tasks 与 /docker/tasks 路由 authMark 同码），无权限不渲染。
-               不挂 pending 徽标：计数要为它单独拉列表且必是过期数字，进行中的数量进
-               任务页里看（与总览 hero 同一口径）。 -->
-          <ArtButtonTable
-            v-if="canList"
-            icon="ri:task-line"
-            iconClass="bg-theme/12 text-theme"
-            title="任务中心"
-            @click="goTasks"
-          />
-          <!-- 自动刷新：容器表是轻量清单（不是总览的全量聚合），盯表的核心姿势仍是
-               「开着不动」；默认关、开着时每 10 秒静默重拉（对齐 overview / 设备总览）。 -->
-          <ArtButtonTable
-            :icon="'ri:timer-2-line'"
-            :iconClass="autoRefresh ? 'bg-theme text-white shadow-sm' : 'bg-theme/12 text-theme'"
-            :title="autoRefresh ? '关闭自动刷新（每 10 秒）' : '开启自动刷新（每 10 秒）'"
-            @click="autoRefresh = !autoRefresh"
-          />
-          <!-- 刷新：loading 态与总览 hero 同款（图标自转 + 禁点 + 标题换「刷新中…」——
-               手动刷新期间按钮自己就是进行中反馈，不再只靠 live-dot 一闪）。 -->
-          <ArtButtonTable
-            icon="ri:refresh-line"
-            :iconClass="`bg-theme/12 text-theme${loading ? ' wkl-hero-refresh--loading' : ''}`"
-            :title="loading ? '刷新中…' : '刷新'"
-            :disabled="loading"
-            @click="refresh"
-          />
-        </div>
-      </div>
-
-      <!-- ============ 加载（首次，还没有任何行可给） ============ -->
-      <div v-if="pageState === 'loading'" class="wkl-card wkl-state flex-cc flex-col gap-3 py-16">
-        <div class="wkl-state__icon flex-cc">
-          <ArtSvgIcon icon="ri:loader-4-line" class="wkl-state__spin" />
-        </div>
-        <div class="text-sm font-medium text-[var(--el-text-color-regular)]">
-          正在拉取跨主机容器清单…
-        </div>
-        <!-- 原副行「跨全部可管主机聚合，首次加载请稍候」属解释句，已按「零解释文案」
-             纪律删除（主行即朴素加载文案，副行只会与它重复）。 -->
-      </div>
-
-      <!-- ============ 错误（首拉失败：结论句 + 重试，不显示旧数据） ============ -->
-      <div v-else-if="pageState === 'error'" class="wkl-card wkl-state">
-        <ElResult icon="error" title="容器清单获取失败" sub-title="统一清单接口暂时不可用">
-          <template #extra>
-            <ElButton type="primary" @click="reloadAll">重试</ElButton>
-          </template>
-        </ElResult>
-      </div>
-
-      <!-- ============ 空态（没有可管主机 —— 引导，不是一块空白） ============ -->
-      <div v-else-if="pageState === 'empty'" class="wkl-card wkl-state">
-        <ElEmpty description="尚无可管主机">
-          <div class="wkl-state__hint">
-            可管主机来自已安装 agent 并上报 Docker 能力信号的设备；设备入库并上报后，
-            这里会列出它上面的容器。
+            <!-- 任务中心入口（8c 整页路由）：长任务的跨主机收口页，与总览 hero 的入口
+                 同一形态、同一权限档（docker:list —— GET /docker/tasks 与路由 authMark
+                 同码），无权限不渲染。不挂 pending 徽标：计数要为它单独拉列表且必是
+                 过期数字，进行中的数量进任务页里看（与总览 hero 同一口径）。 -->
+            <ArtButtonTable
+              v-if="canList"
+              icon="ri:task-line"
+              iconClass="bg-theme/12 text-theme"
+              title="任务中心"
+              @click="goTasks"
+            />
+            <!-- 自动刷新：容器表是轻量清单（不是总览的全量聚合），盯表的核心姿势仍是
+                 「开着不动」；默认关、开着时每 10 秒静默重拉（对齐 overview / 设备总览）。 -->
+            <ArtButtonTable
+              :icon="'ri:timer-2-line'"
+              :iconClass="autoRefresh ? 'bg-theme text-white shadow-sm' : 'bg-theme/12 text-theme'"
+              :title="autoRefresh ? '关闭自动刷新（每 10 秒）' : '开启自动刷新（每 10 秒）'"
+              @click="autoRefresh = !autoRefresh"
+            />
+            <!-- total 如实报全量、items 截 500：截断必须说出口，否则用户以为
+                 「筛选完了就这么多」而漏看排在 500 名之后的行。
+                 只在 pageState=ready（握有数据）时报数 —— 首拉/失败/无可管主机时
+                 报「共 0 个」是假话（数据面不得伪装新鲜）。 -->
+            <span v-if="pageState === 'ready'" class="docker-count">
+              共 {{ total }} 个容器<template v-if="truncated">
+                · 列表显示前 {{ rows.length }} 条</template
+              >
+            </span>
+            <!-- 静默刷新失败：保留最后已知清单并说出口（与镜像/卷/网络页 的
+                 docker-refresh-note 同一形态：小字、琥珀 token）。 -->
+            <span v-if="refreshError" class="docker-refresh-note">刷新失败，正在显示上次结果</span>
           </div>
-          <ElButton type="primary" @click="reloadAll">刷新</ElButton>
-        </ElEmpty>
-      </div>
+        </template>
+      </ArtTableHeader>
 
-      <!-- ============ 正常态：筛选 + 统一表 + 批量栏 ============ -->
+      <!-- 首拉失败（还没有任何行可给）：紧凑失败态 —— 结论句 + 重试，不显示旧数据
+           （旧数据不存在，错误屏就是全部事实）；全局错误 toast 由 utils/http 的
+           request() 统一弹出，这里不另做。 -->
+      <ElEmpty v-if="pageState === 'error'" class="docker-empty" description="容器清单获取失败">
+        <ElButton size="small" @click="reloadAll">重试</ElButton>
+      </ElEmpty>
+
+      <!-- 没有可管主机（主机清单与容器计数一起指向这个结论）：「筛没了」是另一种
+           事实，在 WorkloadTable 里分开说。刷新重拉两个数据源（主机可能刚入库）。 -->
+      <ElEmpty v-else-if="pageState === 'empty'" class="docker-empty" description="尚无可管主机">
+        <ElButton size="small" @click="reloadAll">刷新</ElButton>
+      </ElEmpty>
+
+      <!-- 正常态：表 + 批量栏。首拉 loading 不再有页面级加载卡 —— WorkloadTable 在
+           无行时把 loading 遮罩画在表体上（showTable = loading || rows>0），加载态
+           交给表体自身。表格与列集合在子组件（列集合守卫测试照旧从 ArtTable 断言）；
+           行「详情 / 日志」是 navigation（8a 页面化）：本页只 emit，跳转由页面做
+           —— 表格不认识路由。 -->
       <template v-else>
-        <ArtSearchBar
-          v-show="showSearchBar"
-          v-model="searchForm"
-          :items="searchItems"
-          @search="onSearch"
-          @reset="onReset"
+        <WorkloadTable
+          :rows="rows"
+          :loading="loading"
+          :has-filter="hasFilter"
+          :pending-id="pendingId"
+          :batch-busy="batchBusy"
+          @menu-select="onMenuSelect"
+          @open-detail="(row) => openDetail(row)"
+          @selection-change="onSelectionChange"
+          @reset-filter="onReset"
         />
 
-        <ElCard class="art-table-card" shadow="never">
-          <ArtTableHeader
-            v-model:showSearchBar="showSearchBar"
-            :loading="loading"
-            @refresh="refresh"
-          >
-            <template #left>
-              <!-- total 如实报全量、items 截 500：截断必须说出口，否则用户以为
-                   「筛选完了就这么多」而漏看排在 500 名之后的行。 -->
-              <span class="docker-count">
-                共 {{ total }} 个容器<template v-if="truncated">
-                  · 列表显示前 {{ rows.length }} 条</template
-                >
-              </span>
-            </template>
-          </ArtTableHeader>
-
-          <!-- 表格 + 空态 + 行菜单在子组件（列集合守卫测试照旧从 ArtTable 断言）。
-               行「详情 / 日志」是 navigation（8a 页面化）：本页只 emit，跳转由页面做
-               —— 表格不认识路由。 -->
-          <WorkloadTable
-            :rows="rows"
-            :loading="loading"
-            :has-filter="hasFilter"
-            :pending-id="pendingId"
-            :batch-busy="batchBusy"
-            @menu-select="onMenuSelect"
-            @open-detail="(row) => openDetail(row)"
-            @selection-change="onSelectionChange"
-            @reset-filter="onReset"
-          />
-
-          <!-- 批量栏（含批量删除确认弹窗与逐行派发循环）在子组件。 -->
-          <WorkloadBatchBar
-            :selected="selected"
-            :busy="busy"
-            :refresh="refreshSilent"
-            @busy-change="batchBusy = $event"
-          />
-        </ElCard>
+        <!-- 批量栏（含批量删除确认弹窗与逐行派发循环）在子组件。**留表下、不进工具条**：
+             页面级常驻动作（创建/任务中心/自动刷新）进工具条；批量栏承载选中态的批量
+             动作、逐行波次与进度，是列表的选中态控制台 —— 随勾选出现、贴在被它控制的
+             行下面（与波次反馈的阅读位置也一致）。 -->
+        <WorkloadBatchBar
+          :selected="selected"
+          :busy="busy"
+          :refresh="refreshSilent"
+          @busy-change="batchBusy = $event"
+        />
       </template>
-    </div>
+    </ElCard>
 
     <!-- 单个操作的确认弹窗：删除是标准档必走它；受保护目标上的写动作也走它 ——
          「强制操作」开关是它唯一的输入面（开关是否渲染由组件按 docker:exec 权限判定，
@@ -166,7 +133,10 @@
 
 <script setup lang="ts">
   /**
-   * 容器列表页（切片 2 重构）：**跨主机统一工作负载表**。
+   * 容器列表页（切片 2 重构）：**跨主机统一工作负载表**；本波「列表页纯化」后
+   * 页头（hero）整块删除，页面 = 搜索栏 + 表卡（工具条内置钮 + 计数/刷新标注 +
+   * 表 + 批量栏）的纯清单形态（对齐系统管理的列表形态；页面级常驻动作进工具条、
+   * 选中态批量控制台留表下）。
    *
    * 数据源从「单主机快照（useDockerHostState + 本地过滤）」换成 GET /docker/containers
    * （服务端过滤，三项 query 全部透传）—— 跨主机的表没法在单主机快照上筛。主机维度
@@ -175,18 +145,16 @@
    * 的既有链路不动）。写操作按**行主机**派发：指令通道的 hostId 绑定
    * 当前操作行（useDockerCmds 给了 hostId 就不碰 provide 上下文）。路由、菜单零变更。
    *
-   * 8a 页面化：容器详情与创建都成了整页路由（展示面一律整页，不用抽屉）—— 本页只剩
-   * 「统一的表」这一件事：`?id=` 深链与行桩（7b 的抽屉外部打开模式）**整体删除**，
-   * 行「详情 / 日志」与 hero 的创建钮一律走 router.push（详情页/创建页自己有
-   * inspect 兜底与主机下拉，本页不必替它们兜底）。
+   * 8a 页面化：容器详情与创建都成了整页路由（展示面一律整页，不用抽屉）。加载态
+   * 交给表体自身（WorkloadTable 的 ArtTable :loading），首拉失败走紧凑失败态
+   * （ElEmpty + 重试），刷新失败保留旧数据并在工具条标注「刷新失败，正在显示上次结果」。
    */
   import { computed, ref, watch } from 'vue'
   import { useRoute, useRouter } from 'vue-router'
-  import { ElButton, ElCard, ElEmpty, ElMessage, ElResult } from 'element-plus'
+  import { ElButton, ElCard, ElEmpty, ElMessage } from 'element-plus'
   import ArtButtonTable from '@/components/core/forms/art-button-table/index.vue'
   import ArtSearchBar from '@/components/core/forms/art-search-bar/index.vue'
   import ArtTableHeader from '@/components/core/tables/art-table-header/index.vue'
-  import { usePageIcon } from '@/hooks/core/usePageIcon'
   import { useAuth } from '@/hooks/core/useAuth'
   import { PermDockerList, PermDockerManage } from '@/enums/permission'
   import DockerActionConfirm from '../components/action-confirm.vue'
@@ -201,8 +169,6 @@
   defineOptions({ name: 'DockerContainers' })
 
   const route = useRoute()
-  // 页头图标与侧边栏/页签同源（取菜单图标，改「菜单管理」即同步；见 usePageIcon）
-  const pageIcon = usePageIcon('ri:ship-line')
 
   // ── 筛选（ArtSearchBar；三项全部作为 query 发给端点，服务端过滤）──
   const showSearchBar = ref(false)
@@ -217,11 +183,10 @@
     hosts,
     loading,
     truncated,
+    refreshError,
     pageState,
-    subtitle,
     autoRefresh,
     load,
-    refresh,
     refreshSilent,
     reloadAll
   } = useWorkloadList({
@@ -439,9 +404,13 @@
 </script>
 
 <style lang="scss" scoped>
-  /* 页面骨架（hero/三态/动效降级）下沉在 views/wkl-shell.scss（本模块两页共用的
-   * 范式样式）；这里只留本页特有的布局。令牌出处见 overview-tokens.scss 文件头。 */
-  @use './wkl-shell';
+  /* 工具条左组：图标钮 + 计数文本 + 刷新标注一行排开（对齐系统管理的 toolbar-left）。 */
+  .toolbar-left {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+  }
 
   /* 次要文字对比度 AA（P2 打磨批，与总览页同款处置）：EP 默认
      --el-text-color-secondary(#909399) 对白底只有 3.08:1（QA 实测 2.97–3.08），低于
@@ -449,18 +418,25 @@
      只重定义变量值，页面内所有消费该变量的元素一起达标，不碰元素样式与布局。 */
   .docker-containers-page {
     --el-text-color-secondary: var(--el-text-color-regular);
-
-    /* hero 副标题/g-600 辅助字的对比度 AA（终审 QA D2·浅色实测 3.5:1）：
-       text-g-600 的工具变量指向 --art-gray-600(#7987a1) —— 对页底 #fafbfc 3.5:1，
-       低于 AA 正文线。页面范围内抬一档到 g-700（浅色 #4d5875 对页底 ≈6.8:1；
-       暗色 #ababba 对暗底 ≈8.9:1，随主题自适应）。只重定义工具变量值，页面内
-       所有 text-g-600 文字（hero 副标题、加载提示）一起达标，页面外无副作用。 */
-    --color-g-600: var(--art-gray-700);
   }
 
-  /* 刷新钮 loading 态：图标自转（复用 wkl-shell 的 wkl-spin 关键帧 —— 同块内定义与
-     引用会被 scoped 一致重命名；svg 在 ArtButtonTable 内部渲染，:deep 穿透）。 */
-  .wkl-hero-refresh--loading :deep(svg) {
-    animation: wkl-spin 1.1s linear infinite;
+  /* 工具条计数：辅助信息，小号次要色（与镜像/卷/网络页 的 docker-count 同款）。 */
+  .docker-count {
+    font-size: 12px;
+    color: var(--el-text-color-secondary);
+  }
+
+  /* 静默刷新失败标注：琥珀即「需要注意」（与镜像/卷/网络页 / 任务页同一套颜色语言）。 */
+  .docker-refresh-note {
+    margin-left: 10px;
+    font-size: 12px;
+    // 文字对比度 AA（收尾批）：原 el-color-warning（白底 1.85）改走 token，
+    // 数字见 @styles/core/aa-text.scss。
+    color: var(--aa-warning-text);
+  }
+
+  /* 卡内错误/空态：给接近表格空态的留白（与镜像/卷/网络页 的 docker-empty 同款）。 */
+  .docker-empty {
+    padding: 56px 0;
   }
 </style>

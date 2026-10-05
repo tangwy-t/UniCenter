@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * 镜像 tab 三个输入型写动作（打标签 / 导出 tar / 载入镜像）的接线测试 ——
+ * 镜像页三个输入型写动作（打标签 / 导出 tar / 载入镜像）的接线测试 ——
  * prompt 输入形态归一后，它们全部走 DockerActionConfirm 的**输入档**（原自建
  * ElMessageBox.prompt 已删，同页不再有两套输入形态）。这里钉的是：
  *
@@ -16,11 +16,16 @@
  *   - 漂移守卫：源码扫描钉住「不再自建 prompt」（ElMessageBox / promptText 不回潮）。
  *
  * 纯函数层（输入档描述/校验/形态推导）在 action-confirm.test.ts；页面级收敛不变量
- * （tab 切换/聚合数据源/主机筛选）在 resources.test.ts。
+ * （聚合数据源/主机筛选/合计口径/失败口径）在 resources.test.ts。
+ *
+ * 拆分切片：原「镜像 tab」升格为独立整页 views/images.vue —— 动作入口是
+ * 工具条 ArtButtonTable 图标钮（title 即悬浮说明、禁用理由也写在 title）：
+ * 「拉取/载入」恒在（canManage）且缺选定主机时禁用；「打标签/导出 tar」恰选中一行
+ * 时出现、指令在途时禁用。本文件的点击/断言口径随之改为按 title 找工具条按钮。
  *
  * ElDialog 默认**原地**渲染（append-to-body 未开，与 action-confirm/registry
  * 同挂法），断言走 wrapper 查询。表格行勾选走真 ElTable 的 toggleRowSelection
- *（底栏按钮的启用以「恰选中一行」为前提）——需传**与表数据同一个对象引用**
+ *（工具条按钮的「出现 + 可点」以恰选中一行为前提）——需传**与表数据同一个对象引用**
  *（ElTable 按引用比对；选中的是 fetchDockerImages 返回的那一行）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -31,9 +36,10 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 
 // 源码扫描用 ?raw 直接取 SFC 原文（jsdom 环境里 import.meta.url 解析到文档基址，
 // new URL()/fileURLToPath 都拿不到真实路径 —— vite 的 ?raw 与环境无关）。
-import tabSrc from '../components/resources/images-tab.vue?raw'
+import pageSrc from '../views/images.vue?raw'
 
 const api = vi.hoisted(() => ({
+  fetchDockerHosts: vi.fn(),
   fetchDockerImages: vi.fn(),
   sendDockerCmd: vi.fn(),
   fetchDockerCmdResult: vi.fn(),
@@ -49,10 +55,10 @@ vi.mock('@/hooks/core/useAuth', () => ({
   useAuth: () => ({ hasAuth: () => true, hasAnyAuth: () => true })
 }))
 
-import ImagesTab from '../components/resources/images-tab.vue'
+import ImagesPage from '../views/images.vue'
 import type { DockerHostItem, DockerImageListItem } from '../api'
 
-/** 页面级主机清单（resources.vue 下发的 props；单主机让整体动作的 host 落定）。 */
+/** 可管主机清单（页面自拉的 GET /docker/hosts 替身；单主机让整体动作的 host 落定）。 */
 const HOSTS: DockerHostItem[] = [
   {
     id: 'h1',
@@ -66,7 +72,7 @@ const HOSTS: DockerHostItem[] = [
   }
 ]
 
-/** 跨主机镜像条目（宿主经 props 下发；行带归属两列 —— 写操作按行主机派发）。 */
+/** 跨主机镜像条目（行带归属两列 —— 写操作按行主机派发）。 */
 const IMAGE: DockerImageListItem = {
   id: 'sha256:aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff66667777888899990000',
   repoTags: ['mysql:8.0'],
@@ -80,7 +86,8 @@ const IMAGE: DockerImageListItem = {
 /** 聚合端点（GET /docker/images）的响应形态：total 全量 + items。 */
 const IMAGES = { items: [IMAGE], total: 1 }
 
-/** Art* 全局组件替身（真组件靠 unplugin 注册，测试环境里没有；保住 slot）。 */
+/** Art* 全局组件替身（真组件靠 unplugin 注册，测试环境里没有；保住 slot ——
+ *  `left` 槽承载工具条动作钮，必须渲染出来）。 */
 const passthrough = (name: string) =>
   defineComponent({
     name,
@@ -88,7 +95,7 @@ const passthrough = (name: string) =>
     setup:
       (_, { slots }) =>
       () =>
-        h('div', { 'data-stub': name }, [slots.default?.()])
+        h('div', { 'data-stub': name }, [slots.default?.(), slots.left?.()])
   })
 
 /**
@@ -114,11 +121,36 @@ const artTableStub = defineComponent({
   }
 })
 
+/**
+ * ArtButtonTable 的替身：渲染成**真按钮** —— title（悬浮说明，禁用时带禁用理由）
+ * 与 disabled 都落在元素上；click 的活性口径与真组件一致（禁用吞点击、可点发 emit）。
+ */
+const artButtonTableStub = defineComponent({
+  name: 'ArtButtonTable',
+  inheritAttrs: false,
+  props: {
+    title: { type: String, default: '' },
+    disabled: { type: Boolean, default: false }
+  },
+  emits: ['click'],
+  setup(props, { emit, attrs }) {
+    return () =>
+      h('button', {
+        ...attrs,
+        title: props.title,
+        disabled: props.disabled,
+        onClick: () => {
+          if (!props.disabled) emit('click')
+        }
+      })
+  }
+})
+
 const STUBS = {
   ArtTable: artTableStub,
   ArtSearchBar: passthrough('ArtSearchBar'),
   ArtTableHeader: passthrough('ArtTableHeader'),
-  ArtButtonTable: passthrough('ArtButtonTable'),
+  ArtButtonTable: artButtonTableStub,
   ArtSvgIcon: passthrough('ArtSvgIcon')
 }
 
@@ -136,20 +168,19 @@ const flush = async () => {
 }
 
 /**
- * 挂镜像 tab（9b 起为跨主机聚合表）：主机清单经 props 由页面下发（单主机让
- * 「整体动作」的 host 落定 —— 载入/清理这类无行目标动作面向筛选主机）；
- * 行数据来自 fetchDockerImages（替身）。指令替身不挑主机，但断言仍看 hostId
- * 是否按**行主机/整体主机**派发。
+ * 挂镜像页（拆分切片后为独立整页 views/images.vue）：主机清单由页面自己经
+ * GET /docker/hosts 拉（替身回单主机，让「整体动作」的 host 落定 —— 载入/清理
+ * 这类无行目标动作面向筛选主机）；行数据来自 fetchDockerImages（替身）。指令替身
+ * 不挑主机，但断言仍看 hostId 是否按**行主机/整体主机**派发。
  */
-async function mountTab() {
+async function mountPage() {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [{ path: '/', component: { template: '<div />' } }]
   })
   await router.push('/')
   await router.isReady()
-  const wrapper = mount(ImagesTab, {
-    props: { hosts: HOSTS, hostsLoading: false },
+  const wrapper = mount(ImagesPage, {
     global: { plugins: [router], stubs: STUBS }
   })
   mounted.push(wrapper as VueWrapper)
@@ -157,7 +188,7 @@ async function mountTab() {
   return wrapper as VueWrapper
 }
 
-/** 勾选镜像表的第一行（底栏「打标签 / 导出 tar」以恰选中一行为前提）。
+/** 勾选镜像表的第一行（工具条「打标签 / 导出 tar」以恰选中一行为前提）。
  *  传的是 fetchDockerImages 返回的同一个对象引用 —— ElTable 按引用比对。 */
 async function selectFirstImage(w: VueWrapper) {
   const table = w.findComponent(ElTable)
@@ -170,14 +201,13 @@ async function selectFirstImage(w: VueWrapper) {
   await flush()
 }
 
-/** 底栏操作按钮（按文字找）。
- *  点击若「按钮明明可点却什么都没发生」，两类成因：ElButton 在 disabled/loading 时
- *  吞 click（活性判据见下），或宿主墙钟回拨踩中 Vue 的事件时间戳守卫（合成事件被静默
- *  丢弃 —— 已由 src/test/setup.ts 全局豁免，成因与证据见那里）。 */
-async function clickBar(w: VueWrapper, label: string) {
-  const btn = w.findAll('button').find((b) => (b.text() ?? '').includes(label))
-  expect(btn, `找不到底栏按钮「${label}」`).toBeTruthy()
-  expect((btn!.element as HTMLButtonElement).disabled, `「${label}」不该被禁用`).toBe(false)
+/** 工具条图标钮（按 title 前缀找 —— 禁用时 title 带禁用理由后缀）。
+ *  替身渲染真按钮并复刻真组件的活性判据：disabled 时元素自身即禁用（click 吞掉）。
+ *  点击若「按钮明明可点却什么都没发生」，成因见 src/test/setup.ts 的事件时间戳守卫豁免。 */
+async function clickBar(w: VueWrapper, title: string) {
+  const btn = w.findAll('button').find((b) => (b.attributes('title') ?? '').startsWith(title))
+  expect(btn, `找不到工具条按钮「${title}」`).toBeTruthy()
+  expect((btn!.element as HTMLButtonElement).disabled, `「${title}」不该被禁用`).toBe(false)
   await btn!.trigger('click')
   await flush()
 }
@@ -192,7 +222,7 @@ function confirmOf(w: VueWrapper) {
 /**
  * 弹窗里的输入框：等它**真的渲染出来**再返回。
  *
- * 为什么不是「拿到就 setValue/exists 断言」：开窗是一串异步（点底栏 → 页面开窗状态
+ * 为什么不是「拿到就 setValue/exists 断言」：开窗是一串异步（点工具条 → 页面开窗状态
  * → 弹窗 props → 内容区渲染），拿固定轮数的 flush 去兜在负载下会漂（全量首跑实测过
  * 「输入框还没进 DOM」的红）；判据换成**元素存在**这个事实。
  */
@@ -228,13 +258,16 @@ beforeEach(() => {
   api.fetchDockerCmdResult.mockReset()
   api.sendDockerCmd.mockResolvedValue({ ref: 'r1' })
   api.fetchDockerCmdResult.mockResolvedValue({ status: 'succeeded', detail: '操作已完成' })
+  // 主机清单替身（页面自拉）：单主机让「整体动作」的 host 落定。
+  api.fetchDockerHosts.mockReset()
+  api.fetchDockerHosts.mockResolvedValue({ list: HOSTS })
   // 聚合端点替身：行数据经它进表（勾选/指令都从这一行出发）。
   api.fetchDockerImages.mockResolvedValue(IMAGES)
 })
 
 describe('打标签：输入档收集新引用（校验挡提交）', () => {
   it('空串/非法镜像引用都禁用提交；合法值发出 {src, dst}，不带 target', async () => {
-    const w = await mountTab()
+    const w = await mountPage()
     await selectFirstImage(w)
     await clickBar(w, '打标签…')
 
@@ -273,7 +306,7 @@ describe('打标签：输入档收集新引用（校验挡提交）', () => {
   })
 
   it('取消不发指令（弹窗关闭即中止，与原 prompt 取消同语义）', async () => {
-    const w = await mountTab()
+    const w = await mountPage()
     await selectFirstImage(w)
     await clickBar(w, '打标签…')
 
@@ -291,7 +324,7 @@ describe('打标签：输入档收集新引用（校验挡提交）', () => {
 
 describe('载入镜像：输入档收集文件名（必填，格式不前端拦）', () => {
   it('空串禁用提交；非空文件名发出 {filename}，无 target、无 confirm', async () => {
-    const w = await mountTab()
+    const w = await mountPage()
     // 载入不需要选中行：文件名是唯一主参数。
     await clickBar(w, '载入镜像…')
 
@@ -326,7 +359,7 @@ describe('导出 tar：alreadyExists 两段式（同一只弹窗内切档）', (
       .mockResolvedValueOnce({ status: 'failed', error: '产物已存在', alreadyExists: true })
       .mockResolvedValueOnce({ status: 'succeeded', detail: '已导出' })
 
-    const w = await mountTab()
+    const w = await mountPage()
     await selectFirstImage(w)
     await clickBar(w, '导出 tar…')
 
@@ -384,7 +417,7 @@ describe('导出 tar：alreadyExists 两段式（同一只弹窗内切档）', (
   })
 
   it('第一段直接成功：报告结论并关弹窗，不进第二段', async () => {
-    const w = await mountTab()
+    const w = await mountPage()
     await selectFirstImage(w)
     await clickBar(w, '导出 tar…')
 
@@ -404,7 +437,7 @@ describe('导出 tar：alreadyExists 两段式（同一只弹窗内切档）', (
       status: 'failed',
       error: '磁盘不可写'
     })
-    const w = await mountTab()
+    const w = await mountPage()
     await selectFirstImage(w)
     await clickBar(w, '导出 tar…')
 
@@ -419,16 +452,56 @@ describe('导出 tar：alreadyExists 两段式（同一只弹窗内切档）', (
   })
 })
 
+describe('工具条按钮的活性与出现条件（新形态）', () => {
+  it('没有可管主机：整体动作全渲染但禁用，禁用理由写进 title（不设常驻提示句）', async () => {
+    api.fetchDockerHosts.mockResolvedValue({ list: [] })
+    api.fetchDockerImages.mockResolvedValue({ items: [], total: 0 })
+    const w = await mountPage()
+
+    for (const label of ['拉取镜像…', '构建镜像…', '载入镜像…', '清理悬空镜像…']) {
+      const btn = w.findAll('button').find((b) => (b.attributes('title') ?? '').startsWith(label))
+      expect(btn, `工具条缺「${label}」（有权限就该渲染，禁用 ≠ 不渲染）`).toBeTruthy()
+      expect((btn!.element as HTMLButtonElement).disabled, `「${label}」应禁用`).toBe(true)
+      expect(btn!.attributes('title'), `「${label}」的禁用理由应进 title`).toContain(
+        '需先在「主机」筛选中选定一台主机'
+      )
+    }
+    // 仓库凭据是**全局**面（不属于任何一台主机）：与主机筛选无关，可点。
+    const reg = w
+      .findAll('button')
+      .find((b) => (b.attributes('title') ?? '').startsWith('仓库凭据…'))
+    expect(reg, '仓库凭据入口应渲染').toBeTruthy()
+    expect((reg!.element as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('打标签/导出 tar 恰选中一行才出现（未选中前不占版面），出现即可点', async () => {
+    const w = await mountPage()
+    const findBtn = (label: string) =>
+      w.findAll('button').find((b) => (b.attributes('title') ?? '').startsWith(label))
+
+    expect(findBtn('打标签…'), '未选中任何行时不该出现').toBeUndefined()
+    expect(findBtn('导出 tar…'), '未选中任何行时不该出现').toBeUndefined()
+
+    await selectFirstImage(w)
+    const tag = findBtn('打标签…')
+    const save = findBtn('导出 tar…')
+    expect(tag, '恰选中一行后应出现').toBeTruthy()
+    expect(save, '恰选中一行后应出现').toBeTruthy()
+    expect((tag!.element as HTMLButtonElement).disabled).toBe(false)
+    expect((save!.element as HTMLButtonElement).disabled).toBe(false)
+  })
+})
+
 describe('输入形态归一的漂移守卫（源码扫描）', () => {
-  it('镜像 tab 不再自建 prompt：ElMessageBox / promptText 已删，三动作都接确认弹窗', () => {
-    expect(tabSrc).not.toContain('ElMessageBox')
-    expect(tabSrc).not.toContain('promptText')
+  it('镜像页不再自建 prompt：ElMessageBox / promptText 已删，三动作都接确认弹窗', () => {
+    expect(pageSrc).not.toContain('ElMessageBox')
+    expect(pageSrc).not.toContain('promptText')
     // 三处入口都改接确认弹窗的提交分支（kind 标记进 confirmState）。
     for (const needle of ["kind: 'tag'", "kind: 'load'", "kind: 'save'"]) {
-      expect(tabSrc, `镜像 tab 缺输入档接线标记 ${needle}`).toContain(needle)
+      expect(pageSrc, `镜像页缺输入档接线标记 ${needle}`).toContain(needle)
     }
     // 两段式的就地切档：alreadyExists 分支换 confirmState（不关弹窗）。
-    expect(tabSrc).toContain('alreadyExists === true')
-    expect(tabSrc).toContain('overwrite: true')
+    expect(pageSrc).toContain('alreadyExists === true')
+    expect(pageSrc).toContain('overwrite: true')
   })
 })

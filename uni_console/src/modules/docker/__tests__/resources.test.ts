@@ -1,15 +1,20 @@
 // @vitest-environment jsdom
 /**
- * 镜像与存储页（9b：跨主机化）的行为面 —— 这一页存在的理由就是这些行为：
+ * 拆分后的三张资源列表页（镜像 /docker/images、数据卷 /docker/volumes、
+ * 网络 /docker/networks）的行为面 —— 原「镜像与存储」收敛页的资源三 tab 整体
+ * 平移为三个独立整页（拆分切片），本文件随之改写：**tab 切换 / query 记忆 /
+ * 「切 tab 不重拉」「切 tab 保留筛选」三类用例随 tab 形态一起删除**（没有 tab
+ * 了），其余覆盖全部保留：
  *
- *   - tab 切换写 URL query（query 记忆：深链/刷新/分享还原当前 tab）；
- *   - **聚合数据源**：三个 tab 各拉自己的跨主机端点（GET /docker/images|
- *     volumes|networks），切 tab 不重拉（ElTabPane lazy 首挂后常驻、v-show 隐藏）；
- *   - **页面级一份主机清单**：三 tab 共用（fetchDockerHosts 恰好一次），
- *     主机筛选下拉与「尚无可管主机」判定都从它来；
+ *   - **聚合数据源**：各页拉自己的跨主机端点（GET /docker/images|volumes|
+ *     networks，服务端过滤，筛选参数全部透传）；各页的清单首拉恰一次；
+ *   - **可管主机清单**：各页自拉一份（原页面级一份的主机清单随 tab 页退役，
+ *     主机筛选下拉与「尚无可管主机」判定都从它来）；
  *   - `?host=` 深链作**主机筛选初始值**（单向：用户改筛选不回写 query）；
- *   - 筛选全部作为 query 发给端点（服务端过滤），重置清空；
- *   - D-1 的 tab 对应面：首拉失败 → 错误块 + 重试；刷新失败 → 保留最后已知行 + 标注；
+ *   - 失败口径（新形态）：首拉失败 → ElEmpty 失败描述 + 重试（重试成功后进表）；
+ *     刷新失败 → 保留最后已知行 + 工具条标注（走 ArtTableHeader 的 refresh）；
+ *   - 合计口径：合计读可见行、可回收读后端账目（空账目说「不可用」），随主机
+ *     筛选收窄；服务端截断（total 全量 + 前 N 条说出口）；
  *   - 行内下钻语义保持：镜像「详情」带**行主机**跳单主机窗口的镜像详情页。
  *
  * 同页面的另一半守卫在 page-render.test.ts（渲染冒烟/列集合）。
@@ -27,7 +32,7 @@ const api = vi.hoisted(() => ({
   fetchDockerNetworks: vi.fn(),
   sendDockerCmd: vi.fn(),
   fetchDockerCmdResult: vi.fn(),
-  // 拉取/构建进度对话框与凭据对话框（镜像 tab 挂载）不会真开流，但 import 面必须齐全。
+  // 拉取/构建进度对话框与凭据对话框（镜像页挂载）不会真开流，但 import 面必须齐全。
   openDockerPullStream: vi.fn(),
   openDockerBuildStream: vi.fn(),
   openDockerPushStream: vi.fn(),
@@ -39,7 +44,9 @@ vi.mock('@/hooks/core/useAuth', () => ({
   useAuth: () => ({ hasAuth: () => true, hasAnyAuth: () => true })
 }))
 
-import Resources from '../views/resources.vue'
+import Images from '../views/images.vue'
+import Volumes from '../views/volumes.vue'
+import Networks from '../views/networks.vue'
 
 const HOSTS = {
   list: [
@@ -128,7 +135,7 @@ const passthrough = (name: string) =>
   })
 
 /** ArtSearchBar 的替身换成一个**真输入**：v-model 双向接线，让用例能设置/读取
- *  筛选表单（「切 tab 保留筛选」看它；主机/开关类筛选直接 $emit 表单对象）。 */
+ *  筛选表单（主机/开关类筛选直接 $emit 表单对象）。 */
 const artSearchBarStub = defineComponent({
   name: 'ArtSearchBar',
   props: {
@@ -181,7 +188,6 @@ async function makeRouter(query: Record<string, string> = {}): Promise<Router> {
     history: createMemoryHistory(),
     routes: [
       { path: '/', component: { template: '<div />' } },
-      { path: '/docker/resources', component: Resources },
       {
         path: '/docker/image-detail/:id',
         name: 'DockerImageDetail',
@@ -201,25 +207,14 @@ afterEach(() => {
   for (const w of mounted.splice(0)) w.unmount()
 })
 
-/** 导航链跨几个微任务（tab 点击 → watch → router.replace），用宏任务兜平。 */
 const flush = async () => {
   await new Promise((r) => setTimeout(r, 0))
   await nextTick()
 }
 
-/**
- * 等 query.tab 落到期望值：tab→query 的写回是一次**异步导航**（watch → replace），
- * 判据用「路由到没到」而不是「过了几轮宏任务」—— 管线里若有别的导航在飞，步数会漂。
- */
-async function waitTab(router: Router, tab: string) {
-  await vi.waitUntil(() => String(router.currentRoute.value.query.tab ?? '') === tab, {
-    timeout: 5000
-  })
-}
-
-async function mountResources(query: Record<string, string> = { host: 'h1' }) {
+async function mountPage(component: Component, query: Record<string, string> = { host: 'h1' }) {
   const router = await makeRouter(query)
-  const wrapper = mount(Resources as unknown as Component, {
+  const wrapper = mount(component, {
     global: { plugins: [router], stubs: STUBS }
   })
   mounted.push(wrapper as VueWrapper)
@@ -227,27 +222,17 @@ async function mountResources(query: Record<string, string> = { host: 'h1' }) {
   return { wrapper: wrapper as VueWrapper, router }
 }
 
-/** 点 tab 导航条上的第 n 项（Element Plus 的 tab item 对 click 语义友好）。 */
-async function clickTab(w: VueWrapper, label: string) {
-  const item = w.findAll('.el-tabs__item').find((n) => n.text().includes(label))
-  expect(item, `找不到 tab 导航项「${label}」`).toBeTruthy()
-  await item!.trigger('click')
-  await flush()
-}
-
-/** 某 tab 组件内的 ArtSearchBar 替身（按 tab 收窄查找范围）。 */
-function searchBarOf(w: VueWrapper, tabName: string) {
-  const tab = w.findComponent({ name: tabName })
-  expect(tab.exists(), `${tabName} 未挂载`).toBe(true)
-  const bar = tab.findComponent({ name: 'ArtSearchBar' })
-  expect(bar.exists(), `${tabName} 里没有搜索栏`).toBe(true)
+/** 页面里唯一的搜索栏替身（三页各只挂一个 ArtSearchBar）。 */
+function searchBarOf(w: VueWrapper) {
+  const bar = w.findComponent({ name: 'ArtSearchBar' })
+  expect(bar.exists(), '页面里没有搜索栏').toBe(true)
   return bar
 }
 
-/** 某 tab 传给 ArtTable 的列配置（替身把 columns 落在 $attrs）。 */
-function columnsOf(w: VueWrapper, tabName: string) {
-  const table = w.findComponent({ name: tabName }).findComponent({ name: 'ArtTable' })
-  expect(table.exists(), `${tabName} 里没有表格`).toBe(true)
+/** 页面传给 ArtTable 的列配置（替身把 columns 落在 $attrs）。 */
+function columnsOf(w: VueWrapper) {
+  const table = w.findComponent({ name: 'ArtTable' })
+  expect(table.exists(), '页面里没有表格').toBe(true)
   return ((table.vm as unknown as { $attrs: Record<string, unknown> }).$attrs.columns ?? []) as {
     prop?: string
     label?: string
@@ -256,11 +241,24 @@ function columnsOf(w: VueWrapper, tabName: string) {
   }[]
 }
 
-/** 镜像 tab 的筛选输入（ArtSearchBar 替身渲染的真输入）。 */
-const imagesInput = (w: VueWrapper) =>
-  searchBarOf(w, 'DockerImagesTab').find('input.test-search-input')
+/** 页面传给 ArtTable 的行数据。 */
+function rowsOf(w: VueWrapper) {
+  const table = w.findComponent({ name: 'ArtTable' })
+  expect(table.exists(), '页面里没有表格').toBe(true)
+  return ((table.vm as unknown as { $attrs: Record<string, unknown> }).$attrs.data ?? []) as {
+    hostname?: string
+    name?: string
+  }[]
+}
 
-const keywordOf = (w: VueWrapper): string => (imagesInput(w).element as HTMLInputElement).value
+/** 工具条内置刷新入口：ArtTableHeader 替身只保留占位 DOM，直接发 refresh 事件
+ *  （与真组件点击同一处理链 —— 页面把 @refresh 接在它上面）。 */
+async function triggerHeaderRefresh(w: VueWrapper) {
+  const header = w.findComponent({ name: 'ArtTableHeader' })
+  expect(header.exists(), '页面里没有 ArtTableHeader 工具条').toBe(true)
+  header.vm.$emit('refresh')
+  await flush()
+}
 
 beforeEach(() => {
   vi.stubGlobal(
@@ -278,40 +276,9 @@ beforeEach(() => {
   api.fetchDockerNetworks.mockResolvedValue(NETWORKS)
 })
 
-describe('tab 切换与 query 记忆', () => {
-  it('点 tab 写回 query.tab（replace 不进历史），内容随 tab 切换', async () => {
-    const { wrapper: w, router } = await mountResources()
-    expect(router.currentRoute.value.query.tab).toBeUndefined()
-
-    await clickTab(w, '数据卷')
-    await waitTab(router, 'volumes')
-    expect(router.currentRoute.value.query.tab).toBe('volumes')
-    expect(w.findComponent({ name: 'DockerVolumesTab' }).exists()).toBe(true)
-    // lazy 首挂后常驻：镜像 tab 已挂载过，切走只是 v-show 隐藏（实例还在）。
-    expect(w.findComponent({ name: 'DockerImagesTab' }).exists()).toBe(true)
-
-    await clickTab(w, '网络')
-    await waitTab(router, 'networks')
-    expect(router.currentRoute.value.query.tab).toBe('networks')
-    expect(w.findComponent({ name: 'DockerNetworksTab' }).exists()).toBe(true)
-
-    await clickTab(w, '镜像')
-    await waitTab(router, 'images')
-    expect(router.currentRoute.value.query.tab).toBe('images')
-  })
-
-  it('深链进入：query.tab 落到对应 tab，非法值回落镜像 tab', async () => {
-    const { wrapper: w } = await mountResources({ host: 'h1', tab: 'networks' })
-    expect(w.findComponent({ name: 'DockerNetworksTab' }).exists()).toBe(true)
-
-    const { wrapper: w2 } = await mountResources({ host: 'h1', tab: '不存在的tab' })
-    expect(w2.findComponent({ name: 'DockerImagesTab' }).exists()).toBe(true)
-  })
-})
-
-describe('聚合数据源（9b：跨主机端点 + 服务端过滤）', () => {
-  it('镜像 tab 首拉：?host 深链为主机筛选初始值，三个筛选参数全部发给端点', async () => {
-    await mountResources({ host: 'h1' })
+describe('聚合数据源（跨主机端点 + 服务端过滤）', () => {
+  it('镜像页首拉：?host 深链为主机筛选初始值，三个筛选参数全部发给端点', async () => {
+    await mountPage(Images, { host: 'h1' })
     expect(api.fetchDockerImages).toHaveBeenCalledWith({
       hostId: 'h1',
       keyword: undefined,
@@ -321,31 +288,34 @@ describe('聚合数据源（9b：跨主机端点 + 服务端过滤）', () => {
   })
 
   it('不带 host 的进入是全部主机首拉（hostId 不发）', async () => {
-    await mountResources({})
+    await mountPage(Images, {})
     expect(api.fetchDockerImages).toHaveBeenCalledWith(
       expect.objectContaining({ hostId: undefined })
     )
   })
 
-  it('三个 tab 全逛一遍：每个聚合端点各拉恰好一次，主机清单页面级一份只拉一次', async () => {
-    const { wrapper: w } = await mountResources()
-    await clickTab(w, '数据卷')
-    await clickTab(w, '网络')
-    await clickTab(w, '镜像')
-
-    // 切 tab 不重拉：各 tab 的实例常驻（lazy 首挂后 v-show 隐藏）。
+  it('三页各自首拉自己的聚合端点；可管主机清单各页自拉一份（原页面级共用随 tab 页退役）', async () => {
+    await mountPage(Images)
     expect(api.fetchDockerImages).toHaveBeenCalledTimes(1)
-    expect(api.fetchDockerVolumes).toHaveBeenCalledTimes(1)
-    expect(api.fetchDockerNetworks).toHaveBeenCalledTimes(1)
-    // 主机清单是页面级一份（收敛收益在跨主机形态下的延续）。
+    expect(api.fetchDockerVolumes).not.toHaveBeenCalled()
+    expect(api.fetchDockerNetworks).not.toHaveBeenCalled()
     expect(api.fetchDockerHosts).toHaveBeenCalledTimes(1)
+
+    await mountPage(Volumes)
+    expect(api.fetchDockerVolumes).toHaveBeenCalledTimes(1)
+    expect(api.fetchDockerImages).toHaveBeenCalledTimes(1)
+    expect(api.fetchDockerHosts).toHaveBeenCalledTimes(2)
+
+    await mountPage(Networks)
+    expect(api.fetchDockerNetworks).toHaveBeenCalledTimes(1)
+    expect(api.fetchDockerHosts).toHaveBeenCalledTimes(3)
   })
 
   it('搜索时 keyword/开关/主机三项透传（开关只发 true）', async () => {
-    const { wrapper: w } = await mountResources()
+    const { wrapper: w } = await mountPage(Images)
     api.fetchDockerImages.mockClear()
 
-    const bar = searchBarOf(w, 'DockerImagesTab')
+    const bar = searchBarOf(w)
     bar.vm.$emit('update:modelValue', { keyword: 'mysql', danglingOnly: true, host: 'h2' })
     bar.vm.$emit('search')
     await flush()
@@ -359,10 +329,10 @@ describe('聚合数据源（9b：跨主机端点 + 服务端过滤）', () => {
   })
 
   it('重置清空三项参数（undefined 不发）', async () => {
-    const { wrapper: w } = await mountResources({ host: 'h2' }) // 先带一个 host 深链
+    const { wrapper: w } = await mountPage(Images, { host: 'h2' }) // 先带一个 host 深链
     api.fetchDockerImages.mockClear()
 
-    const bar = searchBarOf(w, 'DockerImagesTab')
+    const bar = searchBarOf(w)
     bar.vm.$emit('update:modelValue', {})
     bar.vm.$emit('reset')
     await flush()
@@ -376,10 +346,10 @@ describe('聚合数据源（9b：跨主机端点 + 服务端过滤）', () => {
   })
 })
 
-describe('底栏合计（可见行与后端账目的两种口径）', () => {
+describe('工具条合计（可见行与后端账目的两种口径）', () => {
   it('「可回收」读后端账目求和，不是 Σ 可见悬空行 SizeMB（对账修）', async () => {
     // 可见行里有 1 张 1200MB 的悬空镜像（旧口径会把这 1200MB 当「可回收」），
-    // 账目（df 对账的独占层）故意另给一套小数字：底栏必须说账目这套
+    // 账目（df 对账的独占层）故意另给一套小数字：工具条必须说账目这套
     //（promise 的是 prune 真会释放的量，共享层不算）。
     api.fetchDockerImages.mockResolvedValue({
       items: [
@@ -400,7 +370,7 @@ describe('底栏合计（可见行与后端账目的两种口径）', () => {
         { hostId: 'h2', danglingCount: 2, danglingMb: 12.5 }
       ]
     })
-    const { wrapper: w } = await mountResources()
+    const { wrapper: w } = await mountPage(Images)
 
     // 主行仍是可见清单的合计（Σ 条目 SizeMB：91.8 + 596.2 + 1200 = 1888）。
     expect(w.find('.docker-total').text()).toContain('合计 3 个 · 1.84 GB')
@@ -411,7 +381,7 @@ describe('底栏合计（可见行与后端账目的两种口径）', () => {
     expect(sub).not.toContain('1.2 GB')
   })
 
-  it('账目跟着主机筛选范围走（服务端按 hostId 收窄 → 底栏只算那台）', async () => {
+  it('账目跟着主机筛选范围走（服务端按 hostId 收窄 → 工具条只算那台）', async () => {
     api.fetchDockerImages.mockImplementation((p: { hostId?: string } = {}) =>
       Promise.resolve({
         ...IMAGES,
@@ -424,7 +394,7 @@ describe('底栏合计（可见行与后端账目的两种口径）', () => {
               ]
       })
     )
-    const { wrapper: w } = await mountResources({ host: 'h2' })
+    const { wrapper: w } = await mountPage(Images, { host: 'h2' })
     expect(api.fetchDockerImages).toHaveBeenCalledWith(expect.objectContaining({ hostId: 'h2' }))
     const sub = w.find('.docker-total__sub').text()
     expect(sub).toContain('2 个可回收')
@@ -433,31 +403,51 @@ describe('底栏合计（可见行与后端账目的两种口径）', () => {
 
   it('没有任何主机报账（disk 为空）→ 副行说「不可用」，不折算成 0', async () => {
     api.fetchDockerImages.mockResolvedValue({ ...IMAGES, disk: [] })
-    const { wrapper: w } = await mountResources()
+    const { wrapper: w } = await mountPage(Images)
     const sub = w.find('.docker-total__sub').text()
     expect(sub).toContain('可回收账目不可用')
     expect(sub).not.toContain('0 个可回收')
   })
+
+  it('数据卷页的合计与补充结论（未知/未使用）在工具条上（有才出现）', async () => {
+    api.fetchDockerVolumes.mockResolvedValue({
+      items: [
+        ...VOLUMES.items,
+        {
+          name: 'orphan',
+          driver: 'local',
+          sizeMb: null,
+          inUse: false,
+          protected: false,
+          hostId: 'h1',
+          hostname: 'bogon'
+        }
+      ],
+      total: 2
+    })
+    const { wrapper: w } = await mountPage(Volumes)
+    expect(w.find('.docker-total').text()).toContain('合计 2 个')
+    const sub = w.find('.docker-total__sub').text()
+    expect(sub).toContain('1 个大小未知')
+    expect(sub).toContain('1 个未使用')
+  })
 })
 
-describe('主机列 + 主机筛选（跨主机形态的核心新增）', () => {
-  it('镜像 tab：行带归属两列，表列里「主机」在平板竖屏起可见', async () => {
-    const { wrapper: w } = await mountResources()
-    const table = w.findComponent({ name: 'DockerImagesTab' }).findComponent({ name: 'ArtTable' })
-    const rows = ((table.vm as unknown as { $attrs: Record<string, unknown> }).$attrs.data ??
-      []) as { hostname?: string }[]
+describe('主机列 + 主机筛选（跨主机形态的核心）', () => {
+  it('镜像页：行带归属两列，表列里「主机」在平板竖屏起可见', async () => {
+    const { wrapper: w } = await mountPage(Images)
     // 两台主机的镜像进同一张表，逐行带归属。
-    expect(rows.map((r) => r.hostname)).toEqual(['bogon', 'nas'])
+    expect(rowsOf(w).map((r) => r.hostname)).toEqual(['bogon', 'nas'])
 
-    const hostCol = columnsOf(w, 'DockerImagesTab').find((c) => c.label === '主机')
+    const hostCol = columnsOf(w).find((c) => c.label === '主机')
     expect(hostCol, '镜像表缺少「主机」列').toBeTruthy()
     expect(hostCol?.prop).toBe('hostname')
     expect(hostCol?.hideBelow).toBe('tablet')
   })
 
-  it('主机筛选下拉来自页面级主机清单（全部主机 + 各台，label 用主机名）', async () => {
-    const { wrapper: w } = await mountResources()
-    const items = searchBarOf(w, 'DockerImagesTab').props('items') as {
+  it('主机筛选下拉来自本页主机清单（全部主机 + 各台，label 用主机名）', async () => {
+    const { wrapper: w } = await mountPage(Images)
+    const items = searchBarOf(w).props('items') as {
       key: string
       filterable?: boolean
       options?: { label: string; value: string }[]
@@ -472,82 +462,77 @@ describe('主机列 + 主机筛选（跨主机形态的核心新增）', () => {
     expect(host?.filterable).toBe(true)
   })
 
-  it('深链 ?host=h2&tab=volumes：数据卷端点首拉就带 hostId（每个 tab 各自吃初值）', async () => {
-    await mountResources({ host: 'h2', tab: 'volumes' })
+  it('深链 ?host=h2：数据卷页端点首拉就带 hostId（各页各自吃初值）', async () => {
+    await mountPage(Volumes, { host: 'h2' })
     expect(api.fetchDockerVolumes).toHaveBeenCalledWith(expect.objectContaining({ hostId: 'h2' }))
   })
 
-  it('网络 tab 的搜索栏同样是三件套（名称/仅内部/主机）', async () => {
-    const { wrapper: w } = await mountResources({ host: 'h1', tab: 'networks' })
-    const items = searchBarOf(w, 'DockerNetworksTab').props('items') as {
+  it('网络页的搜索栏同样是三件套（名称/仅内部/主机）', async () => {
+    const { wrapper: w } = await mountPage(Networks, { host: 'h1' })
+    const items = searchBarOf(w).props('items') as {
       key: string
       filterable?: boolean
     }[]
     expect(items.map((i) => i.key)).toEqual(['keyword', 'internalOnly', 'host'])
-    // 主机下拉可搜：与镜像/卷 tab 同一处置（QA 实测不可搜）
+    // 主机下拉可搜：与镜像/卷页同一处置（QA 实测不可搜）
     expect(items.find((i) => i.key === 'host')?.filterable).toBe(true)
   })
 })
 
-describe('切 tab 保留各 tab 的筛选（实例常驻，v-show 隐藏不销毁）', () => {
-  it('输入翻页回来还在', async () => {
-    const { wrapper: w } = await mountResources()
-    await imagesInput(w).setValue('mysql')
-    expect(keywordOf(w)).toBe('mysql')
-
-    await clickTab(w, '数据卷')
-    await clickTab(w, '镜像')
-    // 筛选还在：切 tab 不是切页，用户逛一圈回来不该丢输入。
-    expect(keywordOf(w)).toBe('mysql')
-  })
-})
-
-describe('失败口径（D-1 的 tab 对应面）', () => {
-  it('首拉失败：错误块 + 重试；重试成功后进表', async () => {
+describe('失败口径（D-1 的页对应面）', () => {
+  it('首拉失败：紧凑失败态（ElEmpty 失败描述）+ 重试；重试成功后进表', async () => {
     api.fetchDockerImages.mockRejectedValueOnce(new Error('network down'))
-    const { wrapper: w } = await mountResources()
-    expect(w.find('.docker-tab-error').exists()).toBe(true)
+    const { wrapper: w } = await mountPage(Images)
     expect(w.text()).toContain('镜像清单获取失败')
 
     api.fetchDockerImages.mockResolvedValue(IMAGES)
-    const retry = w.findAll('.docker-tab-error button').find((b) => b.text().includes('重试'))
-    expect(retry, '错误块里应有重试按钮').toBeTruthy()
+    const retry = w.findAll('button').find((b) => b.text().includes('重试'))
+    expect(retry, '失败态里应有重试按钮').toBeTruthy()
     await retry!.trigger('click')
     await flush()
 
-    expect(w.find('.docker-tab-error').exists()).toBe(false)
+    expect(w.text()).not.toContain('镜像清单获取失败')
     // 行数据进了表（jsdom 里 ElTable 不渲染行单元格，从传给 ArtTable 的 data 断言）。
-    const table = w.findComponent({ name: 'DockerImagesTab' }).findComponent({ name: 'ArtTable' })
-    const rows = ((table.vm as unknown as { $attrs: Record<string, unknown> }).$attrs.data ??
-      []) as { hostname?: string }[]
-    expect(rows.map((r) => r.hostname)).toEqual(['bogon', 'nas'])
+    expect(rowsOf(w).map((r) => r.hostname)).toEqual(['bogon', 'nas'])
   })
 
   it('刷新失败：保留最后已知行并标注（不把看完的清单换成错误屏）', async () => {
-    const { wrapper: w } = await mountResources()
-    const table = w.findComponent({ name: 'DockerImagesTab' }).findComponent({ name: 'ArtTable' })
-    const rowsOf = () =>
-      ((table.vm as unknown as { $attrs: Record<string, unknown> }).$attrs.data ?? []) as {
-        hostname?: string
-      }[]
-    expect(rowsOf()).toHaveLength(2)
+    const { wrapper: w } = await mountPage(Images)
+    expect(rowsOf(w)).toHaveLength(2)
 
+    // 刷新 = 把眼前这页看新：主机清单（筛选源）与本页清单一起重拉（refreshAll）。
+    const hostsBefore = api.fetchDockerHosts.mock.calls.length
     api.fetchDockerImages.mockRejectedValueOnce(new Error('network down'))
-    // 表头刷新按钮在 ArtTableHeader 的替身里没有实现（真组件才有点击件）——
-    // 直接调 tab 暴露的 refresh（页面 hero 刷新走的是同一个入口）。
-    const tab = w.findComponent({ name: 'DockerImagesTab' })
-    await (tab.vm as unknown as { refresh: () => Promise<void> }).refresh()
-    await flush()
+    // 刷新入口是 ArtTableHeader 的内置刷新钮（工具条上新形态）。
+    await triggerHeaderRefresh(w)
 
-    expect(w.find('.docker-tab-error').exists()).toBe(false)
+    expect(api.fetchDockerHosts.mock.calls.length).toBe(hostsBefore + 1)
+    expect(w.text()).not.toContain('镜像清单获取失败')
     expect(w.text()).toContain('刷新失败，正在显示上次结果')
     // 清单未被清空：喂给表格的仍是上一批数据（最后已知数据）。
-    expect(rowsOf()).toHaveLength(2)
+    expect(rowsOf(w)).toHaveLength(2)
+  })
+
+  it('计数/合计文本的 ready 门控：失败/无可管主机时不报「共 0 个」假话', async () => {
+    // 首拉失败（还没有任何数据）：错误态下不出现计数/合计文本（数据面不得伪装新鲜）。
+    api.fetchDockerImages.mockRejectedValueOnce(new Error('network down'))
+    const { wrapper: errorW } = await mountPage(Images)
+    expect(errorW.find('.docker-count').exists()).toBe(false)
+    expect(errorW.find('.docker-total').exists()).toBe(false)
+
+    // 无可管主机（pageState=empty）：同样不报 —— 「0 个」不是这里的结论（「尚无可管主机」才是）。
+    api.fetchDockerHosts.mockResolvedValue({ list: [] })
+    api.fetchDockerVolumes.mockResolvedValue({ items: [], total: 0 })
+    const { wrapper: emptyW } = await mountPage(Volumes)
+    expect(emptyW.text()).toContain('尚无可管主机')
+    expect(emptyW.find('.docker-count').exists()).toBe(false)
+    expect(emptyW.find('.docker-total').exists()).toBe(false)
+    expect(emptyW.find('.docker-total__sub').exists()).toBe(false)
   })
 
   it('服务端截断：total 全量 + 前 N 条说出口', async () => {
     api.fetchDockerVolumes.mockResolvedValue({ items: VOLUMES.items, total: 640 })
-    const { wrapper: w } = await mountResources({ host: 'h1', tab: 'volumes' })
+    const { wrapper: w } = await mountPage(Volumes, { host: 'h1' })
     expect(w.text()).toContain('共 640 个数据卷')
     expect(w.text()).toContain('列表显示前 1 条')
   })
@@ -555,8 +540,8 @@ describe('失败口径（D-1 的 tab 对应面）', () => {
 
 describe('行内下钻语义保持（单主机窗口）', () => {
   it('镜像行「详情」带**行主机**跳详情页（不是页面级主机）', async () => {
-    const { wrapper: w, router } = await mountResources({ host: 'h1' })
-    const op = columnsOf(w, 'DockerImagesTab').find((c) => c.prop === 'operation')
+    const { wrapper: w, router } = await mountPage(Images, { host: 'h1' })
+    const op = columnsOf(w).find((c) => c.prop === 'operation')
     expect(op?.formatter, '操作列应有 formatter').toBeTruthy()
 
     // 行归属 h2：详情必须带 h2（镜像属于那台机器，单主机窗口语义不变）。

@@ -248,10 +248,10 @@ describe('取消（独立于观看的显式动作）', () => {
     expect(buttons(w).some((b) => b.text === '取消构建')).toBe(true)
   })
 
-  it('canCancel=false（别人的任务/无权限）：不渲染取消入口，收起口径仍在', async () => {
+  it('canCancel=false（别人的任务/无权限）：不渲染取消入口（收起语义在任务页展开开关的 title，不占展开区正文）', async () => {
     useStream('pull', [jf({ id: 'sha256:aaa', status: 'Downloading' })])
     const w = await mountProgress({ canCancel: false })
     expect(buttons(w).some((b) => b.text === '取消拉取')).toBe(false)
-    expect(w.text()).toContain('收起不取消任务')
+    expect(w.text()).not.toContain('收起不取消任务')
   })
 })

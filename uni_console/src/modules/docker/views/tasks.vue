@@ -1,62 +1,51 @@
 <template>
   <!-- 单根（single-root 守卫在库：布局的 Transition 只支持单根，双根切页白屏）。 -->
-  <div class="docker-tasks art-full-height overflow-y-auto">
-    <div class="tk-inner p-4 pb-8 md:p-5">
-      <!-- ============ 页头：返回 + 图标 + 标题 + 过滤/刷新（对齐其余页面 hero）============ -->
-      <div class="tk-hero mb-4 flex flex-wrap items-center gap-3">
-        <ArtButtonTable
-          icon="ri:arrow-left-line"
-          icon-class="bg-g-300/55 text-g-700"
-          title="返回上一页"
-          @click="back"
-        />
-        <div class="wkl-hero__icon flex-cc">
-          <ArtSvgIcon :icon="pageIcon" />
-        </div>
-        <div class="min-w-0">
-          <h2 class="text-lg font-semibold text-[var(--el-text-color-primary)]">任务中心</h2>
-          <p class="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-g-600">
-            <span
-              class="live-dot inline-block h-1.5 w-1.5 rounded-full bg-success"
-              :class="{ 'is-loading': loading }"
+  <div class="docker-tasks art-full-height">
+    <ElCard class="art-table-card" shadow="never">
+      <!-- :layout 显式去掉 columns 段（组件默认含）：本页不是 ArtTable（任务清单
+           是自绘行表），工具条没有列集合 —— 保留列设置钮只会开出空弹层（死控件）；
+           其余段与组件默认一致。 -->
+      <ArtTableHeader
+        :loading="loading"
+        layout="search,refresh,size,fullscreen,settings"
+        @refresh="manualRefresh"
+      >
+        <template #left>
+          <div class="toolbar-left">
+            <!-- 返回上一页：本页没有菜单入口（从容器页/总览的入口进），返回键就是它的出口。 -->
+            <ArtButtonTable
+              icon="ri:arrow-left-line"
+              icon-class="bg-g-300/55 text-g-700"
+              title="返回上一页"
+              @click="back"
             />
-            <span>{{ subtitle }}</span>
-          </p>
-        </div>
-        <div class="ml-auto flex items-center gap-2">
-          <!-- 状态过滤（服务端过滤）：全部 / 进行中（pending）/ 已结束（一切终态）。 -->
-          <ElRadioGroup v-model="filter" size="small">
-            <ElRadioButton value="all">全部</ElRadioButton>
-            <ElRadioButton value="pending">进行中</ElRadioButton>
-            <ElRadioButton value="done">已结束</ElRadioButton>
-          </ElRadioGroup>
-          <ArtButtonTable
-            icon="ri:refresh-line"
-            iconClass="bg-theme/12 text-theme"
-            title="刷新"
-            @click="manualRefresh"
-          />
-        </div>
-      </div>
+            <!-- 状态过滤（服务端过滤）：全部 / 进行中（pending）/ 已结束（一切终态）。 -->
+            <ElRadioGroup v-model="filter" size="small">
+              <ElRadioButton value="all">全部</ElRadioButton>
+              <ElRadioButton value="pending">进行中</ElRadioButton>
+              <ElRadioButton value="done">已结束</ElRadioButton>
+            </ElRadioGroup>
+          </div>
+        </template>
+      </ArtTableHeader>
 
-      <!-- ── 首拉加载（还没有任何行可给） ── -->
-      <div v-if="state === 'loading'" class="wkl-card tk-state">
+      <!-- ── 首拉加载（还没有任何行可给）：等价最小 loading（骨架）——
+           不再有页面级加载卡外观（列表页纯化：加载态的表意交给列表自身）。 ── -->
+      <div v-if="state === 'loading'" class="tk-loading">
         <ElSkeleton :rows="6" animated />
       </div>
 
-      <!-- ── 首拉失败：结论句 + 重试（不显示旧列表 —— 那时还没有旧列表可显示） ── -->
-      <div v-else-if="state === 'error'" class="wkl-card tk-state">
-        <p class="tk-state__text">任务列表获取失败</p>
+      <!-- ── 首拉失败：紧凑失败态 —— 结论句 + 重试（不显示旧列表 —— 那时还没有
+           旧列表可显示；全局错误 toast 由 utils/http 的 request() 统一弹出）。 ── -->
+      <ElEmpty v-else-if="state === 'error'" class="docker-empty" description="任务列表获取失败">
         <ElButton size="small" @click="manualRefresh">重试</ElButton>
-      </div>
+      </ElEmpty>
 
       <!-- ── 空态（「没有任务」与「筛完了没有」分开说，两种事实不是一句话） ── -->
-      <div v-else-if="state === 'empty'" class="wkl-card tk-state">
-        <ElEmpty :description="emptyText" />
-      </div>
+      <ElEmpty v-else-if="state === 'empty'" class="docker-empty" :description="emptyText" />
 
-      <!-- ── 正常态：轮询失败标注 + 任务行列表 ── -->
-      <div v-else class="wkl-card tk-body">
+      <!-- ── 正常态：轮询失败标注 + 任务行列表 + 分页 ── -->
+      <template v-else>
         <!-- 静默刷新失败：保留最后已知列表并说出口（与列表页「上次数据仍在」同一口径）。 -->
         <p v-if="refreshError" class="tk-refresh-error">刷新失败，正在显示上次结果</p>
         <ul class="tk-list">
@@ -80,11 +69,13 @@
                 <span class="tk-item__target" :title="item.target">{{
                   targetText(item.target)
                 }}</span>
+                <!-- 展开开关：「收起 ≠ 取消」（任务照常跑）的语义收在 title 上，
+                     不占行内正文（展开区的可见文案只留事实）。 -->
                 <button
                   v-if="isExpandable(item) || isExpanded(item.ref)"
                   type="button"
                   class="tk-item__toggle"
-                  :title="isExpanded(item.ref) ? '收起' : '展开'"
+                  :title="isExpanded(item.ref) ? '收起（不取消任务）' : '展开'"
                   @click="toggleExpand(item)"
                 >
                   <ArtSvgIcon
@@ -139,27 +130,28 @@
             @size-change="onSizeChange"
           />
         </div>
-      </div>
-    </div>
+      </template>
+    </ElCard>
   </div>
 </template>
 
 <script setup lang="ts">
   /**
    * 任务中心页（8c 页面化，`/docker/tasks`）：长任务（拉取/启停/重建…）的跨主机收口
-   * 面板 —— 「刚才受理了什么、进行到哪、结论是什么」一张列表读完。被删的
-   * task-center-drawer 内容**原样**平移（列表渲染 / 服务端过滤 / 5 秒轮询 / 拉取进度
-   * 内联一个不改），宿主从抽屉换成页面：整页化后它有了自己的 URL 与刷新语义
-   * （多分辨率适配：任务行在窄屏不再被抽屉宽度切成两行元信息）。
+   * 面板 —— 「刚才受理了什么、进行到哪、结论是什么」一张列表读完。本波「列表页纯化」
+   * 后 = 表卡（工具条：返回 + 状态过滤；列表/空态/分页在卡内）的纯清单形态（对齐
+   * 系统管理的列表形态）；页头（hero：图标+标题+副标题+刷新钮）整块删除 —— 刷新
+   * 由 ArtTableHeader 的内置钮承担，机制说明句（节拍/跨主机定位）按零解释文案纪律
+   * 一并删除（条数事实在分页条「第 x 页 / 共 N 条」里）。
    *
    * 数据是**一份**（GET /docker/tasks：实时 ∪ 历史合并、受理时刻降序、跨主机、
    * 服务端分页），不与任何单主机页面状态耦合 —— 这也是入口虽然长在总览 hero 与容器页
-   * hero 上、列表却不按当前主机过滤的原因：hostname 列已经回答「在哪台机器上」，
+   * 工具条上、列表却不按当前主机过滤的原因：hostname 列已经回答「在哪台机器上」，
    * 再按入口主机收窄会把「跨主机收口」这个立身之本又交回去。
    *
    * 分页（8d）：**服务端分页**（page/pageSize 透传 + total 回显），前端不本地切
    * —— 历史面让列表不再是一个「最近 100 条」的易失窗口（旧上限已改写为分页事实），
-   * 页头「共 N 条」与页尾分页器读的是同一个 total。越界页（保留清理后页码落空）
+   * 分页条「第 x 页 / 共 N 条」两处读的是同一个 total。越界页（保留清理后页码落空）
    * 由 load 内的自愈拉回最后一页，见那里的注释。
    *
    * 列表**只含变更/长任务动作**：只读动作（inspect 档的日志/统计/详情/配置读取 ——
@@ -177,13 +169,14 @@
    * 过滤是**就地状态**（不进 query，原样平移抽屉口径）：服务端过滤每次切换即重拉，
    * 进 query 会让后退键变成「筛选项切换器」，与「回上一页」的直觉打架。
    *
-   * 本页没有后端菜单种子（裁定：不加菜单，从总览 hero 与容器页 hero 入口进）—— 路由
+   * 本页没有后端菜单种子（裁定：不加菜单，从总览 hero 与容器页入口进）—— 路由
    * 取 isHide 形态，理由见 index.ts 的注释（可见且无菜单的路由根本注册不上）。
    */
   import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
   import { useRouter } from 'vue-router'
   import {
     ElButton,
+    ElCard,
     ElEmpty,
     ElPagination,
     ElRadioButton,
@@ -191,7 +184,8 @@
     ElSkeleton
   } from 'element-plus'
   import ArtButtonTable from '@/components/core/forms/art-button-table/index.vue'
-  import { usePageIcon } from '@/hooks/core/usePageIcon'
+  import ArtSvgIcon from '@/components/core/base/art-svg-icon/index.vue'
+  import ArtTableHeader from '@/components/core/tables/art-table-header/index.vue'
   import { useAuth } from '@/hooks/core/useAuth'
   import { useUserStore } from '@/store/modules/user'
   import { PermDockerManage } from '@/enums/permission'
@@ -203,8 +197,6 @@
   defineOptions({ name: 'DockerTasksPage' })
 
   const router = useRouter()
-  // 页头图标与侧边栏/页签同源（取菜单图标，改「菜单管理」即同步；见 usePageIcon）。
-  const pageIcon = usePageIcon('ri:task-line')
 
   /** 返回上一页：本页没有菜单入口（从各页入口进），返回键就是它的出口。 */
   function back() {
@@ -214,8 +206,8 @@
   // ── 数据与四态（首拉 loading/error、空、ready；静默刷新失败保留旧列表） ──
 
   const items = ref<DockerTaskItem[]>([])
-  /** 合计条数：服务端合并列表（实时 ∪ 历史）的真实全量 —— 页头「共 N 条」与分页器
-      都读它（8d 起不再是「窗口内匹配数」，理由见 api.ts 的 DockerTasksQuery 注释）。 */
+  /** 合计条数：服务端合并列表（实时 ∪ 历史）的真实全量 —— 分页条「第 x 页 / 共 N 条」
+      读它（8d 起不再是「窗口内匹配数」，理由见 api.ts 的 DockerTasksQuery 注释）。 */
   const total = ref(0)
   /** 页码与页大小（服务端分页：切页/切大小即重拉，前端不本地切）。 */
   const page = ref(1)
@@ -223,7 +215,7 @@
   const loading = ref(false)
   /** 首拉失败（还没有任何行可给）：错误态 + 重试。 */
   const firstError = ref(false)
-  /** 其后静默刷新失败：保留最后已知列表，页头说出口。 */
+  /** 其后静默刷新失败：保留最后已知列表，标注说出口。 */
   const refreshError = ref(false)
   /** 是否成功拉到过一次（「首拉」与「静默刷新」的分界）。 */
   const hasLoaded = ref(false)
@@ -253,16 +245,6 @@
     if (filter.value === 'done') return '没有已结束的任务'
     return '还没有受理过任何任务'
   })
-
-  /** 页头副标题：三个硬事实（数据范围 / 全量条数 / 自动刷新节奏）。原「最近受理的
-   * 指令」定位句与「可见期间」机制说明属解释性文案，已按「零解释文案」纪律删除；
-   * 8d 起「最多 100 条」的旧上限也随分页落地改写为「共 N 条」（首拉之前不报价 ——
-   * 抢跑一个「共 0 条」是假话）。 */
-  const subtitle = computed(() =>
-    hasLoaded.value
-      ? `跨主机 · 共 ${total.value} 条 · 每 ${POLL_MS / 1000} 秒自动刷新`
-      : `跨主机 · 每 ${POLL_MS / 1000} 秒自动刷新`
-  )
 
   /**
    * 拉一次任务列表（筛选与分页作为 query 全部透传，服务端过滤/分页 —— 与容器列表页
@@ -512,56 +494,37 @@
 </script>
 
 <style lang="scss" scoped>
-  @use '@styles/core/breakpoints.scss' as *;
-  /* 页面骨架（hero/三态/动效降级）复用列表页范式样式（本模块四页共用）。 */
-  @use './wkl-shell';
+  /* 页面骨架（hero/三态/动效降级）曾复用列表页范式样式；列表页纯化后已无 hero
+     与 wkl 卡外观，本页只留自己的列表样式。 */
   @use './overview-tokens' as t;
-
-  /* 矮视口 hero 行内化（与 containers/resources 同源 mixin：tk-hero 结构同款）。 */
-  .tk-hero {
-    @include t.hero-collapse;
-  }
-
-  /* 手机横屏紧凑档：页内留白收档（与 .wkl-page__inner 同款落点）。 */
-  @include respond-height-at-most('phoneShort') {
-    .tk-inner {
-      padding: 8px;
-      padding-bottom: 12px;
-    }
-  }
 
   // 「重试」等默认档按钮的主色文字对比度 AA：病灶与处方见 overview-tokens
   // 的 primary-text-aa（终审 QA D2·浅色实测 3.68:1）。
   @include t.primary-text-aa;
 
-  /* 本页的两个页面级对比度令牌（终审 QA D2 实测后的收口）：
-     - --el-text-color-secondary：本页是六页「secondary 升 regular」批的漏网页
-       （元信息行的状态词/主机/发起人仍吃 EP 默认 #909399，对白底 3.08:1）——
-       补齐同款处置：升到 regular 档（浅色 6.1:1、暗色随主题同样达标）；
-     - --color-g-600：hero 副标题 text-g-600 的工具变量指向 --art-gray-600(#7987a1)，
-       对页底 #fafbfc 3.5:1，低于 AA 正文线 → 抬一档到 g-700（浅色 #4d5875 ≈6.8:1、
-       暗色 #ababba ≈8.9:1，随主题自适应）。只重定义变量值，页面外无副作用。 */
+  /* 工具条左组：返回钮 + 状态过滤一行排开（对齐系统管理的 toolbar-left）。 */
+  .toolbar-left {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+  }
+
+  /* 本页的页面级对比度令牌（终审 QA D2 实测后的收口）：
+     --el-text-color-secondary：元信息行的状态词/主机/发起人仍吃 EP 默认 #909399
+     （对白底 3.08:1），页面范围内升到 regular 档（浅色 6.1:1、暗色随主题同样达标）。 */
   .docker-tasks {
     --el-text-color-secondary: var(--el-text-color-regular);
-    --color-g-600: var(--art-gray-700);
   }
 
-  .tk-state {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    align-items: center;
+  /* 首拉骨架：等价最小 loading（无卡外观），只给一层留白。 */
+  .tk-loading {
     padding: 32px 16px;
-
-    &__text {
-      margin: 0;
-      color: var(--el-text-color-regular);
-      font-size: 13px;
-    }
   }
 
-  .tk-body {
-    padding: 4px 12px;
+  /* 卡内错误/空态：给接近表格空态的留白（与镜像/卷/网络页 的 docker-empty 同款）。 */
+  .docker-empty {
+    padding: 56px 0;
   }
 
   // 静默刷新失败标注：琥珀即「需要注意」（与模块内陈旧/离线标注同一套颜色语言）。
@@ -582,8 +545,7 @@
     list-style: none;
   }
 
-  // 分页条（8d）：左侧一个硬事实（第 X 页 / 共 N 条），右侧分页控件。
-  // 与页头副标题的「共 N 条」同源（同一个 total）—— 上下两处说同一句话。
+  // 分页条（8d）：左侧一个硬事实（第 X 页 / 共 N 条），右侧分页控件 —— 同一个 total。
   .tk-page {
     display: flex;
     flex-wrap: wrap;
@@ -774,17 +736,6 @@
   @media (prefers-reduced-motion: reduce) {
     .tk-spin {
       animation: none;
-    }
-  }
-
-  // 平板竖屏（<768 宽）：过滤/刷新工具行占满一行（hero 的动作组换行铺开，详情页同一口径）。
-  // 矮视口是例外：横屏时缺的是高度 —— 工具行再占一整行会多花一行（32+gap），那里让
-  // 它留在 hero 行内化后的同一行（宽度由侧栏图标栏让出来后够用）。
-  @include respond-below('tablet') {
-    @include respond-height-at-least('short') {
-      .tk-hero > .ml-auto {
-        width: 100%;
-      }
     }
   }
 </style>

@@ -188,10 +188,11 @@ describe('总览纯函数（口径错了只表现为页面说错话，必须钉�
 
     it('五块下钻到对应页面；主机/磁盘磁贴没有页面 → 锚到本页面板', () => {
       expect(by('containers').to).toBe('/docker/containers')
-      // 7a：镜像/数据卷/网络磁贴下钻到收敛页的对应 tab（字符串带 query，router.push 解析）。
-      expect(by('images').to).toBe('/docker/resources?tab=images')
-      expect(by('volumes').to).toBe('/docker/resources?tab=volumes')
-      expect(by('networks').to).toBe('/docker/resources?tab=networks')
+      // 拆分切片：镜像/数据卷/网络磁贴直达各自的独立列表页（不带 query ——
+      // 账目本来就是跨主机合计，进入后是全部主机视图）。
+      expect(by('images').to).toBe('/docker/images')
+      expect(by('volumes').to).toBe('/docker/volumes')
+      expect(by('networks').to).toBe('/docker/networks')
       expect(by('projects').to).toBe('/docker/projects')
       expect(by('hosts').anchor).toBe('dov-hosts')
       expect(by('disk').to).toBeUndefined()
@@ -394,9 +395,7 @@ describe('总览纯函数（口径错了只表现为页面说错话，必须钉�
     })
 
     it('diskPanelSubtitle：N 台里 M 台已上报，缺报数如实分开（不折算成零）', () => {
-      expect(diskPanelSubtitle(makeOverview().hosts)).toBe(
-        '共 3 台 · 2 台已上报磁盘账'
-      )
+      expect(diskPanelSubtitle(makeOverview().hosts)).toBe('共 3 台 · 2 台已上报磁盘账')
     })
   })
 })
@@ -444,7 +443,9 @@ async function makeRouter(): Promise<Router> {
       { path: '/docker/containers', component: { template: '<div />' } },
       // 8a：容器详情是整页路由（异常行下钻的目标），param 段单独登记。
       { path: '/docker/containers/:id', component: { template: '<div />' } },
-      { path: '/docker/resources', component: { template: '<div />' } }
+      // 拆分切片：镜像/数据卷是独立整页（磁盘面板下钻的目标）。
+      { path: '/docker/images', component: { template: '<div />' } },
+      { path: '/docker/volumes', component: { template: '<div />' } }
     ]
   })
   await router.push('/')
@@ -550,9 +551,7 @@ describe('渲染冒烟：挂载成功 + KPI 数值来自 mock fleet', () => {
 
     const section = w.find('#dov-disk')
     expect(section.exists()).toBe(true)
-    expect(section.find('.dov-section__sub').text()).toBe(
-      '共 3 台 · 2 台已上报磁盘账'
-    )
+    expect(section.find('.dov-section__sub').text()).toBe('共 3 台 · 2 台已上报磁盘账')
     const rows = w.findAll('.dov-disk__row')
     expect(rows).toHaveLength(3)
 
@@ -676,14 +675,14 @@ describe('下钻（控制塔的本职：把人交棒给列表页 / 详情页）'
     const h1Row = w.findAll('.dov-disk__row').find((r) => r.text().includes('bogon'))!
     const goImages = h1Row.findAll('.dov-disk__go').find((b) => b.text() === '镜像清理…')!
     await goImages.trigger('click')
-    await waitFullPath(router, '/docker/resources?host=h1&tab=images')
-    // 7a：磁盘面板下钻到收敛页的对应 tab（host + tab 都进 query，深链还原现场）。
-    expect(router.currentRoute.value.fullPath).toBe('/docker/resources?host=h1&tab=images')
+    await waitFullPath(router, '/docker/images?host=h1')
+    // 拆分切片：磁盘面板下钻到独立镜像页（host 进 query 作该页主机筛选初始值）。
+    expect(router.currentRoute.value.fullPath).toBe('/docker/images?host=h1')
 
     const goVolumes = h1Row.findAll('.dov-disk__go').find((b) => b.text() === '卷清理…')!
     await goVolumes.trigger('click')
-    await waitFullPath(router, '/docker/resources?host=h1&tab=volumes')
-    expect(router.currentRoute.value.fullPath).toBe('/docker/resources?host=h1&tab=volumes')
+    await waitFullPath(router, '/docker/volumes?host=h1')
+    expect(router.currentRoute.value.fullPath).toBe('/docker/volumes?host=h1')
   })
 
   it('主机卡片点击 → 容器列表带 ?host=（模块主机上下文的 query 约定）', async () => {

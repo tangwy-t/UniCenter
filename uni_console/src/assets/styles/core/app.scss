@@ -130,21 +130,18 @@
 // ---------- 单滚动链（「沉浸」形态：短视口 / 表格全屏态） ----------
 //
 // 目标：**页面零滚动，滚动条只在表体里**（表底与行内滚动完全可达）。
-// 链：页根(.art-full-height，flex 列) → 页内包裹层 → 卡片(.art-table-card)
+// 链：页根(.art-full-height，flex 列) → 卡片(.art-table-card) 直落
 //     → 卡体(.el-card__body) → 表(.art-table) → el-table 内滚。
+// （页内包裹层随列表页纯化整块删除：容器/项目页去包裹层、任务页页根收编后，
+//   卡片就是页根的直接子项 —— 下面 .art-table-card 一条规则直接落在它上面。）
 // 触发（同一份规则，两处入口）：
 //   - 短视口（高度 ≤ HEIGHT_BREAKPOINTS.short，见 breakpoints.ts）：表体高度
 //     由本链决定；
 //   - 表格全屏态（.el-full-screen）：容器本来就是视口，链一路收到底 ——
 //     修复 844×390 下卡片按内容长高（8 行撑到 518px）越出视口、底部不可达的既有溢出。
-// 链断在哪里就退化成普通文档流：flex:1 落在无高度的包裹层里不生效，无害；
-// flex:1 落在无高度的 flex 容器里时，子项按内容高渲染，同样无害。
+// 链断在哪里就退化成普通文档流：flex:1 落在无高度的 flex 容器里时，子项按内容高
+// 渲染，同样无害。
 @mixin art-single-scroll-chain {
-  > :where(.wkl-page__inner, .tk-inner) {
-    flex: 1 1 0;
-    min-height: 0;
-  }
-
   .art-table-card {
     flex: 1 1 0;
     min-height: 0;

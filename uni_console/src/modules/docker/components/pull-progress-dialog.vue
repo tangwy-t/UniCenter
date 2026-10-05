@@ -54,7 +54,7 @@
           {{
             credsFailed
               ? '已保存凭据读取失败，可先匿名拉取'
-              : '还没有已保存的仓库凭据（镜像页底栏可管理）'
+              : '还没有已保存的仓库凭据（镜像页工具条的『仓库凭据…』可管理）'
           }}
         </p>
       </div>
@@ -62,9 +62,7 @@
       <!-- 受理期错误（403/409/400…）：分类句来自 classifyAcceptError（服务端 msg 优先）；
            留在输入态可改可重试，不弹 toast —— 对话框还开着，结论就地给。 -->
       <p v-if="acceptError" class="pp-input__error">{{ acceptError }}</p>
-      <p class="pp-input__hint"
-        >可填「仓库/名称:标签」的完整形态（如 registry/app:v1）；拉取进度将逐层实时显示。</p
-      >
+      <p class="pp-input__hint">可填「仓库/名称:标签」的完整形态（如 registry/app:v1）。</p>
     </div>
 
     <!-- ── 进度态：汇总 + 逐层列表 ── -->

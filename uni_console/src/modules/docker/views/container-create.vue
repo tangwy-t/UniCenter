@@ -684,9 +684,11 @@
     ElMessage.error(runErrorMessage(res, '创建未完成'))
   }
 
-  /** 取消/失败收尾：回容器列表（带上当前主机，列表据此还原到同一台机器）。 */
+  /** 取消/失败收尾：回容器列表（带上当前主机，列表据此还原到同一台机器）。
+   *  跳转走 **path**：菜单页的注册名是 `menu-<menuId>`（框架按菜单树注册），插件
+   *  声明的 name 没进 router —— 命名跳转静默失败（routes.test.ts 守卫钉住）。 */
   function cancel() {
-    void router.push({ name: 'DockerContainers', query: { host: formHostId.value } })
+    void router.push({ path: '/docker/containers', query: { host: formHostId.value } })
   }
 </script>
 
@@ -886,8 +888,8 @@
     user-select: all;
   }
 
-  // ── 底部按钮：与表单同一张卡片，右对齐（页面上不再有抽屉的固定底栏；
-  //    留白靠内容区自身的滚动，长表单滚到底就能看见它）。 ──
+  // ── 底部按钮：与表单同一张卡片，右对齐（留白靠内容区自身的滚动，
+  //    长表单滚到底就能看见它）。 ──
   .cc-foot {
     display: flex;
     justify-content: flex-end;

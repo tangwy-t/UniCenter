@@ -1,47 +1,45 @@
 <template>
   <!-- 单根（single-root 守卫在库：布局的 Transition 只支持单根，双根切页白屏）。 -->
-  <div class="docker-events art-full-height overflow-y-auto">
-    <div class="ev-inner p-4 pb-8 md:p-5">
-      <!-- ============ 页头：返回 + 图标 + 标题 + 跟随/刷新（对齐其余页面 hero）============ -->
-      <div class="ev-hero mb-4 flex flex-wrap items-center gap-3">
-        <ArtButtonTable
-          icon="ri:arrow-left-line"
-          icon-class="bg-g-300/55 text-g-700"
-          title="返回上一页"
-          @click="back"
-        />
-        <div class="wkl-hero__icon flex-cc">
-          <ArtSvgIcon :icon="pageIcon" />
-        </div>
-        <div class="min-w-0">
-          <h2 class="text-lg font-semibold text-[var(--el-text-color-primary)]">事件流</h2>
-          <p class="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-g-600">
-            <span class="ev-dot" :class="`is-${phase}`" aria-hidden="true" />
-            <span>{{ statusText }}</span>
-          </p>
-        </div>
-        <div class="ml-auto flex flex-wrap items-center gap-2">
-          <!-- 致命失败（401/403）的重试：与活动流面板同款（重试换不回结果时才停机）。 -->
-          <ElButton v-if="phase === 'stopped' && stopReason" size="small" @click="retryStream">
-            重试
-          </ElButton>
-          <!-- 实时跟随 / 暂停：暂停 = **冻结列表**（新事件只计数不插行）——列表是
-               「最新在前」的表格，插行会把正在读的位置整段顶下去；恢复 = 把暂停期间
-               的 N 条一次并回来。流本身不暂停（暂停只停「列表动」，不停「收事实」）。 -->
-          <ElButton size="small" class="ev-follow" @click="togglePause">
-            {{ paused ? `继续跟随${pausedCount > 0 ? `（${pausedCount} 条）` : ''}` : '暂停' }}
-          </ElButton>
-          <ArtButtonTable
-            icon="ri:refresh-line"
-            iconClass="bg-theme/12 text-theme"
-            title="刷新"
-            @click="manualRefresh"
-          />
-        </div>
-      </div>
+  <div class="docker-events art-full-height">
+    <ElCard class="art-table-card" shadow="never">
+      <!-- :layout 显式去掉 columns 段（组件默认含）：本页不是 ArtTable（事件清单
+           是自建 ElTable），工具条没有列集合 —— 保留列设置钮只会开出空弹层
+           （死控件）；其余段与组件默认一致。 -->
+      <ArtTableHeader
+        :loading="loading"
+        layout="search,refresh,size,fullscreen,settings"
+        @refresh="manualRefresh"
+      >
+        <template #left>
+          <div class="toolbar-left">
+            <!-- 返回上一页：本页没有菜单入口（从活动流面板头部进），返回键就是它的出口。 -->
+            <ArtButtonTable
+              icon="ri:arrow-left-line"
+              icon-class="bg-g-300/55 text-g-700"
+              title="返回上一页"
+              @click="back"
+            />
+            <!-- 流的连接态（硬数据，不是解释句）：实时 / 连接中 / 已断开·重连中 /
+                 已停止·原因。原 hero 的呼吸点（颜色单独表意）已删，文字事实保留 ——
+                 断流期间没有它，静止的列表会看起来和实时一样新鲜。 -->
+            <span class="ev-status" :class="`is-${phase}`">{{ statusText }}</span>
+            <!-- 实时跟随 / 暂停：暂停 = **冻结列表**（新事件只计数不插行）——列表是
+                 「最新在前」的表格，插行会把正在读的位置整段顶下去；恢复 = 把暂停期间
+                 的 N 条一次并回来。流本身不暂停（暂停只停「列表动」，不停「收事实」）。 -->
+            <ElButton size="small" class="ev-follow" @click="togglePause">
+              {{ paused ? `继续跟随${pausedCount > 0 ? `（${pausedCount} 条）` : ''}` : '暂停' }}
+            </ElButton>
+            <!-- 致命失败（401/403）的重试：与活动流面板同款（重试换不回结果时才停机）；
+                 停机原因在左边的连接态里原文可读。 -->
+            <ElButton v-if="phase === 'stopped' && stopReason" size="small" @click="retryStream">
+              重试
+            </ElButton>
+          </div>
+        </template>
+      </ArtTableHeader>
 
       <!-- ============ 过滤条（主机 / 类型 / 关键字，全部交给服务端）============ -->
-      <div class="wkl-card ev-filters mb-4 flex flex-wrap items-center gap-3">
+      <div class="ev-filters flex flex-wrap items-center gap-3">
         <span class="ev-filters__label">主机</span>
         <ElSelect v-model="filterHost" class="ev-filters__host" placeholder="全部主机">
           <ElOption label="全部主机" value="" />
@@ -65,46 +63,49 @@
         />
       </div>
 
-      <!-- ── 首拉加载（还没有任何行可给） ── -->
-      <div v-if="state === 'loading'" class="wkl-card ev-state">
+      <!-- ── 首拉加载（还没有任何行可给）：等价最小 loading（骨架）——
+           不再有页面级加载卡外观（列表页纯化：加载态的表意交给列表自身）。 ── -->
+      <div v-if="state === 'loading'" class="ev-skeleton">
         <ElSkeleton :rows="6" animated />
       </div>
 
-      <!-- ── 首拉失败：结论句 + 重试（不显示旧列表 —— 那时还没有旧列表可显示） ── -->
-      <div v-else-if="state === 'error'" class="wkl-card ev-state">
-        <p class="ev-state__text">事件历史获取失败</p>
+      <!-- ── 首拉失败：紧凑失败态 —— 结论句 + 重试（不显示旧列表 —— 那时还没有
+           旧列表可显示；全局错误 toast 由 utils/http 的 request() 统一弹出）。 ── -->
+      <ElEmpty v-else-if="state === 'error'" class="docker-empty" description="事件历史获取失败">
         <ElButton size="small" @click="manualRefresh">重试</ElButton>
-      </div>
+      </ElEmpty>
 
       <!-- ── 空态（「窗口里没有事件」与「筛完了没有」分开说，两种事实不是一句话） ── -->
-      <div v-else-if="state === 'empty'" class="wkl-card ev-state">
-        <ElEmpty :description="emptyText" />
-      </div>
+      <ElEmpty v-else-if="state === 'empty'" class="docker-empty" :description="emptyText" />
 
-      <!-- ── 正常态：静默失败标注 + 事件表 + 翻页 ── -->
-      <div v-else class="wkl-card ev-body">
+      <!-- ── 正常态：静默失败标注 + 暂停条 + 事件表 + 翻页 ── -->
+      <template v-else>
         <!-- 静默刷新失败：保留最后已知列表并说出口（与列表页「上次数据仍在」同一口径）。 -->
         <p v-if="refreshError" class="ev-refresh-error">刷新失败，正在显示上次结果</p>
-        <!-- 暂停提示条：吸顶常驻（同活动流面板的暂停条），点它恢复跟随。 -->
+        <!-- 暂停提示条：常驻（同活动流面板的暂停条），点它恢复跟随。 -->
         <div v-if="paused" class="ev-paused" @click="togglePause">
           <span class="ev-paused__text">
             {{ pausedCount > 0 ? `已暂停 · 新事件 ${pausedCount} 条` : '已暂停' }}
           </span>
           <ElButton size="small" @click.stop="togglePause">继续跟随</ElButton>
         </div>
-        <!-- 高度上限（本页自测口径）。1600×900 实测（数字见下）：
-             口径 = 表顶距视口顶 265（hero 顶 124 + hero 46 + 间距 16 + 过滤条 58 +
-             间距 16 + 卡上衬 5）+ 暂停条 49（条高 33 + 上下边距 8×2，实测表顶被它推低
-             49）+ 表底以下 60（游标条 29 + 卡底 11 + 页底 20）+ 余量 16 = 390。
+        <!-- 高度上限（本页自测口径）。1600×900 实测，去 hero 后重算（数字见下）：
+             口径 = 表顶距视口顶 250（视口顶→卡顶 116〔旧「hero 顶 124」扣掉已删的
+             页内 padding 20、加卡片自带 margin-top 12〕 + 卡体上衬 20〔el-card__body
+             EP 默认内边距〕 + 工具行 32 + 工具行→过滤条 12 + 过滤条 58〔沿用旧实测：
+             控件行 + 上下 10px 留白〕 + 过滤条→表 12）
+             + 暂停条 49（条高 33 + 上下边距 8×2，与旧口径同）
+             + 表底以下 70（游标条 29 + 卡体下衬 21〔内边距 20 + 边框 1〕 + 页底 20）
+             + 余量 16 = 385。
              为什么把暂停条算常备：暂停是本页主操作之一，它出现时也不许把
              「账目句／加载更早」挤出屏；代价只是未暂停时多 49px 空白（页面反而
              完全不滚、chrome 全程静止）。max(240px,…) 下限：矮视口（横屏）下
              calc 会剩负值，表体整个塌掉。ElTable 原生 max-height 提供
-             表头固定、表体内滚——本页的翻页是游标式（无分页器），行数不能顶走底栏。 -->
+             表头固定、表体内滚——本页的翻页是游标式（无分页器），行数不能顶走游标条。 -->
         <ElTable
           :data="rows"
           size="small"
-          max-height="max(240px, calc(100vh - 390px))"
+          max-height="max(240px, calc(100vh - 385px))"
           :row-class-name="() => 'ev-row'"
         >
           <ElTableColumn label="时刻" width="190">
@@ -153,15 +154,21 @@
         </ElTable>
 
         <!-- 翻页（游标）：只报两个硬事实 —— 已加载多少、窗口共多少；还有更早的
-             才给「加载更早」（服务端 nextCursor 为空的结束态）。 -->
+             才给「加载更早」（服务端 nextCursor 为空的结束态）。
+             「窗口共 N」以历史首拉落定（hasLoaded）为闸：落定前窗口数是缺位
+             事实（total 初值 0），报出来就是「已加载 N · 窗口共 0」的当场矛盾。 -->
         <div class="ev-more">
-          <span class="ev-more__hint"> 已加载 {{ rows.length }} 条 · 窗口共 {{ total }} 条 </span>
+          <span class="ev-more__hint">
+            已加载 {{ rows.length }} 条<template v-if="hasLoaded">
+              · 窗口共 {{ total }} 条</template
+            >
+          </span>
           <ElButton v-if="nextCursor" size="small" :loading="loadingMore" @click="loadMore">
             加载更早
           </ElButton>
         </div>
-      </div>
-    </div>
+      </template>
+    </ElCard>
   </div>
 </template>
 
@@ -170,7 +177,10 @@
    * 事件流详版页（本波，`/docker/events`）：活动流面板的整页形态 —— 跨主机 docker
    * 事件的**历史 + 实时**一张表，回答「刚才到现在都发生了什么、谁在哪台机器上退出成
    * 什么样」。照 views/tasks.vue 先例：hidden 路由（无菜单种子，入口长在总览的活动流
-   * 面板头部）＋ docker:list（与两条端点同档），整页化换来筛选、翻历史与自己的 URL。
+   * 面板头部）＋ docker:list（与两条端点同档）。本波「列表页纯化」后 = 表卡（工具条：
+   * 返回 + 连接态 + 暂停/继续 + 重试；过滤条、事件表与游标条在卡内）的纯清单形态
+   * （对齐系统管理的列表形态）；页头（hero：图标+标题+副标题+呼吸点）整块删除，
+   * 连接态事实从副标题移进工具条（去掉只靠颜色的呼吸点）。
    *
    * 数据是**两条腿**（core 的同一份保留窗口）：
    *   - 历史：GET /docker/events/history（t 降序、游标分页、服务端过滤）；
@@ -198,6 +208,7 @@
   import { useRouter } from 'vue-router'
   import {
     ElButton,
+    ElCard,
     ElEmpty,
     ElInput,
     ElOption,
@@ -210,7 +221,6 @@
   } from 'element-plus'
   import ArtButtonTable from '@/components/core/forms/art-button-table/index.vue'
   import ArtSvgIcon from '@/components/core/base/art-svg-icon/index.vue'
-  import { usePageIcon } from '@/hooks/core/usePageIcon'
   import {
     fetchDockerEventHistory,
     fetchDockerHosts,
@@ -236,7 +246,6 @@
   defineOptions({ name: 'DockerEventsPage' })
 
   const router = useRouter()
-  const pageIcon = usePageIcon('ri:pulse-line')
 
   /** 返回上一页：本页没有菜单入口（从活动流面板头部进），返回键就是它的出口。 */
   function back() {
@@ -270,7 +279,8 @@
       裁剪会让长度不再等量增长，差值会凭空变大）。 */
   let pausedBase = 0
 
-  /** 窗口共 N 条 = 端点报的窗口全量（抓取时刻）+ 此后实时接受的条数。 */
+  /** 窗口共 N 条 = 端点报的窗口全量（抓取时刻）+ 此后实时接受的条数；历史首拉
+      落定（hasLoaded）前这个数不出口 —— 缺位事实不报（模板闸门见翻页条注释）。 */
   const total = ref(0)
   /** 最近一次历史抓取完成时的 log 计数（实时增量的基准）。 */
   let liveBase = 0
@@ -552,6 +562,7 @@
     if (controller) controller.abort()
   }
 
+  /** 连接态文本（工具条里的硬数据）：停机原因原文可读（与重试钮成对出现）。 */
   const statusText = computed(() => {
     if (phase.value === 'stopped')
       return stopReason.value ? `已停止 · ${stopReason.value}` : '已停止'
@@ -638,54 +649,48 @@
 
 <style lang="scss" scoped>
   @use '@styles/core/breakpoints.scss' as *;
-  /* 页面骨架（hero/三态/动效降级）复用列表页范式样式（本模块四页共用）。 */
-  @use './wkl-shell';
+  /* 页面骨架（hero/三态）范式样式不再引用（列表页纯化，wkl 卡外观已删）；
+     只借 overview-tokens 的按钮对比度处方。 */
   @use './overview-tokens' as t;
 
   // 「重试」等默认档按钮的主色文字对比度 AA：病灶与处方见 overview-tokens
   // 的 primary-text-aa（终审 QA D2·浅色实测 3.68:1）。
   @include t.primary-text-aa;
 
+  /* 工具条左组：返回钮 + 连接态 + 暂停/重试一行排开（对齐系统管理的 toolbar-left）。 */
+  .toolbar-left {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+  }
+
   /* 页面级对比度令牌（与 tasks 页同款收口）：
-     - --el-text-color-secondary 升 regular：表内次要文字（时间/主机/退出码中性档）
-       在白卡上吃 EP 默认 #909399 只有 3.08:1；
-     - --color-g-600 抬一档到 g-700：hero 副标题的对比度（浅色 ≈6.8:1、暗色随主题）。 */
+     --el-text-color-secondary 升 regular：表内次要文字（时间/主机/退出码中性档）
+     在白卡上吃 EP 默认 #909399 只有 3.08:1。 */
   .docker-events {
     --el-text-color-secondary: var(--el-text-color-regular);
-    --color-g-600: var(--art-gray-700);
   }
 
   .ev-mono {
     font-family: var(--el-font-family-mono, monospace);
   }
 
-  /* ---------- 状态点（实时呼吸 / 断连警示 / 停机） ---------- */
-  .ev-dot {
-    flex: none;
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--el-text-color-secondary);
+  /* ---------- 连接态文本（工具条的硬数据；呼吸点已删，不再只靠颜色表意） ---------- */
+  .ev-status {
+    font-size: 12px;
+    color: var(--el-text-color-regular);
 
-    &.is-live {
-      background: var(--el-color-success);
-    }
-
-    &.is-connecting {
-      background: var(--el-text-color-secondary);
-    }
-
-    &.is-reconnecting {
-      background: var(--el-color-warning);
-    }
-
+    // 停机（401/403）：红色陈述事实 —— 与旁边的重试钮成对。
     &.is-stopped {
-      background: var(--el-color-danger);
+      color: var(--aa-danger-text);
     }
   }
 
-  /* ---------- 过滤条 ---------- */
+  /* ---------- 过滤条（收进卡内：去卡外观，只留控件行） ---------- */
   .ev-filters {
+    // 与工具行/表格的间距按 max-height 口径的推导值走（12px，见模板注释）。
+    margin: 12px 0;
     padding: 10px 12px;
 
     &__label {
@@ -702,23 +707,14 @@
     }
   }
 
-  /* ---------- 三态 ---------- */
-  .ev-state {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    align-items: center;
+  /* 首拉骨架：等价最小 loading（无卡外观），只给一层留白。 */
+  .ev-skeleton {
     padding: 32px 16px;
-
-    &__text {
-      margin: 0;
-      color: var(--el-text-color-regular);
-      font-size: 13px;
-    }
   }
 
-  .ev-body {
-    padding: 4px 12px 10px;
+  /* 卡内错误/空态：给接近表格空态的留白（与镜像/卷/网络页 的 docker-empty 同款）。 */
+  .docker-empty {
+    padding: 56px 0;
   }
 
   /* 静默刷新失败标注：琥珀即「需要注意」（与 tasks 页同一套颜色语言）。 */
@@ -729,16 +725,13 @@
     line-height: 1.6;
   }
 
-  /* ---------- 暂停提示条（吸顶；整条可点） ---------- */
+  /* ---------- 暂停提示条（整条可点） ---------- */
   .ev-paused {
-    position: sticky;
-    top: 0;
-    z-index: 1;
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     gap: 8px;
-    margin: 8px -12px;
+    margin: 8px 0;
     padding: 4px 12px;
     cursor: pointer;
     background: color-mix(in srgb, var(--el-color-warning) 10%, transparent);
@@ -862,12 +855,8 @@
     }
   }
 
-  // 手机横屏（<768）：过滤条各项占满一行（hero 的动作组换行铺开，详情页同一口径）。
+  // 手机横屏（<768）：过滤条各项占满一行（详情页同一口径）。
   @include respond-below('tablet') {
-    .ev-hero > .ml-auto {
-      width: 100%;
-    }
-
     .ev-filters__host,
     .ev-filters__kw {
       width: 100%;

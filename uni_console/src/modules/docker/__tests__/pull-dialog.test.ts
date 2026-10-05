@@ -246,6 +246,9 @@ async function waitPolls(n: number) {
 describe('输入态', () => {
   it('非法引用当场显错，点开始不派发（校验在前端先挡一道）', async () => {
     const w = await mountDialog()
+    // 提示句只留格式示例（「拉取进度将逐层实时显示」半句已删）。
+    expect(w.text()).toContain('可填「仓库/名称:标签」的完整形态（如 registry/app:v1）。')
+    expect(w.text()).not.toContain('逐层实时显示')
     await setRef(w, '_bad')
     expect(w.text()).toContain('镜像引用不合法')
     await click(w, '开始拉取', { awaitEnabled: false })

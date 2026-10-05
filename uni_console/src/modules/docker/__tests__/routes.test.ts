@@ -4,13 +4,17 @@ import { describe, expect, it } from 'vitest'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import plugin from '../index'
 
-/** 三条带菜单的列表页 path 与后端 v015 种子菜单**逐字一致**（7a 最终面；跨仓比对
- *  由 Go 侧 v015_seed_docker_frontend_test.go 做）。 */
-const MENU_PATHS = ['/docker/containers', '/docker/resources', '/docker/projects']
-
-/** 7a 收敛退役的三个旧列表 path：路由已删、不做 redirect，站内也不许再指它们
- *（有活引用 = 深链 404）。清零由文末的源码扫描守卫钉住。 */
-const RETIRED_PATHS = ['/docker/images', '/docker/volumes', '/docker/networks']
+/** 五个带菜单的列表页 path 与后端 v015 种子菜单**逐字一致**（菜单平铺后的最终
+ *  菜单面：容器/镜像/数据卷/网络/项目；跨仓比对由 Go 侧
+ *  v015_seed_docker_frontend_test.go 做）。拆分切片：原收敛页 /docker/resources
+ *  退役，镜像/数据卷/网络三条独立列表页复活（与被 7a 收敛前的旧 path 同名）。 */
+const MENU_PATHS = [
+  '/docker/containers',
+  '/docker/images',
+  '/docker/volumes',
+  '/docker/networks',
+  '/docker/projects'
+]
 
 /** 7b 收敛退役的容器详情页 path：路由与 view 整体删除，深链改指
  * /docker/containers?host=&id=（统一表页用行桩打开抽屉）。同样无 redirect，
@@ -30,7 +34,7 @@ const OVERVIEW_PATH = '/docker'
 describe('docker 模块路由', () => {
   const routes = plugin.routes ?? []
 
-  it('三条带菜单的列表页 path 存在且不重复', () => {
+  it('带菜单的列表页 path 存在且不重复', () => {
     const paths = routes.map((r) => r.path)
     for (const p of MENU_PATHS) expect(paths, `缺少列表页路由 ${p}`).toContain(p)
     expect(new Set(paths).size).toBe(paths.length)
@@ -47,38 +51,42 @@ describe('docker 模块路由', () => {
     expect(r?.meta?.isHide).toBeFalsy()
   })
 
-  it('镜像与存储路由（7a 收敛页）：path/name/标题/图标与菜单种子一致', () => {
-    const r = routes.find((x) => x.path === '/docker/resources')
-    expect(r, '缺少收敛页路由 /docker/resources（后端菜单会整条静默消失）').toBeTruthy()
-    expect(r?.name).toBe('DockerResources')
-    expect(r?.meta?.title).toBe('镜像与存储')
-    // 图标与 v015 菜单种子一致（侧边栏/页签同源）；ri: 前缀整套离线内置。
-    expect(r?.meta?.icon).toBe('ri:database-2-line')
-    expect(r?.meta?.authMark).toBe('docker:list')
-    expect(r?.meta?.isHide).toBeFalsy()
-    expect(typeof r?.component).toBe('function')
+  it('三条拆分列表页路由的形状：path/name/标题/图标与菜单种子一致，可见且懒加载', () => {
+    // 拆分切片：镜像/数据卷/网络从收敛页的三个 tab 升格为独立整页（菜单平铺），
+    // path 与 v015 种子菜单**逐字一致**；图标沿用三条旧菜单的图标（box/硬盘/转发）。
+    const shapes = [
+      { path: '/docker/images', name: 'DockerImages', title: '镜像', icon: 'ri:box-1-line' },
+      {
+        path: '/docker/volumes',
+        name: 'DockerVolumes',
+        title: '数据卷',
+        icon: 'ri:hard-drive-3-line'
+      },
+      {
+        path: '/docker/networks',
+        name: 'DockerNetworks',
+        title: '网络',
+        icon: 'ri:share-forward-line'
+      }
+    ]
+    for (const s of shapes) {
+      const r = routes.find((x) => x.path === s.path)
+      expect(r, `缺少列表页路由 ${s.path}（后端菜单会整条静默消失）`).toBeTruthy()
+      expect(r?.name, `${s.path} 的 name`).toBe(s.name)
+      expect(r?.meta?.title, `${s.path} 的标题`).toBe(s.title)
+      expect(r?.meta?.icon, `${s.path} 的图标`).toBe(s.icon)
+      expect(r?.meta?.authMark, `${s.path} 的权限码`).toBe('docker:list')
+      // 菜单项必须可见（不设 isHide；隐藏路由不进侧边栏，菜单就白种了）
+      expect(r?.meta?.isHide).toBeFalsy()
+      // 懒加载：component 是 () => import(...) 形态
+      expect(typeof r?.component).toBe('function')
+    }
   })
 
-  it('三条列表页都需要 docker:list 权限', () => {
+  it('带菜单的列表页都需要 docker:list 权限', () => {
     for (const p of MENU_PATHS) {
       const r = routes.find((x) => x.path === p)
       expect(r?.meta?.authMark, `${p} 缺少 authMark`).toBe('docker:list')
-    }
-  })
-
-  it('7a 退役的三个旧列表 path 不再是路由（收敛 = 整体删除，不做 redirect）', () => {
-    const paths = routes.map((r) => r.path)
-    for (const p of RETIRED_PATHS) {
-      expect(
-        paths,
-        `旧 path ${p} 不应再注册为路由（深链已改指 /docker/resources?tab=…）`
-      ).not.toContain(p)
-    }
-    // 旧路由名（DockerImages 等）同样退役：image-detail 的返回链路已改指 DockerResources，
-    // 按旧名 push 会静默失败（vue-router 找不到名字时打警告并留在原页）。
-    const names = routes.map((r) => r.name)
-    for (const n of ['DockerImages', 'DockerVolumes', 'DockerNetworks']) {
-      expect(names, `旧路由名 ${n} 不应残留`).not.toContain(n)
     }
   })
 
@@ -238,15 +246,14 @@ describe('docker 模块路由', () => {
   })
 })
 
-/* ── 旧 path 引用清零守卫（7a）────────────────────────────────────────
- * 三个旧列表页收敛为 /docker/resources 的 tab 后，旧 path **没有 redirect 兜底** ——
- * 任何活引用（router.push / 字符串跳转 / 路由表）都是深链 404。引用清零只能靠
- * 源码扫描钉住：路由表守卫（上文）只管 index.ts，这里扫整个模块的 .ts/.vue。
+/* ── 源码引用清零守卫的公共工具 ──────────────────────────────────────
+ * 退役 path / 路由名 / 已被删组件名的活引用即死链或双表面，清零靠源码扫描钉住：
+ * 路由表守卫（上文）只管 index.ts，这些守卫扫整个模块的 .ts/.vue。
  *
  * 扫描前剥掉注释（模板/块/行）：注释里解释历史时提到旧 path 是正当的文档，
  * 不是活引用；`//` 的剥法避开 'https://' 里的斜杠对（路径字面量不会出现在那里）。
- * __tests__ 与点开头目录（.mimosa 等工具产物）不扫 —— 本文件自己就持有旧 path
- * 字面量（要拿它当禁止清单）。
+ * __tests__ 与点开头目录（.mimosa 等工具产物）不扫 —— 各守卫文件自己就持有
+ * 被禁字面量（要拿它们当禁止清单）。
  */
 function stripComments(src: string): string {
   return src
@@ -264,38 +271,6 @@ function sourceFiles(dir: string, out: string[] = []): string[] {
   }
   return out
 }
-
-describe('旧列表 path 引用清零（7a：无 redirect，活引用即死链）', () => {
-  /**
-   * HTTP 层豁免：api.ts 里的 `/docker/images|volumes|networks` 是**后端端点路径**
-   * （9a 的四个跨主机资源端点与 7a 退役的旧前端路由**刻意同形** —— 见 uni_core
-   * router.go 的注释），不是导航引用；对它们的消费经 fetch 封装，活在 HTTP 命名
-   * 空间而不是 SPA 路由命名空间。守卫的目的是「旧路由没有 redirect，任何导航
-   * 引用（router.push / 字符串跳转 / 路由表）都是深链 404」，故豁免这一个 HTTP
-   * 层文件；其余源码照扫（含各 view/component 的跳转）。
-   */
-  const HTTP_PATH_EXEMPT = '/api.ts'
-
-  it('扫描不是空转：确实扫到了模块源码', () => {
-    const files = sourceFiles(new URL('..', import.meta.url).pathname)
-    expect(files.length).toBeGreaterThan(0)
-    expect(files.some((f) => f.endsWith('views/resources.vue'))).toBe(true)
-  })
-
-  it('模块源码（剥注释后）不再出现三个旧 path', () => {
-    const files = sourceFiles(new URL('..', import.meta.url).pathname)
-    for (const file of files) {
-      if (file.endsWith(HTTP_PATH_EXEMPT)) continue
-      const code = stripComments(readFileSync(file, 'utf8'))
-      for (const p of RETIRED_PATHS) {
-        expect(
-          code,
-          `${file} 仍引用旧 path ${p}（深链会 404；应改指 /docker/resources?tab=…）`
-        ).not.toContain(p)
-      }
-    }
-  })
-})
 
 /* ── 7b 双表面清除（8a 后仍生效）的引用清零守卫 ──────────────────────
  * ① 容器详情页（/docker/container-detail/:id）整体删除：path 与路由名的活引用即
@@ -397,5 +372,72 @@ describe('8a/8b/8c 抽屉页面化：抽屉与 ?id= 深链语义不得复活', (
       code.includes('query.id') || code.includes('query?.id'),
       'containers.vue 仍读 query.id：详情深链应改指 /docker/containers/:id（列表页不再开详情）'
     ).toBe(false)
+  })
+})
+
+/* ── 菜单页命名跳转清零守卫（V1 浏览器实测回归，2026-10-04）───────────
+ * 机制：框架按**菜单树**注册路由（RouteRegistry 用 menu.path 取插件组件、按菜单
+ * 记录注册），可见菜单页在 router 里的注册名是 `menu-<menuId>`；插件里声明的
+ * name（DockerImages / DockerProjects / DockerContainers…）**根本没注册**
+ * （浏览器内实测 router.hasRoute('DockerImages') = false）。对它们做
+ * `push({ name })` 时 vue-router 只在 console 打一句 `No match for {...}`，
+ * 页面纹丝不动 —— V1 实测中镜像详情「返回」、项目工作台「返回」、创建容器
+ * 「取消」三处导航全断（隐藏路由 tasks/events/详情/创建/工作台才保名，命名跳转
+ * 照常）。纪律：站内跳转一律 path 形态。
+ *
+ * 本守卫把这条纪律钉成源码级断言：菜单页名单**从插件路由表动态推导**
+ * （meta.isHide 为假的那些 name），模块源码（views/ + components/ + utils/，
+ * 剥注释）里不得出现对它们的 push({ name })。
+ *   - 正则兼容多行写法（`push({\n  name: 'X'`，\s 跨行匹配）；
+ *   - `defineOptions({ name: 'X' })` 是组件名声明、不含 `push(`，不会误伤；
+ *   - 名字都是 [A-Za-z] 组成，无需转义即可安全嵌进正则。
+ * 自检两道：名单推导不失焦（恰好是 /docker 六页的 name）+ 正则确实抓得多行、
+ * 不误伤 defineOptions（防守卫自己腐烂成空转）。
+ */
+describe('菜单页命名跳转清零：push({ name }) 不得指向菜单页', () => {
+  const routes = plugin.routes ?? []
+  /** 动态推导：可见（非 isHide）菜单页的 name —— 这些名字在 router 里不存在。 */
+  const menuNames = routes.filter((r) => !r.meta?.isHide).map((r) => String(r.name))
+  const namedPushRe = (name: string) =>
+    new RegExp(`push\\(\\s*\\{\\s*name\\s*:\\s*['"]${name}['"]`)
+
+  it('守卫自检：名单恰好是 /docker 六页（动态推导不失焦）', () => {
+    // 期望集由既有常量推导（总览 + 五条列表页），与动态名单同源不同路 —— 失焦即红。
+    const expected = [...MENU_PATHS, OVERVIEW_PATH].map((p) => {
+      const r = routes.find((x) => x.path === p)
+      expect(r, `期望名单里的路由 ${p} 缺失`).toBeTruthy()
+      return String(r?.name)
+    })
+    expect(new Set(menuNames)).toEqual(new Set(expected))
+  })
+
+  it('守卫自检：正则抓多行 push、不误伤 defineOptions（组件名声明）', () => {
+    const re = namedPushRe('DockerImages')
+    expect(
+      re.test("void router.push({\n    name: 'DockerImages',\n    query: { host: 'h1' }\n  })\n"),
+      '多行写法 push({\\n name: …) 没被抓住 —— 守卫是漏勺'
+    ).toBe(true)
+    expect(re.test("defineOptions({ name: 'DockerImages' })\n"), 'defineOptions 被误伤').toBe(
+      false
+    )
+    // 数组 push（批量失败清单等）的 name 是变量引用，不会命中字符串字面量形态。
+    expect(re.test('failures.push({ name: c.name, message })\n')).toBe(false)
+  })
+
+  it('模块源码（剥注释后）不存在对菜单页路由名的 push —— 一律 path 形态', () => {
+    const files = sourceFiles(new URL('..', import.meta.url).pathname)
+    let scanned = 0
+    for (const file of files) {
+      scanned++
+      const code = stripComments(readFileSync(file, 'utf8'))
+      for (const name of menuNames) {
+        expect(
+          namedPushRe(name).test(code),
+          `${file} 仍有 push({ name: '${name}' })：菜单页注册名是 menu-<menuId>，` +
+            `插件名没注册 —— 命名跳转静默失败（页面不动），一律改 path push`
+        ).toBe(false)
+      }
+    }
+    expect(scanned, '源码扫描是空转（一个文件都没扫到）').toBeGreaterThan(0)
   })
 })
