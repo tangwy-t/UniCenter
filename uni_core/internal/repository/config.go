@@ -68,7 +68,12 @@ func (r *ConfigRepo) Create(ctx context.Context, cfg *entity.SysConfig) error {
 }
 
 func (r *ConfigRepo) Update(ctx context.Context, cfg *entity.SysConfig) error {
-	return r.db.WithContext(ctx).Model(&entity.SysConfig{}).Where("id = ?", cfg.ID).Updates(cfg).Error
+	// Select 显式点名 config_value（零值也要写）：GORM 的 Updates(struct) 会
+	// 跳过零值字段，而 config_value 的合法值包含**空串**（全站目标版本空 =
+	// 关闭全站升级）——不点名列，关闭操作会静默变成「UPDATE 不含该列」，
+	// DB 旧值原样保留、接口却报成功（2026-10-09 生产实测坐实）。
+	return r.db.WithContext(ctx).Model(&entity.SysConfig{}).Where("id = ?", cfg.ID).
+		Select("config_value", "remark", "status").Updates(cfg).Error
 }
 
 func (r *ConfigRepo) Delete(ctx context.Context, id uint64) error {
