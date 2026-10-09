@@ -37,12 +37,15 @@
         />
 
         <!-- 刷新按钮 -->
+        <!-- ArtIconButton 的 click 透传原生事件（主题切换按钮要读坐标），此处
+             显式丢弃载荷调 reload()：reload(time) 的参数只接数字，直接绑方法
+             会把事件对象当 time 传（旧行为恰是 event→Number 强转 0，等于无延迟）。 -->
         <ArtIconButton
           v-if="shouldShowRefreshButton"
           icon="ri:refresh-line"
           class="!ml-3 refresh-btn max-sm:!hidden"
           :style="{ marginLeft: !isLeftMenu ? '10px' : '0' }"
-          @click="reload"
+          @click="reload()"
         />
 
         <!-- 面包屑 -->

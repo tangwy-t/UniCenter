@@ -12,16 +12,26 @@
     <div class="flex-c md:justify-end max-sm:!hidden" :class="{ 'max-md:mt-3': !isShortViewport }">
       <div
         v-if="showSearchBar != null"
+        role="button"
+        tabindex="0"
+        aria-label="搜索"
         class="button"
         @click="search"
+        @keydown.enter.prevent="search"
+        @keydown.space.prevent="search"
         :class="showSearchBar ? 'active !bg-theme hover:!bg-theme/80' : ''"
       >
         <ArtSvgIcon icon="ri:search-line" :class="showSearchBar ? 'text-white' : 'text-g-700'" />
       </div>
       <div
         v-if="shouldShow('refresh')"
+        role="button"
+        tabindex="0"
+        aria-label="刷新"
         class="button"
         @click="refresh"
+        @keydown.enter.prevent="refresh"
+        @keydown.space.prevent="refresh"
         :class="{ loading: loading && isManualRefresh }"
       >
         <ArtSvgIcon
@@ -30,8 +40,8 @@
         />
       </div>
 
-      <ElDropdown v-if="shouldShow('size')" @command="handleTableSizeChange">
-        <div class="button">
+      <ElDropdown v-if="shouldShow('size')" trigger="click" @command="handleTableSizeChange">
+        <div role="button" tabindex="0" aria-label="表格密度" class="button">
           <ArtSvgIcon icon="ri:arrow-up-down-fill" />
         </div>
         <template #dropdown>
@@ -53,14 +63,23 @@
         </template>
       </ElDropdown>
 
-      <div v-if="shouldShow('fullscreen')" class="button" @click="toggleFullScreen">
+      <div
+        v-if="shouldShow('fullscreen')"
+        role="button"
+        tabindex="0"
+        :aria-label="isFullScreen ? '退出全屏' : '全屏'"
+        class="button"
+        @click="toggleFullScreen"
+        @keydown.enter.prevent="toggleFullScreen"
+        @keydown.space.prevent="toggleFullScreen"
+      >
         <ArtSvgIcon :icon="isFullScreen ? 'ri:fullscreen-exit-line' : 'ri:fullscreen-line'" />
       </div>
 
       <!-- 列设置 -->
       <ElPopover v-if="shouldShow('columns')" placement="bottom" trigger="click">
         <template #reference>
-          <div class="button">
+          <div role="button" tabindex="0" aria-label="列设置" class="button">
             <ArtSvgIcon icon="ri:align-right" />
           </div>
         </template>
@@ -104,7 +123,7 @@
       <!-- 其他设置 -->
       <ElPopover v-if="shouldShow('settings')" placement="bottom" trigger="click">
         <template #reference>
-          <div class="button">
+          <div role="button" tabindex="0" aria-label="表格设置" class="button">
             <ArtSvgIcon icon="ri:settings-line" />
           </div>
         </template>
@@ -331,18 +350,24 @@
   @reference '@styles/core/tailwind.css';
 
   .button {
-    @apply ml-2 
-    size-8 
-    flex 
-    items-center 
-    justify-center 
-    cursor-pointer 
-    rounded-md 
+    @apply ml-2
+    size-8
+    flex
+    items-center
+    justify-center
+    cursor-pointer
+    rounded-md
     bg-g-300/55
     dark:bg-g-300/40
-    text-g-700  
-    hover:bg-g-300 
-    md:ml-0 
+    text-g-700
+    hover:bg-g-300
+    md:ml-0
     md:mr-2.5;
+
+    /* 键盘可见、鼠标不吵：与全站 focus 环同款（el-ui.scss 的 :focus-visible 批） */
+    &:focus-visible {
+      outline: 2px solid var(--el-color-primary);
+      outline-offset: 2px;
+    }
   }
 </style>

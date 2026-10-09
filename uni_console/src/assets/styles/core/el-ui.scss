@@ -75,6 +75,18 @@ html:root:not(.dark) {
   --el-text-color-placeholder: color-mix(in srgb, var(--art-gray-600) 75%, var(--art-gray-900));
 }
 
+// 次要文字 secondary 灰槽（QA 实测 EP 原值 #909399 对白底 3.08:1、对页底
+// #fafbfc 2.97:1，均在 4.5:1 线下）。与 placeholder 同一收口姿势：改总闸
+// --el-text-color-secondary，EP 的 table 表头/描述、form 提示、message、
+// dialog footer、descriptions label 等次级文字槽全部经此槽引用，一线全收；
+// 值取 aa-text.scss 的 --aa-secondary-text（同一处方：art-gray-600 65% +
+// art-gray-900 35% ≈ #606985，白底 5.45:1、页底 5.26:1，留在应用灰调色板内）。
+// 只限浅色（:not(.dark)）：暗色 EP 自带 rgba(#f0f5ff,.65)（对暗卡 7.50:1、
+// 对暗页底 7.85:1）本就达标，排除暗色既保不回归，也把暗色归属确定化。
+html:root:not(.dark) {
+  --el-text-color-secondary: var(--aa-secondary-text);
+}
+
 // 优化 el-form-item 标签高度
 .el-form-item__label {
   height: var(--el-component-custom-height) !important;
@@ -342,8 +354,13 @@ html.dark .el-card {
   }
 }
 
-.el-dropdown-selfdefine:focus {
-  outline: none !important;
+// 下拉触发器焦点环（键盘可见、鼠标不吵）：原 `outline:none !important` 抹掉了
+// EP 的默认 focus 描边又无任何替换 —— 自定义触发的下拉（ArtButtonMore 一族）
+// 键盘 Tab 到位时完全无焦点指示。改为 :focus-visible 才画主题描边（2px/2px
+// 与全站 focus 环同款）；鼠标点击（:focus）不出环、不吵。
+.el-dropdown-selfdefine:focus-visible {
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: 2px;
 }
 
 // 处理移动端组件兼容性
@@ -498,9 +515,13 @@ html.dark .el-card {
   margin: -3px 0 0 2px;
 }
 
-// 去除 el-dropdown 鼠标放上去出现的边框
+// 焦点环（键盘可见、鼠标不吵）：原规则把 tooltip 触发器的 focus-visible 描边
+// 无替换地 unset 掉（「去除 dropdown hover 边框」的真实诉求是压 hover 悬浮时的
+// 噪声描边）。:focus-visible 只在键盘到达时出现，本就不产生 hover 噪声，
+// 改画主题描边后键盘焦点不再消失。
 .el-tooltip__trigger:focus-visible {
-  outline: unset;
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: 2px;
 }
 
 // ipad 表单右侧按钮优化
@@ -652,11 +673,15 @@ html.dark .el-card {
   }
 }
 
-// 隐藏折叠菜单弹窗 hover 出现的边框
+// 折叠菜单弹层焦点：原规则 `box-shadow:none + outline:none !important` 在弹层
+// 内任一菜单项获得焦点时把容器描边无替换地抹掉。box-shadow 压制保留（弹层内
+// 菜单项 focus/hover 时容器不该出现阴影噪声）；outline 的 !important 压制删除
+// —— 键盘焦点指示由触发器承担（ArtIconButton / .el-dropdown-selfdefine 的
+// :focus-visible 环），弹层容器本无 outline，删掉后不会出现容器级描边噪声。
+// 严禁再回到「无替换地 outline:none」。
 .menu-left-popper:focus-within,
 .horizontal-menu-popper:focus-within {
   box-shadow: none !important;
-  outline: none !important;
 }
 
 // 数字输入组件右侧按钮高度跟随自定义组件高度

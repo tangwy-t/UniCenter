@@ -1,8 +1,17 @@
 <!-- 更多按钮 -->
 <template>
   <div>
-    <ElDropdown v-if="hasAnyAuthItem">
-      <ArtIconButton icon="ri:more-2-fill" class="!size-8 bg-g-200 dark:bg-g-300/45 text-sm" />
+    <ElDropdown v-if="hasAnyAuthItem" trigger="click">
+      <!-- trigger="click"：默认 hover 触发下键盘 Enter 打不开菜单（tooltip trigger 的
+           keydown 只在 click/hover 显式匹配时 toggle；click 让 Enter/Space 生效）。
+           aria-label 给行级「更多」一个读屏名称，ArtIconButton 的 keydown 不冒泡重复
+           开关（ElDropdown 的 triggerKeys 在同一 keydown 上先 preventDefault 并 toggle）。
+           hover 打开路径保留在移入后的下拉区，行为不回退。 -->
+      <ArtIconButton
+        icon="ri:more-2-fill"
+        class="!size-8 bg-g-200 dark:bg-g-300/45 text-sm"
+        aria-label="更多操作"
+      />
       <template #dropdown>
         <ElDropdownMenu>
           <template v-for="item in list" :key="item.key">

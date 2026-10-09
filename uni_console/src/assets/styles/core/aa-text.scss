@@ -127,6 +127,22 @@ html:root {
   --aa-primary-fill: color-mix(in srgb, var(--el-color-primary) 70%, #000);
 }
 
+// ==================== 中性灰次要文字（secondary 灰槽） ====================
+//
+// EP 的 --el-text-color-secondary（浅色 #909399）当次要文字：对白底 3.08:1、
+// 对页底 #fafbfc 2.97:1，4.5:1 线下。与语义族同一条纪律：token 唯一持有
+// 处方、组件只引用不复制色值 —— 总闸收口在 el-ui.scss 的
+// html:root:not(.dark){ --el-text-color-secondary: var(--aa-secondary-text) }。
+// 处方沿用 placeholder 先例（el-ui.scss）：art-gray-600 65% + art-gray-900
+// 35% 的混色 ≈ #606985，落在本应用灰度调色板内 —— 浅色白底 5.45、页底
+// #fafbfc 5.26；暗色不设此档（EP 暗色自带 rgba(#f0f5ff,.65)，对暗卡
+// #161618 7.50、对暗页底 7.85，本就达标，由总闸的 :not(.dark) 排除、
+// 不回归）。消费方照 el-ui.scss 的 gate 继承；模板侧需要「次要灰文字」时
+// 优先引用本 token（text-[var(--aa-secondary-text)]），而不是 text-g-600。
+html:root {
+  --aa-secondary-text: color-mix(in srgb, var(--art-gray-600) 65%, var(--art-gray-900));
+}
+
 // 语义色文字族 token（权重与达标数字见文件头；黑端写字面 #000 的理由同
 // --aa-primary-fill：本应用把 var(--el-color-black) 全局映射成了 white）。
 html:root {
