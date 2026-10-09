@@ -56,7 +56,7 @@
       :action="rollbackConfirm.action"
       :target="rollbackConfirm.project"
       :override="rollbackConfirm.override"
-      target-kind="项目"
+      target-kind="Compose 项目"
       :loading="confirmLoading"
       @confirm="onRollbackConfirm"
     />

@@ -72,7 +72,7 @@ func (e *StreamExecutor) startComposeLogs(ctx context.Context, cmd *agentproto.D
 	// 协议层已校验，这里保证「进入 argv 的每个可变片段都过白名单」在一处可见。
 	project := o.Target
 	if !agentproto.IsDockerProjectName(project) {
-		return &ExecError{Msg: "项目名不合法"}
+		return &ExecError{Msg: "Compose 项目名不合法"}
 	}
 	flavor := e.composeFlavorValue()
 	bin, err := composeBinary(flavor)
@@ -97,7 +97,7 @@ func (e *StreamExecutor) startComposeLogs(ctx context.Context, cmd *agentproto.D
 	pr, pw, err := os.Pipe()
 	if err != nil {
 		sess.cancelBy("pipe failed")
-		return &ExecError{Msg: "打开项目日志流失败", Detail: err.Error()}
+		return &ExecError{Msg: "打开 Compose 项目日志流失败", Detail: err.Error()}
 	}
 	proc := e.composeExecValue()(sess.ctx, bin, argv...)
 	proc.Stdout = pw
@@ -106,7 +106,7 @@ func (e *StreamExecutor) startComposeLogs(ctx context.Context, cmd *agentproto.D
 		sess.cancelBy("compose logs start failed")
 		pr.Close()
 		pw.Close()
-		return &ExecError{Msg: "打开项目日志流失败", Detail: err.Error()}
+		return &ExecError{Msg: "打开 Compose 项目日志流失败", Detail: err.Error()}
 	}
 	// 父进程侧的写端必须关掉：不关的话 CLI 退出后读循环等不到 EOF，会话永远收不了摊。
 	pw.Close()

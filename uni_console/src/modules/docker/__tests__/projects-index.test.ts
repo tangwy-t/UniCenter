@@ -166,7 +166,7 @@ describe('跨主机索引渲染（9b：聚合数据源）', () => {
   it('两台主机的项目都进同一张表，行带 hostId/hostname，计数说出口', async () => {
     const w = await mountPage()
     expect(w.find('.docker-projects-page').exists()).toBe(true)
-    expect(w.html()).toContain('共 2 个项目')
+    expect(w.html()).toContain('共 2 个 Compose 项目')
     const rows = tableRows(w)
     expect(rows.map((p) => p.name)).toEqual(['uni-center', 'media-stack'])
     expect(rows[0]).toMatchObject({ hostId: 'h1', hostname: 'bogon' })
@@ -184,7 +184,7 @@ describe('跨主机索引渲染（9b：聚合数据源）', () => {
   it('服务端截断时计数说出口（total 全量 + 前 N 条）', async () => {
     api.fetchDockerProjects.mockResolvedValue({ items: PROJECTS, total: 640 })
     const w = await mountPage()
-    expect(w.html()).toContain('共 640 个项目')
+    expect(w.html()).toContain('共 640 个 Compose 项目')
     expect(w.html()).toContain('列表显示前 2 条')
   })
 
@@ -331,7 +331,7 @@ describe('四种状态的空/错口径', () => {
   it('有可管主机但项目为空：还没有项目', async () => {
     api.fetchDockerProjects.mockResolvedValue({ items: [], total: 0 })
     const w = await mountPage()
-    expect(w.text()).toContain('还没有项目')
+    expect(w.text()).toContain('还没有 Compose 项目')
   })
 
   it('筛选没命中：分开说 + 「清除筛选」能回到全量', async () => {
@@ -342,7 +342,7 @@ describe('四种状态的空/错口径', () => {
     bar.vm.$emit('update:modelValue', { keyword: '不存在' })
     bar.vm.$emit('search')
     await new Promise((r) => setTimeout(r, 0))
-    expect(w.text()).toContain('没有符合筛选条件的项目')
+    expect(w.text()).toContain('没有符合筛选条件的 Compose 项目')
 
     // 清除筛选：回到无筛选的一次拉取（替身此时回全量）。
     api.fetchDockerProjects.mockResolvedValue({ items: PROJECTS, total: PROJECTS.length })
@@ -356,7 +356,7 @@ describe('四种状态的空/错口径', () => {
   it('首拉失败：整页错误态 + 重试（不显示旧数据）', async () => {
     api.fetchDockerProjects.mockRejectedValueOnce(new Error('network down'))
     const w = await mountPage()
-    expect(w.text()).toContain('项目清单获取失败')
+    expect(w.text()).toContain('Compose 项目清单获取失败')
     expect(w.findComponent({ name: 'ArtTable' }).exists()).toBe(false)
 
     api.fetchDockerProjects.mockResolvedValue({ items: PROJECTS, total: PROJECTS.length })

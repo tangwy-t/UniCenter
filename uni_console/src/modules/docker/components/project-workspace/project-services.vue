@@ -68,14 +68,14 @@
             <span class="pws-container__name">{{ c.name }}</span>
             <span class="pws-container__state">{{ c.statusText || c.state }}</span>
           </button>
-          <div v-if="svc.containers.length === 0" class="pws-card__note"> 该网元当前没有容器 </div>
+          <div v-if="svc.containers.length === 0" class="pws-card__note"> 该服务当前没有容器 </div>
         </div>
       </div>
     </div>
 
-    <div v-if="services.length === 0" class="pws__note">该项目的网元当前没有容器，暂不在此列出</div>
+    <div v-if="services.length === 0" class="pws__note">该 Compose 项目的服务当前没有容器，暂不在此列出</div>
     <div v-else-if="missingCount > 0" class="pws__note">
-      另有 {{ missingCount }} 个网元当前没有容器，未在此列出
+      另有 {{ missingCount }} 个服务当前没有容器，未在此列出
     </div>
 
     <!-- 网元级动作的确认弹窗：仅删容器（照抄服务名强档）、缩容到 0（照抄服务名），
@@ -269,7 +269,7 @@
     let n: number
     try {
       const { value } = await ElMessageBox.prompt(
-        `为网元「${svc.name}」设置要运行的实例数（0 表示停止并移除它的容器）。`,
+        `为服务「${svc.name}」设置要运行的实例数（0 表示停止并移除它的容器）。`,
         '扩缩容',
         {
           confirmButtonText: '确定',
@@ -343,7 +343,7 @@
    */
   async function runContainerLoop(action: string, targets: DockerContainerItem[], force: boolean) {
     if (targets.length === 0) {
-      ElMessage.info('该网元没有需要处理的容器')
+      ElMessage.info('该服务没有需要处理的容器')
       return
     }
     // 批量跨主机是**同名不同机**的错误操作：主机一换，剩余项就不再发送。

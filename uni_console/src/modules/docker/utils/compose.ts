@@ -137,7 +137,7 @@ export const FIELD_LABELS: Record<string, string> = {
 
 /** 段落名词（diff 摘要用）：新增/移除 N 个「网元/网络/数据卷」。 */
 const SECTION_NOUNS: Record<ComposeSectionName, string> = {
-  services: '网元',
+  services: '服务',
   networks: '网络',
   volumes: '数据卷'
 }
@@ -1002,7 +1002,7 @@ export function composeModelIssues(doc: ComposeDoc): string[] {
   const issues: string[] = []
   for (const name of doc.services.keys) {
     if (!SERVICE_NAME_RE.test(name)) {
-      issues.push(`网元名「${name}」不符合命名规则（字母或数字开头，可含 . _ -）`)
+      issues.push(`服务名「${name}」不符合命名规则（字母或数字开头，可含 . _ -）`)
     }
     const svc = doc.services.items[name]
     if (!svc) continue
@@ -1010,7 +1010,7 @@ export function composeModelIssues(doc: ComposeDoc): string[] {
     const build = svc._raw?.build
     const hasBuild = build !== undefined && build !== null && build !== ''
     if (!hasImage && !hasBuild) {
-      issues.push(`网元「${name}」还没有填镜像（或构建配置），保存前请先填写`)
+      issues.push(`服务「${name}」还没有填镜像（或构建配置），保存前请先填写`)
     }
   }
   return issues

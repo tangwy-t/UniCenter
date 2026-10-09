@@ -128,7 +128,7 @@
       :target="project"
       :override="confirm.override"
       :target-protected="confirm.kind === 'apply' && projectProtected"
-      target-kind="项目"
+      target-kind="Compose 项目"
       :loading="confirmLoading"
       @confirm="onConfirmed"
     >
@@ -262,7 +262,7 @@
   )
 
   const fileText = computed(() => {
-    if (!filePath.value) return '配置文件（路径由主机上的项目记录给出）'
+    if (!filePath.value) return '配置文件（路径由主机上的 Compose 项目记录给出）'
     const parts = filePath.value.split('/')
     return parts[parts.length - 1] || filePath.value
   })

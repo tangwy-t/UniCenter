@@ -192,7 +192,7 @@
 
         <div class="fm-svc__actions">
           <ElButton size="small" type="danger" plain @click="removeService(name)">
-            移除这个网元
+            移除这个服务
           </ElButton>
         </div>
       </ElCollapseItem>
@@ -269,7 +269,7 @@
           </ElRadio>
         </ElRadioGroup>
         <div class="fm-tpl__name">
-          <span class="fm-field__label">网元名称</span>
+          <span class="fm-field__label">服务名称</span>
           <ElInput v-model="tplDialog.name" size="small" placeholder="字母或数字开头，可含 . _ -" />
         </div>
       </div>
@@ -448,8 +448,8 @@
   async function removeService(name: string): Promise<void> {
     try {
       await ElMessageBox.confirm(
-        `将从配置里移除网元「${name}」，保存后生效。应用项目时可勾选「回收孤儿容器」清理它的容器。`,
-        '移除网元',
+        `将从配置里移除服务「${name}」，保存后生效。应用 Compose 项目时可勾选「回收孤儿容器」清理它的容器。`,
+        '移除服务',
         { confirmButtonText: '移除', cancelButtonText: '取消', type: 'warning' }
       )
     } catch {
@@ -532,7 +532,7 @@
       return
     }
     if (props.doc.services.items[name]) {
-      ElMessage.warning('同名网元已存在')
+      ElMessage.warning('同名服务已存在')
       return
     }
     const service = templateService(tplDialog.value.templateKey)

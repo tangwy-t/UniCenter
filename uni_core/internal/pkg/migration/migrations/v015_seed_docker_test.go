@@ -144,6 +144,38 @@ func TestDockerResourceMenusShape(t *testing.T) {
 	}
 }
 
+// TestDockerMenuIcons 钉住 Docker 域的主题图标集（目录 + 六个概念各一枚）。
+//
+// 图标是「改了不报错」的值：写错只表现为侧边栏/页签/总览 KPI 磁贴不对劲。同一套值
+// 在 uni_console/src/modules/docker/index.ts 的 meta.icon 里复写一份（前端菜单模式
+// 与总览磁贴回退的那一半，前端 routes.test.ts 钉住）；此处钉住后端菜单模式的那一半。
+func TestDockerMenuIcons(t *testing.T) {
+	want := map[string]string{
+		"docker":            "devicon-plain:docker-wordmark",
+		"docker:overview":   "simple-icons:distrobox",
+		"docker:containers": "cib:docker",
+		"docker:images":     "pajamas:container-image",
+		"docker:volumes":    "ri:hard-drive-3-line",
+		"docker:networks":   "material-symbols:graph-2",
+		"docker:projects":   "catppuccin:docker-compose",
+	}
+	got := map[string]string{}
+	for _, d := range dockerMenuDefinitions {
+		if d.Type != "menu" && d.Type != "dir" {
+			continue
+		}
+		if d.Icon == "" {
+			t.Fatalf("菜单 %s 缺少图标（侧边栏/页签/总览磁贴都会空白）", d.Key)
+		}
+		got[d.Key] = d.Icon
+	}
+	for key, icon := range want {
+		if got[key] != icon {
+			t.Fatalf("菜单 %s 的 Icon = %q, want %q（改图标须与前端 meta.icon 两处同步）", key, got[key], icon)
+		}
+	}
+}
+
 // 默认保护清单必须包含底座（它一旦为空，uni-center 自己的容器就成了可删对象）。
 func TestDockerProtectedDefaultCoversBase(t *testing.T) {
 	var v string

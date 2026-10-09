@@ -71,7 +71,7 @@ func (e *WriteExecutor) doComposeFile(ctx context.Context, cmd *agentproto.Docke
 func (e *WriteExecutor) composeConfigPath(ctx context.Context, project string) (string, error) {
 	if !agentproto.IsDockerProjectName(project) {
 		// 协议层已校验；这里是纵深防御（路径这条链上每个可变片段都再过一遍）。
-		return "", &ExecError{Msg: "项目名不合法"}
+		return "", &ExecError{Msg: "Compose 项目名不合法"}
 	}
 	files, err := composeConfigFilesOf(ctx, e.api, project)
 	if err != nil {

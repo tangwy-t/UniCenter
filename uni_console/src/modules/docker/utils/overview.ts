@@ -39,6 +39,7 @@ export interface OverviewKpiSegment {
 
 export interface OverviewKpiTile {
   key: string
+  /** 图标名：有下钻页面的五枚与菜单同源（见 buildOverviewKpis 的 iconByPath）。 */
   icon: string
   /** 图标方块渐变的基色（EP/theme 变量字符串，磁贴以 --tile 消费）。 */
   tile: string
@@ -59,12 +60,49 @@ export interface OverviewKpiTile {
   title: string
 }
 
+/** menuIconByPath 的输入节点：菜单树本函数只消费这三个字段（便于单测构造）。 */
+export interface MenuIconNode {
+  path: string
+  meta?: { icon?: string }
+  children?: MenuIconNode[]
+}
+
+/**
+ * 从菜单树（useMenuStore().menuList，MenuProcessor 的输出）收集 path → meta.icon。
+ *
+ * KPI 磁贴图标与侧边栏同源的输入 —— 后端菜单模式下 meta.icon 即 sys_menu.icon，
+ * 运维在「系统管理 → 菜单管理」改一次，侧边栏/页签/磁贴一起变；前端菜单模式下它
+ * 来自插件清单（modules/<name>/index.ts），同样是侧边栏所见的那一个。
+ *
+ * 遍历/覆盖口径：父先于子，同 path 时**子节点覆盖父节点** —— 顶层目录的 path 由
+ * 首个子菜单推导（与总览菜单同为 /docker），「该页面的图标」应以菜单节点为准；
+ * icon 为空/缺省的节点不进映射（既不覆盖父值，调用侧也据此回退硬编码值）。
+ */
+export function menuIconByPath(list: MenuIconNode[]): Record<string, string> {
+  const out: Record<string, string> = {}
+  const walk = (nodes: MenuIconNode[]) => {
+    for (const node of nodes) {
+      const icon = node.meta?.icon
+      if (icon) out[node.path] = icon
+      if (node.children?.length) walk(node.children)
+    }
+  }
+  walk(list)
+  return out
+}
+
 /**
  * 舰队 KPI 磁贴：每个资源维度一块，主数值是跨主机合计，副行给分项。
  *
  * 七块 = 六个资源维度 + 一块磁盘占用（6a）。分项数字的着色是**信息**不是装饰：
  * 停止数 > 0 用 danger、未用数 > 0 用 warning、全部可用用 success —— 0 时不上色，
  * 颜色恒与「需要注意」绑定，运维扫一眼就知道哪块有事。
+ *
+ * 图标同源（本波）：五枚有下钻页面（to）的磁贴 —— 容器/镜像/数据卷/网络/项目 ——
+ * 图标取**菜单同路径的 meta.icon**（iconByPath 入参，视图侧用 menuIconByPath 从
+ * 菜单树收集）：运维改「菜单管理」里的图标，磁贴与侧边栏/页签一起变。菜单里查不到
+ * 或 icon 为空则回退硬编码的主题图标值（下方各磁贴的字面量，与 v015 种子同源），
+ * 磁贴永远有图标。主机/磁盘两枚无对应菜单（锚到本页面板），不参与同源。
  *
  * 磁盘磁贴的三条纪律：
  *   - 主数值是容量文本（formatCapacityMb，MB 自动进位 GB/TB）—— 磁盘账的读法
@@ -74,7 +112,10 @@ export interface OverviewKpiTile {
  *   - 部分主机未上报（df.hosts < hosts.total）时副行给 warning 计数 —— 合计是
  *     **已知主机的账**，读者必须知道它可能偏小。
  */
-export function buildOverviewKpis(fleet: Api.Docker.DockerOverviewFleet): OverviewKpiTile[] {
+export function buildOverviewKpis(
+  fleet: Api.Docker.DockerOverviewFleet,
+  iconByPath?: Record<string, string>
+): OverviewKpiTile[] {
   const stopped = fleet.containers.stopped
   const stoppedTone = stopped > 0 ? 'danger' : undefined
   const imagesUnused = fleet.images.unused
@@ -85,11 +126,13 @@ export function buildOverviewKpis(fleet: Api.Docker.DockerOverviewFleet): Overvi
   const disk = fleet.disk
   const diskTotalMB = disk.imagesTotalMb + disk.volumesTotalMb + disk.buildCacheMb
   const diskNotReported = fleet.hosts.total - disk.hosts
+  /** 菜单覆盖优先、硬编码主题图标兜底（菜单 icon 为空串也走兜底）。 */
+  const navIcon = (path: string, fallback: string) => iconByPath?.[path] || fallback
 
   return [
     {
       key: 'containers',
-      icon: 'ri:ship-line',
+      icon: navIcon('/docker/containers', 'cib:docker'),
       tile: 'var(--el-color-primary)',
       value: fleet.containers.total,
       label: '容器',
@@ -103,7 +146,7 @@ export function buildOverviewKpis(fleet: Api.Docker.DockerOverviewFleet): Overvi
     },
     {
       key: 'images',
-      icon: 'ri:box-1-line',
+      icon: navIcon('/docker/images', 'pajamas:container-image'),
       tile: 'var(--art-secondary)',
       value: fleet.images.total,
       label: '镜像',
@@ -115,7 +158,7 @@ export function buildOverviewKpis(fleet: Api.Docker.DockerOverviewFleet): Overvi
     },
     {
       key: 'volumes',
-      icon: 'ri:hard-drive-3-line',
+      icon: navIcon('/docker/volumes', 'ri:hard-drive-3-line'),
       tile: 'var(--el-color-warning)',
       value: fleet.volumes.total,
       label: '数据卷',
@@ -125,7 +168,7 @@ export function buildOverviewKpis(fleet: Api.Docker.DockerOverviewFleet): Overvi
     },
     {
       key: 'networks',
-      icon: 'ri:share-forward-line',
+      icon: navIcon('/docker/networks', 'material-symbols:graph-2'),
       tile: 'var(--el-color-info)',
       value: fleet.networks.total,
       label: '网络',
@@ -135,10 +178,10 @@ export function buildOverviewKpis(fleet: Api.Docker.DockerOverviewFleet): Overvi
     },
     {
       key: 'projects',
-      icon: 'ri:stack-line',
+      icon: navIcon('/docker/projects', 'catppuccin:docker-compose'),
       tile: 'var(--el-color-primary)',
       value: fleet.projects.total,
-      label: '项目',
+      label: 'Compose',
       sub: [
         {
           text: `运行 ${projectsRunning}`,
@@ -146,7 +189,7 @@ export function buildOverviewKpis(fleet: Api.Docker.DockerOverviewFleet): Overvi
         }
       ],
       to: '/docker/projects',
-      title: '跨全部主机合计的编排项目'
+      title: '跨全部主机合计的 Compose 项目'
     },
     {
       key: 'hosts',

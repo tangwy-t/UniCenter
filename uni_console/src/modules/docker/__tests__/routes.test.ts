@@ -53,9 +53,15 @@ describe('docker 模块路由', () => {
 
   it('三条拆分列表页路由的形状：path/name/标题/图标与菜单种子一致，可见且懒加载', () => {
     // 拆分切片：镜像/数据卷/网络从收敛页的三个 tab 升格为独立整页（菜单平铺），
-    // path 与 v015 种子菜单**逐字一致**；图标沿用三条旧菜单的图标（box/硬盘/转发）。
+    // path 与 v015 种子菜单**逐字一致**；图标与种子同为 Docker 主题图标集
+    //（两处同步口径见 v015_seed_docker.go 的图标注释）。
     const shapes = [
-      { path: '/docker/images', name: 'DockerImages', title: '镜像', icon: 'ri:box-1-line' },
+      {
+        path: '/docker/images',
+        name: 'DockerImages',
+        title: '镜像',
+        icon: 'pajamas:container-image'
+      },
       {
         path: '/docker/volumes',
         name: 'DockerVolumes',
@@ -66,7 +72,7 @@ describe('docker 模块路由', () => {
         path: '/docker/networks',
         name: 'DockerNetworks',
         title: '网络',
-        icon: 'ri:share-forward-line'
+        icon: 'material-symbols:graph-2'
       }
     ]
     for (const s of shapes) {
@@ -80,6 +86,25 @@ describe('docker 模块路由', () => {
       expect(r?.meta?.isHide).toBeFalsy()
       // 懒加载：component 是 () => import(...) 形态
       expect(typeof r?.component).toBe('function')
+    }
+  })
+
+  it('六页菜单图标：Docker 主题图标集整表（与 v015 种子同源，单边漂移即红）', () => {
+    // 这份表是「Docker 主题图标集」的**前端一侧**（后端一侧在 v015_seed_docker_test.go
+    // 的 TestDockerMenuIcons）：总览 KPI 磁贴的回退值、前端菜单模式的侧边栏都取自它，
+    // 单边改了值而另一边没跟，本用例或 Go 侧对应用例即红。
+    const vocabulary: Array<[string, string]> = [
+      ['/docker', 'simple-icons:distrobox'],
+      ['/docker/containers', 'cib:docker'],
+      ['/docker/images', 'pajamas:container-image'],
+      ['/docker/volumes', 'ri:hard-drive-3-line'],
+      ['/docker/networks', 'material-symbols:graph-2'],
+      ['/docker/projects', 'catppuccin:docker-compose']
+    ]
+    for (const [path, icon] of vocabulary) {
+      const r = routes.find((x) => x.path === path)
+      expect(r, `缺少菜单页路由 ${path}`).toBeTruthy()
+      expect(r?.meta?.icon, `${path} 的图标`).toBe(icon)
     }
   })
 

@@ -24,7 +24,7 @@
                  只在 pageState=ready（握有数据）时报数 —— 首拉/失败/无可管主机时
                  报「共 0 个」是假话（数据面不得伪装新鲜）。 -->
             <span v-if="pageState === 'ready'" class="docker-count">
-              共 {{ total }} 个项目<template v-if="truncated">
+              共 {{ total }} 个 Compose 项目<template v-if="truncated">
                 · 列表显示前 {{ rows.length }} 条</template
               >
             </span>
@@ -50,7 +50,7 @@
       <ElEmpty
         v-else-if="pageState === 'error'"
         class="docker-empty"
-        description="项目清单获取失败"
+        description="Compose 项目清单获取失败"
       >
         <ElButton size="small" @click="reloadAll">重试</ElButton>
       </ElEmpty>
@@ -59,10 +59,10 @@
            vs 还没有项目。空态渲染在本页、不写进 ArtTable 的 `#empty` 插槽：ArtTable
            不转发该插槽（内部把 ElTable 的空态写死成「暂无数据」），写进去会被静默丢弃。 -->
       <ElEmpty v-else-if="pageState === 'empty'" class="docker-empty" description="尚无可管主机" />
-      <ElEmpty v-else-if="hasFilter" class="docker-empty" description="没有符合筛选条件的项目">
+      <ElEmpty v-else-if="hasFilter" class="docker-empty" description="没有符合筛选条件的 Compose 项目">
         <ElButton size="small" @click="onReset">清除筛选</ElButton>
       </ElEmpty>
-      <ElEmpty v-else class="docker-empty" description="还没有项目" />
+      <ElEmpty v-else class="docker-empty" description="还没有 Compose 项目" />
     </ElCard>
   </div>
 </template>
@@ -269,7 +269,7 @@
       },
       {
         prop: 'services',
-        label: '网元数',
+        label: '服务数',
         minWidth: 90,
         hideBelow: 'tablet'
       },

@@ -27,8 +27,8 @@
       </ElEmpty>
 
       <!-- ============ 项目不在快照里（名字错/已下线/换了主机）：给结论与回路 ============ -->
-      <ElEmpty v-else-if="!project" :description="`该主机上没有项目「${projectName}」`">
-        <ElButton size="small" @click="back">返回项目列表</ElButton>
+      <ElEmpty v-else-if="!project" :description="`该主机上没有 Compose 项目「${projectName}」`">
+        <ElButton size="small" @click="back">返回 Compose 列表</ElButton>
       </ElEmpty>
 
       <!-- ============ 正常态：hero → 网元卡片区 → 日志/配置页签 ============ -->
@@ -51,7 +51,7 @@
 
         <section class="pw-section">
           <div class="pw-section__head">
-            <span class="pw-section__title">网元</span>
+            <span class="pw-section__title">服务</span>
           </div>
           <ProjectServices
             :project="projectName"
@@ -103,7 +103,7 @@
       :action="projConfirm.action"
       :target="projConfirm.target"
       :target-protected="projConfirm.protected"
-      target-kind="项目"
+      target-kind="Compose 项目"
       :loading="confirmLoading"
       @confirm="onProjectConfirm"
     >

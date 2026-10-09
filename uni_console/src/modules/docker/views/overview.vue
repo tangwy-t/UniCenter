@@ -167,6 +167,7 @@
   import { useAuth } from '@/hooks/core/useAuth'
   import { PermDockerList } from '@/enums/permission'
   import { usePageIcon } from '@/hooks/core/usePageIcon'
+  import { useMenuStore } from '@/store/modules/menu'
   import OverviewAnomalyTable from '../components/overview-anomaly-table.vue'
   import OverviewDiskPanel from '../components/overview-disk-panel.vue'
   import OverviewEventsFeed from '../components/overview-events-feed.vue'
@@ -176,6 +177,7 @@
   import {
     buildOverviewKpis,
     diskPanelSubtitle,
+    menuIconByPath,
     overviewPageState,
     overviewSubtitle
   } from '../utils/overview'
@@ -185,9 +187,15 @@
   defineOptions({ name: 'DockerOverview' })
 
   // 页头图标与侧边栏/页签同源（取菜单图标，改「菜单管理」即同步；见 usePageIcon）
-  const pageIcon = usePageIcon('ri:ship-line')
+  const pageIcon = usePageIcon('simple-icons:distrobox')
 
   const router = useRouter()
+
+  // KPI 磁贴图标同样与菜单同源（本波）：从菜单树收集 path → meta.icon 传给
+  // buildOverviewKpis —— 改「菜单管理」里某一页的图标，侧边栏/页签/总览磁贴
+  // 一起变；菜单里查不到则回退 buildOverviewKpis 里的主题图标值。
+  const menuStore = useMenuStore()
+  const menuIcons = computed(() => menuIconByPath(menuStore.menuList))
 
   // ── 任务中心入口（6b → 8c 整页路由） ────────────────────────────
   // 权限与任务列表端点同档（docker:list，本页路由 authMark 同码）；入口是 navigation
@@ -207,7 +215,9 @@
   const anomalies = computed<Api.Docker.DockerOverviewAnomalies>(
     () => meta.value?.anomalies ?? { total: 0, items: [] }
   )
-  const kpis = computed(() => (meta.value ? buildOverviewKpis(meta.value.fleet) : []))
+  const kpis = computed(() =>
+    meta.value ? buildOverviewKpis(meta.value.fleet, menuIcons.value) : []
+  )
   /** 磁盘面板的分区副标题（上报口径：N 台里 M 台报了磁盘账，缺报不折算成零）。 */
   const diskSub = computed(() => diskPanelSubtitle(hosts.value))
   const subtitle = computed(() =>

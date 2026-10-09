@@ -38,40 +38,42 @@ func init() {
 //     （v016 文件现为墓碑，说明见 v016_seed_docker_overview.go）；
 //   - 7a 曾把 images / volumes / networks 三个旧列表页收敛为 /docker/resources
 //     的三个 tab，三条菜单行随之整行删除；本轮拆分切片把收敛页拆回三个独立整页，
-//     三条菜单行**同名复活**（Key/Path/Component/Sort/Icon 与 7a 前的旧行逐字
-//     一致），/docker/resources 一行不留（不留 redirect，开发阶段零兼容负担：
-//     已迁移的开发库按重置口径处理，见 v016 墓碑文件头的说明）。
+//     三条菜单行**同名复活**（Key/Path/Component/Sort 与 7a 前的旧行逐字一致），
+//     /docker/resources 一行不留（不留 redirect，开发阶段零兼容负担：已迁移的
+//     开发库按重置口径处理，见 v016 墓碑文件头的说明）。
+//
+// 图标口径（Docker 主题图标集）：六个概念各一枚主题图标，与前端**同源** —— 同一套
+// 值同时写在 uni_console/src/modules/docker/index.ts 的 meta.icon（前端菜单模式与
+// 总览 KPI 磁贴回退的另一半）与本列表（后端菜单模式；总览磁贴直接读菜单树的
+// meta.icon），前端离线包（scripts/offline-icons.mjs）同时抽取这两处字面量。改图标
+// 必须两处同步，两侧各有测试钉住（前端 routes.test.ts、本目录 v015 测试）。
 //
 // 「初始化即最终态」的取向：fresh 库只跑一次 v015 就得到正确菜单，不靠后续迁移
 // 的增删链把历史形状搬运到最终形状 —— 迁移链是给**数据**记账的，开发期反复改
 // 种子时，链条越长越容易在中途形状上出错。
 var dockerMenuDefinitions = []menuDef{
-	{Key: "docker", Name: "Docker 管理", Type: "dir", Sort: 3, Icon: "ri:stack-line"},
-	// 控制塔总览（原 v016）：Sort=0，点开目录先看到跨主机总览，再进各资源页。
-	// Icon 复用舰队隐喻 ri:ship-line（与总览响应的 fleet KPI 同一套语言）。
+	{Key: "docker", Name: "Docker 管理", Type: "dir", Sort: 3, Icon: "devicon-plain:docker-wordmark"},
+	// 控制塔总览：Sort=0，点开目录先看到跨主机总览，再进各资源页。
 	{Key: "docker:overview", Parent: "docker", Name: "Docker 总览", Type: "menu",
 		Perms: permission.PermDockerList, Path: "/docker", Component: "docker/overview",
-		Sort: 0, Icon: "ri:ship-line"},
+		Sort: 0, Icon: "simple-icons:distrobox"},
 	{Key: "docker:containers", Parent: "docker", Name: "容器", Type: "menu",
 		Perms: permission.PermDockerList, Path: "/docker/containers", Component: "docker/containers",
-		Sort: 1, Icon: "ri:ship-line"},
-	// 镜像 / 数据卷 / 网络（拆分切片同名复活的三条）：7a 收敛把三个旧列表页并入
-	// /docker/resources 三 tab 时这三行被整行删除，本轮拆回独立整页后复活 ——
-	// Key/Path/Component/Sort/Icon 与 7a 前的旧行逐字一致（图标分别是 box-1-line /
-	// hard-drive-3-line / share-forward-line，即 7a 前旧列表菜单的图标，随页面
-	// 一起复活）。Sort 2/3/4：容器之后、项目之前，与原三行占同一段。
+		Sort: 1, Icon: "cib:docker"},
+	// 镜像 / 数据卷 / 网络（拆分切片同名复活的三条）：Sort 2/3/4，容器之后、
+	// 项目之前，与原三行占同一段。
 	{Key: "docker:images", Parent: "docker", Name: "镜像", Type: "menu",
 		Perms: permission.PermDockerList, Path: "/docker/images", Component: "docker/images",
-		Sort: 2, Icon: "ri:box-1-line"},
+		Sort: 2, Icon: "pajamas:container-image"},
 	{Key: "docker:volumes", Parent: "docker", Name: "数据卷", Type: "menu",
 		Perms: permission.PermDockerList, Path: "/docker/volumes", Component: "docker/volumes",
 		Sort: 3, Icon: "ri:hard-drive-3-line"},
 	{Key: "docker:networks", Parent: "docker", Name: "网络", Type: "menu",
 		Perms: permission.PermDockerList, Path: "/docker/networks", Component: "docker/networks",
-		Sort: 4, Icon: "ri:share-forward-line"},
-	{Key: "docker:projects", Parent: "docker", Name: "项目", Type: "menu",
+		Sort: 4, Icon: "material-symbols:graph-2"},
+	{Key: "docker:projects", Parent: "docker", Name: "Compose", Type: "menu",
 		Perms: permission.PermDockerList, Path: "/docker/projects", Component: "docker/projects",
-		Sort: 5, Icon: "ri:stack-line"},
+		Sort: 5, Icon: "catppuccin:docker-compose"},
 
 	// 按钮权限挂在各自的页面下。**一期页面不渲染二期按钮**（§11.0 矩阵），
 	// 但权限码必须先存在于菜单树里 —— 授权界面（角色管理）据此分配。

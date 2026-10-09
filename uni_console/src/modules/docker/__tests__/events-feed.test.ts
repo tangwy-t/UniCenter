@@ -13,6 +13,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent, h, nextTick, ref, KeepAlive, type Component } from 'vue'
 import { mount, type VueWrapper } from '@vue/test-utils'
+import { createPinia } from 'pinia'
 import { createMemoryHistory, createRouter } from 'vue-router'
 
 const api = vi.hoisted(() => ({
@@ -628,10 +629,12 @@ describe('总览页集成：面板就位、生命周期随页面', () => {
     // 先 push 再 isReady：初始导航由首次 push 触发（不 push 的 isReady 永远等不到）
     await router.push('/')
     await router.isReady()
-    // ArtButtonTable 依赖 pinia（useUserStore），与 page-render 同款替身绕开
+    // ArtButtonTable 依赖 pinia（useUserStore），与 page-render 同款替身绕开；
+    // pinia 本身照装（overview.vue 的 KPI 磁贴图标读 useMenuStore().menuList，
+    // 菜单为空 → 全走硬编码回退值，与本组用例无关）。
     return mountInKeepAlive(Overview, {
       global: {
-        plugins: [router],
+        plugins: [router, createPinia()],
         stubs: {
           ArtButtonTable: defineComponent({
             name: 'ArtButtonTable',

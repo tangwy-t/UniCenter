@@ -377,29 +377,29 @@ export const DOCKER_ACTION_REGISTRY: readonly DockerActionEntry[] = [
   },
   {
     action: 'compose:up',
-    label: '启动项目',
+    label: '启动 Compose 项目',
     icon: 'ri:play-circle-line',
     perm: PermDockerManage,
     danger: 'danger',
     needsTarget: true,
     confirm: 'target-word',
     guarded: true,
-    conclusion: '项目下的容器会被重建，服务会短暂中断。'
+    conclusion: 'Compose 项目下的容器会被重建，服务会短暂中断。'
   },
   {
     action: 'compose:stop',
-    label: '停止项目',
+    label: '停止 Compose 项目',
     icon: 'ri:pause-circle-line',
     perm: PermDockerManage,
     danger: 'danger',
     needsTarget: true,
     confirm: 'target-word',
     guarded: true,
-    conclusion: '项目下的所有容器都会停止。'
+    conclusion: 'Compose 项目下的所有容器都会停止。'
   },
   {
     action: 'compose:start',
-    label: '启动项目容器',
+    label: '启动 Compose 项目容器',
     icon: 'ri:play-line',
     perm: PermDockerManage,
     danger: 'normal',
@@ -410,7 +410,7 @@ export const DOCKER_ACTION_REGISTRY: readonly DockerActionEntry[] = [
   },
   {
     action: 'compose:restart',
-    label: '重启项目',
+    label: '重启 Compose 项目',
     icon: 'ri:refresh-line',
     perm: PermDockerManage,
     danger: 'normal',
@@ -421,7 +421,7 @@ export const DOCKER_ACTION_REGISTRY: readonly DockerActionEntry[] = [
   },
   {
     action: 'compose:pull',
-    label: '拉取项目镜像',
+    label: '拉取 Compose 项目镜像',
     icon: 'ri:download-2-line',
     perm: PermDockerManage,
     danger: 'normal',
@@ -432,14 +432,14 @@ export const DOCKER_ACTION_REGISTRY: readonly DockerActionEntry[] = [
   },
   {
     action: 'compose:down',
-    label: '停止并移除项目',
+    label: '停止并移除 Compose 项目',
     icon: 'ri:shut-down-line',
     perm: PermDockerDelete,
     danger: 'destructive',
     needsTarget: true,
     confirm: 'target-word',
     guarded: true,
-    conclusion: '项目下的容器与网络会被移除。此操作不可恢复。'
+    conclusion: 'Compose 项目下的容器与网络会被移除。此操作不可恢复。'
   },
   {
     action: 'compose.service:scale',
@@ -461,7 +461,7 @@ export const DOCKER_ACTION_REGISTRY: readonly DockerActionEntry[] = [
     needsTarget: true,
     confirm: 'target-word',
     guarded: true,
-    conclusion: '该服务的容器会被移除；可用「启动项目」重新创建。'
+    conclusion: '该服务的容器会被移除；可用「启动 Compose 项目」重新创建。'
   }
 ]
 

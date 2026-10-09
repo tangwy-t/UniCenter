@@ -8,7 +8,7 @@
           <ArtButtonTable
             icon="ri:arrow-left-line"
             icon-class="bg-g-300/55 text-g-700"
-            title="返回项目列表"
+            title="返回 Compose 列表"
             @click="emit('back')"
           />
           <h2 class="pwh__title">{{ project.name }}</h2>
@@ -24,10 +24,10 @@
         </div>
         <!-- 元信息：容器/网元/配置文件/备份四件事一行说完（工作台的第一屏回答「这是什么」）。 -->
         <p class="pwh__meta">
-          {{ containersText }} · 网元 {{ project.services }} · {{ configFilesText }} · 备份
+          {{ containersText }} · 服务 {{ project.services }} · {{ configFilesText }} · 备份
           {{ backupCount }} 份
           <template v-if="missingCount > 0">
-            · 另有 {{ missingCount }} 个网元没有容器（未列出）
+            · 另有 {{ missingCount }} 个服务没有容器（未列出）
           </template>
         </p>
         <!-- 主机行：主机是页面级上下文（项目是主机作用域的），切换 = 换一台机器看同一批事实。 -->

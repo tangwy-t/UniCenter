@@ -329,7 +329,7 @@ describe('diff 摘要与明细（保存预览弹窗的文案来源）', () => {
     removeSectionEntry(b, 'services', 'db')
     setServiceField(b.services.items.web, 'image', 'nginx:1.29')
     setServiceField(b.services.items.web, 'restart', 'always')
-    expect(diffSummary(a, b)).toBe('将新增 1 个网元、移除 1 个网元、修改 2 处')
+    expect(diffSummary(a, b)).toBe('将新增 1 个服务、移除 1 个服务、修改 2 处')
   })
 
   it('无改动时摘要为「没有改动」', () => {
@@ -346,9 +346,9 @@ describe('diff 摘要与明细（保存预览弹窗的文案来源）', () => {
     setServiceField(b.services.items.web, 'image', 'nginx:1.29')
     const details = diffDetails(a, b).join('\n')
     expect(details).toContain('redis')
-    expect(details).toContain('新增网元')
+    expect(details).toContain('新增服务')
     expect(details).toContain('db')
-    expect(details).toContain('移除网元')
+    expect(details).toContain('移除服务')
     expect(details).toContain('镜像')
   })
 

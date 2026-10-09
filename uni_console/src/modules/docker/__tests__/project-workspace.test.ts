@@ -379,7 +379,7 @@ describe('工作台渲染冒烟（挂载即验证，白屏类故障的守卫）'
     expect(w.find('.pwh__state').text()).toBe('部分运行')
     expect(w.find('.pwh__meta').text()).toContain('容器 1/2')
     expect(w.find('.pwh__meta').text()).toContain('备份 1 份')
-    expect(w.find('.pwh__meta').text()).toContain('另有 1 个网元没有容器')
+    expect(w.find('.pwh__meta').text()).toContain('另有 1 个服务没有容器')
     // 网元卡：两张卡（core/web），副本与容器行都在。
     expect(w.findAll('.pws-card')).toHaveLength(2)
     expect(w.find('.pws-card__name').text()).toBe('core')
@@ -399,8 +399,8 @@ describe('工作台渲染冒烟（挂载即验证，白屏类故障的守卫）'
 
   it('项目不在快照里：给结论句与返回入口（不留一块空白菜地）', async () => {
     const w = await mountWorkspace('no-such-project')
-    expect(w.find('.el-empty__description').text()).toContain('该主机上没有项目「no-such-project」')
-    expect(w.findAll('button').some((b) => b.text() === '返回项目列表')).toBe(true)
+    expect(w.find('.el-empty__description').text()).toContain('该主机上没有 Compose 项目「no-such-project」')
+    expect(w.findAll('button').some((b) => b.text() === '返回 Compose 列表')).toBe(true)
   })
 
   it('网元行归纳：与列表页同口径（按标签归纳、按名排序、running 计数）', () => {

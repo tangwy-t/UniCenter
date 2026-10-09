@@ -46,13 +46,13 @@ const plugin: PluginManifest = {
       path: '/docker',
       name: 'DockerOverview',
       component: () => import('./views/overview.vue'),
-      meta: { title: 'Docker 总览', icon: 'ri:ship-line', authMark: PermDockerList }
+      meta: { title: 'Docker 总览', icon: 'simple-icons:distrobox', authMark: PermDockerList }
     },
     {
       path: '/docker/containers',
       name: 'DockerContainers',
       component: () => import('./views/containers.vue'),
-      meta: { title: '容器', icon: 'ri:ship-line', authMark: PermDockerList }
+      meta: { title: '容器', icon: 'cib:docker', authMark: PermDockerList }
     },
     {
       // 镜像列表页（拆分切片）：原「镜像与存储」收敛页的镜像 tab 升格为独立整页
@@ -61,7 +61,7 @@ const plugin: PluginManifest = {
       path: '/docker/images',
       name: 'DockerImages',
       component: () => import('./views/images.vue'),
-      meta: { title: '镜像', icon: 'ri:box-1-line', authMark: PermDockerList }
+      meta: { title: '镜像', icon: 'pajamas:container-image', authMark: PermDockerList }
     },
     {
       // 数据卷列表页（拆分切片）：原收敛页的数据卷 tab 升格为独立整页。
@@ -75,13 +75,13 @@ const plugin: PluginManifest = {
       path: '/docker/networks',
       name: 'DockerNetworks',
       component: () => import('./views/networks.vue'),
-      meta: { title: '网络', icon: 'ri:share-forward-line', authMark: PermDockerList }
+      meta: { title: '网络', icon: 'material-symbols:graph-2', authMark: PermDockerList }
     },
     {
       path: '/docker/projects',
       name: 'DockerProjects',
       component: () => import('./views/projects.vue'),
-      meta: { title: '项目', icon: 'ri:stack-line', authMark: PermDockerList }
+      meta: { title: 'Compose', icon: 'catppuccin:docker-compose', authMark: PermDockerList }
     },
     {
       // 创建容器（8b 页面化）：抽屉的表单平移成整页（多分辨率适配：表单里那些
@@ -122,7 +122,7 @@ const plugin: PluginManifest = {
       component: () => import('./views/container-detail/index.vue'),
       meta: {
         title: '容器详情',
-        icon: 'ri:ship-line',
+        icon: 'cib:docker',
         isHide: true,
         authMark: PermDockerInspect
       }
@@ -174,8 +174,8 @@ const plugin: PluginManifest = {
       name: 'DockerProjectWorkspace',
       component: () => import('./views/project-workspace.vue'),
       meta: {
-        title: '项目工作台',
-        icon: 'ri:stack-line',
+        title: 'Compose 工作台',
+        icon: 'catppuccin:docker-compose',
         isHide: true,
         authMark: PermDockerInspect
       }
@@ -184,7 +184,7 @@ const plugin: PluginManifest = {
       path: '/docker/image-detail/:id',
       name: 'DockerImageDetail',
       component: () => import('./views/image-detail.vue'),
-      meta: { title: '镜像详情', icon: 'ri:box-1-line', isHide: true, authMark: PermDockerInspect }
+      meta: { title: '镜像详情', icon: 'pajamas:container-image', isHide: true, authMark: PermDockerInspect }
     }
   ]
 }

@@ -45,7 +45,7 @@ import (
 func composeConfigFilesOf(ctx context.Context, api DockerAPI, project string) ([]string, error) {
 	cs, err := api.Containers(ctx)
 	if err != nil {
-		return nil, &ExecError{Msg: "读取项目信息失败", Detail: err.Error()}
+		return nil, &ExecError{Msg: "读取 Compose 项目信息失败", Detail: err.Error()}
 	}
 	hasContainer := false
 	for _, c := range cs {
@@ -78,9 +78,9 @@ func composeConfigFilesOf(ctx context.Context, api DockerAPI, project string) ([
 	}
 	if hasContainer {
 		// 容器在、但路径无从得知（旧版 compose 不记标签，索引里也没有历史）：如实标注。
-		return nil, &ExecError{Msg: "这个项目的配置文件位置未知（旧版 compose 未记录）"}
+		return nil, &ExecError{Msg: "这个 Compose 项目的配置文件位置未知（旧版 compose 未记录）"}
 	}
-	return nil, &ExecError{Msg: "这个项目的配置文件位置未知：本机还没有它的容器。请先在主机上执行一次 `docker compose up -d`，之后控制台就能管理它"}
+	return nil, &ExecError{Msg: "这个 Compose 项目的配置文件位置未知：本机还没有它的容器。请先在主机上执行一次 `docker compose up -d`，之后控制台就能管理它"}
 }
 
 // validatedLabelConfigFiles 把 config_files 标签拆成文件清单并逐项校验。
@@ -126,7 +126,7 @@ func validatedIndexedConfigFile(project, path string) (string, error) {
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return "", &ExecError{
-				Msg:    "这个项目的配置文件已不存在（它可能在主机上被移动或删除了）。请先在主机上执行一次 `docker compose up -d`，控制台会重新记住它的位置",
+				Msg:    "这个 Compose 项目的配置文件已不存在（它可能在主机上被移动或删除了）。请先在主机上执行一次 `docker compose up -d`，控制台会重新记住它的位置",
 				Detail: "project index: " + project + " -> " + path,
 			}
 		}
@@ -149,12 +149,12 @@ func composeNames(action, target string) (project, service string, err error) {
 		agentproto.DockerActionComposeServiceRemoveContainers:
 		p, s, ok := agentproto.SplitDockerProjectService(target)
 		if !ok {
-			return "", "", &ExecError{Msg: "服务目标不合法（应为「项目名/服务名」）"}
+			return "", "", &ExecError{Msg: "服务目标不合法（应为「Compose 项目名/服务名」）"}
 		}
 		return p, s, nil
 	default:
 		if !agentproto.IsDockerProjectName(target) {
-			return "", "", &ExecError{Msg: "项目名不合法"}
+			return "", "", &ExecError{Msg: "Compose 项目名不合法"}
 		}
 		return target, "", nil
 	}
@@ -254,21 +254,21 @@ func (e *WriteExecutor) composeArgv(action string, o *agentproto.DockerCmdOption
 func composeFailureMsg(action string) string {
 	switch action {
 	case agentproto.DockerActionComposeUp, agentproto.DockerActionComposeStart:
-		return "启动项目失败"
+		return "启动 Compose 项目失败"
 	case agentproto.DockerActionComposeStop:
-		return "停止项目失败"
+		return "停止 Compose 项目失败"
 	case agentproto.DockerActionComposeRestart:
-		return "重启项目失败"
+		return "重启 Compose 项目失败"
 	case agentproto.DockerActionComposePull:
-		return "拉取项目镜像失败"
+		return "拉取 Compose 项目镜像失败"
 	case agentproto.DockerActionComposeDown:
-		return "下线项目失败"
+		return "下线 Compose 项目失败"
 	case agentproto.DockerActionComposeServiceScale:
 		return "调整服务实例数失败"
 	case agentproto.DockerActionComposeServiceRemoveContainers:
 		return "删除服务容器失败"
 	default:
-		return "执行项目操作失败"
+		return "执行 Compose 项目操作失败"
 	}
 }
 

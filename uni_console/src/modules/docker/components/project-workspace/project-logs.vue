@@ -26,7 +26,7 @@
         collapse-tags
         collapse-tags-tooltip
         clearable
-        placeholder="全部网元"
+        placeholder="全部服务"
       >
         <ElOption v-for="s in services" :key="s" :label="s" :value="s" />
       </ElSelect>

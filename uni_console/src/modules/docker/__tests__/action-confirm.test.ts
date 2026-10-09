@@ -45,13 +45,13 @@ describe('五形态（普通确认 / DELETE / 目标名 / 文件名 / 输入）'
 
   it('目标名档：项目级动作照抄项目名，主按钮沿用动作标签', () => {
     const form = confirmForm(
-      { action: 'compose:down', target: 'uni-center', targetKind: '项目' },
+      { action: 'compose:down', target: 'uni-center', targetKind: 'Compose 项目' },
       false
     )
     expect(form.kind).toBe('target-word')
     expect(form.expected).toBe('uni-center')
-    expect(form.inputLabel).toBe('输入项目名称以确认')
-    expect(form.buttonText).toBe('停止并移除项目')
+    expect(form.inputLabel).toBe('输入Compose 项目名称以确认')
+    expect(form.buttonText).toBe('停止并移除 Compose 项目')
   })
 
   it('目标名档：「项目/服务」形态取服务部分（含 scale 缩容到 0）', () => {
@@ -363,7 +363,7 @@ describe('注册表之外的动作（四期配置编辑）用 override 显式给
 
   it('override 生效：强确认照抄项目名与调用方文案', () => {
     const form = confirmForm(
-      { action: 'compose.file:patch', target: 'uni-center', targetKind: '项目', override },
+      { action: 'compose.file:patch', target: 'uni-center', targetKind: 'Compose 项目', override },
       false
     )
     expect(form.kind).toBe('target-word')

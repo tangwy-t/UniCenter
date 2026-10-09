@@ -383,7 +383,7 @@ describe('项目页的失败口径（D-1 在 9b 的页层落点）', () => {
     api.fetchDockerProjects.mockRejectedValue(new Error('network down'))
     const w = await mountPage(Projects)
 
-    expect(w.text()).toContain('项目清单获取失败')
+    expect(w.text()).toContain('Compose 项目清单获取失败')
     // 首拉失败没有任何行可给：不渲染表格（旧数据不存在，错误屏就是全部事实）。
     expect(w.findComponent({ name: 'ArtTable' }).exists()).toBe(false)
   })

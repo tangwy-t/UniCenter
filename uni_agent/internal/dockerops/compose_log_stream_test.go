@@ -329,9 +329,9 @@ func TestComposeLogsRejectsBeforeExec(t *testing.T) {
 	}{
 		{"没有检测到 compose", composeProjectFixture(configFile), "", "uni-center", "没有检测到可用的 compose"},
 		{"项目名带 shell 元字符", composeProjectFixture(configFile),
-			agentproto.DockerComposeFlavorPlugin, "uni-center; rm -rf /", "项目名不合法"},
+			agentproto.DockerComposeFlavorPlugin, "uni-center; rm -rf /", "Compose 项目名不合法"},
 		{"项目名带斜杠（服务形态不是项目形态）", composeProjectFixture(configFile),
-			agentproto.DockerComposeFlavorPlugin, "uni-center/uni_core", "项目名不合法"},
+			agentproto.DockerComposeFlavorPlugin, "uni-center/uni_core", "Compose 项目名不合法"},
 		{"从未见过的项目（无容器无索引）", &stubAPI{},
 			agentproto.DockerComposeFlavorPlugin, "uni-center", "先在主机上执行一次"},
 	}

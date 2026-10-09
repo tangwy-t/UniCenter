@@ -12,7 +12,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent, h, nextTick } from 'vue'
 import { mount, type VueWrapper } from '@vue/test-utils'
+import { createPinia } from 'pinia'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
+import { useMenuStore } from '@/store/modules/menu'
+import type { AppRouteRecord } from '@/types/router'
 
 const api = vi.hoisted(() => ({
   fetchDockerOverview: vi.fn(),
@@ -51,9 +54,11 @@ import {
   hostSyncText,
   hostSyncTone,
   hostVerdict,
+  menuIconByPath,
   overviewPageState,
   overviewSubtitle
 } from '../utils/overview'
+import type { OverviewKpiTile as KpiTile } from '../utils/overview'
 import type { DockerHostItem, DockerOverviewResp } from '../api'
 
 /* ── 夹具 ─────────────────────────────────────────────── */
@@ -271,6 +276,75 @@ describe('总览纯函数（口径错了只表现为页面说错话，必须钉�
     })
   })
 
+  describe('磁贴图标与菜单同源（iconByPath / menuIconByPath）', () => {
+    const fleet = makeOverview().fleet
+    const iconOf = (key: string, iconByPath?: Record<string, string>) =>
+      buildOverviewKpis(fleet, iconByPath).find((k) => k.key === key)!.icon
+
+    it('有覆盖：菜单同路径的 meta.icon 优先于硬编码回退值', () => {
+      // 故意用一枚与回退值（cib:docker）不同的图标名：证明「跟随菜单当前值」
+      // 而不是任何形式的硬编码。
+      const iconByPath = { '/docker/containers': 'material-symbols:graph-2' }
+      expect(iconOf('containers', iconByPath)).toBe('material-symbols:graph-2')
+      // 未覆盖的邻居照常回退（覆盖是按 path 逐键生效的）
+      expect(iconOf('volumes', iconByPath)).toBe('ri:hard-drive-3-line')
+      expect(iconOf('images', iconByPath)).toBe('pajamas:container-image')
+    })
+
+    it('无覆盖：菜单里查不到（缺键/空映射/未传）→ 回退硬编码主题图标值', () => {
+      expect(iconOf('containers')).toBe('cib:docker')
+      expect(iconOf('images', {})).toBe('pajamas:container-image')
+      expect(iconOf('volumes', {})).toBe('ri:hard-drive-3-line')
+      expect(iconOf('networks', {})).toBe('material-symbols:graph-2')
+      expect(iconOf('projects', {})).toBe('catppuccin:docker-compose')
+    })
+
+    it('空图标：菜单 icon 为空串 → 回退（磁贴永远有图标）', () => {
+      expect(iconOf('containers', { '/docker/containers': '' })).toBe('cib:docker')
+    })
+
+    it('主机/磁盘两枚无对应菜单，不参与同源', () => {
+      const iconByPath = { '/docker/containers': 'material-symbols:graph-2' }
+      expect(iconOf('hosts', iconByPath)).toBe('ri:server-line')
+      expect(iconOf('disk', iconByPath)).toBe('ri:database-2-line')
+    })
+
+    it('menuIconByPath：深度遍历收集；同 path 子节点覆盖父节点；空 icon 不进映射也不擦父值', () => {
+      const map = menuIconByPath([
+        {
+          // 顶层目录的 path 由首个子菜单推导、与总览菜单同 path —— 菜单节点应胜出
+          path: '/docker',
+          meta: { icon: 'devicon-plain:docker-wordmark' },
+          children: [
+            { path: '/docker', meta: { icon: 'simple-icons:distrobox' } },
+            { path: '/docker/volumes', meta: { icon: 'ri:hard-drive-3-line' } },
+            // 空 icon：不进映射（调用侧对缺失键回退）
+            { path: '/docker/empty', meta: {} },
+            {
+              path: '/docker/networks',
+              meta: { icon: 'material-symbols:graph-2' },
+              // 同 path 的空 icon 子节点不得擦掉父值
+              children: [{ path: '/docker/networks', meta: {} }]
+            },
+            {
+              path: '/docker/projects',
+              meta: { icon: 'catppuccin:docker-compose' },
+              children: [
+                { path: '/docker/projects/:name', meta: { icon: 'catppuccin:docker-compose' } }
+              ]
+            }
+          ]
+        }
+      ])
+      expect(map['/docker']).toBe('simple-icons:distrobox')
+      expect(map['/docker/volumes']).toBe('ri:hard-drive-3-line')
+      expect(map['/docker/empty']).toBeUndefined()
+      expect(map['/docker/networks']).toBe('material-symbols:graph-2')
+      expect(map['/docker/projects']).toBe('catppuccin:docker-compose')
+      expect(map['/docker/projects/:name']).toBe('catppuccin:docker-compose')
+    })
+  })
+
   describe('主机卡片的两条事实线', () => {
     it('结论句：error（服务端结论）优先；无 error 但 dockerOk=false 兜短句；正常 → success', () => {
       expect(hostVerdict(makeHost({ error: '读取资源快照失败' }))).toEqual({
@@ -438,7 +512,7 @@ async function makeRouter(): Promise<Router> {
         path: '/docker',
         name: 'DockerOverview',
         component: Overview,
-        meta: { title: 'Docker 总览', icon: 'ri:ship-line' }
+        meta: { title: 'Docker 总览', icon: 'simple-icons:distrobox' }
       },
       { path: '/docker/containers', component: { template: '<div />' } },
       // 8a：容器详情是整页路由（异常行下钻的目标），param 段单独登记。
@@ -473,14 +547,23 @@ async function waitPath(router: Router, path: string) {
   await vi.waitUntil(() => router.currentRoute.value.path === path, { timeout: 5000 })
 }
 
-async function mountOverview(): Promise<{ w: VueWrapper; router: Router }> {
+async function mountOverview(
+  menu?: AppRouteRecord[]
+): Promise<{ w: VueWrapper; router: Router }> {
+  const pinia = createPinia()
+  // 菜单树先灌再接挂：页面的 KPI 磁贴图标读 useMenuStore().menuList（同源口径），
+  // 不传 menu 时菜单为空 → 全部走硬编码回退值（既有用例的既有行为）。
+  if (menu) useMenuStore(pinia).menuList = menu
   const router = await makeRouter()
   await router.push('/docker')
   // attachTo：主机磁贴的下钻走 document.getElementById —— VTU 默认把组件挂在
   // 脱离文档的 div 上，不 attach 就查不到（getElementById 恒 null）。
   const el = document.createElement('div')
   document.body.appendChild(el)
-  const w = mount(Overview, { attachTo: el, global: { plugins: [router], stubs: STUBS } })
+  const w = mount(Overview, {
+    attachTo: el,
+    global: { plugins: [router, pinia], stubs: STUBS }
+  })
   mounted.push(w)
   await flush()
   return { w, router }
@@ -532,6 +615,40 @@ describe('渲染冒烟：挂载成功 + KPI 数值来自 mock fleet', () => {
     expect(notReported!.classes()).toContain('is-warning')
     // 副标题是舰队摘要
     expect(w.find('.dov-hero').text()).toContain('共 3 台主机 · 2 台可用')
+  })
+
+  it('KPI 磁贴图标与菜单同源：menuList 同 path 的 meta.icon 覆盖硬编码回退', async () => {
+    const { w } = await mountOverview([
+      {
+        path: '/docker',
+        name: 'dir-1',
+        meta: { title: 'Docker 管理', icon: 'devicon-plain:docker-wordmark' },
+        children: [
+          {
+            path: '/docker',
+            name: 'menu-1',
+            meta: { title: 'Docker 总览', icon: 'simple-icons:distrobox' }
+          },
+          {
+            // 菜单值故意 ≠ 磁贴回退值（cib:docker）：证明磁贴跟随「菜单当前值」
+            path: '/docker/containers',
+            name: 'menu-2',
+            meta: { title: '容器', icon: 'material-symbols:graph-2' }
+          }
+        ]
+      }
+    ])
+    const tiles = w
+      .findAllComponents({ name: 'DockerOverviewKpiTile' })
+      .map((c) => c.props('tile') as KpiTile)
+    const tileOf = (key: string) => tiles.find((t) => t.key === key)!
+    // 菜单里有的：取菜单值（运维改「菜单管理」即联动）
+    expect(tileOf('containers').icon).toBe('material-symbols:graph-2')
+    // 菜单里没有的：回退硬编码主题图标值
+    expect(tileOf('images').icon).toBe('pajamas:container-image')
+    // 主机/磁盘不参与同源（无对应菜单）
+    expect(tileOf('hosts').icon).toBe('ri:server-line')
+    expect(tileOf('disk').icon).toBe('ri:database-2-line')
   })
 
   it('主机卡片：三台各一张；部分失败的那台如实显示 error，不炸整页', async () => {
