@@ -32,12 +32,7 @@
             <ElButton
               size="small"
               :disabled="selected.length === 0"
-              @click="
-                openUpgradeDialog(
-                  selected.map((r) => r.id),
-                  'rollback'
-                )
-              "
+              @click="openRollbackDialog"
             >
               回滚选中
             </ElButton>
@@ -46,18 +41,35 @@
         </template>
       </ArtTableHeader>
 
+      <!-- 首拉失败：表格区整块错误态 + 重试（不再静默留旧数据）。全局 toast
+           仍由 utils/http 弹，这里是页面内联的结论与出路。 -->
+      <ElEmpty v-if="loadError" class="dev-empty" description="设备列表加载失败">
+        <ElButton size="small" @click="loadList">重试</ElButton>
+      </ElEmpty>
+
       <ArtTable
+        v-else
+        ref="tableRef"
         :loading="loading"
         :data="data"
         :columns="columns"
         :pagination="pagination"
+        :empty-text="emptyText"
+        row-key="id"
         @pagination:size-change="handleSizeChange"
         @pagination:current-change="handleCurrentChange"
         @selection-change="onSelectionChange"
-      />
+        @sort-change="handleSortChange"
+      >
+        <!-- 空态动作：筛选命中 0 时给「清除筛选」（无设备的空态不给——
+             那时按钮没有去处）。 -->
+        <template v-if="filterChips.length > 0 && !loading && data.length === 0" #empty-bottom>
+          <ElButton size="small" @click="clearAllFilters">清除筛选</ElButton>
+        </template>
+      </ArtTable>
     </ElCard>
 
-    <!-- ============ 升级/回滚对话框（单台与批量共用）============ -->
+    <!-- ============ 升级/回滚对话框（单台升级与批量升级共用）============ -->
     <ElDialog v-model="upgradeVisible" :title="dialogTitle" width="480px">
       <div class="up-dialog">
         <div class="up-dialog__targets">
@@ -87,10 +99,51 @@
       </template>
     </ElDialog>
 
+    <!-- ============ 批量回滚：每台回自己的上一版本（不共用版本下拉）============
+         版本来源是服务端 detail.rollbackVersion（升级记录推导），按版本分组下发；
+         无记录的设备不参与（列出并标注，静默跳过会让人以为回滚了）。 -->
+    <ElDialog v-model="rollbackVisible" title="回滚 Agent" width="560px">
+      <div class="rb-dialog">
+        <div v-if="rollbackLoading" class="rb-dialog__loading">正在读取各设备的回滚版本…</div>
+        <template v-else>
+          <ElTable :data="rollbackTargets" size="small" max-height="22rem">
+            <ElTableColumn prop="hostname" label="设备" min-width="180" show-overflow-tooltip />
+            <ElTableColumn label="当前版本" width="130">
+              <template #default="{ row }">{{ row.agentVersion || '—' }}</template>
+            </ElTableColumn>
+            <ElTableColumn label="回滚到" width="130">
+              <template #default="{ row }">
+                <span v-if="row.rollbackVersion" class="rb-dialog__ver">{{ row.rollbackVersion }}</span>
+                <span v-else class="rb-dialog__skip">无回滚记录（将跳过）</span>
+              </template>
+            </ElTableColumn>
+          </ElTable>
+          <div class="rb-dialog__count">
+            {{ rollbackDispatchable }} 台将回滚
+          </div>
+        </template>
+      </div>
+      <template #footer>
+        <ElButton @click="rollbackVisible = false">取消</ElButton>
+        <ElButton
+          type="primary"
+          :disabled="!rollbackTargets.length || rollbackDispatchable === 0 || rollbackLoading"
+          :loading="submitting"
+          @click="submitRollback"
+        >
+          回滚 {{ rollbackDispatchable }} 台
+        </ElButton>
+      </template>
+    </ElDialog>
+
     <!-- ============ 按筛选下发：先看影响面，再确认 ============ -->
     <ElDialog v-model="filterVisible" title="按当前筛选下发升级" width="460px">
       <div class="up-filter">
         <div class="up-filter__hint">按列表当前的筛选条件下发到全部命中设备</div>
+        <!-- 生效条件枚举（数据值）：与列表请求同一份 currentFilter()。 -->
+        <div v-if="filterChips.length > 0" class="up-filter__conds">
+          <span v-for="c in filterChips" :key="c.key">{{ c.label }}：{{ c.text }}</span>
+        </div>
         <ElSelect
           v-model="filterVersion"
           class="w-full"
@@ -124,9 +177,9 @@
 </template>
 
 <script setup lang="ts">
-  import { computed, h, reactive, ref } from 'vue'
+  import { computed, h, onActivated, onMounted, reactive, ref } from 'vue'
   import { ElMessage, ElMessageBox, ElTag } from 'element-plus'
-  import { useRouter } from 'vue-router'
+  import { useRoute, useRouter } from 'vue-router'
   import {
     PermDeviceDelete,
     PermDeviceDisable,
@@ -141,7 +194,7 @@
   import ArtButtonTable from '@/components/core/forms/art-button-table/index.vue'
   import ArtButtonMore from '@/components/core/forms/art-button-more/index.vue'
   import WatermarkBar from '../components/watermark-bar.vue'
-  import type { DeviceQuery } from '../api'
+  import type { DeviceQuery, DeviceSortBy } from '../api'
   import {
     disableDevice,
     dispatchDeviceUpgrade,
@@ -153,6 +206,7 @@
     removeDevice
   } from '../api'
   import { availableVersions, skipText, skipTotal, tagTypeOf, upgradeBadge } from '../utils/upgrade'
+  import { EMPTY_TEXT, formatRelative, formatUnixSeconds } from '../utils/display'
 
   defineOptions({ name: 'DeviceList' })
 
@@ -163,8 +217,15 @@
   const statusDict = useDict('sys_normal_disable', { numeric: true })
   const { hasAuth } = useAuth()
   const router = useRouter()
+  const route = useRoute()
 
-  const searchForm = ref<{ hostname?: string; status?: number; online?: boolean }>({})
+  const searchForm = ref<{
+    hostname?: string
+    status?: number
+    online?: boolean
+    primaryIp?: string
+    agentVersion?: string
+  }>({})
   const showSearchBar = ref(false)
   const searchItems = computed(() => [
     {
@@ -172,7 +233,31 @@
       label: '主机名',
       type: 'input',
       placeholder: '请输入主机名',
-      clearable: true
+      clearable: true,
+      // 回车即提交（props 透传到 ElInput，onKeyup 随 attrs 落到原生 input 上）。
+      props: { onKeyup: (e: KeyboardEvent) => e.key === 'Enter' && handleSearch() }
+    },
+    {
+      key: 'primaryIp',
+      label: 'IP',
+      type: 'input',
+      placeholder: '请输入 IP',
+      clearable: true,
+      // 模糊匹配（后端 LIKE），前缀/片段都命中；回车即提交，与主机名同款。
+      props: { onKeyup: (e: KeyboardEvent) => e.key === 'Enter' && handleSearch() }
+    },
+    {
+      key: 'agentVersion',
+      label: 'Agent 版本',
+      // 标签含空格 + 二字中文，约 70px 文本；默认 70px 宽的 label 盒
+      //（border-box，右内边距 12px → 内容仅 ~58px）装不下，会在空格处折行。
+      // 给本项单独放宽到 92px（内容 ~80px），单行显示，不动 art-search-bar 全局默认。
+      labelWidth: '92px',
+      type: 'input',
+      placeholder: '精确匹配',
+      clearable: true,
+      // 精确匹配（后端 =）：placeholder 直接给结论「精确匹配」，不解释。
+      props: { onKeyup: (e: KeyboardEvent) => e.key === 'Enter' && handleSearch() }
     },
     {
       key: 'status',
@@ -196,19 +281,58 @@
     }
   ])
 
+  // ── 服务端排序（sortBy/sortOrder → 后端白名单）────────────────────────
+  //
+  // 状态只存这两条，翻页/筛选/重查都随 query 一起发。空 = 默认排序
+  // （后端 lastSeenAt desc，与不传排序等价）—— 不在本地复制默认值，
+  // 保证「前端空 ⇔ 后端默认」永远同口径。
+  const sortBy = ref<DeviceSortBy | ''>('')
+  const sortOrder = ref<'asc' | 'desc' | ''>('')
+
+  /**
+   * ElTable sort-change 事件的落点（列声明 sortable:'custom'，排序由服务端做）。
+   *
+   * EP 的三态循环：升 → 降 → 取消（order 为 null）。取消排序 = 清回默认
+   * （清空两条状态，后端回落 lastSeenAt desc），而不是停在最后一次方向。
+   * 未知 prop 一律忽略（列集合里只有三个可排键，多出来的列头点击不该改排序）。
+   */
+  const SORTABLE_PROPS = new Set(['lastSeenAt', 'hostname', 'agentVersion'])
+  function handleSortChange({ prop, order }: { prop?: string; order?: string | null }) {
+    if (!prop || !SORTABLE_PROPS.has(prop)) return
+    if (order === 'ascending') {
+      sortBy.value = prop as DeviceSortBy
+      sortOrder.value = 'asc'
+    } else if (order === 'descending') {
+      sortBy.value = prop as DeviceSortBy
+      sortOrder.value = 'desc'
+    } else {
+      // 三态循环的第三态：清回默认排序
+      sortBy.value = ''
+      sortOrder.value = ''
+    }
+    pagination.current = 1
+    loadList()
+  }
+
   const canUpgrade = computed(() => hasAuth(PermDeviceUpgrade))
   const loading = ref(false)
   const data = ref<Api.Device.DeviceListItem[]>([])
+  /** 首拉失败：表格区整块错误态 + 重试（未成功过一次才置位，其后刷新失败保旧数据）。 */
+  const loadError = ref(false)
+  /** 表格 ref：clearSelection 用（下发/回滚完成后清勾选）。 */
+  const tableRef = ref<{ elTableRef?: { clearSelection: () => void } }>()
 
   // ── 升级 / 回滚（W1 / W3 / W4）───────────────────────────────────────
   //
-  // 两条入口共用同一个对话框：多选/单台（版本下拉按**选中设备的平台**过滤）
-  // 与按筛选全量（先预演影响面再确认）。入口不同、动作相同 —— 都是「把目标
-  // 版本写下去」，故不并成两套表单。
+  // 三条入口：多选升级/单台升级（版本下拉按**选中设备的平台**过滤）、批量回滚
+  //（每台回**它自己的** rollbackVersion，不共用版本）、按筛选全量（先预演
+  // 影响面再确认）。入口不同、动作相同 —— 都是「把目标版本写下去」，
+  // 故升级路径共用 submitUpgrade，回滚单走 submitRollback（按版本分组）。
   const selected = ref<Api.Device.DeviceListItem[]>([])
   const releases = ref<Api.Device.AgentReleaseItem[]>([])
   const publishedVersions = ref<string[]>([])
   const upgradeVisible = ref(false)
+  const rollbackVisible = ref(false)
   const filterVisible = ref(false)
   const submitting = ref(false)
   const mode = ref<'upgrade' | 'rollback'>('upgrade')
@@ -217,7 +341,22 @@
   const filterVersion = ref('')
   const filterPreview = ref<Api.Device.DeviceUpgradePreviewResp | null>(null)
 
+  // ── 批量回滚（对话内容与提交逻辑独立于升级对话框）──────────────────
+  /** 回滚目标清单：hostname / 当前版本 / rollbackVersion（无则不参与）。 */
+  interface RollbackTarget {
+    id: string
+    hostname: string
+    agentVersion: string
+    rollbackVersion: string
+  }
+  const rollbackTargets = ref<RollbackTarget[]>([])
+  const rollbackLoading = ref(false)
+  const rollbackDispatchable = computed(
+    () => rollbackTargets.value.filter((t) => t.rollbackVersion).length
+  )
+
   const dialogTitle = computed(() => (mode.value === 'rollback' ? '回滚 Agent' : '升级 Agent'))
+
   const dialogActionText = computed(() => {
     const verb = mode.value === 'rollback' ? '回滚' : '升级'
     if (targetRows.value.length > 1) {
@@ -235,6 +374,12 @@
     selected.value = rows
   }
 
+  /** 勾选态随数据/翻页复原后清空本地副本并通知 ElTable（两处都要做）。 */
+  function clearSelection() {
+    selected.value = []
+    tableRef.value?.elTableRef?.clearSelection()
+  }
+
   async function ensureReleaseData() {
     if (releases.value.length > 0) return
     const res = await fetchAgentReleases()
@@ -242,10 +387,21 @@
     publishedVersions.value = res.publishedVersions || []
   }
 
-  async function openUpgradeDialog(ids: string[], nextMode: 'upgrade' | 'rollback' = 'upgrade') {
+  /**
+   * 打开升级/单台回滚对话框。
+   *
+   * 只有 ids.length === 1 且 mode === 'rollback' 时走服务端推导 —— 批量回滚
+   * 不走这里（openRollbackDialog），那是一个完全不同的对话框（每台各回各的
+   * rollbackVersion，而不是把一批设备都写到一个自选版本上）。
+   */
+  async function openUpgradeDialog(
+    ids: string[],
+    nextMode: 'upgrade' | 'rollback' = 'upgrade',
+    presetVersion = ''
+  ) {
     mode.value = nextMode
     targetRows.value = data.value.filter((r) => ids.includes(r.id))
-    chosenVersion.value = ''
+    chosenVersion.value = presetVersion
     if (ids.length === 1 && nextMode === 'rollback') {
       // 单台回滚的版本由**服务端**从升级记录推导（「升级前是哪个版本」不该让人回忆）。
       try {
@@ -260,6 +416,35 @@
       await ensureReleaseData()
     } catch (e) {
       ElMessage.error(errText(e, '版本列表加载失败'))
+    }
+  }
+
+  /**
+   * 批量回滚入口：对选中设备逐一取服务端 rollbackVersion，构造「设备→上一版本」
+   * 映射；无记录的行进清单但**不参与**下发（「将跳过」标注在行上）。
+   * 并发取详情（一次选中通常 ≤ 百台，fetchDevice 是廉价的单查）。
+   */
+  async function openRollbackDialog() {
+    if (selected.value.length === 0) return
+    rollbackTargets.value = []
+    rollbackVisible.value = true
+    rollbackLoading.value = true
+    const rows = [...selected.value]
+    try {
+      const details = await Promise.allSettled(rows.map((r) => fetchDevice(r.id)))
+      rollbackTargets.value = rows.map((row, i) => {
+        const res = details[i]
+        const rollbackVersion =
+          res.status === 'fulfilled' ? res.value.rollbackVersion || '' : ''
+        return {
+          id: row.id,
+          hostname: row.hostname,
+          agentVersion: row.agentVersion || '',
+          rollbackVersion
+        }
+      })
+    } finally {
+      rollbackLoading.value = false
     }
   }
 
@@ -282,16 +467,71 @@
         ids: targetRows.value.map((r) => r.id)
       })
       const skipped = skipTotal(res.skip)
+      // 多台批量：toast 讲结论，去向是任务页深链（?id= 落到刚建的任务上）；
+      // 单台：留在本页继续操作（一次回车就是一条结论，跳页反而打断节奏）。
+      if (targetRows.value.length > 1 && res.taskId) {
+        upgradeVisible.value = false
+        clearSelection()
+        void router.push({ path: '/device/upgrade-task', query: { id: res.taskId } })
+        return
+      }
       ElMessage.success(
         skipped > 0
           ? `已下发 ${res.dispatched} 台，跳过 ${skipped} 台（${skipText(res.skip)}）`
           : `已下发 ${res.dispatched} 台`
       )
       upgradeVisible.value = false
-      selected.value = []
+      clearSelection()
       await loadList()
     } catch (e) {
       ElMessage.error(errText(e, '下发失败'))
+    } finally {
+      submitting.value = false
+    }
+  }
+
+  /**
+   * 批量回滚提交：按「目标版本」分组、每组一次 dispatchDeviceUpgrade
+   * （{version, ids:[…]}）。一组失败不停其余组（单组失败只报它自己），
+   * 全部结果汇成一条结论。
+   */
+  async function submitRollback() {
+    const dispatchable = rollbackTargets.value.filter((t) => t.rollbackVersion)
+    if (dispatchable.length === 0) return
+    try {
+      await ElMessageBox.confirm(`确认把 ${dispatchable.length} 台设备回滚到各自上一版本吗？`, '提示', {
+        type: 'warning'
+      })
+    } catch {
+      return
+    }
+    submitting.value = true
+    // 按目标版本分组（一次回滚通常都落在同一个版本上，但退化情形也要正确）。
+    const groups = new Map<string, string[]>()
+    for (const t of dispatchable) {
+      const ids = groups.get(t.rollbackVersion) ?? []
+      ids.push(t.id)
+      groups.set(t.rollbackVersion, ids)
+    }
+    let ok = 0
+    const failures: string[] = []
+    try {
+      for (const [version, ids] of groups) {
+        try {
+          const res = await dispatchDeviceUpgrade({ version, ids })
+          ok += res.dispatched
+        } catch (e) {
+          failures.push(`${version}：${errText(e, '下发失败')}`)
+        }
+      }
+      if (failures.length > 0) {
+        ElMessage.error(`已回滚 ${ok} 台；${failures.join('；')}`)
+      } else {
+        ElMessage.success(`已回滚 ${ok} 台`)
+      }
+      rollbackVisible.value = false
+      clearSelection()
+      await loadList()
     } finally {
       submitting.value = false
     }
@@ -339,12 +579,18 @@
         expectedCount: filterPreview.value.matched
       })
       const skipped = skipTotal(res.skip)
+      // 全量下发是高影响面操作：发完直接去任务页深链看逐台进度
+      //（toast 的台数在这里只是复核，进度才是要盯的东西）。
+      filterVisible.value = false
+      if (res.taskId) {
+        void router.push({ path: '/device/upgrade-task', query: { id: res.taskId } })
+        return
+      }
       ElMessage.success(
         skipped > 0
           ? `已下发 ${res.dispatched} 台，跳过 ${skipped} 台（${skipText(res.skip)}）`
           : `已下发 ${res.dispatched} 台`
       )
-      filterVisible.value = false
       await loadList()
     } catch (e) {
       ElMessage.error(errText(e, '下发失败'))
@@ -355,10 +601,14 @@
     }
   }
 
-  /** 当前筛选条件（与列表请求**同一份**，保证「看到的就是发下去的」）。 */
+  /** 当前筛选条件（与列表请求**同一份**，保证「看到的就是发下去的」）。
+   *  排序不进筛选（它不改变命中集合，只改变行序——「按当前筛选下发」的
+   *  影响面与排序无关，expectedCount 的比对不该被排序扰动）。 */
   function currentFilter(): DeviceQuery {
     return {
       ...(searchForm.value.hostname ? { hostname: searchForm.value.hostname } : {}),
+      ...(searchForm.value.primaryIp ? { primaryIp: searchForm.value.primaryIp } : {}),
+      ...(searchForm.value.agentVersion ? { agentVersion: searchForm.value.agentVersion } : {}),
       ...(searchForm.value.status !== undefined && searchForm.value.status !== null
         ? { status: Number(searchForm.value.status) }
         : {}),
@@ -368,9 +618,63 @@
     }
   }
 
+  /** 生效筛选的 chips（label + 实际值）：纯数据，不解释。 */
+  interface FilterChip {
+    key: 'hostname' | 'status' | 'online' | 'primaryIp' | 'agentVersion'
+    label: string
+    text: string
+  }
+  const filterChips = computed<FilterChip[]>(() => {
+    const chips: FilterChip[] = []
+    if (searchForm.value.hostname) {
+      chips.push({ key: 'hostname', label: '主机名', text: searchForm.value.hostname })
+    }
+    if (searchForm.value.primaryIp) {
+      chips.push({ key: 'primaryIp', label: 'IP', text: searchForm.value.primaryIp })
+    }
+    if (searchForm.value.agentVersion) {
+      chips.push({
+        key: 'agentVersion',
+        label: 'Agent 版本',
+        text: searchForm.value.agentVersion
+      })
+    }
+    if (searchForm.value.status !== undefined && searchForm.value.status !== null) {
+      chips.push({
+        key: 'status',
+        label: '启停状态',
+        text: statusDict.labelOf(searchForm.value.status) || String(searchForm.value.status)
+      })
+    }
+    if (searchForm.value.online !== undefined && searchForm.value.online !== null) {
+      chips.push({
+        key: 'online',
+        label: '在线状态',
+        text: searchForm.value.online ? '在线' : '离线'
+      })
+    }
+    return chips
+  })
+
+  function clearAllFilters() {
+    searchForm.value = {}
+    handleSearch()
+  }
+
   function errText(e: unknown, fallback: string): string {
     const msg = (e as { message?: string }) && (e as { message?: string }).message
     return msg && msg.trim() !== '' ? msg : fallback
+  }
+
+  /** 复制文本（IP 列点击即复制；与详情页 copyText 同款交互）。 */
+  async function copyText(text: string) {
+    if (!text) return
+    try {
+      await navigator.clipboard.writeText(text)
+      ElMessage.success('已复制')
+    } catch {
+      ElMessage.warning('复制失败，请手动选择文本')
+    }
   }
   const pagination = reactive({ current: 1, size: 10, total: 0 })
   /** 正在切启停态的设备 id：用于禁用行内按钮，避免重复提交。 */
@@ -383,6 +687,8 @@
         page: pagination.current,
         pageSize: pagination.size,
         ...(searchForm.value.hostname ? { hostname: searchForm.value.hostname } : {}),
+        ...(searchForm.value.primaryIp ? { primaryIp: searchForm.value.primaryIp } : {}),
+        ...(searchForm.value.agentVersion ? { agentVersion: searchForm.value.agentVersion } : {}),
         ...(searchForm.value.status !== undefined && searchForm.value.status !== null
           ? { status: Number(searchForm.value.status) }
           : {}),
@@ -391,26 +697,29 @@
         ...(searchForm.value.online !== undefined && searchForm.value.online !== null
           ? { online: Boolean(searchForm.value.online) }
           : {}),
+        // 服务端排序：空 = 默认（后端 lastSeenAt desc）；两键只成对出现。
+        ...(sortBy.value ? { sortBy: sortBy.value } : {}),
+        ...(sortBy.value && sortOrder.value ? { sortOrder: sortOrder.value } : {}),
         // 字典只用于把 status 渲染成中文标签，与列表请求并行拉取。
         // （此处的 void 只是把它串进同一个 await，无其它副作用。）
         ...(await statusDict.ensure(), {})
       })
       data.value = res.list
       pagination.total = res.total
+      loadError.value = false
+    } catch {
+      // 首拉失败：置错误态（表格区换整块重试）；曾成功过则保旧数据不换脸
+      // —— 全局 toast 已由 utils/http 弹过，这里只决定页面形态。
+      if (data.value.length === 0) loadError.value = true
     } finally {
       loading.value = false
     }
   }
 
-  /** unix 秒 → 本地时间；缺值显示「—」（与水位列同一约定）。 */
-  function fmtUnixSeconds(v?: number | null) {
-    if (v === undefined || v === null) return '—'
-    const d = new Date(v * 1000)
-    const p = (n: number) => String(n).padStart(2, '0')
-    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(
-      d.getMinutes()
-    )}:${p(d.getSeconds())}`
-  }
+  /** 空态两分：有筛选命中 0 →「无匹配结果」（给清除按钮）；无设备 →「暂无数据」。 */
+  const emptyText = computed(() =>
+    filterChips.value.length > 0 ? '无匹配结果' : '暂无数据'
+  )
 
   function onUpgradeAction(key: string, row: Api.Device.DeviceListItem) {
     if (key === 'upgrade') void openUpgradeDialog([row.id], 'upgrade')
@@ -462,7 +771,13 @@
     } catch {
       return // 用户取消
     }
-    await removeDevice(row.id)
+    try {
+      await removeDevice(row.id)
+    } catch (e) {
+      // 删除失败走 errText toast（与下发/回滚同一口径），列表不动（行还在）。
+      ElMessage.error(errText(e, '删除失败'))
+      return
+    }
     ElMessage.success('已删除')
     // 删掉最后一页的最后一条时回退一页，避免停在空页。
     if (data.value.length === 1 && pagination.current > 1) pagination.current -= 1
@@ -547,13 +862,40 @@
       // 列宽口径：数据列一律 minWidth（随容器伸缩），仅 selection / index /
       // 操作列这类结构性列用固定 width。断点定义见 src/config/breakpoints.ts。
       // 选择列只在有升级权限时出现：没这个权限的人看到一个用不上的勾选框只会困惑。
+      // reserve-selection：跨页勾选保持（翻页/删除/重拉后勾选不丢）——前提是
+      // 表级 row-key="id"（模板上已传），EP 按行 id 记忆勾选态。
       ...(canUpgrade.value
-        ? [{ type: 'selection' as const, width: 46, selectable: () => true }]
+        ? [
+            {
+              type: 'selection' as const,
+              width: 46,
+              selectable: () => true,
+              reserveSelection: true
+            }
+          ]
         : []),
-      // 序号是纯位置信息，手机上让位给数据列。
-      { type: 'index', width: 60, label: '序号', hideBelow: 'tablet' },
-      // 主机名 = 设备标识，任何宽度都不隐藏。
-      { prop: 'hostname', label: '主机名', minWidth: 180, showOverflowTooltip: true },
+      // 序号用跨页连续的 globalIndex（不随翻页重置）；手机上让位给数据列。
+      { type: 'globalIndex', width: 60, label: '序号', hideBelow: 'tablet' },
+      // 主机名 = 设备标识，任何宽度都不隐藏；固定左（与 selection/index 构成
+      // 稳定左前缀），横滚时身份列钉在原地。fixed 与 hideBelow 在本列**不同用**
+      //（该列无 hideBelow），两者在 ArtTable 的渲染层互不干涉（hideBelow 只把列
+      // 从渲染集里过滤掉、fixed 交给 EP 布局）—— 结论见本文件底部注释。
+      {
+        prop: 'hostname',
+        label: '主机名',
+        minWidth: 180,
+        fixed: 'left',
+        showOverflowTooltip: true,
+        // 服务端排序（后端白名单列 hostname）；'custom' = 排序不发本地，
+        // 只抛 sort-change 事件由页面换页重查。
+        sortable: 'custom',
+        formatter: (row: Api.Device.DeviceListItem) =>
+          h(
+            'a',
+            { class: 'dev-host-link', onClick: () => openDetail(row) },
+            row.hostname || EMPTY_TEXT
+          )
+      },
       // 系统类型影响升级包与兼容判断，平板起显示。
       {
         prop: 'os',
@@ -564,12 +906,38 @@
       },
       // 架构只在排查兼容性问题时才需要，优先级最低，桌面起显示。
       { prop: 'arch', label: '架构', minWidth: 100, hideBelow: 'desktop' },
+      // 来源 IP（服务端观测，非设备自述）：定位/SSH 前在列表里就能看到是哪台。
+      // 缺值「—」（未观测到时字段整个不出现，见 DeviceListItem.PrimaryIP 注释）；
+      // 点击复制（复用详情页 copyText 交互），空值不渲染按钮。
+      {
+        prop: 'primaryIp',
+        label: 'IP',
+        minWidth: 130,
+        hideBelow: 'desktop',
+        formatter: (row: Api.Device.DeviceListItem) =>
+          row.primaryIp
+            ? h(
+                'span',
+                {
+                  class: 'dev-ip',
+                  title: '点击复制',
+                  role: 'button',
+                  tabindex: 0,
+                  onClick: () => copyText(row.primaryIp || ''),
+                  onKeydown: (e: KeyboardEvent) => e.key === 'Enter' && copyText(row.primaryIp || '')
+                },
+                row.primaryIp
+              )
+            : h('span', null, EMPTY_TEXT)
+      },
       {
         prop: 'agentVersion',
         label: 'Agent 版本',
         minWidth: 190,
         // 版本决定「该不该升级 / 能不能回滚」，平板起显示。
         hideBelow: 'tablet',
+        // 服务端排序（后端白名单列 agent_version）。
+        sortable: 'custom',
         // 版本列要一眼回答「这台机器该不该动」：当前版本 + （有目标时）目标与标记。
         // 标记的语义规则在 utils/upgrade.upgradeBadge 里（含「不支持远程升级」
         // 这类必须说清楚的结论），这里只负责渲染。
@@ -622,7 +990,18 @@
         minWidth: 170,
         // 「失联多久」是离线的第一追问，平板起显示；更细的采样时刻见水位列。
         hideBelow: 'tablet',
-        formatter: (row) => fmtUnixSeconds(row.lastSeenAt)
+        // 服务端排序（后端默认列 last_seen_at，点表头即显式指定同一口径）。
+        sortable: 'custom',
+        // 相对时间在前（5 分钟前），绝对时刻放 title（悬浮可见，读屏可读）。
+        formatter: (row: Api.Device.DeviceListItem) =>
+          h(
+            'span',
+            {
+              class: 'dev-rel-time',
+              title: row.lastSeenAt ? formatUnixSeconds(row.lastSeenAt) : ''
+            },
+            formatRelative(row.lastSeenAt)
+          )
       },
       // 水位三列来自列表接口拼的 Redis latest：缺值时**整个字段不出现**
       // （omitempty），一律显示「—」，不得把缺值当成 0。
@@ -656,7 +1035,7 @@
         minWidth: 170,
         // 最细粒度的时间元数据（与水位列配套核对数据新鲜度），桌面起显示。
         hideBelow: 'desktop',
-        formatter: (row) => fmtUnixSeconds(row.watermarkAt)
+        formatter: (row) => formatUnixSeconds(row.watermarkAt)
       },
       // 操作列固定右侧、宽随按钮数计算（结构性列），任何宽度都不隐藏：
       // 窄屏放不下的次要动作本来就已收进「更多」下拉。
@@ -691,7 +1070,46 @@
     loadList()
   }
 
-  loadList()
+  // ── 「重试失败项」深链（升级任务页 retryFailed push 来的 query）──────
+  // retryIds 是逗号分隔的设备 id、retryVersion 是那次任务的目标版本。
+  // 打开升级对话框（预选 retryVersion）；query 随即 replace 清掉 —— 防刷新
+  // /复进时二次触发。挂载时机只认 onMounted：KeepAlive 的返回不重挂，
+  // 该深链本来也只在「从任务页点过来」时出现一次。
+  // ── 「重试失败项」深链（升级任务页 retryFailed push 来的 query）──────
+  // retryIds 是逗号分隔的设备 id、retryVersion 是那次任务的目标版本。
+  // 等**首拉落定后**再打开升级对话框（openUpgradeDialog 用 data.value 过滤
+  // 目标行，首拉未回来时它是空的 —— 对话框会开成「0 台」）。query 随即
+  // replace 清掉 —— 防刷新/复进时二次触发。挂载时机只认 onMounted：
+  // KeepAlive 的返回不重挂，该深链本来也只在「从任务页点过来」时出现一次。
+  onMounted(async () => {
+    const retryIds = typeof route.query.retryIds === 'string' ? route.query.retryIds : ''
+    const retryVersion =
+      typeof route.query.retryVersion === 'string' ? route.query.retryVersion : ''
+    if (retryIds) {
+      const ids = retryIds
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
+      if (ids.length > 0) {
+        // 首拉在 setup 尾部已 void 出发，这里等同一份落定（loadList 幂等，
+        // onActivated 的补拉不会与本流程竞争 —— 它们都是「拉当前页」）。
+        await firstLoad
+        void openUpgradeDialog(ids, 'upgrade', retryVersion)
+      }
+    }
+    void router.replace({ path: '/device/index', query: {} })
+  })
+
+  // ── KeepAlive 回显后的数据同步 ──────────────────────────────────────
+  // 路由 meta.keepAlive=true（见 modules/device/index.ts）：翻页/筛选/列配置/
+  // 勾选都由缓存实例保持；但列表数据会陈旧（在详情页停留期间设备可能变化）。
+  // onActivated 在**首次挂载也会触发**，与 setup 尾部的 loadList 重复拉一次的
+  // 代价可接受（一次分页查询），换来「返回列表永远不是陈旧快照」。
+  onActivated(() => {
+    loadList()
+  })
+
+  const firstLoad = loadList()
 </script>
 
 <style lang="scss" scoped>
@@ -707,6 +1125,44 @@
       font-size: 12px;
       color: var(--el-text-color-regular);
       font-variant-numeric: tabular-nums;
+      /* 「已选 N 台」是一个计数原子值，不折行。 */
+      white-space: nowrap;
+    }
+  }
+
+  /* 首拉失败的内联错误态（ElEmpty）：给接近表格空态的留白 */
+  .dev-empty {
+    padding: 56px 0;
+  }
+
+  /* 主机名链接（点击进详情；showOverflowTooltip 仍在列级生效） */
+  .dev-host-link {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--aa-primary-text);
+    text-decoration: none;
+    cursor: pointer;
+
+    &:hover {
+      color: var(--aa-primary-text-hover);
+      text-decoration: underline;
+      text-underline-offset: 3px;
+    }
+  }
+
+  /* 相对时间（title 里是绝对时刻）；时间戳原子值不折行 */
+  .dev-rel-time {
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  /* IP 列：点击复制（等宽数字对齐；空值「—」无按钮语义） */
+  .dev-ip {
+    font-variant-numeric: tabular-nums;
+    cursor: pointer;
+
+    &:hover {
+      color: var(--aa-primary-text-hover);
     }
   }
 
@@ -718,6 +1174,7 @@
 
     &__now {
       font-variant-numeric: tabular-nums;
+      white-space: nowrap;
     }
 
     &__arrow {
@@ -726,6 +1183,8 @@
       // el-color-warning（白底 1.85）改走 token，数字见 @styles/core/aa-text.scss。
       color: var(--aa-warning-text);
       font-variant-numeric: tabular-nums;
+      /* 「→ 0.3.0」含空格，版本原子值不折行 */
+      white-space: nowrap;
     }
   }
 
@@ -746,6 +1205,35 @@
     }
   }
 
+  /* 批量回滚：设备 → 各自上一版本的清单（右侧结论列给了去留语义） */
+  .rb-dialog {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+
+    &__loading {
+      padding: 32px 0;
+      text-align: center;
+      font-size: 12px;
+      color: var(--el-text-color-secondary);
+    }
+
+    &__ver {
+      font-variant-numeric: tabular-nums;
+    }
+
+    &__skip {
+      font-size: 12px;
+      color: var(--el-text-color-secondary);
+    }
+
+    &__count {
+      font-size: 13px;
+      color: var(--el-text-color-primary);
+      font-variant-numeric: tabular-nums;
+    }
+  }
+
   /* 影响面：大号数字是这个确认框唯一的「仪式感」，花在影响面上而不是装饰上 */
   .up-filter {
     display: flex;
@@ -755,6 +1243,18 @@
     &__hint {
       font-size: 12px;
       color: var(--el-text-color-secondary);
+    }
+
+    /* 生效条件枚举（数据值）：一行一条，不下拉折叠（最多 3 项） */
+    &__conds {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      background: var(--el-fill-color-lighter);
+      font-size: 12px;
+      color: var(--el-text-color-regular);
     }
 
     &__preview {
@@ -788,3 +1288,18 @@
     }
   }
 </style>
+
+<!--
+  ── fixed 与 hideBelow 的共存结论（本页的取用证据）─────────────────────
+  ArtTable 的渲染层先按 hideBelow 过滤列集（responsive-columns.
+  filterColumnsForViewport —— 只把列从渲染集里**去掉**，不碰 fixed 字段），
+  再把保留列的 fixed 原样交给 ElTableColumn；EP 按保留列里的声明序重排
+  fixed 前缀（responsive-columns.warnNonPrefixFixedLeft 钉住「左固定列
+  必须是渲染列表前缀」的约束）。两者作用在不同层、互不干涉：一列可以
+  同时声明 fixed:'left' 与 hideBelow —— 视口宽时固定显示、窄时整列消失，
+  固定组自动收缩为剩下的前缀。
+  本页的左前缀是 selection → globalIndex → hostname（hostname 固定且
+  无 hideBelow）；手机档序号被过滤后前缀仍是 selection → hostname，
+  依然连续 —— 不会触发列序告警。故「身份列任何宽度可见」与「宽屏横滚时
+  身份列钉在原地」两个目标同时成立，无需取舍。
+-->

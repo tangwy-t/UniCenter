@@ -236,6 +236,11 @@
                   → {{ upgradeTarget }}
                 </template>
               </span>
+              <!-- 已固定：pin 的正向状态标记（设备级目标 == 当前版本且非跟随全站）——
+                   否则「已固定」只能靠「恢复跟随全站」链接反推。 -->
+              <ElTag v-if="isPinned" size="small" type="primary" effect="light">
+                已固定 {{ device.agentVersion }}
+              </ElTag>
               <ElTag
                 v-if="upgradeBadgeInfo"
                 size="small"
@@ -267,7 +272,7 @@
                   回滚到 {{ rollbackVersion }}
                 </ElButton>
                 <ElButton
-                  v-if="canUpgrade && device.agentUpgradeSupported"
+                  v-if="canUpgrade && device.agentUpgradeSupported && !isPinned"
                   size="small"
                   plain
                   @click="pinCurrent"
@@ -458,6 +463,7 @@
   import {
     availableVersions,
     formatUnixTime,
+    isDevicePinned,
     reasonText,
     resultText,
     tagTypeOf,
@@ -715,6 +721,8 @@
   const upgradeTarget = computed(() => device.value?.targetVersion || '')
   /** 一键回滚目标（服务端从升级记录推导；空 = 没有成功历史）。 */
   const rollbackVersion = computed(() => device.value?.rollbackVersion || '')
+  /** 已固定：设备级目标 == 当前版本且非跟随全站（pin 的正向状态标记）。 */
+  const isPinned = computed(() => (device.value ? isDevicePinned(device.value) : false))
   const upgradeBadgeInfo = computed(() => (device.value ? upgradeBadge(device.value) : null))
   /** 版本下拉：已发布 ∩ 本设备平台有程序包。 */
   const versionOptions = computed(() =>
@@ -762,19 +770,29 @@
   async function openUpgrade() {
     chosenVersion.value = ''
     upgradeVisible.value = true
-    if (releases.value.length === 0) {
-      try {
-        const res = await fetchAgentReleases()
-        releases.value = res.list || []
-        publishedVersions.value = res.publishedVersions || []
-      } catch (e) {
-        ElMessage.error(errMsg(e, '版本列表加载失败'))
-      }
+    // 每次打开都重取：版本是会话期间可能新增的（刚发布的版本必须出现在下拉里），
+    // 之前「releases 非空就复用缓存」会让新版本在刷新页面前一直缺席。
+    try {
+      const res = await fetchAgentReleases()
+      releases.value = res.list || []
+      publishedVersions.value = res.publishedVersions || []
+    } catch (e) {
+      ElMessage.error(errMsg(e, '版本列表加载失败'))
     }
   }
 
   async function submitUpgrade() {
     if (!deviceId.value || !chosenVersion.value) return
+    // 与列表页单台升级口径一致：下发前二次确认（升级会重启 Agent、短暂中断采集）。
+    try {
+      await ElMessageBox.confirm(
+        `确认把「${device.value?.hostname}」升级到 ${chosenVersion.value} 吗？升级会重启 Agent，采集中断。`,
+        '升级确认',
+        { type: 'warning', confirmButtonText: '升级', cancelButtonText: '取消' }
+      )
+    } catch {
+      return
+    }
     submitting.value = true
     try {
       const res = await upgradeDevice(deviceId.value, { version: chosenVersion.value })
@@ -820,12 +838,23 @@
    */
   async function pinCurrent() {
     if (!deviceId.value || !device.value?.agentVersion) return
+    const version = device.value.agentVersion
+    // pin 改变的是持续行为（比单次升级更长远），故下达前确认；文案只给结论。
+    try {
+      await ElMessageBox.confirm(
+        `固定后「${device.value.hostname}」将停在 ${version}，不再跟随全站版本，需手动恢复。`,
+        '固定版本',
+        { type: 'warning', confirmButtonText: '固定', cancelButtonText: '取消' }
+      )
+    } catch {
+      return
+    }
     try {
       await upgradeDevice(deviceId.value, {
-        version: device.value.agentVersion,
+        version,
         pin: true
       })
-      ElMessage.success(`已固定在 ${device.value.agentVersion}（不再跟随全站）`)
+      ElMessage.success(`已固定在 ${version}（不再跟随全站）`)
       await refreshAll()
     } catch (e) {
       ElMessage.error(errMsg(e, '操作失败'))
@@ -1065,6 +1094,8 @@
       padding: 0 3px;
       background: var(--el-fill-color-light);
       border-radius: 3px;
+      /* 设备 ID / IP 是原子数据：单行，不随副行 flex-wrap 折成两行。 */
+      white-space: nowrap;
     }
 
     &__copy {
@@ -1230,6 +1261,8 @@
       font-weight: 600;
       /* F-23：等宽数字，自动刷新时数字不跳动 */
       font-variant-numeric: tabular-nums;
+      /* 运行时长含空格（`12 天 3 时`）——原子值单行，不折成两行。 */
+      white-space: nowrap;
       line-height: 1.2;
     }
 
@@ -1377,6 +1410,8 @@
       font-size: 13px;
       color: var(--el-text-color-regular);
       font-variant-numeric: tabular-nums;
+      /* 「当前版本 → 目标版本」含空格：版本原子值单行。 */
+      white-space: nowrap;
     }
 
     &__reason {
@@ -1388,6 +1423,8 @@
     &__time {
       font-size: 12px;
       color: var(--el-text-color-secondary);
+      /* 绝对时刻含空格：时间戳原子值单行。 */
+      white-space: nowrap;
     }
 
     &__actions {
@@ -1429,10 +1466,13 @@
     &__record-time {
       color: var(--el-text-color-secondary);
       font-variant-numeric: tabular-nums;
+      white-space: nowrap;
     }
 
     &__record-ver {
       font-variant-numeric: tabular-nums;
+      /* 「from → to」含空格：版本原子值单行。 */
+      white-space: nowrap;
     }
 
     &__record-state {

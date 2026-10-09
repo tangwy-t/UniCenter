@@ -8,7 +8,8 @@
         </div>
         <div class="min-w-0">
           <h2 class="text-lg font-semibold text-[var(--el-text-color-primary)]">升级任务</h2>
-          <p class="mt-0.5 text-xs text-g-600">{{ subtitle }}</p>
+          <!-- 同 overview.vue：text-g-600 换 AA 次要灰 token，只动这一处副标题 -->
+          <p class="mt-0.5 text-xs text-[var(--aa-secondary-text)]">{{ subtitle }}</p>
         </div>
         <div class="ml-auto flex items-center gap-1">
           <ArtButtonTable
@@ -25,6 +26,24 @@
         <div class="do-card ut-list">
           <div class="ut-list__head">
             <span class="ut-list__title">任务列表</span>
+            <div class="ut-list__filters">
+              <ElSelect
+                v-model="sourceFilter"
+                size="small"
+                placeholder="来源"
+                clearable
+                class="ut-src"
+                @change="applyListFilters"
+              >
+                <ElOption label="单台" value="manual" />
+                <ElOption label="多选" value="batch" />
+                <ElOption label="按筛选" value="filter" />
+                <ElOption label="全站" value="global" />
+              </ElSelect>
+              <ElCheckbox v-model="runningOnly" size="small" @change="applyListFilters">
+                只看未收口
+              </ElCheckbox>
+            </div>
             <span class="ut-list__hint">每 {{ listIntervalSec }} 秒自动刷新</span>
           </div>
           <ElTable
@@ -50,15 +69,33 @@
             </ElTableColumn>
             <ElTableColumn label="进度" min-width="220">
               <template #default="{ row }">
-                <span class="ut-counts">{{ taskCountsText(row.counts) }}</span>
-                <span v-if="isSettled(row)" class="ut-done">已收口</span>
+                <!-- 细进度条：成功段（绿）+ 失败段（红，失败数非 0 时）。数值文本保留为无障碍通道。 -->
+                <div class="ut-progress">
+                  <span class="ut-progress__bar" aria-hidden="true">
+                    <i
+                      class="ut-progress__ok"
+                      :style="{ width: progressOf(row).succeededPercent + '%' }"
+                    />
+                    <i
+                      v-if="progressOf(row).failed > 0"
+                      class="ut-progress__bad"
+                      :style="{ width: progressOf(row).failedPercent + '%' }"
+                    />
+                  </span>
+                  <span class="ut-progress__text">
+                    <span class="ut-counts">{{ taskCountsText(row.counts) }}</span>
+                    <span v-if="isSettled(row)" class="ut-done">已收口</span>
+                  </span>
+                </div>
               </template>
             </ElTableColumn>
             <ElTableColumn label="发起人" width="90">
               <template #default="{ row }">{{ row.actor || '—' }}</template>
             </ElTableColumn>
             <ElTableColumn label="时间" width="128">
-              <template #default="{ row }">{{ formatUnixTime(row.createdAt) }}</template>
+              <template #default="{ row }"
+                ><span class="whitespace-nowrap">{{ formatUnixTime(row.createdAt) }}</span></template
+              >
             </ElTableColumn>
           </ElTable>
           <ElPagination
@@ -153,7 +190,9 @@
                 </template>
               </ElTableColumn>
               <ElTableColumn label="耗时" width="86">
-                <template #default="{ row }">{{ elapsedText(row) }}</template>
+                <template #default="{ row }"
+                  ><span class="whitespace-nowrap">{{ elapsedText(row) }}</span></template
+                >
               </ElTableColumn>
               <ElTableColumn label="结果" width="96">
                 <template #default="{ row }">
@@ -195,7 +234,8 @@
     stageLabel,
     stageText,
     stageView,
-    taskCountsText
+    taskCountsText,
+    taskProgress
   } from '../utils/upgrade'
 
   defineOptions({ name: 'DeviceUpgradeTask' })
@@ -219,6 +259,9 @@
   const detail = ref<Api.Device.AgentUpgradeTaskDetailResp | null>(null)
   const selectedId = ref<string>('')
   const filter = ref<'' | 'active' | 'failed'>('')
+  /** 列表筛选：只看未收口的任务 / 按来源（复用后端 running / source 参数）。 */
+  const runningOnly = ref(false)
+  const sourceFilter = ref('')
 
   const listIntervalSec = 5
   const detailIntervalSec = 2
@@ -234,6 +277,11 @@
   /** 任务是否已收口（后端在没有进行中且没有等待时写 finishedAt）。 */
   function isSettled(row: TaskItem): boolean {
     return !!row.finishedAt
+  }
+
+  /** 列表「进度」列的细进度条视图（成功段 + 失败段）。 */
+  function progressOf(row: TaskItem) {
+    return taskProgress(row.counts)
   }
 
   function stage(row: AttemptItem) {
@@ -272,6 +320,8 @@
     listLoading.value = true
     try {
       const q: UpgradeTaskQuery = { page: page.value, pageSize }
+      if (runningOnly.value) q.running = true
+      if (sourceFilter.value) q.source = sourceFilter.value
       const res = await fetchAgentUpgradeTasks(q)
       tasks.value = res.list ?? []
       taskTotal.value = res.total ?? 0
@@ -318,6 +368,12 @@
     void loadList(false)
   }
 
+  /** 列表筛选变化：回到第 1 页重新拉（筛选态变化会让分页越界）。 */
+  function applyListFilters() {
+    page.value = 1
+    void loadList(false)
+  }
+
   function reloadAll() {
     void loadList()
     void loadDetail()
@@ -361,8 +417,15 @@
     await loadDetail()
     // 列表 5 秒、详情 2 秒（升级是低频秒级操作，2 秒延迟不可感知；
     // 引入 WS 推送的复杂度与收益不成比例——见设计 §6）。
-    listTimer = setInterval(() => void loadList(), listIntervalSec * 1000)
-    detailTimer = setInterval(() => void loadDetail(), detailIntervalSec * 1000)
+    listTimer = setInterval(() => {
+      // 页面不可见时不轮询：后台标签页里的轮询纯属浪费（同 detail.vue 既有写法）。
+      if (typeof document !== 'undefined' && document.hidden) return
+      void loadList()
+    }, listIntervalSec * 1000)
+    detailTimer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return
+      void loadDetail()
+    }, detailIntervalSec * 1000)
   })
 
   // 离开页面即停：轮询不该在后台继续烧请求。
@@ -374,7 +437,6 @@
 
 <style lang="scss" scoped>
   @use '../views/device-tokens' as t;
-  @use '@styles/core/breakpoints.scss' as *;
 
   @include t.rise-keyframes;
   @include t.pulse-keyframes;
@@ -402,12 +464,6 @@
     display: grid;
     grid-template-columns: minmax(0, 1fr);
     gap: 16px;
-
-    /* 宽屏起「固定宽列表 + 自适应详情」两栏并排
-       （1280 与断点表 xl 同值，纯口径统一，行为等价） */
-    @include respond-at-least('xl') {
-      grid-template-columns: 26rem minmax(0, 1fr);
-    }
   }
 
   .ut-list,
@@ -417,9 +473,20 @@
 
   .ut-list__head {
     display: flex;
-    align-items: baseline;
+    flex-wrap: wrap;
+    align-items: center;
     gap: 8px;
     margin-bottom: 8px;
+  }
+
+  .ut-list__filters {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .ut-src {
+    width: 96px;
   }
 
   .ut-list__title {
@@ -429,6 +496,7 @@
   }
 
   .ut-list__hint {
+    margin-left: auto;
     font-size: 11px;
     color: var(--el-text-color-secondary);
   }
@@ -476,6 +544,8 @@
     font-variant-numeric: tabular-nums;
     font-family: var(--art-font-family-mono, monospace);
     font-size: 12px;
+    /* 任务 #ID / 「from → to」版本是原子值：单行，不折行。 */
+    white-space: nowrap;
   }
 
   .ut-muted {
@@ -487,8 +557,43 @@
     color: var(--el-text-color-regular);
   }
 
+  /* ── 列表「进度」列的细进度条 ────────────────────────────────────
+     成功段（绿）表达「已达成 / 全部」，失败数非 0 时补一段红；数值文本
+     一行仍在（读屏与色弱用户不能只靠颜色）。 */
+  .ut-progress {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .ut-progress__bar {
+    display: flex;
+    height: 4px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: var(--el-fill-color-light);
+  }
+
+  .ut-progress__ok {
+    height: 100%;
+    background: var(--el-color-success);
+    transition: width 0.3s ease;
+  }
+
+  .ut-progress__bad {
+    height: 100%;
+    background: var(--el-color-danger);
+    transition: width 0.3s ease;
+  }
+
+  .ut-progress__text {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px;
+  }
+
   .ut-done {
-    margin-left: 6px;
     font-size: 11px;
     // 文字对比度 AA（收尾批）：原 el-color-success（白底 1.72）改走 token，
     // 数字见 @styles/core/aa-text.scss。
@@ -579,6 +684,11 @@
   @media (prefers-reduced-motion: reduce) {
     .ut-rail__node.is-now {
       animation: none;
+    }
+
+    .ut-progress__ok,
+    .ut-progress__bad {
+      transition: none;
     }
   }
 </style>

@@ -20,7 +20,13 @@ const plugin: PluginManifest = {
       meta: {
         title: '设备列表',
         icon: 'ri:hard-drive-2-line',
-        authMark: PermDeviceList
+        authMark: PermDeviceList,
+        // 状态保持：从详情页返回列表时翻页/筛选/列配置/勾选不丢（art-page-content
+        // 只缓存 meta.keepAlive 的路由）。缓存键是**组件名**（defineOptions 的
+        // 'DeviceList'），与路由注册名（后端菜单模式是 menu-<id>）无关，两种
+        // 菜单模式同键。列表数据不预拉 —— onActivated 里的 loadList 保证回显
+        // 后数据与筛选同步，见 views/index.vue。
+        keepAlive: true
       }
     },
     {

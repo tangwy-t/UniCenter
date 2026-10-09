@@ -19,15 +19,11 @@
         </div>
       </div>
 
-      <!-- ============ 全站目标版本（危险拉杆：只在这一页、且带影响面）============ -->
-      <div class="do-card dr-global">
+      <!-- ============ 全站目标版本（内联拉杆：版本下拉 + 开关，确认时带影响面）============ -->
+      <div class="do-card dr-global" :class="{ 'dr-global--on': globalEnabled }">
         <div class="dr-global__row">
           <div class="min-w-0">
             <div class="dr-global__label">全站目标版本</div>
-            <div class="dr-global__value">
-              <template v-if="globalTarget">{{ globalTarget }}</template>
-              <template v-else><span class="dr-muted">未开启</span></template>
-            </div>
             <div class="dr-global__hint">
               <template v-if="summary">
                 待对齐 {{ willAlign }} 台 · 已指定版本（不跟随）{{ summary.pinnedDevices ?? 0 }} 台
@@ -36,13 +32,25 @@
             </div>
           </div>
           <div class="dr-global__actions">
-            <ElButton v-if="canUpgradeGlobal" size="small" type="primary" @click="openGlobalDialog">
-              {{ globalTarget ? '更改全站目标' : '设置全站目标' }}
-            </ElButton>
-            <ElButton v-if="canUpgradeGlobal && globalTarget" size="small" @click="clearGlobal">
-              关闭全站升级
-            </ElButton>
-            <span v-if="!canUpgradeGlobal" class="dr-muted">无全站升级权限</span>
+            <template v-if="canUpgradeGlobal">
+              <ElSelect
+                v-model="globalVersion"
+                class="dr-global__select"
+                size="small"
+                placeholder="选择已发布版本"
+                :disabled="!globalEnabled"
+                @change="onGlobalVersionChange"
+              >
+                <ElOption v-for="v in releaseOptions" :key="v" :label="v" :value="v" />
+              </ElSelect>
+              <ElSwitch
+                v-model="globalEnabled"
+                active-text="开启"
+                inactive-text="关闭"
+                @change="onGlobalToggle"
+              />
+            </template>
+            <span v-else class="dr-muted">无全站升级权限</span>
           </div>
         </div>
       </div>
@@ -87,7 +95,9 @@
             </template>
           </ElTableColumn>
           <ElTableColumn label="大小" width="96">
-            <template #default="{ row }">{{ formatSize(row.sizeBytes) }}</template>
+            <template #default="{ row }"
+              ><span class="whitespace-nowrap">{{ formatSize(row.sizeBytes) }}</span></template
+            >
           </ElTableColumn>
           <ElTableColumn label="状态" width="92">
             <template #default="{ row }">
@@ -101,7 +111,9 @@
             </template>
           </ElTableColumn>
           <ElTableColumn label="上传时间" width="140">
-            <template #default="{ row }">{{ formatUnixTime(row.createdAt) }}</template>
+            <template #default="{ row }"
+              ><span class="whitespace-nowrap">{{ formatUnixTime(row.createdAt) }}</span></template
+            >
           </ElTableColumn>
           <ElTableColumn label="备注" min-width="140">
             <template #default="{ row }">{{ row.notes || '—' }}</template>
@@ -154,8 +166,8 @@
 
     <!-- ============ 上传对话框 ============ -->
     <ElDialog v-model="uploadVisible" title="上传 Agent 程序包" width="520px" @closed="resetUpload">
-      <ElForm label-width="80px">
-        <ElFormItem label="版本号" required>
+      <ElForm ref="formRef" :model="form" :rules="formRules" label-width="80px">
+        <ElFormItem label="版本号" prop="version" required>
           <ElInput v-model="form.version" placeholder="如 0.2.0" />
         </ElFormItem>
         <ElFormItem label="目标系统" required>
@@ -178,11 +190,12 @@
             class="w-full"
             :auto-upload="false"
             :limit="1"
-            accept="*"
             :on-change="onFileChange"
             :on-exceed="onExceed"
           >
-            <div class="dr-upload__text">拖入或用下方按钮选择 agent 二进制</div>
+            <div class="dr-upload__text">
+              拖入或选择 agent 二进制（uni_agent 可执行文件，无扩展名）
+            </div>
           </ElUpload>
         </ElFormItem>
         <ElFormItem v-if="uploading" label="进度">
@@ -201,38 +214,14 @@
         </ElButton>
       </template>
     </ElDialog>
-
-    <!-- ============ 全站目标对话框（写明影响面）============ -->
-    <ElDialog v-model="globalVisible" title="设置全站目标版本" width="440px">
-      <div class="dr-gdialog">
-        <!--
-          修复：模板文本节点按字面渲染，`**` 是 markdown 残留 —— 会把星号直接印在
-          对话框里（本处无任何 markdown 渲染链路）。强调改回本对话框已有的 <b>
-          （同下方「预计下发」行）。
-          此句保留：它是危险拉杆的影响面结论（只有跟随者被波及），属「页面只留
-          结论」范畴，不是实现原理文案。
-        -->
-        <div class="dr-gdialog__hint">
-          只影响<b>跟随全站</b>的设备；已单独指定版本的设备不会被动。
-        </div>
-        <ElSelect v-model="globalVersion" class="w-full" placeholder="选择已发布版本">
-          <ElOption v-for="v in releaseOptions" :key="v" :label="v" :value="v" />
-        </ElSelect>
-        <div v-if="globalPreview" class="dr-gdialog__preview">
-          预计下发 <b>{{ globalPreview }}</b> 台
-        </div>
-      </div>
-      <template #footer>
-        <ElButton @click="globalVisible = false">取消</ElButton>
-        <ElButton type="primary" :disabled="!globalVersion" @click="applyGlobal">确认设置</ElButton>
-      </template>
-    </ElDialog>
   </div>
 </template>
 
 <script setup lang="ts">
   import { computed, onMounted, ref } from 'vue'
+  import { useRouter } from 'vue-router'
   import { ElMessage, ElMessageBox, ElProgress, ElTag, ElTooltip } from 'element-plus'
+  import type { FormInstance, FormRules } from 'element-plus'
 
   import {
     PermDeviceReleaseDelete,
@@ -262,6 +251,8 @@
 
   // 页头图标与侧边栏/页签同源（取菜单图标，改「菜单管理」即同步；见 usePageIcon）
   const pageIcon = usePageIcon('ri:upload-cloud-2-line')
+
+  const router = useRouter()
 
   const { hasAuth } = useAuth()
   const canUpload = computed(() => hasAuth(PermDeviceReleaseUpload))
@@ -298,6 +289,9 @@
       releases.value = rel.list ?? []
       published.value = rel.publishedVersions ?? []
       summary.value = sum
+      // 开关态与当前版本随汇总同步：globalEnabled = 是否存在全站目标。
+      globalVersion.value = sum.globalTargetVersion ?? ''
+      globalEnabled.value = !!sum.globalTargetVersion
     } catch (e) {
       ElMessage.error(errText(e, '加载失败'))
     } finally {
@@ -358,6 +352,15 @@
       file: null
     }
   )
+  const formRef = ref<FormInstance>()
+  // 版本号格式：x.y.z（与后端 IsSemver 一致）——required 之外再校验格式，
+  // 免得一个「v0.2」在上传后才被后端驳回。
+  const formRules: FormRules = {
+    version: [
+      { required: true, message: '请输入版本号', trigger: 'blur' },
+      { pattern: /^\d+\.\d+\.\d+$/, message: '格式应为 x.y.z（如 0.2.0）', trigger: 'blur' }
+    ]
+  }
   let controller: AbortController | null = null
 
   function onFileChange(file: { raw?: File }) {
@@ -373,6 +376,7 @@
     uploading.value = false
     uploadPercent.value = 0
     form.value = { version: '', os: 'linux', arch: 'amd64', notes: '', file: null }
+    formRef.value?.clearValidate()
     controller = null
   }
 
@@ -385,6 +389,14 @@
   async function submitUpload() {
     const f = form.value.file
     if (!f) return
+    // 版本号先过格式校验（内联错误提示由 ElForm 渲染在输入框下方）。
+    if (formRef.value) {
+      const valid = await formRef.value
+        .validate()
+        .then(() => true)
+        .catch(() => false)
+      if (!valid) return
+    }
     const fd = new FormData()
     fd.append('file', f)
     fd.append('version', form.value.version.trim())
@@ -409,12 +421,13 @@
   }
 
   // ── 全站目标 ──────────────────────────────────────────────────────────
-  const globalVisible = ref(false)
+  // 内联拉杆：开关 = 是否存在全站目标；下拉 = 当前生效目标版本。
   const globalVersion = ref('')
+  const globalEnabled = ref(false)
   const releaseOptions = computed(() => published.value)
+  // 影响面 = 总台数 - 已指定版本的台数（跟随者里再减掉已在该版本的）。
   const globalPreview = computed(() => {
     if (!globalVersion.value || !summary.value) return 0
-    // 影响面 = 总台数 - 已指定版本的台数（跟随者里再减掉已在该版本的）。
     const followers = (summary.value.total ?? 0) - (summary.value.pinnedDevices ?? 0)
     const achieved = summary.value.versionDistribution?.find(
       (d) => d.version === globalVersion.value
@@ -422,30 +435,63 @@
     return Math.max(0, followers - (achieved ?? 0))
   })
 
-  function openGlobalDialog() {
-    globalVersion.value = globalTarget.value || releaseOptions.value[0] || ''
-    globalVisible.value = true
+  /** 影响面结论（确认文案共用，只给台数与波及范围）。 */
+  function globalImpactText(): string {
+    return `预计下发 ${globalPreview.value} 台（只影响跟随全站的设备）`
   }
 
-  async function applyGlobal() {
+  /** 下发全站目标；有任务跳升级任务页跟进，无任务留本页刷新汇总。 */
+  async function applyGlobalTarget(): Promise<boolean> {
     try {
       const res = await setAgentGlobalTarget(globalVersion.value)
       ElMessage.success(
         res.affected > 0 ? `已设置全站目标，${res.affected} 台将开始升级` : '已设置全站目标'
       )
-      globalVisible.value = false
-      await reload()
+      if (res.taskId) {
+        router.push({ path: '/device/upgrade-task', query: { id: res.taskId } })
+      } else {
+        await reload()
+      }
+      return true
     } catch (e) {
       ElMessage.error(errText(e, '设置失败'))
+      return false
     }
   }
 
-  async function clearGlobal() {
+  async function onGlobalToggle(val: string | number | boolean) {
+    if (val) {
+      // 开：无生效版本时取第一个已发布版本；一个都没有则回退并警示。
+      if (!globalVersion.value) globalVersion.value = releaseOptions.value[0] ?? ''
+      if (!globalVersion.value) {
+        ElMessage.warning('没有可用的已发布版本，请先上传并发布程序包')
+        globalEnabled.value = false
+        return
+      }
+      // 影响面必须最新：确认前重取汇总（挂载时的 summary 可能已陈旧）。
+      try {
+        summary.value = await fetchAgentUpgradeSummary()
+      } catch {
+        /* 取不到则沿用旧汇总，不阻断开关 */
+      }
+      try {
+        await ElMessageBox.confirm(`确认将全站目标设为 ${globalVersion.value}？${globalImpactText()}。`, '开启全站升级', {
+          type: 'warning'
+        })
+      } catch {
+        globalEnabled.value = false
+        return
+      }
+      if (!(await applyGlobalTarget())) globalEnabled.value = false
+      return
+    }
+    // 关：保留危险拉杆的确认。
     try {
       await ElMessageBox.confirm('关闭后不再自动对齐全站版本，设备将停在当前版本。', '提示', {
         type: 'warning'
       })
     } catch {
+      globalEnabled.value = true
       return
     }
     try {
@@ -454,7 +500,29 @@
       await reload()
     } catch (e) {
       ElMessage.error(errText(e, '操作失败'))
+      globalEnabled.value = true
     }
+  }
+
+  async function onGlobalVersionChange() {
+    // 下拉变更仅在开启态发生；取消则回退到当前生效版本。
+    if (!globalEnabled.value) return
+    const next = globalVersion.value
+    // 影响面必须最新（同 onGlobalToggle）。
+    try {
+      summary.value = await fetchAgentUpgradeSummary()
+    } catch {
+      /* 沿用旧汇总 */
+    }
+    try {
+      await ElMessageBox.confirm(`确认将全站目标改为 ${next}？${globalImpactText()}。`, '更改全站目标', {
+        type: 'warning'
+      })
+    } catch {
+      globalVersion.value = globalTarget.value
+      return
+    }
+    if (!(await applyGlobalTarget())) globalVersion.value = globalTarget.value
   }
 
   function errText(e: unknown, fallback: string): string {
@@ -513,6 +581,25 @@
     font-size: 12px;
   }
 
+  // 左侧描边常驻 3px（仅改色，避免开关切换时内容位移）；开启态转主色强调。
+  .dr-global {
+    border-left-width: 3px;
+    transition: border-color 0.2s ease;
+  }
+
+  .dr-global--on {
+    border-left-color: var(--el-color-primary);
+
+    .dr-global__label {
+      color: var(--el-color-primary);
+    }
+
+    .dr-global__select :deep(.el-select__selected-item) {
+      color: var(--el-color-primary);
+      font-weight: 600;
+    }
+  }
+
   .dr-global__row {
     display: flex;
     flex-wrap: wrap;
@@ -526,15 +613,6 @@
     color: var(--el-text-color-secondary);
   }
 
-  .dr-global__value {
-    margin-top: 2px;
-    font-size: 22px;
-    font-weight: 650;
-    line-height: 1.2;
-    color: var(--el-text-color-primary);
-    font-variant-numeric: tabular-nums;
-  }
-
   .dr-global__hint {
     margin-top: 2px;
     font-size: 12px;
@@ -545,6 +623,10 @@
     display: flex;
     align-items: center;
     gap: 8px;
+  }
+
+  .dr-global__select {
+    width: 132px;
   }
 
   .dr-dist__head,
@@ -591,6 +673,8 @@
     color: var(--el-text-color-regular);
     text-align: right;
     font-variant-numeric: tabular-nums;
+    /* 「N 台」是计数原子值，不折行。 */
+    white-space: nowrap;
   }
 
   .dr-empty {
@@ -603,18 +687,6 @@
   .dr-upload__text {
     font-size: 13px;
     color: var(--el-text-color-regular);
-  }
-
-  .dr-gdialog__hint {
-    margin-bottom: 10px;
-    font-size: 12px;
-    color: var(--el-text-color-regular);
-  }
-
-  .dr-gdialog__preview {
-    margin-top: 10px;
-    font-size: 13px;
-    color: var(--el-text-color-primary);
   }
 
   @media (prefers-reduced-motion: reduce) {

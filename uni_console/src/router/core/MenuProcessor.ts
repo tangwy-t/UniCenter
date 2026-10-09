@@ -76,11 +76,18 @@ export class MenuProcessor {
 
     // 插件路由：path → 组件加载函数，供后端菜单解析组件
     const routeMap = new Map<string, AppRouteRecord['component']>()
+    // 插件路由：path → 声明 meta（后端菜单只携带 title/icon/visible/perms，
+    // keepAlive 等纯前端行为字段在菜单接口里**没有落点**——种子不播种它们；
+    // 若不在这里透传，插件里声明的 meta.keepAlive 会在后端菜单模式下静默丢失
+    //（页面照常出，但 art-page-content 只缓存 meta.keepAlive 的路由 → 状态
+    // 保持只在静态菜单模式下生效，两种模式行为分叉）。
+    const pluginMetaMap = new Map<string, AppRouteRecord['meta']>()
     for (const route of asyncRoutes) {
       const component = route.component as (() => Promise<unknown>) | undefined
       const hasComponent = typeof component === 'function'
       if (route.path && hasComponent) {
         routeMap.set(route.path, component)
+        pluginMetaMap.set(route.path, route.meta)
       }
     }
 
@@ -137,7 +144,10 @@ export class MenuProcessor {
           path: menu.path,
           name: `menu-${menu.id}`,
           component: component as () => Promise<unknown>,
+          // 菜单字段（标题/图标/显隐/权限）来自后端，行为字段（keepAlive 等）
+          // 从插件声明透传——后端值优先，插件补充前端独有字段。
           meta: {
+            ...pluginMetaMap.get(menu.path),
             title: menu.name,
             icon: menu.icon || undefined,
             isHide: menu.visible === 0,

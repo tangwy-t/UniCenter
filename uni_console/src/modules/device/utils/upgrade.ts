@@ -173,6 +173,25 @@ export function upgradeBadge(row: UpgradeRow): UpgradeBadge | null {
   return { text: '待升级', tone: 'info', hint: '' }
 }
 
+/**
+ * 是否已固定（设备级目标 == 当前版本且非跟随全站）。
+ *
+ * 「固定」的全部语义就是「把设备级目标写成它当前的版本」（见 api.ts 契约与后端
+ * `SetDeviceTarget`）：于是「已固定」= 有设备级目标 且 目标版本恰等于当前 agent 版本。
+ * 设备级目标若指向**其它**版本，那是「设备指定版本」（普通升级 / 在途），不是固定 ——
+ * 两者需要被区分，否则把一个正在升级的版本误标成「已固定」。
+ */
+export function isDevicePinned(row: {
+  agentVersion?: string
+  targetVersion?: string
+  targetFromGlobal?: boolean
+}): boolean {
+  if (row.targetFromGlobal) return false
+  const target = row.targetVersion ?? ''
+  const current = row.agentVersion ?? ''
+  return target !== '' && target === current
+}
+
 /** 阶段轨的渲染视图。 */
 export interface StageView {
   /** 四个节点（顺序固定）。 */
@@ -366,6 +385,49 @@ export function taskCountsText(counts?: CountsLike | null): string {
   push(counts.timeout, '超时')
   // superseded 不上行：它只说明「这条被新的下发取代了」，不是一种状态分布。
   return parts.length > 0 ? parts.join(' · ') : '—'
+}
+
+/** 任务进度条的视图（细进度条：成功段 + 失败段）。 */
+export interface TaskProgressView {
+  /** 全部桶之和（进度条的分母）。 */
+  total: number
+  succeeded: number
+  failed: number
+  /** 成功段占比（0-100，四舍五入）；total 为 0 时也是 0。 */
+  succeededPercent: number
+  /** 失败段占比（0-100，四舍五入）；失败数为 0 时为 0（页面据此不染 danger 段）。 */
+  failedPercent: number
+}
+
+/**
+ * 把任务计数折成细进度条视图。
+ *
+ * 分母取**全部桶之和**（含 pending / running / rolledBack / timeout / superseded）：
+ * 进度条要表达「这批里已经成了多少、挂了多少」，用一个小于真实台数的分母会把
+ * 「等待上线」也算成已完成，进度条就会在任务远未收口时先满格。
+ */
+export function taskProgress(counts?: CountsLike | null): TaskProgressView {
+  const c = counts ?? {}
+  const total =
+    (c.pending ?? 0) +
+    (c.running ?? 0) +
+    (c.succeeded ?? 0) +
+    (c.failed ?? 0) +
+    (c.rolledBack ?? 0) +
+    (c.timeout ?? 0) +
+    (c.superseded ?? 0)
+  const succeeded = c.succeeded ?? 0
+  const failed = c.failed ?? 0
+  if (total <= 0) {
+    return { total: 0, succeeded: 0, failed: 0, succeededPercent: 0, failedPercent: 0 }
+  }
+  return {
+    total,
+    succeeded,
+    failed,
+    succeededPercent: Math.round((succeeded / total) * 100),
+    failedPercent: Math.round((failed / total) * 100)
+  }
 }
 
 /** 任务/预演的跳过明细（后端 `DeviceUpgradeSkip`）。 */

@@ -46,9 +46,17 @@
 
       <template v-if="$slots.default" #default><slot /></template>
 
+      <!-- 空态：emptyText prop 控文案；#empty-bottom 插槽控制 ElEmpty 底部
+           的动作区（如「清除筛选」按钮）—— ElEmpty 的 default 插槽就是底部
+           内容位，转发它而不是整个 #empty（后者会连空图与描述一起接管，
+           各页自绘一遍成本高且形态漂移）。 -->
       <template #empty>
         <div v-if="loading"></div>
-        <ElEmpty v-else :description="emptyText" :image-size="120" />
+        <ElEmpty v-else :description="emptyText" :image-size="120">
+          <template v-if="$slots['empty-bottom']" #default>
+            <slot name="empty-bottom" />
+          </template>
+        </ElEmpty>
       </template>
     </ElTable>
 

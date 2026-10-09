@@ -3,8 +3,11 @@
  *
  * 字段与查询参数**逐一对齐后端契约**(uni_core):
  * - 列表 `GET /devices`：query `page`/`pageSize`/`hostname`/`status`/`online`
- *   （后端 `request.DeviceQuery` 内嵌 `app.PageRequest`，故分页参数名为
- *   `page`/`pageSize`，与前端 `PageResponse` 信封同字）。
+ *   /`primaryIp`/`agentVersion`/`sortBy`/`sortOrder`（后端 `request.DeviceQuery`
+ *   内嵌 `app.PageRequest`，故分页参数名为 `page`/`pageSize`，与前端
+ *   `PageResponse` 信封同字）。
+ *   `primaryIp` 模糊、`agentVersion` 精确；排序白名单 lastSeenAt/hostname/
+ *   agentVersion（后端静默回落默认，不 400）。
  * - 详情 `GET /devices/:id`、启用 `POST /devices/:id/enable`、
  *   停用 `POST /devices/:id/disable`、删除 `DELETE /devices/:id`。
  * - 整机趋势与资源下钻**共用** `GET /devices/:id/metrics`：`kind`+`name`
@@ -25,7 +28,10 @@ export type DeviceListItem = Api.Device.DeviceListItem
 /** 设备详情。 */
 export type DeviceResp = Api.Device.DeviceResp
 
-/** 设备列表查询参数：主机名模糊、启停态精确、在线状态布尔。 */
+/** 列表排序键（后端仓储白名单；水位列是 Redis 组装、非 DB 列，不可排序）。 */
+export type DeviceSortBy = 'lastSeenAt' | 'hostname' | 'agentVersion'
+
+/** 设备列表查询参数：主机名/IP 模糊、启停态精确、版本精确、在线状态布尔、服务端排序。 */
 export interface DeviceQuery {
   page?: number
   pageSize?: number
@@ -35,6 +41,14 @@ export interface DeviceQuery {
   status?: number
   /** 在线过滤：后端按 `sys.agent.offlineThreshold` 折算，前端不自行判定。 */
   online?: boolean
+  /** 来源 IP 模糊匹配（后端 LIKE %v%）。 */
+  primaryIp?: string
+  /** Agent 版本**精确**匹配（0.6 ≠ 0.6.0，后端 =，非 LIKE）。 */
+  agentVersion?: string
+  /** 排序列（后端白名单，非法值静默回落 lastSeenAt）。 */
+  sortBy?: DeviceSortBy
+  /** 排序方向（非法值回落 desc）；不传排序时后端默认 lastSeenAt desc。 */
+  sortOrder?: 'asc' | 'desc'
 }
 
 /**
