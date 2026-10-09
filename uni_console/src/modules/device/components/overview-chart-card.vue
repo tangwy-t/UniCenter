@@ -1,14 +1,18 @@
 <template>
   <div class="oc-card do-card">
-    <!-- ============ 头部：标题 + 用途/指标说明 ============ -->
+    <!-- ============ 头部：标题 + 台数口径 + 指标说明 ============ -->
     <div class="oc-card__head">
       <div class="oc-card__title">
         <span class="oc-card__name">{{ chart.title }}</span>
-        <!-- 覆盖率：让读者知道这张图代表了几台设备。
-             「3 / 5 台」比「画了 3 条线」更有信息量 —— 后者无法判断
-             是只有 3 台设备，还是另外 2 台没数据。 -->
+        <!-- 台数口径：后端截断 → 「已显示 N / 总 M 台」；top-N 裁剪 → 单列
+             「已显示」角标；有数据不足 → 「N / M 台有数据」。三种「数字比
+             显示台数少」各有各的角标，不共用一个数 —— 共用会让「没数据」
+             与「被裁掉」不可区分。 -->
+        <ElTag v-if="grandTotal > chart.devicesTotal" size="small" type="warning" effect="light">
+          已显示 {{ chart.devicesTotal }} / 总 {{ grandTotal }} 台
+        </ElTag>
         <ElTag
-          v-if="chart.devicesWithData < chart.devicesTotal"
+          v-else-if="chart.devicesWithData < chart.devicesTotal"
           size="small"
           type="warning"
           effect="light"
@@ -16,6 +20,15 @@
           {{ chart.devicesWithData }} / {{ chart.devicesTotal }} 台有数据
         </ElTag>
         <ElTag v-else size="small" type="info" effect="plain">{{ chart.devicesTotal }} 台</ElTag>
+        <ElTag
+          v-if="displayedDevices < chart.devicesWithData"
+          size="small"
+          type="warning"
+          effect="plain"
+          class="oc-card__topn"
+        >
+          已显示 {{ displayedDevices }} / {{ chart.devicesWithData }} 台
+        </ElTag>
       </div>
 
       <div class="oc-card__tools">
@@ -52,13 +65,16 @@
 
 <script setup lang="ts">
   import { computed, onBeforeUnmount, onMounted, watch } from 'vue'
+  import { storeToRefs } from 'pinia'
+  import { useSettingStore } from '@/store/modules/setting'
 
   import type { EChartsOption } from '@/plugins/echarts'
   import { useChart, useChartOps } from '@/hooks/core/useChart'
 
-  import { formatMetricText, metricLabel } from '../utils/column-meta'
-  import { EMPTY_TEXT, formatByUnit } from '../utils/display'
-  import type { OverviewChart } from '../utils/overview'
+  import { formatMetricText, metricLabel, metricUnit } from '../utils/column-meta'
+  import { EMPTY_TEXT, formatByUnit, formatAxisTickByUnit } from '../utils/display'
+  import { formatAxisTick } from '../utils/metrics'
+  import { capacitySegments, COL, type OverviewChart, type OverviewSeries } from '../utils/overview'
 
   defineOptions({ name: 'DeviceOverviewChartCard' })
 
@@ -75,22 +91,45 @@
      * 非空时不在集合内的设备会被淡出，用于「点选对比」时突出子集。
      */
     highlightedDeviceIds?: string[]
+    /**
+     * 后端口径的设备总数（device_total，未截断）。后端截断（>max_devices）时
+     * 与 devicesTotal（截断后数量）不等 → 头部角标如实报「已显示 N / 总 M 台」。
+     * 缺省（undefined）时与 devicesTotal 同口径（无截断）。
+     */
+    devicesGrandTotal?: number
   }>()
 
   const emit = defineEmits<{
-    /** 点击某条曲线 → 由页面决定是筛选该设备还是跳转详情。 */
+    /** 点击某条曲线/某根柱 → 页面决定去向（本页约定为跳转设备详情）。 */
     (e: 'pick-device', deviceId: string): void
   }>()
 
-  // 主题色板取自项目既有的 useChartOps（与其它图表同源，避免本页自成一套配色）。
-  const ops = useChartOps()
+  // 主题：isDark 驱动色板重取（见 palette 的依赖声明注释）。
+  const { isDark } = storeToRefs(useSettingStore())
+
+  /** 存量图（stacked：每台一柱的磁盘容量对比）。 */
+  const isSnapshotChart = computed(() => props.chart.type === 'stacked')
+
+  /** 实际画出来的台数（角标「已显示 N 台」的 N）。 */
+  const displayedDevices = computed(() =>
+    isSnapshotChart.value
+      ? props.chart.snapshot.length
+      : new Set(props.chart.series.map((s) => s.deviceId)).size
+  )
+
+  /** 后端口径总数（缺省回落到本地图块总数 —— 无截断时两者恒等）。 */
+  const grandTotal = computed(() => props.devicesGrandTotal ?? props.chart.devicesTotal)
 
   // 图表高度按展示类型区分：柱状图需要给 X 轴标签留更多空间
   // （设备名可能较长），折线/面积可以更紧凑。
-  const chartHeight = computed(() => (isBarLike.value ? '18rem' : '16rem'))
+  const chartHeight = computed(() =>
+    isSnapshotChart.value ? '18rem' : isBarLike.value ? '18rem' : '16rem'
+  )
   const isBarLike = computed(() => props.chart.type === 'bar' || props.chart.type === 'stacked')
 
-  const hasData = computed(() => props.chart.series.length > 0)
+  const hasData = computed(() =>
+    isSnapshotChart.value ? props.chart.snapshot.length > 0 : props.chart.series.length > 0
+  )
 
   const emptyText = computed(() =>
     props.chart.devicesTotal === 0 ? '暂无设备' : '所选设备在该时间窗内无此指标数据'
@@ -106,24 +145,14 @@
    * 按下标取色会让同一台机器的颜色在两次刷新之间跳变 —— 用户会以为
    * 换了设备在看。按名字取色则颜色与设备身份绑定，刷新后颜色不变。
    *
-   * 色板取自 settingStore 的主题色以与全局主题一致，末尾几个点缀色用于
-   * 设备数超出主题色数量时的补充（循环使用）。
+   * 色板来自 useChartOps（亮/暗两套）。注意 ops 是 setup 时的**一次性求值**
+   * （普通对象，不是响应式），故这里显式依赖 isDark 重新调 useChartOps ——
+   * 只读 ops.colors 的话 computed 不追踪主题，切深浅色后仍旧是旧色板
+   * （这正是被修掉的那个「一次性快照」缺陷的回潮路径）。
    */
   const palette = computed<string[]>(() => {
-    // 基础色来自全局主题（与其它图表一致）；其后补足可辨识的扩展色 ——
-    // 总览常同时画 5 台以上设备，只有主题的 5~7 色不够区分。
-    const base = ops.colors ?? []
-    return [
-      ...base,
-      '#7C4DFF',
-      '#FF6D00',
-      '#00B8D4',
-      '#C2185B',
-      '#43A047',
-      '#8D6E63',
-      '#546E7A',
-      '#F4511E'
-    ]
+    void isDark.value // 依赖声明：主题切换时本 computed 失效 → 重取色板
+    return useChartOps().colors ?? []
   })
 
   const colorOf = (name: string): string => {
@@ -140,7 +169,7 @@
    * 该图块的数值格式化器。
    *
    * 一个图块可能含多列（如「磁盘 IO」的读与写），故格式化按**列**决定而不是
-   * 按图块决定：读速率与写速率同为 B/s 没问题，但若将来把 % 与 B/s 放进同块，
+   * 按图块决定：读速率与写速率同为 B/s 没问题，但若把 % 与 B/s 放进同块，
    * 按图块格式化会把百分比也写成「1.5 KB/s」。系列名里带得出列名（见
    * nameOfSeries），故我们从 figure 里反查列。
    */
@@ -165,17 +194,23 @@
    *   - `showSymbol: false` + `sampling: 'lttb'`：长窗口（180 天）下点数可达
    *     数千，逐点画圆点会拖慢渲染且遮住曲线；lttb 抽样保留极值形状；
    *   - X 轴 `type: 'time'`：轴是真实时间（毫秒），不是等距分类 ——
-   *     用 category 轴会在「桶边界不规则」时说谎；
+   *     用 category 轴会在「桶边界不规则」时说谎（存量图走 category 分支，
+   *     那是「每台一柱」的语义要求，不是时间轴）；
+   *   - 按量纲分 Y 轴（unitAxes）：混量纲块（% + MB、个 + 秒）各自缩放，
+   *     不再共轴把小量纲压成贴 0 的直线；主量纲占左轴（带刻度与单位），
+   *     其余轴 show:false —— 刻度互挤没有任何信息量，绝对值由 tooltip 承载；
    *   - `animation: false`：总览页有十余张图，同时播放动画会让整页卡顿，
    *     且动画期间无法读数。
    */
   const buildOption = (): EChartsOption => {
     seriesColumn.clear()
+    if (isSnapshotChart.value) return buildSnapshotOption()
 
     // @/plugins/echarts 没有导出通用的 SeriesOption（只有 EChartsOption 与
     // BarSeriesOption），故这里用 EChartsOption['series'] 的数组元素类型。
     // 直接写 SeriesItem[] 而不加类型断言，让「构造出的系列形状不合法」
     // 在编译期就暴露，而不是等到运行期 ECharts 静默忽略。
+    const axisIndexByUnit = new Map(props.chart.unitAxes.map((g, i) => [g.unit, i]))
     const series = props.chart.series.map((s) => {
       seriesColumn.set(s.name, s.metric)
       const dimmed =
@@ -183,12 +218,16 @@
         props.highlightedDeviceIds.length > 0 &&
         !props.highlightedDeviceIds.includes(s.deviceId)
 
+      // 按量纲挂轴（查不到时回到 0 / 主量纲 —— 绝不画出没有轴的线）。
+      const yAxisIndex = axisIndexByUnit.get(metricUnit(s.metric)) ?? 0
+
       const common = {
         name: s.name,
         // connectNulls:false —— 缺桶断线而不是连成直线
         connectNulls: false,
         showSymbol: false,
         sampling: 'lttb' as const,
+        yAxisIndex,
         // 淡出：降透明度 + 变细，而不是隐藏 —— 用户仍能看到全貌，
         // 只是被选中的那几台更突出（隐藏会让「对比」失去参照）。
         lineStyle: dimmed ? { width: 1, opacity: 0.18 } : { width: 1.6, color: colorOf(s.name) },
@@ -196,7 +235,7 @@
         emphasis: { focus: 'series' as const }
       }
 
-      if (props.chart.type === 'bar' || props.chart.type === 'stacked') {
+      if (props.chart.type === 'bar') {
         return { ...common, type: 'bar' as const, stack: 'total', barMaxWidth: 32, data: s.points }
       }
       if (props.chart.type === 'area') {
@@ -211,6 +250,38 @@
       // （下方单独 return，不从这条路径出去）。
       return { ...common, type: 'line' as const, data: s.points }
     })
+
+    // 主量纲（unitAxes[0]）占左轴：刻度带单位（`20%`、`743.4 KB/s`）。
+    // 其余量纲 show:false —— 只给该量纲的线提供自适应量程（实测落点与
+    // 可见轴逐字相同），不画刻度：多套刻度互相叠、且横向网格线只能有
+    // 一根轴的语义，多套并存本身就是误导。绝对值由 tooltip 逐条带单位承载。
+    const primaryUnit = props.chart.unitAxes[0]?.unit ?? ''
+    const yAxis =
+      props.chart.unitAxes.length > 1
+        ? props.chart.unitAxes.map((group, i) =>
+            i === 0
+              ? {
+                  type: 'value' as const,
+                  // scale:false —— 从 0 起。总览是「横向对比」场景，截断 Y 轴基准
+                  // 会放大微小差异（20% 与 22% 看起来天差地别），误导读者。
+                  scale: false,
+                  axisLabel: {
+                    fontSize: 11,
+                    formatter: (v: number) => formatAxisTickByUnit(group.unit, v)
+                  }
+                }
+              : { type: 'value' as const, scale: false, show: false }
+          )
+        : {
+            type: 'value' as const,
+            // scale:false —— 从 0 起。总览是「横向对比」场景，截断 Y 轴基准
+            // 会放大微小差异（20% 与 22% 看起来天差地别），误导读者。
+            scale: false,
+            axisLabel: {
+              fontSize: 11,
+              formatter: (v: number) => formatAxisTickByUnit(primaryUnit, v)
+            }
+          }
 
     return {
       animation: false,
@@ -253,15 +324,114 @@
       },
       xAxis: {
         type: 'time',
-        axisLabel: { hideOverlap: true, fontSize: 11 },
+        axisLabel: {
+          hideOverlap: true,
+          fontSize: 11,
+          // 刻度文案与详情页同口径（formatAxisTick：按 range 决定到分/到日），
+          // 不再显示原始毫秒大数。
+          formatter: (value: number) => formatAxisTick(value, props.rangeSeconds)
+        },
+        splitLine: { show: false }
+      },
+      yAxis,
+      series
+    } satisfies EChartsOption
+  }
+
+  /**
+   * 存量图（stacked）的 option：X 轴 category（按设备名），每台一柱、
+   * 已用 / 可用两段堆叠（可用 = total − used）。
+   *
+   * 修复前：时间序列点被塞进 stack:'total' 的柱系列、X 轴还是 time ——
+   * 渲染出的是一根随时间漂移的无意义「总量柱」，与声明里「每台一柱、
+   * 两段」的语义完全不符。
+   */
+  const buildSnapshotOption = (): EChartsOption => {
+    // 两段固定语义色：已用 = 主色（紧张度由快照表进度条承载，这里只表构成），
+    // 可用 = 中性填充（残余量不是「数据」，是柱子的另一半）。两段的区分靠
+    // 图例文字与堆叠缝隙，不靠色相对比 —— 色弱读者不依赖颜色也能读。
+    const usedColor = palette.value[0] ?? '#3B82F6'
+    const freeColor = isDark.value ? '#3a3a42' : '#dcdfe6'
+    const surfaceColor = isDark.value ? '#161618' : '#ffffff'
+    seriesColumn.set('已用', COL.diskUsedGB)
+    seriesColumn.set('可用', COL.diskTotalGB)
+
+    // 缺一段（total 或 used 缺失 / total < used 翻转）的设备不画柱 ——
+    // 残缺两段会让柱高失去「总容量」语义，且与「缺值不画条」的全站纪律一致。
+    const rows = props.chart.snapshot
+      .map((row) => ({ row, seg: capacitySegments(row) }))
+      .filter((x) => x.seg !== null)
+
+    const series = [
+      {
+        name: '已用',
+        type: 'bar' as const,
+        stack: 'capacity',
+        barMaxWidth: 24,
+        // 2px 表面色描边 = 堆叠段之间的缝隙（描边在段边缘、与背景同色）：
+        // 分隔靠缝隙不靠深色描边 —— 深描边是「数据之外的墨」。
+        itemStyle: {
+          color: usedColor,
+          borderColor: surfaceColor,
+          borderWidth: 1
+        },
+        data: rows.map(({ row, seg }) => ({
+          value: seg!.used,
+          deviceId: row.deviceId
+        }))
+      },
+      {
+        name: '可用',
+        type: 'bar' as const,
+        stack: 'capacity',
+        barMaxWidth: 24,
+        itemStyle: {
+          color: freeColor,
+          borderColor: surfaceColor,
+          borderWidth: 1
+        },
+        data: rows.map(({ row, seg }) => ({
+          value: seg!.free,
+          deviceId: row.deviceId
+        }))
+      }
+    ]
+
+    return {
+      animation: false,
+      grid: { top: 24, right: 16, bottom: 44, left: 8, containLabel: true },
+      tooltip: {
+        trigger: 'axis',
+        confine: true,
+        formatter: (params) => renderTooltip(params)
+      },
+      legend: {
+        type: 'scroll',
+        bottom: 0,
+        textStyle: { fontSize: 11 },
+        itemWidth: 12,
+        // 同折线图例的天头余量守卫（见上方注释）。
+        itemHeight: 16,
+        itemGap: 10,
+        orient: 'horizontal',
+        left: 'center',
+        padding: 0,
+        height: 28
+      },
+      xAxis: {
+        type: 'category',
+        data: rows.map(({ row }) => row.hostname),
+        axisLabel: { hideOverlap: true, fontSize: 11, interval: 0 },
         splitLine: { show: false }
       },
       yAxis: {
         type: 'value',
-        // scale:false —— 从 0 起。总览是「横向对比」场景，截断 Y 轴基准
-        // 会放大微小差异（20% 与 22% 看起来天差地别），误导读者。
         scale: false,
-        axisLabel: { fontSize: 11 }
+        axisLabel: {
+          fontSize: 11,
+          // 容量刻度带单位（`500 GB` / `1.75 TB`），与 tooltip 同口径。
+          formatter: (v: number) => formatAxisTickByUnit('GB', v)
+        }
       },
       series
     } satisfies EChartsOption
@@ -273,32 +443,61 @@
    * 不用 `valueFormatter` 的原因是它的签名只有 value、拿不到 seriesName，
    * 而本页的单位必须按**列**决定。自绘还能顺带控制信息密度：一行一台设备，
    * 名字在前、数值在后（右对齐），比默认的多行堆叠更易横向扫读。
+   *
+   * 规模控制：只渲染**当前值降序的前 10 行** + 「其余 N 台」折叠一行。
+   * 100 台 × 2 列 = 200 行的 tooltip 没有任何可读性，只有渲染开销。
    */
+  const TOOLTIP_MAX_ROWS = 10
   const renderTooltip = (params: unknown): string => {
     const arr = Array.isArray(params) ? params : [params]
     if (arr.length === 0) return ''
-    const rows = arr
+    const items = arr
       .filter((p) => p && typeof p === 'object')
       .map((p) => {
         const item = p as { seriesName?: string; value?: unknown; color?: string }
         const name = item.seriesName ?? ''
-        // value 在 time 轴上是 [时间戳, 值]
+        // value 在 time 轴上是 [时间戳, 值]；category 轴上可能是 [idx, 值] 或纯值
         const raw = Array.isArray(item.value) ? item.value[1] : item.value
-        const dot = item.color
-          ? `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${item.color};margin-right:6px"></span>`
+        return { name, raw, color: item.color ?? '' }
+      })
+      // 按当前值降序取前 N：hover 的任务是「谁此刻最高」，降序正是读的顺序。
+      .sort((a, b) => {
+        const av = typeof a.raw === 'number' ? a.raw : Number.NEGATIVE_INFINITY
+        const bv = typeof b.raw === 'number' ? b.raw : Number.NEGATIVE_INFINITY
+        return bv - av
+      })
+
+    const shown = items.slice(0, TOOLTIP_MAX_ROWS)
+    const rest = items.length - shown.length
+    const rows = shown
+      .map(({ name, raw, color }) => {
+        const dot = color
+          ? `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${color};margin-right:6px"></span>`
           : ''
         return `<div style="display:flex;align-items:center;gap:12px;justify-content:space-between">
           <span style="display:flex;align-items:center;min-width:0">${dot}${escapeHtml(name)}</span>
-          <span style="font-weight:600">${escapeHtml(fmt(name, raw))}</span>
+          <span style="font-weight:600;white-space:nowrap;flex:none">${escapeHtml(fmt(name, raw))}</span>
         </div>`
       })
+      .join('')
+    const fold =
+      rest > 0 ? `<div style="margin-top:2px;font-size:11px;color:#999">其余 ${rest} 台…</div>` : ''
+
     // 时间头：用第一个系列的时间（同轴同点，取首个即代表本次 hover 的时刻）。
+    // 存量图（category 轴）没有时间头 —— 头一行换成设备名。
+    if (isSnapshotChart.value) {
+      const first = arr[0] as { name?: string } | undefined
+      const head = first?.name
+        ? `<div style="margin-bottom:4px;font-weight:600">${escapeHtml(first.name)}</div>`
+        : ''
+      return head + rows + fold
+    }
     const first = arr[0] as { value?: unknown } | undefined
     const ts = Array.isArray(first?.value) ? (first?.value as number[])[0] : undefined
     const head = ts
       ? `<div style="margin-bottom:4px;font-size:12px;color:#999">${formatTooltipTime(ts)}</div>`
       : ''
-    return head + rows.join('')
+    return head + rows + fold
   }
 
   const option = computed(() => buildOption())
@@ -328,7 +527,7 @@
       : `${date} ${time}:${pad(d.getSeconds())}`
   }
 
-  const { chartRef, initChart, updateChart } = useChart({
+  const { chartRef, initChart, updateChart, getChartInstance } = useChart({
     initOptions: { renderer: 'canvas' }
   })
 
@@ -349,12 +548,34 @@
    */
   const onChartVisible = () => updateChart(option.value, { replaceMerge: ['series'] })
 
+  // 点击曲线/柱 → 上报设备 ID（页面语义：跳转该设备详情）。
+  // 折线图按系列名反查 deviceId；存量柱的 data 项直接带 deviceId。
+  const onChartClick = (params: unknown) => {
+    const p = params as { seriesName?: string; data?: unknown }
+    if (typeof p?.data === 'object' && p.data !== null && 'deviceId' in (p.data as object)) {
+      emit('pick-device', (p.data as { deviceId: string }).deviceId)
+      return
+    }
+    const name = p?.seriesName
+    if (!name) return
+    const s: OverviewSeries | undefined = props.chart.series.find((x) => x.name === name)
+    if (s) emit('pick-device', s.deviceId)
+  }
+
+  const bindClick = () => {
+    const chart = getChartInstance()
+    chart?.off('click', onChartClick)
+    chart?.on('click', onChartClick)
+  }
+
   onMounted(() => {
     initChart(option.value, !hasData.value)
+    bindClick()
     chartRef.value?.addEventListener('chartVisible', onChartVisible)
   })
 
   onBeforeUnmount(() => {
+    getChartInstance()?.off('click', onChartClick)
     chartRef.value?.removeEventListener('chartVisible', onChartVisible)
   })
 
@@ -365,16 +586,16 @@
       // （筛掉设备后系列变少），默认的 merge 会**残留**上一次的多余系列，
       // 表现为「筛掉后那条线还在」。
       updateChart(option.value, { replaceMerge: ['series'] })
+      bindClick()
     },
     { deep: false }
   )
 
-  // 点击曲线 → 上报设备 ID（页面决定语义：筛选或跳转）。
-  const onPick = (seriesName: string) => {
-    const s = props.chart.series.find((x) => x.name === seriesName)
-    if (s) emit('pick-device', s.deviceId)
-  }
-  defineExpose({ onPick })
+  // 主题切换：色板重取（ops.colors 已按亮/暗两套切换），重画并重挂点击。
+  watch(isDark, () => {
+    updateChart(option.value, { replaceMerge: ['series'] })
+    bindClick()
+  })
 </script>
 
 <style lang="scss" scoped>
@@ -414,6 +635,12 @@
       font-weight: 600;
       color: var(--el-text-color-primary);
       white-space: nowrap;
+    }
+
+    /* top-N 裁剪角标：与「N 台有数据」并排但视觉更轻（plain + warning）——
+       它回答的是另一个问题（被裁掉多少台），不应与覆盖率告警等重。 */
+    &__topn {
+      flex: none;
     }
 
     &__info {

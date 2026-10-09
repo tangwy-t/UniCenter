@@ -18,7 +18,13 @@
  * 直接喂响应对象断言。渲染层（views/overview.vue）只负责把这里的输出交给图表。
  */
 
-import { METRIC_META, formatMetricText, metricLabel, metricUnit } from './column-meta'
+import {
+  METRIC_META,
+  groupColumnsByUnit,
+  formatMetricText,
+  metricLabel,
+  metricUnit
+} from './column-meta'
 
 /** 后端列名常量。**只在此处出现一次**，避免字面量散落。 */
 export const COL = {
@@ -146,7 +152,8 @@ export const CHART_BLOCKS: ChartBlockSpec[] = [
     type: 'line',
     span: 'half',
     purpose: '内存使用率趋势；可用内存按字节量级单独成块（量纲不同）',
-    rationale: '时间序列 → 折线；百分比与 MB 量纲不同，故只用百分比系列，MB 由快照卡片承载'
+    rationale:
+      '时间序列 → 折线；百分比与 MB 量纲不同，共轴时百分比线被压成贴 0 的直线 —— 故按量纲分轴（主量纲左轴，MB 挂隐藏右轴各自缩放），而不是砍掉某一列'
   },
   {
     key: 'swap',
@@ -155,7 +162,8 @@ export const CHART_BLOCKS: ChartBlockSpec[] = [
     type: 'line',
     span: 'half',
     purpose: '换页活动是内存饱和的前兆，单独成块以便在内存告警前发现',
-    rationale: '时间序列 → 折线；量纲混杂时优先画百分比（唯一可跨设备比较的量纲）'
+    rationale:
+      '时间序列 → 折线；量纲混杂（% 与 MB）时按量纲分轴：百分比占左轴，MB 挂隐藏轴各自缩放 —— 两列都保留且互不压扁'
   },
   {
     key: 'disk-capacity',
@@ -165,7 +173,7 @@ export const CHART_BLOCKS: ChartBlockSpec[] = [
     span: 'half',
     purpose: '当前各设备的磁盘容量与已用量（非趋势），用于一眼看出谁的容量吃紧',
     rationale:
-      '「容量 vs 已用」是**存量构成**而非时间序列 → 堆叠柱：每台设备一个柱，已用与可用两段，柱高即总容量，可直接比较绝对规模与剩余空间'
+      '「容量 vs 已用」是**存量构成**而非时间序列 → 堆叠柱：每台设备一个柱，已用与可用（total − used）两段，柱高即总容量，可直接比较绝对规模与剩余空间。数据取每列**最后一个非空值**（存量快照），不是时间序列'
   },
   {
     key: 'disk-usage',
@@ -214,7 +222,7 @@ export const CHART_BLOCKS: ChartBlockSpec[] = [
     span: 'half',
     purpose: '进程数变化与运行时长（运行时长回退即代表设备重启过）',
     rationale:
-      '同为时间序列 → 折线；两者量纲不同（个 vs 秒），故各自独立 Y 轴由 ECharts 的多轴能力处理，或由用户按需只看其一'
+      '同为时间序列 → 折线；两者量纲不同（个 vs 秒）且数值差两个数量级（数百 vs 数万），按量纲分轴：进程数占左轴，秒挂隐藏轴各自缩放 —— 同轴会把进程数压成贴 0 的直线'
   },
   {
     key: 'temp',
@@ -256,6 +264,22 @@ export interface OverviewSeries {
   total: number
 }
 
+/**
+ * 堆叠柱（存量图）的一行：一台设备的**分类快照**。
+ *
+ * 「磁盘容量对比」不是时间序列 —— 它要的是每台设备**此刻**的已用/可用两段。
+ * 取值口径：每列取**最后一个非空值**（后端 pts 按时间升序，见 device_overview.go
+ * 的 buildOverviewSeries —— lastIdx 只增不减）。缺列（该设备全窗无数据）整行不进。
+ */
+export interface OverviewSnapshotRow {
+  /** 设备 ID。 */
+  deviceId: string
+  /** 主机名（缺省回退 ID）。 */
+  hostname: string
+  /** 列名 → 最新非空值。缺列不进 map（与「值为 0」形状上可区分）。 */
+  values: Record<string, number>
+}
+
 /** 一张已构建好的图表。 */
 export interface OverviewChart {
   key: string
@@ -266,8 +290,18 @@ export interface OverviewChart {
   rationale: string
   /** 本图块实际用到的列（顺序与 CHART_BLOCKS 声明一致）。 */
   columns: string[]
-  /** 实际绘制的系列（每台设备 × 每列）。 */
+  /** 实际绘制的系列（每台设备 × 每列）。存量图（stacked）此为空，改看 snapshot。 */
   series: OverviewSeries[]
+  /**
+   * 存量图（stacked）的分类快照：每台设备一行、按**该块第一列**的最新值降序。
+   * 时间序列图为空数组。
+   */
+  snapshot: OverviewSnapshotRow[]
+  /**
+   * 按量纲分出的纵轴组（多量纲图块用）：主量纲（列最多）在第一位占左轴，
+   * 其余挂隐藏轴。渲染层据此给每个系列配 yAxisIndex，杜绝「百分比线贴 0」。
+   */
+  unitAxes: { unit: string; columns: string[] }[]
   /** 图中**有数据**的设备台数（用于「N 台中有 M 台有数据」的说明）。 */
   devicesWithData: number
   /** 图块涉及的设备总数（与 devicesWithData 对比得出覆盖率）。 */
@@ -335,6 +369,25 @@ export function countPresent(values: (number | null)[] | undefined): number {
   return values.reduce<number>((n, v) => (v === null || v === undefined ? n : n + 1), 0)
 }
 
+/** top-N 的「全部」哨兵：不裁剪，画全部设备（快照表本就全量）。 */
+export const TOP_N_ALL = Number.POSITIVE_INFINITY
+
+/**
+ * 取一个设备在一列上的**最新非空值**。
+ *
+ * 排名口径（top-N 与存量快照共用）：后端 values 按共享时间轴对齐、时间升序，
+ * 故「最后一个非 null 的值」即最新观测。**null 不当 0** —— 全窗无数据返回
+ * `null`，排序时排在最后。
+ */
+export function lastValue(values: (number | null)[] | undefined): number | null {
+  if (!Array.isArray(values)) return null
+  for (let i = values.length - 1; i >= 0; i--) {
+    const v = values[i]
+    if (typeof v === 'number' && Number.isFinite(v)) return v
+  }
+  return null
+}
+
 /**
  * 构建**全部**可显示的图表。
  *
@@ -348,14 +401,20 @@ export function countPresent(values: (number | null)[] | undefined): number {
  *      整体「全都画不出」的情况由 `isEmptyResult` + `drawableChartCount`
  *      渲染成一个**显式空态**，而不是一屏空白图。
  *
+ * top-N：每个图块按**该块第一个列**的最新非空值降序，只保留前 N 台的曲线，
+ * 其余设备不进图（快照表仍显示全部）。字段缺失/全 null 的设备排在最后，
+ * **绝不**被当成 0 参与降序。默认 8 —— 100 台规模下全画只会糊成一片。
+ *
  * @param axis      共享时间轴（unix 秒）
  * @param available 后端 `available_metrics`（决定哪些图块存在）
  * @param devices   后端 `devices`（每台设备的 series + 主机名）
+ * @param topN      每块最多画几台设备（默认 8；`TOP_N_ALL` = 不裁剪）
  */
 export function buildOverviewCharts(
   axis: number[],
   available: string[],
-  devices: DeviceOverviewLike[]
+  devices: DeviceOverviewLike[],
+  topN: number = 8
 ): OverviewChart[] {
   const { assigned, leftover } = assignColumns(available)
 
@@ -384,38 +443,97 @@ export function buildOverviewCharts(
   }
 
   return specs
-    .map(({ spec, columns }) => buildChart(spec, columns, axis, devices))
+    .map(({ spec, columns }) => buildChart(spec, columns, axis, devices, topN))
     .filter(hasDrawableSeries)
 }
 
-/** 构建单张图表。 */
+/**
+ * 构建单张图表。
+ *
+ * 存量图（stacked）：每台设备一行分类快照（列 → 最后一个非空值），按第一列
+ * 降序；不进 series（时间点序列对存量图没有意义，见 disk-capacity 的 rationale）。
+ * 时间序列图（line/area）：按第一列的最新非空值降序取 top-N，再逐列产出系列。
+ */
 function buildChart(
   spec: ChartBlockSpec,
   columns: string[],
   axis: number[],
-  devices: DeviceOverviewLike[]
+  devices: DeviceOverviewLike[],
+  topN: number
 ): OverviewChart {
-  const series: OverviewSeries[] = []
-  const devicesWithData = new Set<string>()
   // 单列图块只写主机名，多列图块才带指标名（理由见 OverviewSeries.name 的注释）。
   const singleColumn = columns.length === 1
+  // 按量纲分轴：主量纲（列最多，平票取先出现）在第一位。单量纲时只有一组 ——
+  // 渲染层拿到的是退化的单轴，行为与「一根 Y 轴」完全一致。
+  const unitAxes = groupColumnsByUnit(columns)
 
-  for (const dev of devices) {
+  // ── 排名：按该块第一列的最新非空值降序，缺值排最后（不是 0）──────────
+  const rankColumn = columns[0]
+  const ranked = devices
+    .map((dev) => ({
+      dev,
+      rank: lastValue(dev.series?.find((x) => x.metric === rankColumn)?.values)
+    }))
+    // null 排最后：先把有值的按值降序、无值的按设备出现顺序排在尾部 ——
+    // 两者分别 sort 再拼，避免 comparator 里对 null 与 number 混合比较。
+    .sort((a, b) => {
+      if (a.rank === null && b.rank === null) return 0
+      if (a.rank === null) return 1
+      if (b.rank === null) return -1
+      return b.rank - a.rank
+    })
+
+  // 「有数据」按**全部**设备算（top-N 裁的只是画出来的台数，不是有数据的台数）：
+  // 角标「已显示 N / 总 M 台」与「M 台有数据」各自回答不同的问题，混用会让
+  // 「3 台没数据」与「3 台被 top-N 裁掉」不可区分。
+  const devicesWithData = new Set<string>()
+  for (const { dev } of ranked) {
     for (const col of columns) {
-      const s = (dev.series ?? []).find((x) => x.metric === col)
-      const present = s?.present ?? 0
-      if (present === 0) continue // 整列无数据的设备不进图例（避免图例被空系列淹没）
-      devicesWithData.add(dev.id)
-      const host = dev.hostname || dev.id
-      series.push({
-        name: singleColumn ? host : `${host} · ${metricLabel(col)}`,
+      if ((dev.series?.find((x) => x.metric === col)?.present ?? 0) > 0) {
+        devicesWithData.add(dev.id)
+        break
+      }
+    }
+  }
+
+  const series: OverviewSeries[] = []
+  const snapshot: OverviewSnapshotRow[] = []
+
+  if (spec.type === 'stacked') {
+    // 存量快照：每台设备取各列的最后一个非空值；任一列有值即入图。
+    // top-N 同样适用（100 台的柱状图同样糊）；全部列缺值的设备不进。
+    for (const { dev } of ranked.slice(0, topN === TOP_N_ALL ? undefined : topN)) {
+      const values: Record<string, number> = {}
+      for (const col of columns) {
+        const v = lastValue(dev.series?.find((x) => x.metric === col)?.values)
+        if (v !== null) values[col] = v
+      }
+      if (Object.keys(values).length === 0) continue
+      snapshot.push({
         deviceId: dev.id,
-        metric: col,
         hostname: dev.hostname || dev.id,
-        points: seriesPoints(axis, s?.values),
-        present,
-        total: axis.length
+        values
       })
+    }
+  } else {
+    // 时间序列：top-N 内的设备才产出曲线；其余不进图（看全量走快照表）。
+    const kept = ranked.slice(0, topN === TOP_N_ALL ? undefined : topN)
+    for (const { dev } of kept) {
+      for (const col of columns) {
+        const s = (dev.series ?? []).find((x) => x.metric === col)
+        const present = s?.present ?? 0
+        if (present === 0) continue // 整列无数据的设备不进图例（避免图例被空系列淹没）
+        const host = dev.hostname || dev.id
+        series.push({
+          name: singleColumn ? host : `${host} · ${metricLabel(col)}`,
+          deviceId: dev.id,
+          metric: col,
+          hostname: dev.hostname || dev.id,
+          points: seriesPoints(axis, s?.values),
+          present,
+          total: axis.length
+        })
+      }
     }
   }
 
@@ -428,6 +546,8 @@ function buildChart(
     rationale: spec.rationale,
     columns,
     series,
+    snapshot,
+    unitAxes,
     devicesWithData: devicesWithData.size,
     devicesTotal: devices.length
   }
@@ -502,9 +622,10 @@ export function drawableChartCount(charts: OverviewChart[]): number {
   return charts.filter(hasDrawableSeries).length
 }
 
-/** 图表是否可画（有至少一条非空系列）。 */
+/** 图表是否可画（有至少一条非空系列，或存量图有至少一行快照）。 */
 export function hasDrawableSeries(chart: OverviewChart): boolean {
-  return chart.series.some((s) => s.present > 0)
+  if (chart.series.some((s) => s.present > 0)) return true
+  return (chart.snapshot?.length ?? 0) > 0
 }
 
 // ── 设备级问题文案 ────────────────────────────────────────
@@ -515,6 +636,10 @@ export function hasDrawableSeries(chart: OverviewChart): boolean {
  * 三种可叠加的问题各自独立成句：离线、数据陈旧（心跳在但指标停更）、
  * 趋势取数失败。它们**不是**互斥的 —— 一台设备可以既在线又数据陈旧，
  * 也可以既离线又有历史取数错误，故按「最严重的先说」的顺序拼接。
+ *
+ * 水位阈值：CPU ≥80 标「高」、≥90 标「告警」（与 usageTone 的 80/90 分档
+ * 同一阈值源，分档文案不走新造标准）。此前 CPU 97% 显示「正常」—— 提示列
+ * 只看在线/陈旧，不看水位，恰是最需要人看的那台机器被漏报。
  */
 export function deviceIssueText(dev: DeviceOverviewLike, thresholdSec?: number): string {
   const parts: string[] = []
@@ -526,8 +651,39 @@ export function deviceIssueText(dev: DeviceOverviewLike, thresholdSec?: number):
     // 但指标已停更，图上是一条平的直线，极易被误读为「负载稳定」。
     parts.push('指标数据已陈旧（心跳正常但采样未更新）')
   }
-  if (!dev.watermarkAt && dev.online) parts.push('尚无指标快照')
+  const hot = usageHotspot(dev.watermark)
+  if (hot) parts.push(hot)
+  if (!dev.watermarkAt && dev.online && !hot) parts.push('尚无指标快照')
   return parts.join('；')
+}
+
+/**
+ * 水位热点文案（无热点返回空串）。
+ *
+ * 阈值与 usageTone 同源（80 高 / 90 告警），此处只取提示列关心的三个水位：
+ * CPU / 内存 / 磁盘。只报**最高**的一档（一行装不下三个并列的「高」），
+ * 缺值（null）不参与 —— 没采到不等于 0。
+ */
+export function usageHotspot(watermark: Record<string, number> | undefined): string {
+  if (!watermark) return ''
+  const watched: Array<[string, string]> = [
+    [COL.cpu, 'CPU'],
+    [COL.memPercent, '内存'],
+    [COL.diskUsedPercent, '磁盘']
+  ]
+  let name = ''
+  let value = -Infinity
+  for (const [col, label] of watched) {
+    const v = watermark[col]
+    if (typeof v !== 'number' || !Number.isFinite(v)) continue
+    if (v > value) {
+      value = v
+      name = label
+    }
+  }
+  if (value >= 90) return `${name}使用率 ${Math.round(value)}%（告警）`
+  if (value >= 80) return `${name}使用率 ${Math.round(value)}%（高）`
+  return ''
 }
 
 // ── 展示格式化 ────────────────────────────────────────────
@@ -544,9 +700,25 @@ export function formatMetric(column: string, value: number | null | undefined): 
   return formatMetricText(column, value)
 }
 
-/** 图表 Y 轴/Tooltip 的数值格式化（与 formatMetric 同口径，供 ECharts 回调使用）。 */
-export function formatAxisValue(column: string, value: number | null | undefined): string {
-  return formatMetricText(column, value)
+// ── 存量图（磁盘容量）派生 ─────────────────────────────────
+
+/**
+ * 存量快照行 → 堆叠柱两段：已用 / 可用（= total − used）。
+ *
+ * 可用段**只在该行同时有 total 与 used 时**产出：只有 total 时画不出「已用
+ * 占比」，只有 used 时剩余量不可知 —— 两段残缺会让柱高失去「总容量」语义，
+ * 宁可不画（该设备不进图，缺值语义与快照表一致）。`total < used`（数据
+ * 翻转，如换盘瞬间）返回 null 段，同样不画，不夹成 0。
+ */
+export function capacitySegments(row: OverviewSnapshotRow): {
+  used: number | null
+  free: number | null
+} | null {
+  const total = row.values[COL.diskTotalGB]
+  const used = row.values[COL.diskUsedGB]
+  if (total === undefined || used === undefined) return null
+  if (!Number.isFinite(total) || !Number.isFinite(used) || total < used) return null
+  return { used, free: total - used }
 }
 
 /**

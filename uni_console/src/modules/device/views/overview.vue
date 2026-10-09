@@ -8,7 +8,11 @@
         </div>
         <div class="min-w-0">
           <h2 class="text-lg font-semibold text-[var(--el-text-color-primary)]">设备监控总览</h2>
-          <p class="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-g-600">
+          <!-- text-g-600（白底 3.62:1）换 AA 次要灰 token（5.26:1+，随主题自适应）：
+               只动这一处副标题，不调全站 --art-gray-600（灰阶还供图标/暗色/边栏用） -->
+          <p
+            class="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-[var(--aa-secondary-text)]"
+          >
             <span
               class="live-dot inline-block h-1.5 w-1.5 rounded-full bg-success"
               :class="{ 'is-loading': loading }"
@@ -39,7 +43,7 @@
            此时筛选条自然落到第一位，不会先渲染再被顶下去。 -->
       <div
         v-if="state === 'ready'"
-        class="do-stats kpi-grid grid grid-cols-2 gap-4 md:grid-cols-3 2xl:grid-cols-5"
+        class="do-stats kpi-grid grid grid-cols-2 gap-4 md:grid-cols-3 wide:grid-cols-5"
       >
         <div
           v-for="s in stats"
@@ -103,12 +107,24 @@
 
         <div class="do-filter__row do-filter__row--ranges">
           <!-- 时间窗：与详情页**同一套**档位（后端同一个选档函数），
-             故这里选 90 天与在详情页选 90 天得到的是同一批桶。 -->
+               故这里选 90 天与在详情页选 90 天得到的是同一批桶。 -->
           <ElRadioGroup v-model="rangeSeconds" size="small" @change="reload">
             <ElRadioButton v-for="r in rangeChoices" :key="r.seconds" :value="r.seconds">
               {{ r.label }}
             </ElRadioButton>
           </ElRadioGroup>
+
+          <!-- 图表设备数（top-N）：曲线只画排名靠前的 N 台，快照表仍全量。
+               前置短标签与「自动刷新」同一控件命名格式（控件名，非解释句）。 -->
+          <span class="do-filter__topn-label">图表设备数</span>
+          <ElSelect v-model="chartTopN" size="small" class="do-filter__topn">
+            <ElOption
+              v-for="opt in TOPN_CHOICES"
+              :key="opt.value"
+              :label="opt.label"
+              :value="opt.value"
+            />
+          </ElSelect>
 
           <div class="do-filter__auto">
             <!-- 自动刷新：总览页的核心使用方式是「盯一眼」，
@@ -208,7 +224,8 @@
       <!-- ============ 正常 ============ -->
       <template v-else>
         <!-- 设备快照表：每台设备一行，列出关键水位指标。
-           它承担「横向对比」的精确读数职责 —— 图表看趋势，表格看当前值。 -->
+           它承担「横向对比」的精确读数职责 —— 图表看趋势（只画 top-N），
+           表格看**当前值的全量**。 -->
         <div class="do-card do-snapshot">
           <div class="do-section__head">
             <span class="do-section__title">设备实时快照</span>
@@ -219,7 +236,9 @@
             </ElButton>
           </div>
 
-          <ElTable :data="snapshotRows" size="small" max-height="20rem">
+          <!-- row-key + sortable：客户端快照是本地全量数组，列排序有意义
+               （服务端排序对「已在本地的全量」是白跑一趟）。 -->
+          <ElTable :data="snapshotRows" size="small" max-height="20rem" row-key="id">
             <ElTableColumn label="设备" min-width="180" fixed>
               <template #default="{ row }">
                 <div class="do-dev">
@@ -228,9 +247,13 @@
                     @change="toggleDevice(row.id)"
                   />
                   <ArtSvgIcon :icon="deviceIcon(row.os, row.platform)" class="do-dev__icon" />
+                  <!-- 原子数据（主机名 / 雪花 ID）一律单行：定宽列内超宽走省略号，
+                       全值由 title 悬浮可见（ID 19 位数字折行会明显降可读性）。 -->
                   <div class="do-dev__text">
-                    <div class="do-dev__name">{{ row.hostname || row.id }}</div>
-                    <div class="do-dev__meta">{{ row.id }}</div>
+                    <div class="do-dev__name" :title="row.hostname || row.id">
+                      {{ row.hostname || row.id }}
+                    </div>
+                    <div class="do-dev__meta" :title="row.id">{{ row.id }}</div>
                   </div>
                 </div>
               </template>
@@ -238,7 +261,7 @@
 
             <ElTableColumn label="状态" width="120">
               <template #default="{ row }">
-                <ElTag :type="row.online ? 'success' : 'danger'" size="small" effect="light">
+                <ElTag :type="row.online ? 'success' : 'info'" size="small" effect="light">
                   {{ row.online ? '在线' : '离线' }}
                 </ElTag>
                 <ElTag v-if="row.stale" type="warning" size="small" effect="light">陈旧</ElTag>
@@ -246,24 +269,31 @@
               </template>
             </ElTableColumn>
 
-            <ElTableColumn label="水位时间" width="110">
+            <ElTableColumn label="水位时间" width="110" sortable :sort-method="byWatermarkAt">
               <template #default="{ row }">
-                <span :title="row.watermarkAt ? formatUnixSeconds(row.watermarkAt) : ''">
+                <span
+                  class="whitespace-nowrap"
+                  :title="row.watermarkAt ? formatUnixSeconds(row.watermarkAt) : ''"
+                >
                   {{ formatRelative(row.watermarkAt) }}
                 </span>
               </template>
             </ElTableColumn>
 
             <!-- 关键水位列：CPU / 内存 / 磁盘 使用率带进度条（一眼看紧张度），
-               其余为数值。缺值一律「—」，绝不为 0。 -->
+                 其余为数值。缺值一律「—」，**不画空轨道**（一条 6px 的灰轨道
+                 会被读成「使用率 0%」，与 watermark-bar / 详情页的纪律一致）；
+                 绝不为 0。 -->
             <ElTableColumn
               v-for="c in SNAPSHOT_COLUMNS"
               :key="c.column"
               :label="c.label"
               width="150"
+              sortable
+              :sort-method="(a, b) => sortByColumn(a, b, c.column)"
             >
               <template #default="{ row }">
-                <div v-if="c.bar" class="do-usage">
+                <div v-if="c.bar && hasWatermarkValue(row, c.column)" class="do-usage">
                   <ElProgress
                     :percentage="clampPercent(row.watermark?.[c.column])"
                     :stroke-width="6"
@@ -274,7 +304,9 @@
                     formatMetric(c.column, row.watermark?.[c.column])
                   }}</span>
                 </div>
-                <span v-else>{{ formatMetric(c.column, row.watermark?.[c.column]) }}</span>
+                <span v-else class="whitespace-nowrap">{{
+                  formatMetric(c.column, row.watermark?.[c.column])
+                }}</span>
               </template>
             </ElTableColumn>
 
@@ -302,7 +334,9 @@
 
         <!-- ============ 各指标类别的图表块 ============ -->
         <!-- 这是本页的主体：每张图回答一个独立的问题（见 CHART_BLOCKS 的 purpose）。
-           栅格：宽图占满一行，窄图两列并排；窄屏一律单列。 -->
+           栅格：宽图占满一行，窄图两列并排；窄屏一律单列。
+           点击曲线/柱 → 跳该设备详情（比「勾选联动」可靠：勾选会触发后端重取，
+           点击排障场景要的是「这台机器怎么了」，直接下钻）。 -->
         <div v-if="chartBlocks.length" class="do-charts">
           <div
             v-for="chart in chartBlocks"
@@ -316,6 +350,8 @@
               :range-seconds="meta?.range_seconds ?? rangeSeconds"
               :resolution-seconds="meta?.resolution_seconds ?? 0"
               :highlighted-device-ids="selectedDeviceIds"
+              :devices-grand-total="meta?.device_total"
+              @pick-device="gotoDetail"
             />
           </div>
         </div>
@@ -358,6 +394,7 @@
     rangeOptions
   } from '../utils/metrics'
   import {
+    TOP_N_ALL,
     abnormalDeviceCount,
     buildOverviewCharts,
     buildOverviewStats,
@@ -401,6 +438,16 @@
   const autoRefresh = ref(false)
   const autoIntervalSec = ref(30)
   let timer: ReturnType<typeof setInterval> | null = null
+
+  // ── 图表设备数（top-N）───────────────────────────────────
+  /** 每张图最多画几台设备：曲线只画排名靠前的 N 台，快照表仍显示全部。 */
+  const TOPN_CHOICES: { label: string; value: number }[] = [
+    { label: '8 台', value: 8 },
+    { label: '16 台', value: 16 },
+    { label: '32 台', value: 32 },
+    { label: '全部', value: TOP_N_ALL }
+  ]
+  const chartTopN = ref<number>(8)
 
   // ── 设备勾选（图表对比联动）──────────────────────────────
   // 空数组 = 不筛选（全部同等显示）。这与「把所有设备都勾上」语义不同：
@@ -458,7 +505,12 @@
   const chartBlocks = computed(() => {
     const m = meta.value
     if (!m) return []
-    return buildOverviewCharts(m.axis ?? [], m.available_metrics ?? [], m.devices ?? [])
+    return buildOverviewCharts(
+      m.axis ?? [],
+      m.available_metrics ?? [],
+      m.devices ?? [],
+      chartTopN.value
+    )
   })
 
   /**
@@ -512,12 +564,20 @@
   })
 
   const snapshotSummary = computed(() => {
-    const total = devices.value.length
+    const m = meta.value
+    // 总数优先用后端下发的 device_total（未截断口径）；字段缺席时退回
+    // 本地 devices.length（截断后即 max_devices，此时「截断」角标另行提示）。
+    const total = m?.device_total || devices.value.length
     const withData = devices.value.filter(
       (d) => d.watermark && Object.keys(d.watermark).length > 0
     ).length
     if (total === 0) return ''
-    const bits = [`${total} 台`, `其中 ${withData} 台有指标快照`]
+    const bits = [
+      devices.value.length === total
+        ? `${total} 台`
+        : `已显示 ${devices.value.length} / 总 ${total} 台`,
+      `其中 ${withData} 台有指标快照`
+    ]
     if (selectedDeviceIds.value.length > 0)
       bits.push(`已选 ${selectedDeviceIds.value.length} 台（图表已同步高亮）`)
     return bits.join(' · ')
@@ -547,6 +607,35 @@
   // 水位着色直接复用详情页的 usageTone（返回 CSS 变量字符串）——
   // 避免两页对「多少算紧张」给出不同颜色。
   const usageColor = (v?: number | null) => usageTone(v)
+
+  /** 水位列是否有值（决定画不画进度条 —— 缺值只显示「—」，不画空轨道）。 */
+  const hasWatermarkValue = (row: { watermark?: Record<string, number> }, column: string) => {
+    const v = row.watermark?.[column]
+    return typeof v === 'number' && Number.isFinite(v)
+  }
+
+  // ── 快照表排序（客户端全量数组，sort-method 保证缺值排最后而不是当 0）──
+  type SnapshotRow = (typeof snapshotRows.value)[number]
+
+  const sortByColumn = (a: SnapshotRow, b: SnapshotRow, column: string) => {
+    const av = a.watermark?.[column]
+    const bv = b.watermark?.[column]
+    const an = typeof av === 'number' ? av : null
+    const bn = typeof bv === 'number' ? bv : null
+    if (an === null && bn === null) return 0
+    if (an === null) return 1 // 缺值恒排尾部（Element 升序/降序都会翻转，null 始终垫底）
+    if (bn === null) return -1
+    return an - bn
+  }
+
+  const byWatermarkAt = (a: SnapshotRow, b: SnapshotRow) => {
+    const av = typeof a.watermarkAt === 'number' ? a.watermarkAt : null
+    const bv = typeof b.watermarkAt === 'number' ? b.watermarkAt : null
+    if (av === null && bv === null) return 0
+    if (av === null) return 1
+    if (bv === null) return -1
+    return av - bv
+  }
 
   // ── 加载 ────────────────────────────────────────────────
   const buildQuery = (): DeviceOverviewQuery => {
@@ -653,7 +742,13 @@
   const restartTimer = () => {
     stopTimer()
     if (autoRefresh.value) {
-      timer = setInterval(() => load(true), autoIntervalSec.value * 1000)
+      timer = setInterval(() => {
+        // 页面不可见时不刷新：后台标签页里 setInterval 本就被浏览器限流，
+        // 照常触发只会攒出并发请求（切回时结果错位）；可见恢复由
+        // visibilitychange 的补刷（onVisible）承接，与详情页同款守卫。
+        if (typeof document !== 'undefined' && document.hidden) return
+        load(true)
+      }, autoIntervalSec.value * 1000)
     }
   }
 
@@ -713,7 +808,7 @@
   }
 
   .live-dot.is-loading {
-    background: #f59e0b;
+    background: var(--el-color-warning);
     animation-duration: 0.9s;
   }
 
@@ -754,6 +849,15 @@
       display: flex;
       align-items: center;
       gap: 6px;
+    }
+
+    &__topn {
+      width: 90px;
+    }
+
+    &__topn-label {
+      font-size: 13px;
+      color: var(--el-text-color-regular);
     }
 
     &__auto-label {
@@ -936,16 +1040,25 @@
 
     &__text {
       min-width: 0;
+      overflow: hidden;
     }
 
+    /* 主机名与设备 ID 是「一个值本身」的原子数据：单行 + 省略号，
+       全值走元素 title（定宽 180 列内 19 位 ID 会超出，只 nowrap 会遮挡）。 */
     &__name {
       font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     &__meta {
       color: var(--el-text-color-placeholder);
       font-size: 11px;
       font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
   }
 
@@ -963,6 +1076,8 @@
       min-width: 56px;
       text-align: right;
       font-variant-numeric: tabular-nums;
+      /* 数值含空格（`743.4 KB/s`、`1.75 TB`）：nowrap 保证一个值不被拆成两行。 */
+      white-space: nowrap;
     }
   }
 

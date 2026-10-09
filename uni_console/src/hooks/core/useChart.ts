@@ -53,31 +53,81 @@ import { echarts, type EChartsOption } from '@/plugins/echarts'
 import type { SetOptionOpts } from 'echarts/core'
 import { storeToRefs } from 'pinia'
 import { useSettingStore } from '@/store/modules/setting'
-import { getCssVar } from '@/utils/ui'
 import { useResponsiveMenu } from './useResponsiveMenu'
 import type { BaseChartProps, ChartThemeConfig, UseChartOptions } from '@/types/component/chart'
 
-// 图表主题配置
-export const useChartOps = (): ChartThemeConfig => ({
-  /** */
-  chartHeight: '16rem',
-  /** 字体大小 */
-  fontSize: 13,
-  /** 字体颜色 */
-  fontColor: '#999',
-  /** 主题颜色 */
-  themeColor: getCssVar('--el-color-primary-light-1'),
-  /** 颜色组 */
-  colors: [
-    getCssVar('--el-color-primary-light-1'),
-    '#4ABEFF',
-    '#EDF2FF',
-    '#14DEBA',
-    '#FFAF20',
-    '#FA8A6C',
-    '#FFAF20'
-  ]
-})
+// ── 图表分类色板（按量纲校验过的固定顺序，永不循环生成新色）──────────────
+//
+// 设计约束（dataviz 六项检查，validator 已跑通）：
+//   - 色相固定 16 槽、按序分配，不做「第 17 个自动生成色」—— 生成色在 CVD
+//     （色觉缺陷）下与既有槽不可区分。多于 16 个系列属于数据侧该做 top-N /
+//     分面，不是色板该背的锅。
+//   - 亮暗两套各自校验（light 对 #ffffff 表面、dark 对 #161618 表面）：
+//     亮色全部过亮度带 / 彩度下限 / 相邻 CVD ΔE（最差 8.5）/ 正常视觉 ΔE
+//     （最差 18.8）；暗色最差相邻 CVD ΔE 7.1（处于 6~8 警戒带 —— 由
+//     「图例 + tooltip 色点」的二次编码兜底，本仓库所有图表都带这两层）。
+//   - 旧色板的一个近白槽位（暗表面上直接不可见）与一个重复槽位已移除，
+//     回归守卫见 device 模块 overview.test.ts。
+//
+// 首槽沿用品牌主色 #3B82F6（亮）/ 提亮档（暗）—— 图表第一系列与全站主色
+// 同源，和其余槽位共同过校验。
+const CHART_COLORS_LIGHT: readonly string[] = [
+  '#3B82F6', // 1 主色（与 --el-color-primary 同值）
+  '#eb6834', // 2 橙
+  '#1baf7a', // 3 青绿
+  '#eda100', // 4 黄
+  '#e87ba4', // 5 品红
+  '#008300', // 6 绿
+  '#4a3aa7', // 7 紫罗兰
+  '#e34948', // 8 红
+  // 9–16：超出 8 系列时的扩展槽（同过六项检查；「更多系列」的正确出路仍是
+  // top-N / 分面，这里是给 16 台以内的规模兜底）。
+  '#e0a21f', // 9 琥珀
+  '#0e8fa8', // 10 深青
+  '#c94f7c', // 11 玫红
+  '#6fa02a', // 12 橄榄绿
+  '#946bd8', // 13 浅紫
+  '#b85c38', // 14 赭石
+  '#0083a8', // 15 海蓝
+  '#7a4dd4' // 16 深紫
+]
+
+const CHART_COLORS_DARK: readonly string[] = [
+  '#3987e5', // 1 主色提亮档（暗表面 3:1+）
+  '#d95926',
+  '#199e70',
+  '#c98500',
+  '#d55181',
+  '#008300',
+  '#9085e9',
+  '#b83c34',
+  '#c87f2e',
+  '#2fa3c4',
+  '#c25f8e',
+  '#649f27',
+  '#8d78e0',
+  '#b56a42',
+  '#2a90b8',
+  '#9a72e8'
+]
+
+/**
+ * 图表主题配置。
+ *
+ * 色板**响应主题**：`isDark` 变化时重取（亮/暗两套固定色板），不再在
+ * setup 时刻做一次性快照 —— 旧实现的快照意味着「切深浅色后，暗背景上
+ * 仍旧画着亮色板里那个近白的槽位」。
+ */
+export const useChartOps = (): ChartThemeConfig => {
+  const { isDark } = storeToRefs(useSettingStore())
+  return {
+    chartHeight: '16rem',
+    fontSize: 13,
+    fontColor: '#999',
+    themeColor: isDark.value ? CHART_COLORS_DARK[0] : CHART_COLORS_LIGHT[0],
+    colors: (isDark.value ? CHART_COLORS_DARK : CHART_COLORS_LIGHT).slice()
+  }
+}
 
 // 常量定义
 const RESIZE_DELAYS = [50, 100, 200, 350] as const

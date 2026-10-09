@@ -385,7 +385,28 @@
   interface AxisTipParam {
     seriesName?: string
     value?: [number, number | null] | number | null
+    color?: string
   }
+
+  /** tooltip 行的色点：8px 圆点紧贴指标名（与 overview-chart-card 同款）——
+      多列同图时「线 ↔ 指标」的对应不靠肉眼比色相，看行首色点即可。 */
+  const tooltipDot = (color?: string): string =>
+    color
+      ? `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${color};margin-right:6px;flex:none"></span>`
+      : ''
+
+  /** 列名进 HTML 前转义（列名来自后端 available_metrics，防注入兜底）。 */
+  const escapeHtml = (s: string): string =>
+    s.replace(/[&<>"']/g, (c) => {
+      const map: Record<string, string> = {
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+      }
+      return map[c] ?? c
+    })
 
   function buildChartOption(frames: SeriesFrame[]): EChartsOption {
     const range = meta.value?.rangeSeconds ?? DEFAULT_RANGE_SECONDS
@@ -396,7 +417,30 @@
     const axisIndexByUnit = new Map(axes.map((g, i) => [g.unit, i]))
     return {
       animation: false,
-      grid: { top: 16, right: 16, bottom: 8, left: 8, containLabel: true },
+      // bottom 加高到 36：图例带（28px）+ X 轴标签。此前无图例时 8px 只够
+      // containLabel 的轴标签；图例挂底后不给高度会与轴标签互相压盖。
+      grid: { top: 16, right: 16, bottom: 36, left: 8, containLabel: true },
+      // 图例：多列同图（本面板就是多列场景）必须给出「线 ↔ 指标」的常驻对应
+      // —— 此前无图例、tooltip 又无色点，选 3 列以上时只能数位置猜哪条线是谁。
+      // 图例文案走 metricLabel 的中文名（标识用列名、展示用元数据，分工见
+      // column-meta 的注释）；scroll 型单行翻页，不占绘图高度。
+      legend: {
+        type: 'scroll',
+        bottom: 0,
+        left: 'center',
+        padding: 0,
+        textStyle: { fontSize: 11 },
+        // 图例文案：系列标识是列名，展示走 metricLabel 的中文名（标识/展示
+        // 分工的理由见 column-meta.ts 的注释 —— 翻译只发生在渲染口）。
+        formatter: (name: string) => metricLabel(name),
+        itemWidth: 12,
+        // itemHeight > 文字行高（11px）：滚动图例的裁剪窗口上沿与条目框齐平，
+        // 折线图例标记 = itemHeight × 0.8，取 8 时裁剪线正好压汉字天头（实测
+        // 详情见 overview-chart-card 同款注释）。16 留出 1.9px 天头余量。
+        itemHeight: 16,
+        itemGap: 10,
+        height: 28
+      },
       tooltip: {
         trigger: 'axis',
         formatter: (params: unknown) => {
@@ -410,7 +454,9 @@
             // （column-meta → display.formatByUnit），此处不再自己格式化 ——
             // 曾经这里用 formatMetricValue（纯数字），于是网卡速率显示成 761286.09，
             // 而同一个值在总览页是 743.4 KB/s。
-            return metricTipLine(p.seriesName ?? '', v)
+            // 行首加 8px 色点：多列时「数 ↔ 线」靠色点对应，不靠肉眼比色相。
+            const [label, value] = metricTipLine(p.seriesName ?? '', v).split(': ')
+            return `<div style="display:flex;align-items:center;gap:8px;min-width:180px">${tooltipDot(p.color)}<span>${escapeHtml(label)}</span><span style="margin-left:auto;font-weight:600;white-space:nowrap">${escapeHtml(value ?? '')}</span></div>`
           })
           const head = typeof at === 'number' ? formatBucketTime(at) : ''
           return [head, ...lines].filter((s) => s !== '').join('<br/>')

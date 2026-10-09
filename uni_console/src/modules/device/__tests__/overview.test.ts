@@ -7,6 +7,7 @@ import {
   assignColumns,
   buildOverviewCharts,
   buildOverviewStats,
+  capacitySegments,
   CHART_BLOCKS,
   COL,
   countPresent,
@@ -16,8 +17,11 @@ import {
   formatMetric,
   hasDrawableSeries,
   isEmptyResult,
+  lastValue,
   overviewState,
   seriesPoints,
+  TOP_N_ALL,
+  usageHotspot,
   type DeviceOverviewLike
 } from '../utils/overview'
 
@@ -150,6 +154,7 @@ describe('buildOverviewCharts', () => {
   it('单列图块的系列名只写主机名（图例拥挤的直接对策）', () => {
     // 「磁盘使用率趋势」只有 1 列 → 整张图都是同一指标，再给每台设备加
     // 「· 磁盘使用率」是纯噪声，会把图例挤到换行/分页（总览常同时画十余台）。
+    // 注意顺序：系列按**该列最新值降序**（top-N 排名序），beta 最新值 22 > alpha 12。
     const charts = buildOverviewCharts(
       AXIS,
       [COL.diskUsedPercent],
@@ -159,7 +164,7 @@ describe('buildOverviewCharts', () => {
       ]
     )
     const names = charts.find((c) => c.key === 'disk-usage')!.series.map((s) => s.name)
-    expect(names).toEqual(['alpha', 'beta'])
+    expect(names).toEqual(['beta', 'alpha'])
   })
 
   it('无数据可画时返回空图表列表（供页面渲染显式空态）', () => {
@@ -211,6 +216,255 @@ describe('buildOverviewCharts', () => {
       expect(c.purpose.length, `${c.key} 缺 purpose`).toBeGreaterThan(0)
       expect(c.rationale.length, `${c.key} 缺 rationale`).toBeGreaterThan(0)
     }
+  })
+})
+
+// ── top-N：100 台规模下的曲线裁剪 ───────────────────────────
+
+describe('buildOverviewCharts · top-N 选取', () => {
+  /** 造 n 台设备，cpu 最新值 = i（i 越大越靠前）。 */
+  function fleet(n: number, col = COL.cpu): DeviceOverviewLike[] {
+    return Array.from({ length: n }, (_, i) => dev(String(i), `host-${i}`, { [col]: [i, i, i] }))
+  }
+
+  it('默认只画前 8 台（按第一列最新非空值降序）', () => {
+    // 100 台全画只会糊成一片；快照表仍显示全部（见视图层）。
+    const charts = buildOverviewCharts(AXIS, [COL.cpu], fleet(20))
+    const cpu = charts.find((c) => c.key === 'cpu')!
+    expect(cpu.series).toHaveLength(8)
+    // 降序：最新值 19 的 host-19 排第一
+    expect(cpu.series[0].hostname).toBe('host-19')
+    expect(cpu.series[7].hostname).toBe('host-12')
+    // 设备总数不受 top-N 影响（「N / M 台有数据」的分母口径）
+    expect(cpu.devicesTotal).toBe(20)
+  })
+
+  it('字段缺失 / 全 null 的设备排最后，不被当成 0', () => {
+    // 排名若把 null 当 0，缺值设备会插到「真实为 0」的设备前面 ——
+    // 「没上报」在容量语境里恰恰是最该被看到的，排序不能把它埋掉。
+    const devices = [
+      dev('a', 'no-data', { cpu_used_percent: [null, null, null] }),
+      dev('b', 'zero', { cpu_used_percent: [0, 0, 0] }),
+      dev('c', 'high', { cpu_used_percent: [90, 90, 90] })
+    ]
+    const charts = buildOverviewCharts(AXIS, [COL.cpu], devices, 2)
+    const names = charts.find((c) => c.key === 'cpu')!.series.map((s) => s.hostname)
+    expect(names).toEqual(['high', 'zero'])
+  })
+
+  it('TOP_N_ALL 不裁剪（快照表配套的全量视图）', () => {
+    const charts = buildOverviewCharts(AXIS, [COL.cpu], fleet(12), TOP_N_ALL)
+    expect(charts.find((c) => c.key === 'cpu')!.series).toHaveLength(12)
+  })
+
+  it('top-N 不影响设备总数与「有数据」计数', () => {
+    const devices = fleet(10)
+    const charts = buildOverviewCharts(AXIS, [COL.cpu], devices, 3)
+    const cpu = charts.find((c) => c.key === 'cpu')!
+    expect(cpu.devicesTotal).toBe(10)
+    // 有数据的是全部 10 台（都上报了），画出来的是 3 台 —— 两个数必须分得清。
+    expect(cpu.devicesWithData).toBe(10)
+  })
+})
+
+// ── 磁盘容量：category 堆叠快照 ─────────────────────────────
+
+describe('buildOverviewCharts · 磁盘容量（存量堆叠）', () => {
+  it('stacked 图产出分类快照而非时间序列（每台一柱的语义要求）', () => {
+    // 修复前：时间序列点被塞进堆叠柱 → 渲染成无意义的「总量线」。
+    // 修复后：series 为空、snapshot 每台一行、值 = 该列最后一个非空值。
+    const devices = [
+      dev('1', 'a', { disk_used_gb: [10, 12, 11], disk_total_gb: [100, 100, 100] }),
+      dev('2', 'b', { disk_used_gb: [50, 55, 60], disk_total_gb: [80, 80, 80] })
+    ]
+    const charts = buildOverviewCharts(AXIS, [COL.diskUsedGB, COL.diskTotalGB], devices)
+    const cap = charts.find((c) => c.key === 'disk-capacity')!
+
+    expect(cap.type).toBe('stacked')
+    expect(cap.series).toEqual([]) // 不再是时间序列
+    expect(cap.snapshot).toHaveLength(2)
+    // 快照取**最后一个非空值**：a 的 used=11（不是 10），b 的 used=60
+    const rowA = cap.snapshot.find((r) => r.deviceId === '1')!
+    expect(rowA.values[COL.diskUsedGB]).toBe(11)
+    expect(rowA.values[COL.diskTotalGB]).toBe(100)
+  })
+
+  it('快照按第一列（已用）降序 —— 最吃紧的排最前', () => {
+    const devices = [
+      dev('1', 'a', { disk_used_gb: [10, 10, 10], disk_total_gb: [100, 100, 100] }),
+      dev('2', 'b', { disk_used_gb: [60, 60, 60], disk_total_gb: [80, 80, 80] })
+    ]
+    const cap = buildOverviewCharts(AXIS, [COL.diskUsedGB, COL.diskTotalGB], devices).find(
+      (c) => c.key === 'disk-capacity'
+    )!
+    expect(cap.snapshot.map((r) => r.hostname)).toEqual(['b', 'a'])
+  })
+
+  it('top-N 同样约束存量图（柱多了与线一样糊）', () => {
+    const fleet = Array.from({ length: 10 }, (_, i) =>
+      dev(String(i), `h${i}`, {
+        disk_used_gb: [i, i, i],
+        disk_total_gb: [100, 100, 100]
+      })
+    )
+    const cap = buildOverviewCharts(AXIS, [COL.diskUsedGB, COL.diskTotalGB], fleet, 5).find(
+      (c) => c.key === 'disk-capacity'
+    )!
+    expect(cap.snapshot).toHaveLength(5)
+    expect(cap.snapshot[0].hostname).toBe('h9') // 降序第一位
+  })
+
+  it('两列全缺的设备不进快照（缺值不是 0）', () => {
+    const devices = [
+      dev('1', 'a', { disk_used_gb: [1, 1, 1], disk_total_gb: [2, 2, 2] }),
+      dev('2', 'b', { disk_used_gb: [null, null, null], disk_total_gb: [null, null, null] })
+    ]
+    const cap = buildOverviewCharts(AXIS, [COL.diskUsedGB, COL.diskTotalGB], devices).find(
+      (c) => c.key === 'disk-capacity'
+    )!
+    expect(cap.snapshot).toHaveLength(1)
+    expect(cap.snapshot[0].deviceId).toBe('1')
+  })
+})
+
+describe('capacitySegments · 可用 = total − used', () => {
+  it('两段齐全时 free = total − used', () => {
+    const seg = capacitySegments({
+      deviceId: '1',
+      hostname: 'a',
+      values: { disk_used_gb: 30, disk_total_gb: 100 }
+    })
+    expect(seg).toEqual({ used: 30, free: 70 })
+  })
+
+  it('只有一列（total 或 used）时不产出（柱高会失去「总容量」语义）', () => {
+    expect(
+      capacitySegments({ deviceId: '1', hostname: 'a', values: { disk_used_gb: 30 } })
+    ).toBeNull()
+    expect(
+      capacitySegments({ deviceId: '1', hostname: 'a', values: { disk_total_gb: 100 } })
+    ).toBeNull()
+  })
+
+  it('total < used（数据翻转）不产出、不夹成 0', () => {
+    expect(
+      capacitySegments({
+        deviceId: '1',
+        hostname: 'a',
+        values: { disk_used_gb: 120, disk_total_gb: 100 }
+      })
+    ).toBeNull()
+  })
+})
+
+// ── 按量纲分轴：混轴防「百分比贴 0」──────────────────────────
+
+describe('buildOverviewCharts · 按量纲分轴（unitAxes）', () => {
+  it('mem 块（% + MB）产出两个量纲组，主量纲（%）在前', () => {
+    // 修复前：单 Y 轴下 MB（10^3 量级）把百分比（0~100）压成贴 0 的直线。
+    // 修复后：每列挂到自己的量纲轴（渲染层见 overview-chart-card）。
+    const devices = [
+      dev('1', 'a', {
+        mem_used_percent: [55, 56, 57],
+        mem_available_mb: [4000, 3900, 3800]
+      })
+    ]
+    const mem = buildOverviewCharts(AXIS, [COL.memPercent, COL.memAvailMB], devices).find(
+      (c) => c.key === 'mem'
+    )!
+    expect(mem.unitAxes.map((g) => g.unit)).toEqual(['%', 'MB'])
+  })
+
+  it('proc 块（个 vs 秒）分轴：主量纲 = 先出现的列（proc_count）', () => {
+    const devices = [
+      dev('1', 'a', { proc_count: [200, 210, 220], uptime_sec: [80000, 81000, 82000] })
+    ]
+    const proc = buildOverviewCharts(AXIS, [COL.procCount, COL.uptimeSec], devices).find(
+      (c) => c.key === 'proc'
+    )!
+    // 平票（各 1 列）时主量纲取先出现者 —— proc_count 占左轴。
+    expect(proc.unitAxes.map((g) => g.unit)).toEqual(['', 's'])
+  })
+
+  it('单量纲块退化为单轴组（行为与一根 Y 轴一致）', () => {
+    const devices = [dev('1', 'a', { disk_used_percent: [10, 20, 30] })]
+    const du = buildOverviewCharts(AXIS, [COL.diskUsedPercent], devices).find(
+      (c) => c.key === 'disk-usage'
+    )!
+    expect(du.unitAxes).toHaveLength(1)
+    expect(du.unitAxes[0].unit).toBe('%')
+  })
+})
+
+// ── lastValue：排名的取值口径 ───────────────────────────────
+
+describe('lastValue', () => {
+  it('取最后一个非空值（不是第一个、不是均值）', () => {
+    expect(lastValue([10, null, 30])).toBe(30)
+    expect(lastValue([10, 20, null])).toBe(20)
+  })
+
+  it('全 null / 缺数组 → null（绝不 0）', () => {
+    expect(lastValue([null, null])).toBeNull()
+    expect(lastValue(undefined)).toBeNull()
+    expect(lastValue([])).toBeNull()
+  })
+
+  it('真实的 0 是合法最新值', () => {
+    expect(lastValue([5, 0])).toBe(0)
+  })
+})
+
+// ── 提示列接入水位阈值 ──────────────────────────────────────
+
+describe('deviceIssueText · 水位阈值语义', () => {
+  it('CPU ≥90 显示告警（修复前 97% 也显示「正常」）', () => {
+    const txt = deviceIssueText(
+      dev('1', 'a', {}, { watermarkAt: 123, watermark: { cpu_used_percent: 97 } })
+    )
+    expect(txt).toContain('CPU')
+    expect(txt).toContain('97')
+    expect(txt).toContain('告警')
+  })
+
+  it('≥80 且 <90 显示「高」', () => {
+    const txt = deviceIssueText(
+      dev('1', 'a', {}, { watermarkAt: 123, watermark: { mem_used_percent: 85 } })
+    )
+    expect(txt).toContain('内存')
+    expect(txt).toContain('高')
+    expect(txt).not.toContain('告警')
+  })
+
+  it('只报最高的一个水位（一行装不下三个并列的「高」）', () => {
+    const txt = deviceIssueText(
+      dev(
+        '1',
+        'a',
+        {},
+        {
+          watermarkAt: 123,
+          watermark: { cpu_used_percent: 95, mem_used_percent: 84, disk_used_percent: 91 }
+        }
+      )
+    )
+    // CPU 95 是三者最高 → 只提 CPU，不把三个水位都铺出来
+    expect(txt).toContain('CPU')
+    expect(txt).not.toContain('内存')
+    expect(txt).not.toContain('磁盘')
+  })
+
+  it('水位全缺时不造「高」（null 不是 0）', () => {
+    expect(usageHotspot(undefined)).toBe('')
+    expect(usageHotspot({})).toBe('')
+    expect(usageHotspot({ cpu_used_percent: 40, mem_used_percent: 60 })).toBe('')
+  })
+
+  it('有水位热点时不叠加「尚无指标快照」', () => {
+    const txt = deviceIssueText(
+      dev('1', 'a', {}, { watermarkAt: 123, watermark: { cpu_used_percent: 97 } })
+    )
+    expect(txt).not.toContain('尚无指标快照')
   })
 })
 
@@ -330,6 +584,8 @@ describe('hasDrawableSeries', () => {
           total: 1
         }
       ],
+      snapshot: [] as { deviceId: string; hostname: string; values: Record<string, number> }[],
+      unitAxes: [{ unit: '%', columns: ['cpu_used_percent'] }],
       devicesWithData: 0,
       devicesTotal: 1
     }
@@ -547,6 +803,52 @@ describe('useChart 消费方必须监听 chartVisible（防「空白图块」静
     expect(src).toContain("@/hooks/core/useChart'")
     expect(src).toContain("addEventListener('chartVisible'")
     expect(src).toContain("removeEventListener('chartVisible'")
+  })
+
+  it('overview-chart-card.vue 的 pick-device 是活的：注册 chart.on(click) 且页面有 @pick-device', () => {
+    // 修复前是死代码：emit('pick-device') / defineExpose({ onPick }) 都在，
+    // 但从未 chart.on('click')，页面也没绑 @pick-device —— 点击曲线什么都不
+    // 发生。这条守卫钉住「接线两半必须成对」：
+    //   ① 组件侧：on('click' → emit('pick-device'
+    //   ② 页面侧：模板里 @pick-device=
+    const src = readSrc('../components/overview-chart-card.vue')
+    expect(src).toContain("emit('pick-device'")
+    expect(src).toContain(".on('click'")
+    expect(src).toContain(".off('click'")
+    const view = readSrc('../views/overview.vue')
+    expect(view).toContain('@pick-device')
+  })
+
+  it('overview.vue 的自动刷新带 document.hidden 守卫（与 detail.vue 同款）', () => {
+    // 后台标签页里 setInterval 被浏览器限流，照常触发只会攒并发请求；
+    // 可见恢复由 visibilitychange 补刷承接。漏掉守卫时切后台仍在轮询。
+    const view = readSrc('../views/overview.vue')
+    expect(view).toContain('document.hidden')
+    expect(view).toContain('visibilitychange')
+  })
+
+  it('快照表缺值不渲染空轨道（hasWatermarkValue 守卫在模板里）', () => {
+    // 缺值画 6px 空轨道会被读成「使用率 0%」—— 与 watermark-bar / 详情页
+    // 的「缺值不画条」纪律矛盾。v-if 必须走 hasWatermarkValue，而不是
+    // 恒真（clampPercent(null)→0 仍会渲染轨道）。
+    const view = readSrc('../views/overview.vue')
+    expect(view).toContain('v-if="c.bar && hasWatermarkValue(row, c.column)"')
+  })
+
+  it('overview-chart-card.vue 的 tooltip 有 Top-10 截断（100 台 × 2 列不渲染 200 行）', () => {
+    const src = readSrc('../components/overview-chart-card.vue')
+    expect(src).toContain('TOOLTIP_MAX_ROWS')
+    expect(src).toContain('其余')
+  })
+
+  it('色板不残留近白/重复色（useChartOps 亮暗两套、主题响应）', () => {
+    // #EDF2FF（近白，暗表面上不可见）与重复的 #FFAF20 是旧色板的病灶；
+    // useChartOps 必须在 isDark 下重取（不做 setup 一次性快照）。
+    const src = readSrc('../../../hooks/core/useChart.ts')
+    expect(src).not.toContain('#EDF2FF')
+    const ffaf = src.match(/#FFAF20/g)
+    expect(ffaf ?? []).toHaveLength(0)
+    expect(src).toContain('isDark')
   })
 })
 
