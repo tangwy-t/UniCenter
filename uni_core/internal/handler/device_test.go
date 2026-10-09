@@ -38,10 +38,25 @@ type stubDeviceSvc struct {
 	// 丢弃或改写 query），overviewCalls 计数（与上面同一个理由：防死代码）。
 	overviewQuery *request.DeviceOverviewQuery
 	overviewCalls int
+
+	// 列表面：与总览同款 —— 记录实际传入的 DeviceQuery，断言 handler 把
+	// 新增的 IP/版本/排序参数原样绑定进 service（丢一个，前端筛选就静默失效）。
+	listQuery  *request.DeviceQuery
+	listCalls  int
+	listItems  []response.DeviceListItem
+	listErr    error
+	listPage   int
+	listSize   int
+	listTotal  int64
 }
 
-func (s *stubDeviceSvc) List(context.Context, *request.DeviceQuery) (*app.PageResponse, error) {
-	return app.NewPageResponse([]response.DeviceListItem{}, 0, 1, 10), nil
+func (s *stubDeviceSvc) List(_ context.Context, q *request.DeviceQuery) (*app.PageResponse, error) {
+	s.listQuery = q
+	s.listCalls++
+	if s.listErr != nil {
+		return nil, s.listErr
+	}
+	return app.NewPageResponse(s.listItems, s.listTotal, s.listPage, s.listSize), nil
 }
 
 func (s *stubDeviceSvc) GetByID(context.Context, uint64) (*response.DeviceResp, error) {
@@ -97,6 +112,49 @@ func newGinCtx(method, target string) (*gin.Context, *httptest.ResponseRecorder)
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest(method, target, nil)
 	return c, w
+}
+
+// TestDeviceHandlerListBindsQuery 钉住列表端点把全部查询参数绑定进 service ——
+// 新增的 primaryIp / agentVersion / sortBy / sortOrder 丢一个，前端的筛选与
+// 服务端排序就静默失效（页面照常出列表，只是条件被无视）。
+func TestDeviceHandlerListBindsQuery(t *testing.T) {
+	svc := &stubDeviceSvc{}
+	h := NewDeviceHandler(svc, svc, svc)
+	c, w := newGinCtx(http.MethodGet,
+		"/devices?page=2&pageSize=20&hostname=web&status=1&online=true"+
+			"&primaryIp=10.1.1.&agentVersion=0.6.0&sortBy=agentVersion&sortOrder=asc")
+
+	h.List(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("HTTP 状态 = %d, want 200；body=%s", w.Code, w.Body.String())
+	}
+	if svc.listCalls != 1 {
+		t.Fatalf("List 调用数 = %d, want 1", svc.listCalls)
+	}
+	q := svc.listQuery
+	if q == nil {
+		t.Fatal("handler 未把 DeviceQuery 传给 service")
+	}
+	if q.PrimaryIp != "10.1.1." {
+		t.Fatalf("primaryIp 未绑定: %q", q.PrimaryIp)
+	}
+	if q.AgentVersion != "0.6.0" {
+		t.Fatalf("agentVersion 未绑定: %q", q.AgentVersion)
+	}
+	if q.SortBy != "agentVersion" {
+		t.Fatalf("sortBy 未绑定: %q", q.SortBy)
+	}
+	if q.SortOrder != "asc" {
+		t.Fatalf("sortOrder 未绑定: %q", q.SortOrder)
+	}
+	// 既有参数不回归
+	if q.Hostname != "web" || q.Status == nil || *q.Status != 1 || q.Online == nil || !*q.Online {
+		t.Fatalf("既有参数绑定回归: %+v", q)
+	}
+	if q.Page != 2 || q.PageSize != 20 {
+		t.Fatalf("分页参数未绑定: page=%d pageSize=%d", q.Page, q.PageSize)
+	}
 }
 
 func TestDeviceHandlerMetricsBindsQuery(t *testing.T) {

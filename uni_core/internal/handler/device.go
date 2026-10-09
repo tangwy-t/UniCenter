@@ -72,15 +72,19 @@ func NewDeviceHandler(svc DeviceServiceInterface, metrics DeviceMetricsServiceIn
 
 // List handles GET /api/v1/devices — paginated device listing.
 // @Summary      设备列表
-// @Description  分页查询设备列表，支持按主机名、启停态、在线状态筛选；每行附带 Redis 水位
+// @Description  分页查询设备列表，支持按主机名、来源 IP（模糊）、启停态、在线状态、Agent 版本（精确）筛选，排序白名单 lastSeenAt/hostname/agentVersion；每行附带 Redis 水位
 // @Tags         设备监控
 // @Accept       json
 // @Produce      json
-// @Param        page      query  int     false  "页码"           default(1)
-// @Param        pageSize  query  int     false  "每页条数"       default(10)
-// @Param        hostname  query  string  false  "主机名(模糊查询)"
-// @Param        status    query  int     false  "启停态(0=停用 1=启用)"
-// @Param        online    query  bool    false  "在线状态(true=在线 false=离线)"
+// @Param        page         query  int     false  "页码"           default(1)
+// @Param        pageSize     query  int     false  "每页条数"       default(10)
+// @Param        hostname     query  string  false  "主机名(模糊查询)"
+// @Param        status       query  int     false  "启停态(0=停用 1=启用)"
+// @Param        online       query  bool    false  "在线状态(true=在线 false=离线)"
+// @Param        primaryIp    query  string  false  "来源IP(模糊查询,服务端观测值)"
+// @Param        agentVersion query  string  false  "Agent版本(精确匹配)"
+// @Param        sortBy       query  string  false  "排序列(lastSeenAt默认/hostname/agentVersion,非法值回落默认)"
+// @Param        sortOrder    query  string  false  "排序方向(asc/desc,默认desc)"
 // @Security     BearerAuth
 // @Success      200  {object}  app.Response{data=app.PageResponse}  "查询成功"
 // @Failure      401  {object}  app.Response  "未登录"

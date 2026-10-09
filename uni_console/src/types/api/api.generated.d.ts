@@ -605,6 +605,7 @@ declare namespace Api {
       status: number
       online: boolean
       lastSeenAt?: number | null
+      primaryIp?: string
       cpuUsedPercent?: number | null
       memUsedPercent?: number | null
       diskUsedPercent?: number | null
@@ -627,6 +628,7 @@ declare namespace Api {
       status: number
       online: boolean
       lastSeenAt?: number | null
+      primaryIp?: string
       cpuUsedPercent?: number | null
       memUsedPercent?: number | null
       diskUsedPercent?: number | null

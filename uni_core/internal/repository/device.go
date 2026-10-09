@@ -101,6 +101,38 @@ func (r *DeviceRepo) Touch(ctx context.Context, id uint64, at time.Time) error {
 		UpdateColumn("last_seen_at", at).Error
 }
 
+// deviceSortClause 把排序参数收敛成白名单 SQL 片段（防 ORDER BY 注入），
+// 与 repository/file.go 的 fileSortClause 同款纪律。
+//
+// 白名单**严格限定为 DB 列**：lastSeenAt(默认) / hostname / agentVersion。
+// 水位列（CPU/内存/磁盘使用率）由 service 从 Redis latest 拼进响应，**不是
+// DB 列**，无法也不得出现在这里 —— 对它们排序需要先落库（读时拼装的行
+// 无法 SQL ORDER BY）。
+//
+// 非法值（不在白名单 / 非 asc|desc）**静默回落默认**而不是报 400：
+//   - sortBy 未登记 → last_seen_at；
+//   - sortOrder 不是 asc → desc。
+// 这样旧客户端、笔误的参数都拿到与「不传排序」完全一致的行为，而不是被
+// 400 挡在外面。回落后的默认组合 = lastSeenAt desc, id desc，与引入排序
+// 参数之前 FindPage 的硬编码**逐字一致**（评审回归点：默认排序不变）。
+//
+// id DESC 是所有方向的稳定次序锚（last_seen_at 存在 NULL 与并列值，
+// 只按它排序会因页间并列而抖动）。
+func deviceSortClause(sortBy, sortOrder string) string {
+	column := "last_seen_at"
+	switch sortBy {
+	case "hostname":
+		column = "hostname"
+	case "agentVersion":
+		column = "agent_version"
+	}
+	direction := " DESC"
+	if sortOrder == "asc" {
+		direction = " ASC"
+	}
+	return column + direction + ", id DESC"
+}
+
 // applyFilters 把列表筛选条件链到给定会话上（与 config.go/file.go 的
 // applyFilters 同款：纯函数式地把 db 链下去，不共享语句状态）。
 func (r *DeviceRepo) applyFilters(db *gorm.DB, q *request.DeviceQuery, onlineSince time.Time) *gorm.DB {
@@ -116,6 +148,15 @@ func (r *DeviceRepo) applyFilters(db *gorm.DB, q *request.DeviceQuery, onlineSin
 		} else {
 			db = db.Where("last_seen_at IS NULL OR last_seen_at < ?", onlineSince)
 		}
+	}
+	// IP 模糊（与 Hostname 同语义）：定位场景按片段/前缀搜。
+	if q.PrimaryIp != "" {
+		db = db.Where("primary_ip LIKE ?", "%"+q.PrimaryIp+"%")
+	}
+	// Agent 版本精确（见 request.DeviceQuery.AgentVersion 的注释：模糊会
+	// 把 0.6 与 0.6.0 混进同一结果）。
+	if q.AgentVersion != "" {
+		db = db.Where("agent_version = ?", q.AgentVersion)
 	}
 	return db
 }
@@ -134,7 +175,7 @@ func (r *DeviceRepo) applyFilters(db *gorm.DB, q *request.DeviceQuery, onlineSin
 func (r *DeviceRepo) FindPage(ctx context.Context, q *request.DeviceQuery, onlineSince time.Time) ([]entity.Device, int64, error) {
 	countDB := r.applyFilters(r.db.WithContext(ctx).Model(&entity.Device{}), q, onlineSince)
 	dataDB := r.applyFilters(r.db.WithContext(ctx).Model(&entity.Device{}), q, onlineSince).
-		Order("last_seen_at DESC, id DESC")
+		Order(deviceSortClause(q.SortBy, q.SortOrder))
 	return paginate[entity.Device](countDB, dataDB, q)
 }
 

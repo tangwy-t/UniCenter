@@ -47,6 +47,37 @@ func newDeviceTestEnv(t *testing.T) (*DeviceService, *gorm.DB, *agentmetrics.Raw
 	return svc, db, raw, latest
 }
 
+// TestDeviceListItemCarriesPrimaryIP 钉住「列表项带 IP」的投影：
+// entity.PrimaryIP 必须经 normalizedIP 进 DeviceListItem（IPv4-mapped 归一）。
+// 这是「按 IP 定位设备」在列表页能用的前提 —— 只在详情里有 IP 时，
+// 排查得一台台点进详情。
+func TestDeviceListItemCarriesPrimaryIP(t *testing.T) {
+	svc, db, _, _ := newDeviceTestEnv(t)
+	ctx := context.Background()
+
+	d := &entity.Device{BaseEntity: entity.BaseEntity{ID: 1003}, InstanceID: "i-pip",
+		Hostname: "web-pip", OS: "linux", Arch: "amd64", AgentVersion: "0.6.0",
+		Status: entity.DeviceStatusEnabled, PrimaryIP: "::ffff:10.1.2.3"}
+	if err := db.Create(d).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	pr, err := svc.List(ctx, &request.DeviceQuery{AgentVersion: "0.6.0"})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	items, ok := pr.List.([]response.DeviceListItem)
+	if !ok {
+		t.Fatalf("List 元素类型 = %T, want []response.DeviceListItem", pr.List)
+	}
+	if len(items) != 1 {
+		t.Fatalf("列表长度 = %d, want 1（agentVersion 精确筛选）", len(items))
+	}
+	if items[0].PrimaryIP != "10.1.2.3" {
+		t.Fatalf("列表项 primaryIp = %q, want 10.1.2.3（IPv4-mapped 必须归一）", items[0].PrimaryIP)
+	}
+}
+
 func TestDeviceListJoinsLatestWatermark(t *testing.T) {
 	svc, db, raw, latest := newDeviceTestEnv(t)
 	ctx := context.Background()

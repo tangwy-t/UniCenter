@@ -364,6 +364,9 @@ func (s *DeviceService) toListItem(d *entity.Device, w *agentmetrics.LatestSumma
 		ID: d.ID, Hostname: d.Hostname, OS: d.OS, Arch: d.Arch,
 		AgentVersion: d.AgentVersion, Status: d.Status,
 		Online: d.LastSeenAt != nil && d.LastSeenAt.After(onlineSince),
+		// 列表也要按 IP 定位设备（详见 response.DeviceListItem.PrimaryIP）。
+		// 详情组装（GetByID）再覆盖一次同字段（值同源同口径，见其注释）。
+		PrimaryIP: normalizedIP(d.PrimaryIP),
 		// 升级字段全部来自升级域的同一份快照（含读时推导的相位）。
 		AgentUpgradeSupported: d.AgentUpgradeSupported == 1,
 		TargetVersion:         snap.EffectiveTargetVersion,

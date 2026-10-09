@@ -42,6 +42,132 @@ func seedDevice(t *testing.T, db *gorm.DB, id uint64, instanceID, tokenHash, hos
 	}
 }
 
+// seedDeviceFull 在 seedDevice 之上补 primary_ip / agent_version：这两列的
+// 值是本轮「列表带 IP + 按版本筛选 + 服务端排序」契约的主角，seedDevice 的
+// 固定值（0.1.0 / 空 IP）无法构造出可比的行序与命中差。
+func seedDeviceFull(t *testing.T, db *gorm.DB, id uint64, instanceID, tokenHash, hostname,
+	primaryIP, agentVersion string, seen *time.Time) {
+	t.Helper()
+	d := entity.Device{
+		BaseEntity: entity.BaseEntity{ID: id},
+		InstanceID: instanceID, TokenHash: tokenHash, Hostname: hostname,
+		OS: "linux", Arch: "amd64", AgentVersion: agentVersion, PrimaryIP: primaryIP,
+		Status: entity.DeviceStatusEnabled, LastSeenAt: seen,
+	}
+	if err := db.Create(&d).Error; err != nil {
+		t.Fatalf("seed device: %v", err)
+	}
+}
+
+// TestDeviceFindPagePrimaryIpAndAgentVersionFilters 钉住两个新筛选的语义：
+//   - primaryIp 模糊（LIKE %v%，与 hostname 同语义 —— 定位场景按片段搜）；
+//   - agentVersion **精确**（0.6 不得命中 0.6.0：版本是精确串）。
+func TestDeviceFindPagePrimaryIpAndAgentVersionFilters(t *testing.T) {
+	db := newDeviceTestDB(t)
+	seen := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	seedDeviceFull(t, db, 1001, "i1", "h1", "web-01", "10.1.1.10", "0.6.0", &seen)
+	seedDeviceFull(t, db, 1002, "i2", "h2", "web-02", "10.1.1.100", "0.6.1", &seen)
+	seedDeviceFull(t, db, 1003, "i3", "h3", "db-01", "192.168.7.5", "0.5.9", &seen)
+	repo := NewDeviceRepository(db)
+	ctx := context.Background()
+
+	// primaryIp 模糊：片段 ".1.1." 命中两台
+	_, total, err := repo.FindPage(ctx, &request.DeviceQuery{PrimaryIp: "10.1.1."}, seen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 2 {
+		t.Fatalf("primaryIp=10.1.1. 应命中 2 台, got %d", total)
+	}
+
+	// agentVersion 精确：0.6 只命中 0.6（不得把 0.6.0/0.6.1 混进来）
+	_, total, _ = repo.FindPage(ctx, &request.DeviceQuery{AgentVersion: "0.6"}, seen)
+	if total != 0 {
+		t.Fatalf("agentVersion=0.6 精确匹配应命中 0 台, got %d", total)
+	}
+	list, total, _ := repo.FindPage(ctx, &request.DeviceQuery{AgentVersion: "0.6.0"}, seen)
+	if total != 1 || len(list) != 1 || list[0].ID != 1001 {
+		t.Fatalf("agentVersion=0.6.0 精确匹配应只命中 1001, got total=%d len=%d", total, len(list))
+	}
+}
+
+// TestDeviceSortWhitelistAndFallback 钉住排序契约的**守卫**：
+//   1. 白名单列映射正确：lastSeenAt→last_seen_at、hostname→hostname、
+//      agentVersion→agent_version（各列按 asc 排出的顺序必须真的变）；
+//   2. 非法 sortBy / sortOrder **静默回落默认**（last_seen_at DESC, id DESC），
+//      与「不传排序」逐字同行为 —— 不抛错、不 400（旧客户端不能断）；
+//   3. 任意方向都带 id DESC 锚（并列值不抖动）。
+func TestDeviceSortWhitelistAndFallback(t *testing.T) {
+	db := newDeviceTestDB(t)
+	old := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	fresh := time.Date(2026, 9, 14, 9, 59, 45, 0, time.UTC)
+	seedDeviceFull(t, db, 1001, "i1", "h1", "web-02", "10.0.0.1", "0.6.0", &fresh)
+	seedDeviceFull(t, db, 1002, "i2", "h2", "web-01", "10.0.0.2", "0.5.9", &old)
+	seedDeviceFull(t, db, 1003, "i3", "h3", "alpha-01", "10.0.0.3", "0.7.0", &old)
+	repo := NewDeviceRepository(db)
+	ctx := context.Background()
+	idsOf := func(list []entity.Device) []uint64 {
+		ids := make([]uint64, len(list))
+		for i, d := range list {
+			ids[i] = d.ID
+		}
+		return ids
+	}
+
+	// 白名单映射：hostname asc → web-01(1002) → web-02(1001) → alpha-01(1003)？否：
+	// 字典序 alpha-01 < web-01 < web-02 → [1003, 1002, 1001]
+	list, _, err := repo.FindPage(ctx, &request.DeviceQuery{SortBy: "hostname", SortOrder: "asc"}, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := idsOf(list); !equalIDs(got, []uint64{1003, 1002, 1001}) {
+		t.Fatalf("sortBy=hostname asc 的顺序 = %v, want [1003 1002 1001]", got)
+	}
+
+	// agentVersion asc → 0.5.9(1002) → 0.6.0(1001) → 0.7.0(1003)
+	list, _, _ = repo.FindPage(ctx, &request.DeviceQuery{SortBy: "agentVersion", SortOrder: "asc"}, old)
+	if got := idsOf(list); !equalIDs(got, []uint64{1002, 1001, 1003}) {
+		t.Fatalf("sortBy=agentVersion asc 的顺序 = %v, want [1002 1001 1003]", got)
+	}
+
+	// lastSeenAt 显式 desc = 默认：fresh(1001) 最前，old 两台按 id desc 锚 [1003, 1002]
+	list, _, _ = repo.FindPage(ctx, &request.DeviceQuery{SortBy: "lastSeenAt", SortOrder: "desc"}, old)
+	if got := idsOf(list); !equalIDs(got, []uint64{1001, 1003, 1002}) {
+		t.Fatalf("sortBy=lastSeenAt desc 的顺序 = %v, want [1001 1003 1002]", got)
+	}
+
+	// 不传排序：与显式默认逐字一致（评审回归点：默认排序不变）
+	list, _, _ = repo.FindPage(ctx, &request.DeviceQuery{}, old)
+	if got := idsOf(list); !equalIDs(got, []uint64{1001, 1003, 1002}) {
+		t.Fatalf("不传排序的顺序 = %v, want [1001 1003 1002]（last_seen_at DESC, id DESC）", got)
+	}
+
+	// 非法 sortBy（注入尝试也不得过白名单）→ 回落 last_seen_at desc
+	list, _, _ = repo.FindPage(ctx, &request.DeviceQuery{SortBy: "primary_ip; DROP TABLE device", SortOrder: "desc"}, old)
+	if got := idsOf(list); !equalIDs(got, []uint64{1001, 1003, 1002}) {
+		t.Fatalf("非法 sortBy 必须回落默认排序, got %v", got)
+	}
+
+	// 非法 sortOrder → 回落 desc（不是 asc：默认方向是 desc）
+	list, _, _ = repo.FindPage(ctx, &request.DeviceQuery{SortBy: "hostname", SortOrder: "DESC "}, old)
+	if got := idsOf(list); !equalIDs(got, []uint64{1001, 1002, 1003}) {
+		// hostname desc：web-02(1001) > web-01(1002) > alpha-01(1003)
+		t.Fatalf("非法 sortOrder 必须回落 desc, got %v", got)
+	}
+}
+
+func equalIDs(a, b []uint64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestDeviceFindByInstanceIDAndTokenHash(t *testing.T) {
 	db := newDeviceTestDB(t)
 	seedDevice(t, db, 1001, "inst-a", "hash-a", "web-01", nil)

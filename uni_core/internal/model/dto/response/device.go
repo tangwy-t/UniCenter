@@ -14,6 +14,14 @@ type DeviceListItem struct {
 	Online     bool   `json:"online"`
 	LastSeenAt *int64 `json:"lastSeenAt,omitempty"` // unix 秒
 
+	// PrimaryIP 是**服务端观测到**的 agent 来源 IP（详见 entity.Device.PrimaryIP）。
+	// 列表需要「按 IP 定位设备」（排查/SSH 前先在列表里找到是哪台），故从
+	// DeviceResp 提升到列表项（旧注释「详情页才需要」的裁定已反转）。
+	// service 投影时经 normalizedIP 归一化（IPv4-mapped → 点分十进制）。
+	// omitempty：未观测到时整个字段不出现（与水位三字段同一约定，
+	// 前端显示「—」，不臆造空串）。
+	PrimaryIP string `json:"primaryIp,omitempty"`
+
 	// 以下来自 Redis latest（缺值省略 → 前端显示「—」）
 	CPUUsedPercent  *float64 `json:"cpuUsedPercent,omitempty"`
 	MemUsedPercent  *float64 `json:"memUsedPercent,omitempty"`
@@ -58,9 +66,10 @@ type DeviceResp struct {
 
 	// PrimaryIP 是**服务端观测到**的 agent 来源 IP（详见 entity.Device.PrimaryIP）。
 	//
-	// 放在 DeviceResp 而**不**放 DeviceListItem：列表页已有主机名/OS/架构/在线/
-	// 启停/水位等列，再加 IP 会挤压操作列；而 IP 的价值场景（定位设备、SSH）
-	// 都在详情页发生。列表若需要，后续按需再提列即可。
+	// DeviceResp 内嵌 DeviceListItem（列表项**已**含同名字段，详见上方
+	// DeviceListItem.PrimaryIP 的说明）—— 这里再声明一次是为了在**详情组装**
+	// 时写入归一化后的值（见 service.GetByID：PrimaryIP: normalizedIP(...)），
+	// 覆盖 toListItem 的缺省投影；两处取值同源（entity.PrimaryIP），口径一致。
 	//
 	// omitempty：未观测到时整个字段不出现（老设备在升级本版本前 enroll 的行、
 	// 或测试态未接管 socket）—— 与水位三字段同一约定，前端显示「—」，
