@@ -45,12 +45,15 @@ import Overview from '../views/overview.vue'
 import {
   anomalyStateText,
   anomalyStateTone,
+  anomalyStatusZh,
   anomalyTruncation,
   buildOverviewKpis,
   diskBarPercent,
   diskPanelSubtitle,
   diskRowModel,
   diskRowModels,
+  diskUsageTone,
+  diskWaterModel,
   hostSyncText,
   hostSyncTone,
   hostVerdict,
@@ -181,8 +184,17 @@ describe('总览纯函数（口径错了只表现为页面说错话，必须钉�
     const kpis = buildOverviewKpis(makeOverview().fleet)
     const by = (key: string) => kpis.find((k) => k.key === key)!
 
-    it('七块磁贴（六资源维度 + 磁盘），主数值取自 fleet 合计', () => {
-      expect(kpis).toHaveLength(7)
+    it('六块磁贴（六个资源维度；磁盘移出 KPI 栅格），主数值取自 fleet 合计', () => {
+      // 磁盘占用有独立分区（#dov-disk），不再是磁贴 —— 6 才是 2/3/6 列的公倍数。
+      expect(kpis).toHaveLength(6)
+      expect(kpis.map((k) => k.key)).toEqual([
+        'containers',
+        'images',
+        'volumes',
+        'networks',
+        'projects',
+        'hosts'
+      ])
       expect(by('containers').value).toBe(12)
       expect(by('images').value).toBe(30)
       expect(by('volumes').value).toBe(8)
@@ -191,7 +203,20 @@ describe('总览纯函数（口径错了只表现为页面说错话，必须钉�
       expect(by('hosts').value).toBe(3)
     })
 
-    it('五块下钻到对应页面；主机/磁盘磁贴没有页面 → 锚到本页面板', () => {
+    it('图标底去装饰化：六块共用一枚中性色，无任一枚走语义状态色', () => {
+      // 守卫①：此前七块各取 primary/secondary/warning/info/primary/success/warning ——
+      // 把语义色名当分类色板（蓝×2 / 琥珀×2 / info 灰被读成禁用）。修法：图标不再
+      // 承载分类语义，全部走同一枚中性 token（NEUTRAL_TILE = --el-color-primary）。
+      const palette = new Set(kpis.map((k) => k.tile))
+      expect(palette.size).toBe(1)
+      expect([...palette][0]).toContain('--el-color-primary')
+      for (const k of kpis) {
+        // 集合内无重复/误用语义状态色：success/warning/danger/info 一个都不该出现
+        expect(k.tile).not.toMatch(/success|warning|danger|error|info/)
+      }
+    })
+
+    it('五块下钻到对应页面；主机磁贴没有页面 → 锚到本页面板', () => {
       expect(by('containers').to).toBe('/docker/containers')
       // 拆分切片：镜像/数据卷/网络磁贴直达各自的独立列表页（不带 query ——
       // 账目本来就是跨主机合计，进入后是全部主机视图）。
@@ -200,8 +225,6 @@ describe('总览纯函数（口径错了只表现为页面说错话，必须钉�
       expect(by('networks').to).toBe('/docker/networks')
       expect(by('projects').to).toBe('/docker/projects')
       expect(by('hosts').anchor).toBe('dov-hosts')
-      expect(by('disk').to).toBeUndefined()
-      expect(by('disk').anchor).toBe('dov-disk')
     })
 
     it('分项色恒与「需要注意」绑定：停止 3 → danger，未使用 5 → warning，可用 2/3 → warning', () => {
@@ -212,47 +235,6 @@ describe('总览纯函数（口径错了只表现为页面说错话，必须钉�
       expect(containers[2]!.tone).toBeUndefined()
       expect(by('images').sub[0]!.tone).toBe('warning')
       expect(by('hosts').sub[0]!.tone).toBe('warning')
-    })
-
-    it('磁盘磁贴：总量是容量文本（38 GB）；镜像/卷/缓存三段小字；1 台未上报给 warning', () => {
-      const disk = by('disk')
-      expect(disk.value).toBe('38 GB')
-      expect(disk.sub.map((s) => s.text)).toEqual([
-        '镜像 25 GB',
-        '卷 5 GB',
-        '缓存 8 GB',
-        '1 台未上报'
-      ])
-      expect(disk.sub[3]!.tone).toBe('warning')
-      expect(disk.sub.slice(0, 3).map((s) => s.tone)).toEqual([undefined, undefined, undefined])
-    })
-
-    it('全部主机都没有 df：主数值「—」+「数据不可用」（不是 0 —— 没有数据 ≠ 没有占用）', () => {
-      const fleet = makeOverview().fleet
-      fleet.disk = {
-        hosts: 0,
-        imagesTotalMb: 0,
-        volumesTotalMb: 0,
-        buildCacheMb: 0,
-        imagesDanglingMb: 0
-      }
-      const disk = buildOverviewKpis(fleet).find((k) => k.key === 'disk')!
-      expect(disk.value).toBe('—')
-      expect(disk.sub).toEqual([{ text: '数据不可用', tone: 'warning' }])
-    })
-
-    it('df 有数据但合计为 0：显示 0 MB（真零），未上报计数消失而不是常驻', () => {
-      const fleet = makeOverview().fleet
-      fleet.disk = {
-        hosts: 3,
-        imagesTotalMb: 0,
-        volumesTotalMb: 0,
-        buildCacheMb: 0,
-        imagesDanglingMb: 0
-      }
-      const disk = buildOverviewKpis(fleet).find((k) => k.key === 'disk')!
-      expect(disk.value).toBe('0 MB')
-      expect(disk.sub.map((s) => s.text)).toEqual(['镜像 0 MB', '卷 0 MB', '缓存 0 MB'])
     })
 
     it('零问题舰队不上色：颜色消失而不是变灰（扫描语义）', () => {
@@ -303,10 +285,9 @@ describe('总览纯函数（口径错了只表现为页面说错话，必须钉�
       expect(iconOf('containers', { '/docker/containers': '' })).toBe('cib:docker')
     })
 
-    it('主机/磁盘两枚无对应菜单，不参与同源', () => {
+    it('主机一枚无对应菜单，不参与同源', () => {
       const iconByPath = { '/docker/containers': 'material-symbols:graph-2' }
       expect(iconOf('hosts', iconByPath)).toBe('ri:server-line')
-      expect(iconOf('disk', iconByPath)).toBe('ri:database-2-line')
     })
 
     it('menuIconByPath：深度遍历收集；同 path 子节点覆盖父节点；空 icon 不进映射也不擦父值', () => {
@@ -390,6 +371,22 @@ describe('总览纯函数（口径错了只表现为页面说错话，必须钉�
       expect(anomalyTruncation(50, 50)).toBeNull()
       expect(anomalyTruncation(0, 0)).toBeNull()
     })
+
+    it('状态句本地化：复用 containerStateZh（退出码 + 中文时长 + health），不再渲染原生英文串', () => {
+      // 真机截图病灶：「状态句」列把 Docker 原生串 "Exited (143) 4 days ago" 与中文
+      // 「状态」列同屏渲染（两种语言）。本列改走容器列表同一把尺（containerStateZh）。
+      expect(anomalyStatusZh({ state: 'exited', statusText: 'Exited (143) 4 days ago' })).toBe(
+        '已退出（退出码 143）4 天前'
+      )
+      // 运行中（异常表不产，但函数与容器列表逐字同源）：Up + 时长 + health 补充。
+      expect(anomalyStatusZh({ state: 'running', statusText: 'Up 2 hours (healthy)' })).toBe(
+        '运行中 2 小时（健康）'
+      )
+      // dead 无 statusText：退回状态码中文兜底（不编时长）——与「状态」列同分「已死亡」。
+      expect(anomalyStatusZh({ state: 'dead' })).toBe('已死亡')
+      // 空状态：给「—」（缺值口径，不渲染空串）。
+      expect(anomalyStatusZh({ state: '' })).toBe('—')
+    })
   })
 
   it('副标题：舰队摘要一句 + 自动刷新标记；无数据不编造', () => {
@@ -402,7 +399,7 @@ describe('总览纯函数（口径错了只表现为页面说错话，必须钉�
   })
 
   describe('磁盘面板行模型（6a：「吃了多少、花在哪、怎么收回」的口径）', () => {
-    it('diskBarPercent：行内相对刻度 —— 最大项 100%，其余按占比；全零/零值归 0 不除零', () => {
+    it('diskBarPercent：占分母（本行合计）的比例；零值/零分母归 0 不除零', () => {
       expect(diskBarPercent(25600, 25600)).toBe(100)
       expect(diskBarPercent(5120, 25600)).toBe(20)
       expect(diskBarPercent(0, 25600)).toBe(0)
@@ -411,15 +408,52 @@ describe('总览纯函数（口径错了只表现为页面说错话，必须钉�
       expect(diskBarPercent(-1, 10)).toBe(0)
     })
 
+    it('diskUsageTone（水位分档口径 80/90）：≥90 danger、≥80 warning、其余中性 primary', () => {
+      // 守卫③：阈值与 device 概览 usageTone 同源（80 高 / 90 告警）。
+      expect(diskUsageTone(100)).toBe('danger')
+      expect(diskUsageTone(90)).toBe('danger')
+      expect(diskUsageTone(89.9)).toBe('warning')
+      expect(diskUsageTone(80)).toBe('warning')
+      expect(diskUsageTone(79.9)).toBe('primary')
+      expect(diskUsageTone(0)).toBe('primary')
+    })
+
     it('有 df 的主机行：三条数据条（镜像/数据卷/构建缓存）+ 合计文本 + 可回收结论', () => {
       const row = diskRowModel(makeHost({ disk: { ...DISK_H1 } }))
       expect(row.available).toBe(true)
       expect(row.totalText).toBe('38 GB')
       expect(row.bars.map((b) => b.label)).toEqual(['镜像', '数据卷', '构建缓存'])
       expect(row.bars.map((b) => b.text)).toEqual(['25 GB', '5 GB', '8 GB'])
-      // 行内刻度：镜像最大 → 100%；5120/25600=20%；8192/25600=32%
-      expect(row.bars.map((b) => b.percent)).toEqual([100, 20, 32])
+      // share-of-total：合计 25600+5120+8192=38912 → 65.79% / 13.16% / 21.05%
+      const [img, vol, cache] = row.bars.map((b) => b.percent)
+      expect(img).toBeCloseTo(65.79, 1)
+      expect(vol).toBeCloseTo(13.16, 1)
+      expect(cache).toBeCloseTo(21.05, 1)
+      // 三条相加回 100%（parts-of-whole 的编码前提）
+      expect(img! + vol! + cache!).toBeCloseTo(100, 1)
+      // 条不带严重度字段（构成不承载严重度 —— Wave 3b 的代理着色已废除）；
+      // 整机水位缺省（makeHost 未给 diskUsedPercent）→ available=false。
+      expect(row.bars.every((b) => !('tone' in b))).toBe(true)
+      expect(row.water.available).toBe(false)
       expect(row.reclaimText).toBe('悬空镜像 2 个 · 367.3 MB · 未用卷 1 个')
+    })
+
+    it('数据条不随比例着色（Wave 3b 代理着色废除）：单一类目主导也只给构成比例', () => {
+      const row = diskRowModel(
+        makeHost({
+          disk: {
+            imagesMb: 900,
+            volumesMb: 50,
+            buildCacheMb: 50,
+            imagesDanglingMb: 0,
+            danglingImages: 0,
+            unusedVolumes: 0
+          }
+        })
+      )
+      // 900/1000=90% —— 构成比例照给，但**条不带任何严重度字段**（严重度归整机水位）。
+      expect(row.bars.map((b) => b.percent)).toEqual([90, 5, 5])
+      expect(row.bars.every((b) => !('tone' in b))).toBe(true)
     })
 
     it('无悬空/未用：结论行说「无可回收项」（诚实空态，不是空白）', () => {
@@ -463,13 +497,110 @@ describe('总览纯函数（口径错了只表现为页面说错话，必须钉�
       expect(row.reclaimText).toBe('')
     })
 
-    it('diskRowModels 保留 hosts 行序（与主机卡片区同一来源同一顺序）', () => {
-      const hosts = makeOverview().hosts
-      expect(diskRowModels(hosts).map((r) => r.host.id)).toEqual(['h1', 'h2', 'h3'])
+    it('diskRowModels 按值得注意程度排序：占用大者在前、无 df 者殿后（守卫②）', () => {
+      // 乱序输入：小占用、无 df、大占用 —— 输出应为 [大, 小, 无df]
+      const hosts = [
+        makeHost({
+          id: 'small',
+          disk: {
+            imagesMb: 512,
+            volumesMb: 0,
+            buildCacheMb: 0,
+            imagesDanglingMb: 0,
+            danglingImages: 0,
+            unusedVolumes: 0
+          }
+        }),
+        makeHost({ id: 'nodata' }), // 无 df → 恒殿后
+        makeHost({ id: 'big', disk: { ...DISK_H1 } }) // 合计 38912
+      ]
+      expect(diskRowModels(hosts).map((r) => r.host.id)).toEqual(['big', 'small', 'nodata'])
+      // 真实夹具同样按合计降序：h1(38912) > h3(1536) > h2(无 df，殿后)
+      expect(diskRowModels(makeOverview().hosts).map((r) => r.host.id)).toEqual(['h1', 'h3', 'h2'])
+      // 合计相同：按可回收量（悬空镜像体积）降序
+      const tie = [
+        makeHost({
+          id: 'less-reclaim',
+          disk: {
+            imagesMb: 100,
+            volumesMb: 0,
+            buildCacheMb: 0,
+            imagesDanglingMb: 10,
+            danglingImages: 1,
+            unusedVolumes: 0
+          }
+        }),
+        makeHost({
+          id: 'more-reclaim',
+          disk: {
+            imagesMb: 100,
+            volumesMb: 0,
+            buildCacheMb: 0,
+            imagesDanglingMb: 90,
+            danglingImages: 9,
+            unusedVolumes: 0
+          }
+        })
+      ]
+      expect(diskRowModels(tie).map((r) => r.host.id)).toEqual(['more-reclaim', 'less-reclaim'])
     })
 
-    it('diskPanelSubtitle：N 台里 M 台已上报，缺报数如实分开（不折算成零）', () => {
-      expect(diskPanelSubtitle(makeOverview().hosts)).toBe('共 3 台 · 2 台已上报磁盘账')
+    it('diskPanelSubtitle：两笔账各自如实分开（缺账/缺水位的机各计各的）', () => {
+      // makeOverview 的 3 台：2 台有 df、0 台有整机水位（Wave 4d 前无此字段）。
+      expect(diskPanelSubtitle(makeOverview().hosts)).toBe(
+        '共 3 台 · 2 台已上报磁盘账 · 0 台已上报整机水位'
+      )
+      // 一台同时有两笔账 → M=K=1。
+      expect(diskPanelSubtitle([makeHost({ disk: { ...DISK_H1 }, diskUsedPercent: 62 })])).toBe(
+        '共 1 台 · 1 台已上报磁盘账 · 1 台已上报整机水位'
+      )
+    })
+  })
+
+  describe('整机磁盘水位（Wave 4d：真分母，与 docker 占用账目不同源）', () => {
+    it('缺省（无 diskUsedPercent）：available=false、text「—」，不回落成 0%', () => {
+      const w = diskWaterModel(makeHost())
+      expect(w.available).toBe(false)
+      expect(w.percent).toBe(0)
+      expect(w.text).toBe('—')
+    })
+
+    it('有值：已用百分比 + 分母（已用/总量），分档按真实水位 80/90', () => {
+      const w = diskWaterModel(makeHost({ diskUsedPercent: 62, diskTotalGb: 400 }))
+      expect(w.available).toBe(true)
+      expect(w.percent).toBe(62)
+      // 400 × 62% = 248.0（已用 1 位小数、总量 0 位小数、单位只写一次）。
+      expect(w.text).toBe('已用 62% · 248.0 / 400 GB')
+      expect(w.tone).toBe('primary')
+    })
+
+    it('高水位：≥80 warning、≥90 danger（与 device 概览同阈值）', () => {
+      expect(diskWaterModel(makeHost({ diskUsedPercent: 85, diskTotalGb: 100 })).tone).toBe(
+        'warning'
+      )
+      expect(diskWaterModel(makeHost({ diskUsedPercent: 95, diskTotalGb: 100 })).tone).toBe('danger')
+    })
+
+    it('无分母（只有 diskUsedPercent）：只报已用百分比，不编总量', () => {
+      expect(diskWaterModel(makeHost({ diskUsedPercent: 62 })).text).toBe('已用 62%')
+    })
+
+    it('超界值 clamp 到 [0,100]（条形/文本不给假比例）', () => {
+      expect(diskWaterModel(makeHost({ diskUsedPercent: 150, diskTotalGb: 10 })).percent).toBe(100)
+      expect(diskWaterModel(makeHost({ diskUsedPercent: -5, diskTotalGb: 10 })).percent).toBe(0)
+    })
+
+    it('≥1024GB 转 TB（分母进位不退化成 0.x）', () => {
+      expect(diskWaterModel(makeHost({ diskUsedPercent: 50, diskTotalGb: 2048 })).text).toBe(
+        '已用 50% · 1.00 / 2.00 TB'
+      )
+    })
+
+    it('diskRowModel 把水位带上行：水位与 df 相互独立（无 df 也能有水位）', () => {
+      const row = diskRowModel(makeHost({ diskUsedPercent: 91, diskTotalGb: 100 }))
+      expect(row.available).toBe(false) // 该机无 df 账目
+      expect(row.water.available).toBe(true)
+      expect(row.water.tone).toBe('danger')
     })
   })
 })
@@ -519,7 +650,9 @@ async function makeRouter(): Promise<Router> {
       { path: '/docker/containers/:id', component: { template: '<div />' } },
       // 拆分切片：镜像/数据卷是独立整页（磁盘面板下钻的目标）。
       { path: '/docker/images', component: { template: '<div />' } },
-      { path: '/docker/volumes', component: { template: '<div />' } }
+      { path: '/docker/volumes', component: { template: '<div />' } },
+      // Wave 4d：全局检索隐藏路由（hero 入口的下钻目标）。
+      { path: '/docker/search', component: { template: '<div />' } }
     ]
   })
   await router.push('/')
@@ -547,9 +680,7 @@ async function waitPath(router: Router, path: string) {
   await vi.waitUntil(() => router.currentRoute.value.path === path, { timeout: 5000 })
 }
 
-async function mountOverview(
-  menu?: AppRouteRecord[]
-): Promise<{ w: VueWrapper; router: Router }> {
+async function mountOverview(menu?: AppRouteRecord[]): Promise<{ w: VueWrapper; router: Router }> {
   const pinia = createPinia()
   // 菜单树先灌再接挂：页面的 KPI 磁贴图标读 useMenuStore().menuList（同源口径），
   // 不传 menu 时菜单为空 → 全部走硬编码回退值（既有用例的既有行为）。
@@ -597,24 +728,32 @@ beforeEach(() => {
 })
 
 describe('渲染冒烟：挂载成功 + KPI 数值来自 mock fleet', () => {
-  it('页面挂起、七块 KPI 磁贴的数值与分项渲染到位（磁盘磁贴是容量文本）', async () => {
+  it('页面挂起、六块 KPI 磁贴的数值与分项渲染到位', async () => {
     const { w } = await mountOverview()
 
     expect(w.find('.docker-overview').exists()).toBe(true)
     const values = w.findAll('.kpi-tile__value').map((n) => n.text())
-    expect(values).toEqual(['12', '30', '8', '5', '2', '3', '38 GB'])
+    // 六块资源维度（磁盘移出栅格 → 不再是第 7 块的容量文本）
+    expect(values).toEqual(['12', '30', '8', '5', '2', '3'])
     // 分项与语义色（「停止 3」要红 —— 那是这页最该被看见的数字）
     const segs = w.findAll('.kpi-tile__seg').map((n) => n.text())
     expect(segs).toContain('运行 9')
     expect(segs).toContain('停止 3')
-    expect(segs).toContain('镜像 25 GB')
-    expect(segs).toContain('1 台未上报')
     const stopped = w.findAll('.kpi-tile__seg').find((n) => n.text() === '停止 3')
     expect(stopped!.classes()).toContain('is-danger')
-    const notReported = w.findAll('.kpi-tile__seg').find((n) => n.text() === '1 台未上报')
-    expect(notReported!.classes()).toContain('is-warning')
     // 副标题是舰队摘要
     expect(w.find('.dov-hero').text()).toContain('共 3 台主机 · 2 台可用')
+  })
+
+  it('KPI 图标底去装饰化：六块共性中性色，页面上不再出现语义状态色的磁贴底', async () => {
+    const { w } = await mountOverview()
+    const tiles = w
+      .findAllComponents({ name: 'DockerOverviewKpiTile' })
+      .map((c) => c.props('tile') as KpiTile)
+    expect(tiles).toHaveLength(6)
+    const palette = new Set(tiles.map((t) => t.tile))
+    expect(palette.size).toBe(1)
+    for (const t of tiles) expect(t.tile).not.toMatch(/success|warning|danger|error|info/)
   })
 
   it('KPI 磁贴图标与菜单同源：menuList 同 path 的 meta.icon 覆盖硬编码回退', async () => {
@@ -646,9 +785,8 @@ describe('渲染冒烟：挂载成功 + KPI 数值来自 mock fleet', () => {
     expect(tileOf('containers').icon).toBe('material-symbols:graph-2')
     // 菜单里没有的：回退硬编码主题图标值
     expect(tileOf('images').icon).toBe('pajamas:container-image')
-    // 主机/磁盘不参与同源（无对应菜单）
+    // 主机不参与同源（无对应菜单）
     expect(tileOf('hosts').icon).toBe('ri:server-line')
-    expect(tileOf('disk').icon).toBe('ri:database-2-line')
   })
 
   it('主机卡片：三台各一张；部分失败的那台如实显示 error，不炸整页', async () => {
@@ -668,15 +806,30 @@ describe('渲染冒烟：挂载成功 + KPI 数值来自 mock fleet', () => {
 
     const section = w.find('#dov-disk')
     expect(section.exists()).toBe(true)
-    expect(section.find('.dov-section__sub').text()).toBe('共 3 台 · 2 台已上报磁盘账')
+    expect(section.find('.dov-section__sub').text()).toBe(
+      '共 3 台 · 2 台已上报磁盘账 · 0 台已上报整机水位'
+    )
     const rows = w.findAll('.dov-disk__row')
     expect(rows).toHaveLength(3)
+    // 排序生效：占用最大的 bogon（38 GB）排在首行，无 df 的 node-2 殿后。
+    expect(rows[0]!.text()).toContain('bogon')
+    expect(rows[rows.length - 1]!.text()).toContain('node-2')
 
     // 有 df 的行：三条数据条 + 合计 + 结论行 + 两个入口。
     const h1 = rows.find((r) => r.text().includes('bogon'))!
     expect(h1.findAll('.dov-disk__bar')).toHaveLength(3)
     expect(h1.find('.dov-disk__total').text()).toBe('38 GB')
-    expect(h1.find('.dov-disk__bar-fill').attributes('style')).toContain('width: 100%')
+    // share-of-total：镜像 25600/38912 ≈ 65.79%（不再是 max-scale 的 100%）
+    expect(h1.find('.dov-disk__bar-fill').attributes('style')).toMatch(/width: 65\.7/)
+    // 数据条不带分档 class（构成不承载严重度 —— Wave 3b 的代理着色已废除）。
+    const barClasses = h1.findAll('.dov-disk__bar')[0]!.classes()
+    expect(barClasses).not.toContain('is-primary')
+    expect(barClasses).not.toContain('is-warning')
+    expect(barClasses).not.toContain('is-danger')
+    // 整机水位缺省（夹具无 diskUsedPercent）→ 该行水位如实「未上报 / —」，不冒充 0%。
+    expect(h1.find('.dov-disk__water.is-na').exists()).toBe(true)
+    expect(h1.find('.dov-disk__water-none').text()).toBe('未上报')
+    expect(h1.find('.dov-disk__water-value').text()).toBe('—')
     expect(h1.find('.dov-disk__reclaim').text()).toBe('悬空镜像 2 个 · 367.3 MB · 未用卷 1 个')
     expect(h1.findAll('.dov-disk__go').map((b) => b.text())).toEqual(['镜像清理…', '卷清理…'])
 
@@ -699,6 +852,23 @@ describe('渲染冒烟：挂载成功 + KPI 数值来自 mock fleet', () => {
     expect(w.find('.dov-disk__reclaim').exists()).toBe(true)
   })
 
+  it('磁盘面板：整机水位带真分母渲染（分档色），缺省机如实「未上报」（Wave 4d）', async () => {
+    const overview = makeOverview()
+    // 给 bogon（h1）一台真水位：400GB 已用 95%（≥90 → danger）。
+    overview.hosts[0] = { ...overview.hosts[0]!, diskUsedPercent: 95, diskTotalGb: 400 }
+    api.fetchDockerOverview.mockResolvedValue(overview)
+    const { w } = await mountOverview()
+
+    const row = w.findAll('.dov-disk__row').find((r) => r.text().includes('bogon'))!
+    expect(row.find('.dov-disk__water').classes()).toContain('is-danger')
+    expect(row.find('.dov-disk__water-value').text()).toBe('已用 95% · 380.0 / 400 GB')
+    // 同行的 docker 占用条照常在（水位与 df 是两笔账）。
+    expect(row.findAll('.dov-disk__bar')).toHaveLength(3)
+    // 其余机水位缺省 → 如实「未上报」，不冒充 0%。
+    const na = w.findAll('.dov-disk__row').find((r) => r.text().includes('node-3'))!
+    expect(na.find('.dov-disk__water-none').exists()).toBe(true)
+  })
+
   it('异常表保护列：锁图标 + 「受保护」，不再是 🔒 emoji', async () => {
     const { w } = await mountOverview()
 
@@ -709,14 +879,23 @@ describe('渲染冒烟：挂载成功 + KPI 数值来自 mock fleet', () => {
     expect(w.find('.dov-anoms').html()).not.toContain('🔒')
   })
 
-  it('异常表：收到 2 行数据；表尾给截断口径（total=3 > items=2）', async () => {
-    const { w } = await mountOverview()
+  it('异常表：收到 2 行数据；表尾给截断口径与「查看全部异常」出口（total=3 > items=2）', async () => {
+    const { w, router } = await mountOverview()
 
     const table = w.findComponent({ name: 'ElTable' })
     expect(table.exists()).toBe(true)
     const vm = table.vm as unknown as { $props: Record<string, unknown> }
     expect((vm.$props.data as unknown[]).length).toBe(2)
-    expect(w.find('.dov-anoms__more').text()).toBe('共 3 条，仅显示前 2')
+    expect(w.find('.dov-anoms__more').text()).toContain('共 3 条，仅显示前 2')
+    // 守卫④：截断时有真实出口，href 指向容器页「已停止」筛选（该页非运行态一档）。
+    const exit = w.find('.dov-anoms__all')
+    expect(exit.exists()).toBe(true)
+    expect(exit.text()).toBe('查看全部异常')
+    expect(exit.attributes('href')).toContain('/docker/containers')
+    expect(exit.attributes('href')).toContain('state=stopped')
+    await exit.trigger('click')
+    await waitFullPath(router, '/docker/containers?state=stopped')
+    expect(router.currentRoute.value.fullPath).toBe('/docker/containers?state=stopped')
   })
 
   it('零异常：给绿点结论句，而不是一块空表', async () => {
@@ -778,14 +957,6 @@ describe('下钻（控制塔的本职：把人交棒给列表页 / 详情页）'
     expect(Element.prototype.scrollIntoView).toHaveBeenCalled()
   })
 
-  it('磁盘磁贴（无列表页）→ 滚动到本页的磁盘面板', async () => {
-    const { w } = await mountOverview()
-
-    const tile = w.findAll('.kpi-tile').find((n) => n.text().includes('磁盘占用'))!
-    await tile.trigger('click')
-    expect(Element.prototype.scrollIntoView).toHaveBeenCalled()
-  })
-
   it('磁盘面板的清理入口 → 对应列表页带 ?host=（复用列表页的确认档清理流）', async () => {
     const { w, router } = await mountOverview()
 
@@ -809,6 +980,16 @@ describe('下钻（控制塔的本职：把人交棒给列表页 / 详情页）'
     await card.trigger('click')
     await waitFullPath(router, '/docker/containers?host=h1')
     expect(router.currentRoute.value.fullPath).toBe('/docker/containers?host=h1')
+  })
+
+  it('hero 全局检索入口 → /docker/search（Wave 4d 收尾件）', async () => {
+    const { w, router } = await mountOverview()
+
+    const btn = w.findAll('button').find((b) => b.attributes('title') === '全局检索')
+    expect(btn, 'hero 应有「全局检索」入口').toBeTruthy()
+    await btn!.trigger('click')
+    await waitPath(router, '/docker/search')
+    expect(router.currentRoute.value.path).toBe('/docker/search')
   })
 
   it('异常行打开 → 容器详情页 /docker/containers/:id（8a：深链改指详情页，host 随行）', async () => {

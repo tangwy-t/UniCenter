@@ -202,6 +202,30 @@ describe('docker 模块路由', () => {
     expect(typeof r?.component).toBe('function')
   })
 
+  it('版本一致性视图路由：/docker/image-drift 隐藏注册 + docker:list（Wave 4b，不加菜单种子）', () => {
+    const r = routes.find((x) => x.path === '/docker/image-drift')
+    expect(r, '缺少版本一致性视图路由 /docker/image-drift').toBeTruthy()
+    expect(r?.name).toBe('DockerImageDrift')
+    // 与 GET /docker/image-drift 的静态 perm 同档；入口（镜像页工具条的「版本一致性」钮）也按它门控。
+    expect(r?.meta?.authMark).toBe('docker:list')
+    // 隐藏注册（不是菜单页）：menu path 期望集里没有它，MENU_PATHS 守卫不动。
+    expect(r?.meta?.isHide).toBe(true)
+    expect(MENU_PATHS).not.toContain('/docker/image-drift')
+    expect(typeof r?.component).toBe('function')
+  })
+
+  it('全局检索路由：/docker/search 隐藏注册 + docker:list（Wave 4d，不加菜单种子）', () => {
+    const r = routes.find((x) => x.path === '/docker/search')
+    expect(r, '缺少全局检索路由 /docker/search').toBeTruthy()
+    expect(r?.name).toBe('DockerSearch')
+    // 与 GET /docker/search 的静态 perm 同档；入口（总览 hero 的「全局检索」钮）也按它门控。
+    expect(r?.meta?.authMark).toBe('docker:list')
+    // 隐藏注册（不是菜单页）：menu path 期望集里没有它，MENU_PATHS 守卫不动。
+    expect(r?.meta?.isHide).toBe(true)
+    expect(MENU_PATHS).not.toContain('/docker/search')
+    expect(typeof r?.component).toBe('function')
+  })
+
   /* ── 路由匹配顺序：静态段优先 ──────────────────────────────────────
    * `/docker/containers/create` 与 `/docker/containers/:id` 是同层的静态段与参数段，
    * 后者会把「create」吃成 id —— gin 的路由树与 vue-router 的打分都是**静态段优先**，
@@ -241,6 +265,8 @@ describe('docker 模块路由', () => {
       expect((await pushAndResolve('/docker/tasks')).name).toBe('DockerTasks')
       // 事件流详版页同理：/docker/events 是静态段，与 /docker 总览不互相抢。
       expect((await pushAndResolve('/docker/events')).name).toBe('DockerEvents')
+      // 全局检索同理：/docker/search 是静态段，不被总览或列表页抢走。
+      expect((await pushAndResolve('/docker/search')).name).toBe('DockerSearch')
       expect((await pushAndResolve('/docker')).name).toBe('DockerOverview')
     })
   })
@@ -423,8 +449,7 @@ describe('菜单页命名跳转清零：push({ name }) 不得指向菜单页', (
   const routes = plugin.routes ?? []
   /** 动态推导：可见（非 isHide）菜单页的 name —— 这些名字在 router 里不存在。 */
   const menuNames = routes.filter((r) => !r.meta?.isHide).map((r) => String(r.name))
-  const namedPushRe = (name: string) =>
-    new RegExp(`push\\(\\s*\\{\\s*name\\s*:\\s*['"]${name}['"]`)
+  const namedPushRe = (name: string) => new RegExp(`push\\(\\s*\\{\\s*name\\s*:\\s*['"]${name}['"]`)
 
   it('守卫自检：名单恰好是 /docker 六页（动态推导不失焦）', () => {
     // 期望集由既有常量推导（总览 + 五条列表页），与动态名单同源不同路 —— 失焦即红。
@@ -442,9 +467,7 @@ describe('菜单页命名跳转清零：push({ name }) 不得指向菜单页', (
       re.test("void router.push({\n    name: 'DockerImages',\n    query: { host: 'h1' }\n  })\n"),
       '多行写法 push({\\n name: …) 没被抓住 —— 守卫是漏勺'
     ).toBe(true)
-    expect(re.test("defineOptions({ name: 'DockerImages' })\n"), 'defineOptions 被误伤').toBe(
-      false
-    )
+    expect(re.test("defineOptions({ name: 'DockerImages' })\n"), 'defineOptions 被误伤').toBe(false)
     // 数组 push（批量失败清单等）的 name 是变量引用，不会命中字符串字面量形态。
     expect(re.test('failures.push({ name: c.name, message })\n')).toBe(false)
   })

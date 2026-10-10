@@ -17,19 +17,20 @@
         v-model:columns="columnChecks"
         v-model:showSearchBar="showSearchBar"
         :loading="loading"
+        :has-active-filter="hasFilter"
         @refresh="refreshAll"
       >
         <template #left>
           <div class="toolbar-left">
-            <!-- 硬数据文本：计数（total 如实报全量、items 截 500，截断必须说出口）
-                 + 静默刷新失败标注。计数只在 pageState=ready（握有数据）时报 ——
-                 首拉/失败/无可管主机时报「共 0 个」是假话（数据面不得伪装新鲜）；
-                 刷新失败标注不受它管（那是「上次数据仍在」的另一种事实）。 -->
-            <span v-if="pageState === 'ready'" class="docker-count">
-              共 {{ total }} 个网络<template v-if="truncated">
-                · 列表显示前 {{ rows.length }} 条</template
-              >
-            </span>
+            <!-- 硬数据文本：计数（total = 过滤后全量，翻页由分页器表达 —— 不再有
+                 「列表显示前 N 条」那半句）+ 不可用主机清单 + 静默刷新失败标注。
+                 计数只在 pageState=ready（握有数据）时报 —— 首拉/失败/无可管主机时
+                 报「共 0 个」是假话（数据面不得伪装新鲜）；刷新失败标注不受它管
+                 （那是「上次数据仍在」的另一种事实）。 -->
+            <span v-if="pageState === 'ready'" class="docker-count">共 {{ total }} 个网络</span>
+            <!-- 部分主机不可用（Wave 2）：采集失败的主机是一次「数据不全」的硬事实，
+                 只列主机名 + reason 原文，不加解释句（页面零解释文案）。零值不渲染。 -->
+            <span v-if="unavailableText" class="docker-refresh-note">{{ unavailableText }}</span>
             <span v-if="refreshError" class="docker-refresh-note">
               刷新失败，正在显示上次结果
             </span>
@@ -47,7 +48,16 @@
         <!-- 两种空态分开：没有可管主机 vs 筛选没命中（后者给「清除筛选」）。
              纪律与容器/镜像页一致；空态渲染在本页、不写进 ArtTable 的 `#empty`
              插槽（ArtTable 不转发该插槽，写进去会被静默丢弃）。 -->
-        <ArtTable v-if="showTable" :loading="listLoading" :data="rows" :columns="columns" />
+        <ArtTable
+          v-if="showTable"
+          :loading="listLoading"
+          :data="rows"
+          :columns="columns"
+          :pagination="pagination"
+          @pagination:size-change="handleSizeChange"
+          @pagination:current-change="handleCurrentChange"
+          @sort-change="handleSortChange"
+        />
         <ElEmpty
           v-else-if="pageState === 'empty'"
           class="docker-empty"
@@ -84,7 +94,7 @@
    * 删除按**行主机**派发（指令通道 hostId 绑定该行）—— 一次操作属于发起时锁定的
    * 那台主机；全部动作都有行目标，本页没有「整体动作缺主机」的形态。
    */
-  import { computed, h, ref, watch } from 'vue'
+  import { computed, h, reactive, ref, watch } from 'vue'
   import { useRoute } from 'vue-router'
   import { ElButton, ElCard, ElEmpty, ElMessage } from 'element-plus'
   import { useAuth } from '@/hooks/core/useAuth'
@@ -118,9 +128,9 @@
   const {
     rows,
     total,
+    unavailableHosts,
     loading,
     refreshError,
-    truncated,
     pageState,
     load,
     refresh,
@@ -132,18 +142,77 @@
         hostId: p.hostId || undefined,
         keyword: p.keyword || undefined,
         // 开关只发 true（「仅内部网络」是单侧开关）；false 侧语义留给端点。
-        internal: p.internal ? true : undefined
+        internal: p.internal ? true : undefined,
+        // 服务端分页/排序：pageSize 显式传；未选定排序时不发两键。
+        page: p.page,
+        pageSize: p.pageSize,
+        sortBy: p.sortBy as 'containers' | 'hostId' | 'name' | undefined,
+        sortOrder: p.sortBy ? p.sortOrder : undefined
       }),
     // UI 的 key（internalOnly）在这里映射成端点参数（internal）—— 不让筛选项的
-    // key 泄漏进数据层（与容器页同一句分工）。
+    // key 泄漏进数据层（与容器页同一句分工）。分页/排序态一并在快照里现取。
     params: () => ({
       hostId: searchForm.value.host,
       keyword: searchForm.value.keyword,
-      internal: searchForm.value.internalOnly === true ? true : undefined
+      internal: searchForm.value.internalOnly === true ? true : undefined,
+      page: pagination.current,
+      pageSize: pagination.size,
+      sortBy: sortBy.value || undefined,
+      sortOrder: sortBy.value ? sortOrder.value : undefined
     }),
     hosts: () => hosts.value,
     hostsLoading: () => hostsLoading.value
   })
+
+  // ── 服务端分页 / 排序（Wave 2）────────────────────────────────────
+  // 分页态照 device：page/pageSize 显式发（pageSize 取 50，与后端默认一致）；
+  // 载入后 total 从响应同步。排序只认白名单列（列 prop → 后端 sortBy 键），
+  // 非法/未知 prop 一律忽略（非白名单列不该发请求）。
+  const pagination = reactive({ current: 1, size: 50, total: 0 })
+  watch(total, (v) => {
+    pagination.total = v
+  })
+  /** 列 prop → 后端排序键（白名单：containers + 通用 hostId/name）。 */
+  const SORT_KEYS: Record<string, string> = {
+    name: 'name',
+    hostname: 'hostId',
+    containersCount: 'containers'
+  }
+  const sortBy = ref('')
+  const sortOrder = ref<'asc' | 'desc'>('asc')
+  function handleSortChange({ prop, order }: { prop?: string; order?: string | null }) {
+    const key = prop ? SORT_KEYS[prop] : undefined
+    if (!key) return
+    if (order === 'ascending') {
+      sortBy.value = key
+      sortOrder.value = 'asc'
+    } else if (order === 'descending') {
+      sortBy.value = key
+      sortOrder.value = 'desc'
+    } else {
+      // 三态循环的第三态：清回默认排序（sortBy 空即忽略方向）。
+      sortBy.value = ''
+    }
+    pagination.current = 1
+    void load()
+  }
+  function handleSizeChange(size: number) {
+    pagination.size = size
+    pagination.current = 1
+    void load()
+  }
+  function handleCurrentChange(current: number) {
+    pagination.current = current
+    void load()
+  }
+
+  /** 部分主机不可用（Wave 2）：只列主机名 + reason 原文（页面零解释文案）。 */
+  const unavailableText = computed(() =>
+    unavailableHosts.value.length === 0
+      ? ''
+      : `${unavailableHosts.value.length} 台主机不可用：` +
+        unavailableHosts.value.map((h) => `${h.hostname || h.hostId}（${h.reason}）`).join('、')
+  )
 
   /** 表格的加载态：清单在拉，或主机清单还没到。 */
   const listLoading = computed(() => loading.value || hostsLoading.value)
@@ -159,12 +228,21 @@
       const id = raw ? String(raw) : ''
       const had = searchForm.value.host ?? ''
       searchForm.value.host = id
+      // ?host 深链进入时自动展开搜索栏：从总览下钻进来的人看到的是一张被过滤的表，
+      // 筛选线索必须在明处。immediate 首跑（old 为 undefined）也走这句。
+      if (id) showSearchBar.value = true
+      // 筛选变化（含深链首拉）回第一页：翻到第 3 页再改筛选会落到空页。
+      pagination.current = 1
       if (id !== had || old === undefined) void load()
     },
     { immediate: true }
   )
 
-  const hostOptions = computed(() => hosts.value.map((h) => ({ label: hostLabel(h), value: h.id })))
+  // 主机选项按分组渲染（ArtSearchBar 追加式分组能力：option 带 group 即分组）。
+  // 无分组的归入「未分组」组；组名是数据分类，不是解释文案。
+  const hostOptions = computed(() =>
+    hosts.value.map((h) => ({ label: hostLabel(h), value: h.id, group: h.group || '未分组' }))
+  )
 
   const searchItems = computed(() => [
     {
@@ -196,12 +274,14 @@
   )
 
   function onSearch() {
-    // 服务端过滤：搜索按钮即重拉（无分页可重置）。
+    // 服务端过滤：搜索按钮即重拉，筛选变化回第一页。
     showSearchBar.value = true
+    pagination.current = 1
     void load()
   }
   function onReset() {
     searchForm.value = {}
+    pagination.current = 1
     void load()
   }
 
@@ -265,21 +345,32 @@
     // 桌面（>=1024）才展示。数据列一律 minWidth，固定宽度只留给 index/操作这类结构性列。
     return [
       { type: 'index' as const, width: 60, label: '序号', hideBelow: 'tablet' },
-      { prop: 'name', label: '名称', minWidth: 240, showOverflowTooltip: true },
+      {
+        prop: 'name',
+        label: '名称',
+        minWidth: 240,
+        showOverflowTooltip: true,
+        sortable: 'custom' as const
+      },
       {
         // 主机列是跨主机表的核心：同名网络（bridge/host/none 每台都有）
         // 散在所有机器上，行归属是排查第一线索（平板竖屏起可见）。
+        // 渲染成胶囊 chip：主机是事实上的分组键，不再是最弱的灰文本。
         prop: 'hostname',
         label: '主机',
         minWidth: 120,
         showOverflowTooltip: true,
         hideBelow: 'tablet',
-        formatter: (row: DockerNetworkListItem) => row.hostname || row.hostId
+        sortable: 'custom' as const,
+        formatter: (row: DockerNetworkListItem) =>
+          h('span', { class: 'docker-host' }, hostLabel({ id: row.hostId, hostname: row.hostname }))
       },
       {
         prop: 'driver',
         label: '驱动',
         minWidth: 120,
+        // 单行不变量（Wave 3c）：数据列一律 nowrap（showOverflowTooltip）。
+        showOverflowTooltip: true,
         // bridge/overlay/host 决定容器互通方式，平板竖屏起保留。
         hideBelow: 'tablet',
         formatter: (row: DockerNetworkListItem) => row.driver || '—'
@@ -288,6 +379,8 @@
         prop: 'scope',
         label: '作用域',
         minWidth: 110,
+        // 单行不变量（Wave 3c）：数据列一律 nowrap。
+        showOverflowTooltip: true,
         // 本机 / 集群：排查网络可见范围时要看的事实，平板竖屏起保留。
         hideBelow: 'tablet',
         formatter: (row: DockerNetworkListItem) => scopeText(row.scope)
@@ -296,6 +389,11 @@
         prop: 'containersCount',
         label: '容器数',
         minWidth: 100,
+        // 单行不变量（Wave 3c）：数据列一律 nowrap。
+        showOverflowTooltip: true,
+        align: 'right' as const,
+        className: 'is-num',
+        sortable: 'custom' as const,
         // 计数是元数据，低于桌面隐藏。
         hideBelow: 'desktop'
       },
@@ -303,6 +401,8 @@
         prop: 'internal',
         label: '内部网络',
         minWidth: 110,
+        // 单行不变量（Wave 3c）：数据列一律 nowrap。
+        showOverflowTooltip: true,
         // 「仅内部」才是要点：内部网络没有对外出口，排障时这条决定了容器能不能出去。
         formatter: (row: DockerNetworkListItem) => (row.internal ? '仅内部' : '—')
       },
@@ -331,6 +431,14 @@
 </script>
 
 <style lang="scss" scoped>
+  @use './overview-tokens' as t;
+
+  // 主机 chip（胶囊）：主机是事实上的分组键，跨主机网络表里不再是最弱的灰文本
+  // （与项目/容器/镜像/卷页同一全局类 docker-host + t.pill 制）。
+  :global(.docker-host) {
+    @include t.pill;
+  }
+
   .docker-networks-page {
     /* 次要文字对比度 AA（逐页口径，与收敛页同款处置）：EP 默认
        --el-text-color-secondary(#909399) 对白底只有 3.08:1，低于 AA 正文线 →

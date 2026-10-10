@@ -23,15 +23,15 @@
  * 「拉取/载入」恒在（canManage）且缺选定主机时禁用；「打标签/导出 tar」恰选中一行
  * 时出现、指令在途时禁用。本文件的点击/断言口径随之改为按 title 找工具条按钮。
  *
- * ElDialog 默认**原地**渲染（append-to-body 未开，与 action-confirm/registry
- * 同挂法），断言走 wrapper 查询。表格行勾选走真 ElTable 的 toggleRowSelection
- *（工具条按钮的「出现 + 可点」以恰选中一行为前提）——需传**与表数据同一个对象引用**
- *（ElTable 按引用比对；选中的是 fetchDockerImages 返回的那一行）。
+ * 确认弹窗（action-confirm）现走 append-to-body：DOM 挂到 document.body，弹窗内查询
+ * 经 dialogFind/dialogButtons 双处命中（props 仍从组件实例读）。表格行勾选走真 ElTable
+ * 的 toggleRowSelection（工具条按钮的「出现 + 可点」以恰选中一行为前提）——需传**与表
+ * 数据同一个对象引用**（ElTable 按引用比对；选中的是 fetchDockerImages 返回的那一行）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent, h, nextTick } from 'vue'
 import { ElTable, ElTableColumn } from 'element-plus'
-import { mount, type VueWrapper } from '@vue/test-utils'
+import { DOMWrapper, mount, type VueWrapper } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
 
 // 源码扫描用 ?raw 直接取 SFC 原文（jsdom 环境里 import.meta.url 解析到文档基址，
@@ -212,11 +212,31 @@ async function clickBar(w: VueWrapper, title: string) {
   await flush()
 }
 
-/** 确认弹窗（真组件）与其主按钮（按文字找：打标签/导出/覆盖导出/载入镜像）。 */
+/** 确认弹窗（真组件）—— props 查询（modelValue/action）走它：append-to-body 只把 DOM
+ *  搬到 document.body，组件实例仍在 Vue 组件树上，findComponent 照常命中。弹窗内 DOM
+ *  查询走下面的 dialogFind。 */
 function confirmOf(w: VueWrapper) {
   const confirm = w.findComponent({ name: 'DockerActionConfirm' })
   expect(confirm.exists(), '确认弹窗未挂载').toBe(true)
   return confirm
+}
+
+/** 弹窗内元素查询：append-to-body 后弹窗挂到 document.body，wrapper 里查不到 DOM ——
+ *  先 wrapper（就地渲染场景）、再 document.body（teleport 场景），双处查询范式照
+ *  container-detail-page.test.ts。 */
+function dialogFind(w: VueWrapper, selector: string): DOMWrapper<Element> {
+  const local = w.find(selector)
+  if (local.exists()) return local
+  return new DOMWrapper(document.body).find(selector)
+}
+
+/** 弹窗内的按钮：teleport 后从 document.body 取（只认弹窗内的，避免命中工具条同名钮）。 */
+function dialogButtons(w: VueWrapper): HTMLButtonElement[] {
+  const inBody = Array.from(
+    document.body.querySelectorAll('.el-dialog button')
+  ) as HTMLButtonElement[]
+  if (inBody.length > 0) return inBody
+  return Array.from(w.element.querySelectorAll('.el-dialog button')) as HTMLButtonElement[]
 }
 
 /**
@@ -228,8 +248,8 @@ function confirmOf(w: VueWrapper) {
  */
 async function dialogInputOf(w: VueWrapper, placeholder: string) {
   const selector = `input[placeholder="${placeholder}"]`
-  await vi.waitUntil(() => w.find(selector).exists(), { timeout: 5000 })
-  return w.find(selector)
+  await vi.waitUntil(() => dialogFind(w, selector).exists(), { timeout: 5000 })
+  return dialogFind(w, selector)
 }
 
 /** 等弹窗**关闭**这件事落地（提交 → 指令 → 轮询 → 关窗是一串异步；同样不数轮数）。 */
@@ -237,10 +257,11 @@ async function waitClosed(confirm: ReturnType<typeof confirmOf>) {
   await vi.waitUntil(() => confirm.props('modelValue') === false, { timeout: 5000 })
 }
 
-function submitBtn(confirm: ReturnType<typeof confirmOf>, label: string) {
-  const btn = confirm.findAll('button').find((b) => (b.text() ?? '').includes(label))
+/** 弹窗主按钮（按文字找：打标签/导出/覆盖导出/载入镜像）—— teleport 后从 body 取。 */
+function submitBtn(w: VueWrapper, label: string) {
+  const btn = dialogButtons(w).find((b) => (b.textContent ?? '').includes(label))
   expect(btn, `弹窗里找不到主按钮「${label}」`).toBeTruthy()
-  return btn!
+  return new DOMWrapper(btn!)
 }
 
 const isDisabled = (btn: { element: Element }) => (btn.element as HTMLButtonElement).disabled
@@ -278,22 +299,22 @@ describe('打标签：输入档收集新引用（校验挡提交）', () => {
     expect(confirm.props('modelValue')).toBe(true)
     expect(confirm.props('action')).toBe('image:tag')
     // 输入档形态：标签是「新的镜像引用」，无逐字期望（不发 confirm 值）。
-    expect(confirm.find('.ac-input__label').text()).toBe('新的镜像引用')
+    expect(dialogFind(w, '.ac-input__label').text()).toBe('新的镜像引用')
     const input = await dialogInputOf(w, '例如 仓库/名称:标签')
     expect(input.exists()).toBe(true)
 
     // 空串：主按钮禁用（不发指令）。
-    expect(isDisabled(submitBtn(confirm, '打标签'))).toBe(true)
+    expect(isDisabled(submitBtn(w, '打标签'))).toBe(true)
     // 非法引用：禁用 + 就地错误句可见（非空才显错）。
     await input.setValue('bad ref!')
-    expect(isDisabled(submitBtn(confirm, '打标签'))).toBe(true)
-    expect(confirm.find('.ac-input__error').text()).toContain('镜像引用')
+    expect(isDisabled(submitBtn(w, '打标签'))).toBe(true)
+    expect(dialogFind(w, '.ac-input__error').text()).toContain('镜像引用')
     // 合法引用（带首尾空白）：放行，值裁剪后进载荷。
     await input.setValue('  uni-center/core:v2  ')
-    expect(isDisabled(submitBtn(confirm, '打标签'))).toBe(false)
-    expect(confirm.find('.ac-input__error').exists()).toBe(false)
+    expect(isDisabled(submitBtn(w, '打标签'))).toBe(false)
+    expect(dialogFind(w, '.ac-input__error').exists()).toBe(false)
 
-    await submitBtn(confirm, '打标签').trigger('click')
+    await submitBtn(w, '打标签').trigger('click')
     await flush()
 
     expect(api.sendDockerCmd).toHaveBeenCalledTimes(1)
@@ -312,8 +333,8 @@ describe('打标签：输入档收集新引用（校验挡提交）', () => {
 
     const confirm = confirmOf(w)
     await (await dialogInputOf(w, '例如 仓库/名称:标签')).setValue('nginx:v2')
-    const cancel = confirm.findAll('button').find((b) => (b.text() ?? '').includes('取消'))
-    await cancel!.trigger('click')
+    const cancel = dialogButtons(w).find((b) => (b.textContent ?? '').includes('取消'))
+    await new DOMWrapper(cancel!).trigger('click')
     await flush()
 
     expect(api.sendDockerCmd).not.toHaveBeenCalled()
@@ -330,17 +351,17 @@ describe('载入镜像：输入档收集文件名（必填，格式不前端拦�
 
     const confirm = confirmOf(w)
     expect(confirm.props('action')).toBe('image:load')
-    expect(confirm.find('.ac-input__label').text()).toBe('文件名')
+    expect(dialogFind(w, '.ac-input__label').text()).toBe('文件名')
     // 原 prompt 的正文口径搬进 hint：讲清文件须已放在 agent 下载目录。
-    expect(confirm.find('.ac-input__hint').text()).toContain('文件需已放在该主机的 agent 下载目录')
+    expect(dialogFind(w, '.ac-input__hint').text()).toContain('文件需已放在该主机的 agent 下载目录')
 
     const input = await dialogInputOf(w, '例如 镜像名.tar')
-    expect(isDisabled(submitBtn(confirm, '载入镜像'))).toBe(true)
+    expect(isDisabled(submitBtn(w, '载入镜像'))).toBe(true)
     // 沿用原 prompt 口径：任意非空文件名放行（格式由服务端兜）。
     await input.setValue('my backup.tar.gz')
-    expect(isDisabled(submitBtn(confirm, '载入镜像'))).toBe(false)
+    expect(isDisabled(submitBtn(w, '载入镜像'))).toBe(false)
 
-    await submitBtn(confirm, '载入镜像').trigger('click')
+    await submitBtn(w, '载入镜像').trigger('click')
     await flush()
 
     expect(api.sendDockerCmd).toHaveBeenCalledTimes(1)
@@ -366,13 +387,13 @@ describe('导出 tar：alreadyExists 两段式（同一只弹窗内切档）', (
     const confirm = confirmOf(w)
     expect(confirm.props('action')).toBe('image:save')
     // 第一段：输入档（收集文件名），提示讲产物落点。
-    expect(confirm.find('.ac-input__label').text()).toBe('文件名')
-    expect(confirm.find('.ac-input__hint').text()).toContain('产物落在该主机的 agent 下载目录')
+    expect(dialogFind(w, '.ac-input__label').text()).toBe('文件名')
+    expect(dialogFind(w, '.ac-input__hint').text()).toContain('产物落在该主机的 agent 下载目录')
 
     const input = await dialogInputOf(w, '例如 镜像名.tar')
-    expect(isDisabled(submitBtn(confirm, '导出'))).toBe(true)
+    expect(isDisabled(submitBtn(w, '导出'))).toBe(true)
     await input.setValue('mysql.tar')
-    await submitBtn(confirm, '导出').trigger('click')
+    await submitBtn(w, '导出').trigger('click')
     await flush()
 
     // 第一段载荷：不带覆盖标记、不带 confirm（协议只在覆盖重发时要求照抄）。
@@ -388,19 +409,19 @@ describe('导出 tar：alreadyExists 两段式（同一只弹窗内切档）', (
     // 输入被清空（第二段必须重新照抄，不能沿用第一段已填的值直接点确定）。
     // 逐字档的 placeholder 来自形态推导（「例如 backup.tar」），与输入档的说明文字不同档。
     expect(confirm.props('modelValue')).toBe(true)
-    expect(confirm.find('.ac-input__label').text()).toBe('输入文件名以确认')
+    expect(dialogFind(w, '.ac-input__label').text()).toBe('输入文件名以确认')
     // 第二段的输入框是**另一个节点**（形态切换后重渲染）：等它渲染出来再读值。
     const literalInput = await dialogInputOf(w, '例如 backup.tar')
     expect((literalInput.element as HTMLInputElement).value).toBe('')
-    expect(isDisabled(submitBtn(confirm, '覆盖导出'))).toBe(true)
+    expect(isDisabled(submitBtn(w, '覆盖导出'))).toBe(true)
 
     // 照抄不一致不通过；一致才放行。
     await literalInput.setValue('mysql')
-    expect(isDisabled(submitBtn(confirm, '覆盖导出'))).toBe(true)
+    expect(isDisabled(submitBtn(w, '覆盖导出'))).toBe(true)
     await literalInput.setValue('mysql.tar')
-    expect(isDisabled(submitBtn(confirm, '覆盖导出'))).toBe(false)
+    expect(isDisabled(submitBtn(w, '覆盖导出'))).toBe(false)
 
-    await submitBtn(confirm, '覆盖导出').trigger('click')
+    await submitBtn(w, '覆盖导出').trigger('click')
     await flush()
 
     // 第二段载荷：overwrite=true + confirm=照抄的文件名（服务端逐字校验后才覆盖）。
@@ -423,7 +444,7 @@ describe('导出 tar：alreadyExists 两段式（同一只弹窗内切档）', (
 
     const confirm = confirmOf(w)
     await (await dialogInputOf(w, '例如 镜像名.tar')).setValue('mysql.tar')
-    await submitBtn(confirm, '导出').trigger('click')
+    await submitBtn(w, '导出').trigger('click')
     await flush()
 
     expect(api.sendDockerCmd).toHaveBeenCalledTimes(1)
@@ -443,7 +464,7 @@ describe('导出 tar：alreadyExists 两段式（同一只弹窗内切档）', (
 
     const confirm = confirmOf(w)
     await (await dialogInputOf(w, '例如 镜像名.tar')).setValue('mysql.tar')
-    await submitBtn(confirm, '导出').trigger('click')
+    await submitBtn(w, '导出').trigger('click')
     await flush()
 
     expect(api.sendDockerCmd).toHaveBeenCalledTimes(1)

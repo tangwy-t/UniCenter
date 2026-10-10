@@ -485,6 +485,38 @@ export function actionGuarded(action: string): boolean {
 }
 
 /**
+ * Compose 工作台 hero 动作条的按钮色调（**视觉语义，集中一处**，供 project-hero 消费）。
+ *
+ * 与容器详情 hero（启停/重启=中性、删除=红）和镜像详情（删除=红）同一套「红=破坏性」
+ * 约定：
+ *   - primary：向前的**主操作** —— `compose:up`（Up -d，把项目带起来的第一个动作）；
+ *   - danger：**停止/破坏性** —— `compose:stop`／`compose:down`（下线… 会移除容器与网络）；
+ *   - default：其余生命周期动作 —— `compose:start`／`compose:restart`／`compose:pull`
+ *     （中性描边）。
+ *
+ * 为什么不看注册表的 `danger` 字段：`danger` 是**确认档/保护档**的语义（它驱动
+ * target-word 确认与受保护目标分流），不是视觉色调 —— 让按钮颜色跟着它走，会把
+ * `compose:up`（danger='danger'，因为重建要强确认）误涂成红，正是评审 E §8 记的
+ * 「红=危险的约定在 hero 失效」。视觉语义与确认语义在此分开表述：其它页面的
+ * action-menu/workload-table 仍按 `danger` 上色，不受本映射影响。
+ */
+export type ComposeHeroTone = 'primary' | 'danger' | 'default'
+
+const COMPOSE_HERO_TONE: Record<string, ComposeHeroTone> = {
+  'compose:up': 'primary',
+  'compose:stop': 'danger',
+  'compose:start': 'default',
+  'compose:restart': 'default',
+  'compose:pull': 'default',
+  'compose:down': 'danger'
+}
+
+/** 该 compose 动作在 hero 动作条上的色调（未登记 → 中性，不上色最保守）。 */
+export function composeHeroButtonTone(action: string): ComposeHeroTone {
+  return COMPOSE_HERO_TONE[action] ?? 'default'
+}
+
+/**
  * 「项目/服务」形态 target 的拆分 —— **逐条照抄**协议 `SplitDockerProjectService`：
  * 按**第一个** `/` 切、两侧都非空且各自合法才成立（否则 null，调用方回退整串）。
  */

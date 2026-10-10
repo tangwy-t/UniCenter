@@ -27,7 +27,8 @@ import { describe, expect, it } from 'vitest'
 
 const ROOT = resolve(process.cwd(), 'src/modules/docker/views')
 
-/** 七个列表页（本守卫的作用面；详情/工作台/创建页不在其列）。 */
+/** 列表页（本守卫的作用面；详情/工作台/创建页不在其列）。image-drift 是 Wave 4b
+ *  的隐藏列表页（从镜像页工具条进），与五个资源列表页同一纯清单形态。 */
 const PAGES = [
   'containers.vue',
   'projects.vue',
@@ -35,7 +36,8 @@ const PAGES = [
   'events.vue',
   'images.vue',
   'volumes.vue',
-  'networks.vue'
+  'networks.vue',
+  'image-drift.vue'
 ] as const
 
 /** 剥注释：模板 HTML 注释 + JS/SCSS 的块注释与行注释（注释里的旧形态字样不参与断言）。 */
@@ -69,7 +71,7 @@ const ACTION_BTN_EXEMPT: Record<string, string> = {
 }
 
 describe('docker 列表页形态守卫（纯清单：无 hero / 无三态重卡 / 工具条归 ArtTableHeader）', () => {
-  it('扫描不是空转：七页都在且非空', () => {
+  it('扫描不是空转：列表页都在且非空', () => {
     for (const page of PAGES) {
       const src = sourceOf(page)
       expect(src.length, `${page} 读不到内容`).toBeGreaterThan(0)

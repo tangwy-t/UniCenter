@@ -15,19 +15,20 @@
         v-model:columns="columnChecks"
         v-model:showSearchBar="showSearchBar"
         :loading="loading"
+        :has-active-filter="hasFilter"
         @refresh="refreshAll"
       >
         <template #left>
           <div class="toolbar-left">
-            <!-- total 如实报全量、items 截 500：截断必须说出口，否则用户以为
-                 「筛选完了就这么多」而漏看排在 500 名之后的行。
+            <!-- 计数（total = 过滤后全量，翻页由分页器表达 —— 不再有「列表显示前 N 条」
+                 那半句）+ 不可用主机清单 + 静默刷新失败标注。
                  只在 pageState=ready（握有数据）时报数 —— 首拉/失败/无可管主机时
                  报「共 0 个」是假话（数据面不得伪装新鲜）。 -->
             <span v-if="pageState === 'ready'" class="docker-count">
-              共 {{ total }} 个 Compose 项目<template v-if="truncated">
-                · 列表显示前 {{ rows.length }} 条</template
-              >
+              共 {{ total }} 个 Compose 项目
             </span>
+            <!-- 部分主机不可用（Wave 2）：只列主机名 + reason 原文，不加解释句。零值不渲染。 -->
+            <span v-if="unavailableText" class="docker-refresh-note">{{ unavailableText }}</span>
             <!-- 静默刷新失败：保留最后已知清单并说出口（与镜像/卷/网络页 的
                  docker-refresh-note 同一形态：小字、琥珀 token）。 -->
             <span v-if="refreshError" class="docker-refresh-note">刷新失败，正在显示上次结果</span>
@@ -43,6 +44,10 @@
         :data="rows"
         :columns="columns"
         row-key="name"
+        :pagination="pagination"
+        @pagination:size-change="handleSizeChange"
+        @pagination:current-change="handleCurrentChange"
+        @sort-change="handleSortChange"
       />
 
       <!-- 首拉失败（还没有任何行可给）：紧凑失败态 —— 结论句 + 重试，不显示旧数据；
@@ -59,7 +64,11 @@
            vs 还没有项目。空态渲染在本页、不写进 ArtTable 的 `#empty` 插槽：ArtTable
            不转发该插槽（内部把 ElTable 的空态写死成「暂无数据」），写进去会被静默丢弃。 -->
       <ElEmpty v-else-if="pageState === 'empty'" class="docker-empty" description="尚无可管主机" />
-      <ElEmpty v-else-if="hasFilter" class="docker-empty" description="没有符合筛选条件的 Compose 项目">
+      <ElEmpty
+        v-else-if="hasFilter"
+        class="docker-empty"
+        description="没有符合筛选条件的 Compose 项目"
+      >
         <ElButton size="small" @click="onReset">清除筛选</ElButton>
       </ElEmpty>
       <ElEmpty v-else class="docker-empty" description="还没有 Compose 项目" />
@@ -86,7 +95,7 @@
    * （host 取**行主机** —— 项目是主机作用域的，工作台据此还原同一台机器），
    * 状态/网元动作/聚合日志与配置编辑都在工作台里。
    */
-  import { computed, h, ref, watch } from 'vue'
+  import { computed, h, reactive, ref, watch } from 'vue'
   import { useRoute, useRouter } from 'vue-router'
   import { ElButton, ElCard, ElEmpty } from 'element-plus'
   import { useAuth } from '@/hooks/core/useAuth'
@@ -100,6 +109,12 @@
   import { fetchDockerProjects, type DockerProjectListItem } from '../api'
   import { useHostList, useResourceList } from '../composables/useResourceList'
   import { hostLabel } from '../utils/host'
+  import {
+    projectStatusText,
+    projectStatusTone,
+    statusDotColor,
+    statusTextColor
+  } from '../utils/status'
 
   defineOptions({ name: 'DockerProjects' })
 
@@ -115,22 +130,90 @@
   // 主机清单：本页是单表面，自拉一份（useHostList 进页面即拉）。
   const { hosts, hostsLoading, loadHosts } = useHostList()
 
-  const { rows, total, loading, refreshError, truncated, pageState, load, refresh, reloadAll } =
-    useResourceList<DockerProjectListItem>({
-      fetcher: (p) =>
-        fetchDockerProjects({
-          hostId: p.hostId || undefined,
-          keyword: p.keyword || undefined,
-          state: (p.state as 'running' | 'stopped' | undefined) || undefined
-        }),
-      params: () => ({
-        hostId: searchForm.value.host,
-        keyword: searchForm.value.keyword,
-        state: searchForm.value.state
+  const {
+    rows,
+    total,
+    unavailableHosts,
+    loading,
+    refreshError,
+    pageState,
+    load,
+    refresh,
+    reloadAll
+  } = useResourceList<DockerProjectListItem>({
+    fetcher: (p) =>
+      fetchDockerProjects({
+        hostId: p.hostId || undefined,
+        keyword: p.keyword || undefined,
+        state: (p.state as 'running' | 'stopped' | undefined) || undefined,
+        // 服务端分页/排序：pageSize 显式传；未选定排序时不发两键。
+        page: p.page,
+        pageSize: p.pageSize,
+        sortBy: p.sortBy as 'state' | 'services' | 'hostId' | 'name' | undefined,
+        sortOrder: p.sortBy ? p.sortOrder : undefined
       }),
-      hosts: () => hosts.value,
-      hostsLoading: () => hostsLoading.value
-    })
+    params: () => ({
+      hostId: searchForm.value.host,
+      keyword: searchForm.value.keyword,
+      state: searchForm.value.state,
+      page: pagination.current,
+      pageSize: pagination.size,
+      sortBy: sortBy.value || undefined,
+      sortOrder: sortBy.value ? sortOrder.value : undefined
+    }),
+    hosts: () => hosts.value,
+    hostsLoading: () => hostsLoading.value
+  })
+
+  // ── 服务端分页 / 排序（Wave 2）────────────────────────────────────
+  // 分页态照 device：page/pageSize 显式发（pageSize 取 50，与后端默认一致）；载入后
+  // total 从响应同步。排序只认白名单列（列 prop → 后端 sortBy 键），未知 prop 忽略。
+  const pagination = reactive({ current: 1, size: 50, total: 0 })
+  watch(total, (v) => {
+    pagination.total = v
+  })
+  /** 列 prop → 后端排序键（白名单：state/services + 通用 hostId/name）。 */
+  const SORT_KEYS: Record<string, string> = {
+    name: 'name',
+    hostname: 'hostId',
+    state: 'state',
+    services: 'services'
+  }
+  const sortBy = ref('')
+  const sortOrder = ref<'asc' | 'desc'>('asc')
+  function handleSortChange({ prop, order }: { prop?: string; order?: string | null }) {
+    const key = prop ? SORT_KEYS[prop] : undefined
+    if (!key) return
+    if (order === 'ascending') {
+      sortBy.value = key
+      sortOrder.value = 'asc'
+    } else if (order === 'descending') {
+      sortBy.value = key
+      sortOrder.value = 'desc'
+    } else {
+      // 三态循环的第三态：清回默认排序（sortBy 空即忽略方向）。
+      sortBy.value = ''
+    }
+    pagination.current = 1
+    void load()
+  }
+  function handleSizeChange(size: number) {
+    pagination.size = size
+    pagination.current = 1
+    void load()
+  }
+  function handleCurrentChange(current: number) {
+    pagination.current = current
+    void load()
+  }
+
+  /** 部分主机不可用（Wave 2）：只列主机名 + reason 原文（页面零解释文案）。 */
+  const unavailableText = computed(() =>
+    unavailableHosts.value.length === 0
+      ? ''
+      : `${unavailableHosts.value.length} 台主机不可用：` +
+        unavailableHosts.value.map((h) => `${h.hostname || h.hostId}（${h.reason}）`).join('、')
+  )
 
   /** 表格的加载态：清单在拉，或主机清单还没到（后者尚不知有没有主机，不能先喊「没有」）。 */
   const listLoading = computed(() => loading.value || hostsLoading.value)
@@ -143,7 +226,11 @@
   const showSearchBar = ref(false)
   const searchForm = ref<{ keyword?: string; state?: 'running' | 'stopped'; host?: string }>({})
 
-  const hostOptions = computed(() => hosts.value.map((h) => ({ label: hostLabel(h), value: h.id })))
+  // 主机选项按分组渲染（ArtSearchBar 追加式分组能力：option 带 group 即分组）。
+  // 无分组的归入「未分组」组；组名是数据分类，不是解释文案。
+  const hostOptions = computed(() =>
+    hosts.value.map((h) => ({ label: hostLabel(h), value: h.id, group: h.group || '未分组' }))
+  )
 
   const searchItems = computed(() => [
     {
@@ -187,13 +274,15 @@
   )
 
   function onSearch() {
-    // 服务端过滤：搜索按钮即重拉（无分页可重置）。
+    // 服务端过滤：搜索按钮即重拉，筛选变化回第一页。
     showSearchBar.value = true
+    pagination.current = 1
     void load()
   }
 
   function onReset() {
     searchForm.value = {}
+    pagination.current = 1
     void load()
   }
 
@@ -206,6 +295,12 @@
       const id = raw ? String(raw) : ''
       const had = searchForm.value.host ?? ''
       searchForm.value.host = id
+      // ?host 深链进入时自动展开搜索栏：从工作台返回 / 站内入口带 host 进来时看到
+      // 的是一张被过滤的表，筛选线索必须在明处。immediate 首跑（old 为 undefined）
+      // 也走这句。
+      if (id) showSearchBar.value = true
+      // 筛选变化（含深链首拉）回第一页。
+      pagination.current = 1
       // immediate 首跑（old 为 undefined）必拉一次；此后仅 query 真的变化时重拉。
       if (id !== had || old === undefined) void load()
     },
@@ -218,23 +313,10 @@
     void refresh()
   }
 
-  // ── 展示口径（与工作台 hero 同一批文案/色系，两处不写两种话）──
-
-  /** 项目状态：后端由成员容器运行态归纳出 running/partial/stopped 三态（未知给「—」）。 */
-  function stateText(stateValue?: string): string {
-    if (stateValue === 'running') return '运行中'
-    if (stateValue === 'partial') return '部分运行'
-    if (stateValue === 'stopped') return '已停止'
-    return '—'
-  }
-
-  /** 状态点色（绿=运行中/琥珀=部分运行/灰=其余 —— 颜色即结论，但旁边永远有文字结论，
-      不靠颜色单独传达 —— 无障碍，与工作台 hero 的 pwh__dot 同一口径）。 */
-  function stateDotColor(stateValue?: string): string {
-    if (stateValue === 'running') return 'var(--el-color-success)'
-    if (stateValue === 'partial') return 'var(--el-color-warning)'
-    return 'var(--el-text-color-disabled)'
-  }
+  // ── 展示口径（项目态的色/文收敛到 utils/status，与容器状态列/任务页同一来源）──
+  // 三处（本项目态、容器统一表状态列、任务页态）曾各写一份点色/文案映射；Wave 3a
+  // 收敛为 utils/status.ts 的纯函数：色值口径（点 = EP 语义基色、字 = AA token）与
+  // 领域映射都在那里，这里只消费。「颜色永不单独传达」——旁边永远有文字结论。
 
   // ── 表格列（useTableColumns：列设置随工具条的列设置弹层生效，对齐系统管理）──
   // 状态点走内联样式而不是 scoped class：formatter 产出的 vnode 在 ArtTable 的渲染
@@ -242,42 +324,76 @@
   const { columns, columnChecks } = useTableColumns<DockerProjectListItem>(() => {
     const cols: ColumnOption<DockerProjectListItem>[] = [
       { type: 'index' as const, width: 60, label: '序号', hideBelow: 'tablet' },
-      { prop: 'name', label: '项目名', minWidth: 200, showOverflowTooltip: true },
+      {
+        prop: 'name',
+        label: '项目名',
+        minWidth: 200,
+        showOverflowTooltip: true,
+        sortable: 'custom' as const
+      },
       {
         // 主机列是跨主机表的核心新增：同名项目可能散在多台机器，排查时
         // 「先定位在哪台」是第一句（平板竖屏起可见，与容器统一表同档）。
+        // 渲染成胶囊 chip：主机是事实上的分组键，不再是最弱的灰文本。
         prop: 'hostname',
         label: '主机',
         minWidth: 120,
         showOverflowTooltip: true,
         hideBelow: 'tablet',
-        formatter: (row: DockerProjectListItem) => row.hostname || row.hostId
+        sortable: 'custom' as const,
+        formatter: (row: DockerProjectListItem) =>
+          h('span', { class: 'docker-host' }, hostLabel({ id: row.hostId, hostname: row.hostname }))
       },
       {
         prop: 'state',
         label: '状态',
         minWidth: 110,
-        formatter: (row: DockerProjectListItem) =>
-          h('span', { class: 'docker-proj-state' }, [
-            h('span', {
-              class: 'docker-proj-dot',
-              style: { background: stateDotColor(row.state) },
-              'aria-hidden': 'true'
-            }),
-            stateText(row.state)
-          ])
+        // 单行不变量（Wave 3c）：数据列一律 nowrap（showOverflowTooltip）。
+        showOverflowTooltip: true,
+        sortable: 'custom' as const,
+        // 圆点 + 中文结论：色/文取自 utils/status（点 = EP 语义基色、字 = AA token）。
+        formatter: (row: DockerProjectListItem) => {
+          const tone = projectStatusTone(row.state)
+          return h(
+            'span',
+            { class: 'docker-proj-state', style: { color: statusTextColor(tone) } },
+            [
+              h('span', {
+                class: 'docker-proj-dot',
+                style: { background: statusDotColor(tone) },
+                'aria-hidden': 'true'
+              }),
+              projectStatusText(row.state)
+            ]
+          )
+        }
       },
       {
         prop: 'services',
         label: '服务数',
         minWidth: 90,
-        hideBelow: 'tablet'
+        // 单行不变量（Wave 3c）：数据列一律 nowrap。
+        showOverflowTooltip: true,
+        align: 'right' as const,
+        className: 'is-num',
+        hideBelow: 'tablet',
+        sortable: 'custom' as const
       },
-      { prop: 'containersCount', label: '容器数', minWidth: 90 },
+      {
+        prop: 'containersCount',
+        label: '容器数',
+        minWidth: 90,
+        // 单行不变量（Wave 3c）：数据列一律 nowrap。
+        showOverflowTooltip: true,
+        align: 'right' as const,
+        className: 'is-num'
+      },
       {
         prop: 'protected',
         label: '保护',
         minWidth: 110,
+        // 单行不变量（Wave 3c）：锁图标 + 文字一整行不折行。
+        showOverflowTooltip: true,
         // 动手前必须看见的事实（spec §11.1 的 🔒）。保护档结论句不在此重复 ——
         // 那是工作台 hero 的职责（本页只是索引，不承载动作）。
         // 标记用锁图标 + 文字（不用 🔒 emoji：无 emoji 字体的环境里是豆腐块）；
@@ -328,6 +444,14 @@
 </script>
 
 <style lang="scss" scoped>
+  @use './overview-tokens' as t;
+
+  // 主机 chip（胶囊）：主机是事实上的分组键，跨主机项目表里不再是最弱的灰文本
+  // （与容器/镜像/卷/网络页同一全局类 docker-host + t.pill 制）。
+  :global(.docker-host) {
+    @include t.pill;
+  }
+
   /* 工具条左组：计数文本 + 刷新标注一行排开（对齐系统管理的 toolbar-left）。 */
   .toolbar-left {
     display: flex;

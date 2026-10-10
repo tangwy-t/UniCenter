@@ -10,18 +10,27 @@
     </div>
 
     <div class="flex-c md:justify-end max-sm:!hidden" :class="{ 'max-md:mt-3': !isShortViewport }">
+      <!-- 搜索切换钮：面板展开或有筛选生效时都进激活态 —— 面板收起但筛选仍生效
+           （如 ?host= 深链进入、或收起面板后筛选未清）时必须给得出线索，否则用户
+           看到被过滤的表却找不到原因。小点（::after）是「有筛选生效」的纯视觉记号。 -->
       <div
         v-if="showSearchBar != null"
         role="button"
         tabindex="0"
-        aria-label="搜索"
-        class="button"
+        :aria-label="hasActiveFilter ? '搜索（有筛选生效）' : '搜索'"
+        class="button search-button"
+        :class="[
+          showSearchBar || hasActiveFilter ? 'active !bg-theme hover:!bg-theme/80' : '',
+          hasActiveFilter ? 'has-active-filter' : ''
+        ]"
         @click="search"
         @keydown.enter.prevent="search"
         @keydown.space.prevent="search"
-        :class="showSearchBar ? 'active !bg-theme hover:!bg-theme/80' : ''"
       >
-        <ArtSvgIcon icon="ri:search-line" :class="showSearchBar ? 'text-white' : 'text-g-700'" />
+        <ArtSvgIcon
+          icon="ri:search-line"
+          :class="showSearchBar || hasActiveFilter ? 'text-white' : 'text-g-700'"
+        />
       </div>
       <div
         v-if="shouldShow('refresh')"
@@ -168,6 +177,11 @@
     loading?: boolean
     /** 搜索栏显示状态 */
     showSearchBar?: boolean
+    /**
+     * 是否有筛选生效（页面把已有的 hasFilter 传进来 —— 零新状态）。
+     * 面板收起但筛选仍生效时，搜索钮据此保持激活态并挂「有筛选生效」小点。
+     */
+    hasActiveFilter?: boolean
   }
 
   const props = withDefaults(defineProps<Props>(), {
@@ -176,7 +190,8 @@
     showHeaderBackground: true,
     fullClass: 'art-page-view',
     layout: 'search,refresh,size,fullscreen,columns,settings',
-    showSearchBar: undefined
+    showSearchBar: undefined,
+    hasActiveFilter: false
   })
 
   const columns = defineModel<ColumnOption[]>('columns', {
@@ -368,6 +383,25 @@
     &:focus-visible {
       outline: 2px solid var(--el-color-primary);
       outline-offset: 2px;
+    }
+  }
+
+  /* 搜索钮：定位上下文给「有筛选生效」的小点；点只在有筛选时出现。 */
+  .search-button {
+    position: relative;
+
+    /* 有筛选生效（面板收起时最有用）：图标角一枚小点 —— 纯图标表达，不加解释句。
+       环用卡片底色，落在灰底与主题底两种按钮底上都能分离出来。 */
+    &.has-active-filter::after {
+      content: '';
+      position: absolute;
+      top: 4px;
+      right: 4px;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--el-color-danger);
+      box-shadow: 0 0 0 1.5px var(--default-box-color);
     }
   }
 </style>

@@ -20,7 +20,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { nextTick } from 'vue'
-import { mount, type VueWrapper } from '@vue/test-utils'
+import { mount, DOMWrapper, type VueWrapper } from '@vue/test-utils'
 import { HttpError } from '@/utils/http/error'
 
 const api = vi.hoisted(() => ({
@@ -131,6 +131,31 @@ async function clickRowButton(w: VueWrapper, registry: string, label: string) {
   expect(btn, `行「${registry}」应有「${label}」按钮`).toBeTruthy()
   await btn!.trigger('click')
   await flush()
+}
+
+/** 确认弹窗内元素查询：append-to-body 后弹窗挂到 document.body，wrapper 里查不到 DOM ——
+ *  先 wrapper（就地渲染场景）、再 document.body（teleport 场景），双处查询范式照
+ *  container-detail-page.test.ts。 */
+function dialogFind(w: VueWrapper, selector: string): DOMWrapper<Element> {
+  const local = w.find(selector)
+  if (local.exists()) return local
+  return new DOMWrapper(document.body).find(selector)
+}
+
+/** 确认弹窗根元素（含 .ac-card 的那只 .el-dialog）—— append-to-body 后挂 document.body；
+ *  用 .ac-card 锚定，避免同时命中宿主凭据弹窗（它也在 document.body 的挂载容器里）。 */
+function confirmDialogEl(w: VueWrapper): HTMLElement {
+  const card = w.find('.ac-card')
+  const anchor = card.exists()
+    ? (card.element as HTMLElement)
+    : (document.body.querySelector('.ac-card') as HTMLElement | null)
+  expect(anchor, '确认弹窗 DOM 未渲染').toBeTruthy()
+  return (anchor!.closest('.el-dialog') as HTMLElement) ?? anchor!
+}
+
+/** 确认弹窗内的按钮（按 .ac-card 锚定，避免命中列表里的同名行内钮）。 */
+function dialogButtons(w: VueWrapper): HTMLButtonElement[] {
+  return Array.from(confirmDialogEl(w).querySelectorAll('button')) as HTMLButtonElement[]
 }
 
 /**
@@ -317,14 +342,14 @@ describe('删除凭据（标准档确认）', () => {
 
     const confirm = w.findComponent({ name: 'DockerActionConfirm' })
     expect(confirm.exists()).toBe(true)
-    expect(confirm.find('.ac-card__target').text()).toBe('harbor.example.com')
-    expect(confirm.text()).toContain('删除即失效')
-    expect(confirm.text()).toContain('此操作不可恢复')
+    expect(dialogFind(w, '.ac-card__target').text()).toBe('harbor.example.com')
+    expect(confirmDialogEl(w).textContent).toContain('删除即失效')
+    expect(confirmDialogEl(w).textContent).toContain('此操作不可恢复')
 
     // 确认弹窗自己的「删除」按钮（行内的「删除」仍在列表里 —— 按弹窗作用域取）
-    const btn = confirm.findAll('button').find((b) => (b.text() ?? '').trim() === '删除')
+    const btn = dialogButtons(w).find((b) => (b.textContent ?? '').trim() === '删除')
     expect(btn, '确认弹窗应有「删除」主按钮').toBeTruthy()
-    await btn!.trigger('click')
+    await new DOMWrapper(btn!).trigger('click')
     await flush()
 
     expect(api.deleteDockerRegistry).toHaveBeenCalledWith('harbor.example.com')
@@ -337,8 +362,8 @@ describe('删除凭据（标准档确认）', () => {
     await clickRowButton(w, 'harbor.example.com', '删除')
 
     const confirm = w.findComponent({ name: 'DockerActionConfirm' })
-    const btn = confirm.findAll('button').find((b) => (b.text() ?? '').trim() === '删除')
-    await btn!.trigger('click')
+    const btn = dialogButtons(w).find((b) => (b.textContent ?? '').trim() === '删除')
+    await new DOMWrapper(btn!).trigger('click')
     await flush()
 
     expect(elMessage.error).toHaveBeenCalledWith(expect.stringContaining('该仓库没有凭据记录'))
@@ -351,8 +376,8 @@ describe('删除凭据（标准档确认）', () => {
     await clickRowButton(w, 'harbor.example.com', '删除')
 
     const confirm = w.findComponent({ name: 'DockerActionConfirm' })
-    const cancel = confirm.findAll('button').find((b) => (b.text() ?? '').trim() === '取消')
-    await cancel!.trigger('click')
+    const cancel = dialogButtons(w).find((b) => (b.textContent ?? '').trim() === '取消')
+    await new DOMWrapper(cancel!).trigger('click')
     await flush()
 
     expect(api.deleteDockerRegistry).not.toHaveBeenCalled()

@@ -25,9 +25,27 @@ export function splitLogLines(text: string): string[] {
   return lines
 }
 
-export interface VisibleLog {
-  /** 渲染文本：保留下来的行以 `\n` 连接；过滤后没有命中行时是空串。 */
+/** 日志级别：着色用（信息/警告/错误）。 */
+export type LogLevel = 'info' | 'warn' | 'error'
+
+/**
+ * 渲染用的一行。`text` 是正文（**已摘掉前导时间戳**），`ts` 是逐行解析出的时间戳
+ * （日志正文里没有就缺席），`level` 是级别。
+ *
+ * `text` 仍是纯字符串，页面用文本插值渲染（`{{ }}`）—— 结构化成对象只为「分列 + 着色」，
+ * **不**引入任何 HTML 片段。
+ */
+export interface LogLine {
   text: string
+  ts?: string
+  level: LogLevel
+}
+
+export interface VisibleLog {
+  /** 渲染/下载文本：保留下来的行以 `\n` 连接。**原文**（含时间戳）—— 复制/下载的保真路径。 */
+  text: string
+  /** 逐行渲染结构：摘出前导时间戳与级别，供查看器分列着色（正文走文本插值）。 */
+  lines: LogLine[]
   /** 文本里的总行数（提示「共 N 行」用，不受缓冲与过滤影响）。 */
   totalCount: number
   /** 实际参与渲染的行数（截断并过滤之后的）。 */
@@ -37,14 +55,77 @@ export interface VisibleLog {
 }
 
 /**
+ * 日志行里的时间戳（RFC3339：`2026-09-30T08:00:00.123456789Z`）。
+ *
+ * 两种真机形态都认（都要求时间戳出现在**行首或紧跟一个 `|` 前缀**，不扫行中，避免误伤）：
+ *   ① `docker logs --timestamps`：时间戳在行首 —— `<ts> <正文>`；
+ *   ② compose 聚合日志（agent 侧固定 --timestamps，2026-10-02 真机实测）：
+ *      服务前缀在前、时间戳在后 —— `svc2-1     | <ts> <正文>`。
+ * 容器详情页的 `container:logs`（agent 侧**不带** --timestamps）通常两者皆无：无 ts 不伪造。
+ * 命中的前缀（`svc2-1 | `）作为正文保留（它是「哪个服务说的」这条线索）。
+ */
+const LOG_TS_RE =
+  /^((?:[^|\n]{0,64}\|\s*)?)(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))(\s?)/
+
+/** 级别词（保守词表；大小写不敏感、按词边界匹配，避免 "errors" 里的 "error" 之外误伤）。 */
+const LOG_LEVEL_ERROR_RE = /\b(error|err|fatal|panic|exception|failed|failure)\b/i
+const LOG_LEVEL_WARN_RE = /\b(warn|warning)\b/i
+
+/** 一行日志的级别（识别不到就是 info）—— 着色用，纯启发式，不改动正文。 */
+export function detectLogLevel(text: string): LogLevel {
+  if (LOG_LEVEL_ERROR_RE.test(text)) return 'error'
+  if (LOG_LEVEL_WARN_RE.test(text)) return 'warn'
+  return 'info'
+}
+
+/**
+ * 把一行原文拆成 `{ text, ts?, level }`。
+ *
+ * 行首（或 `|` 前缀之后）若有 RFC3339 时间戳则摘出：`ts` 存原串、`text` 是其余正文
+ * （`|` 前缀保留、紧跟时间戳的一个空格吃掉）。**没有时间戳时不伪造**：`ts` 缺席，
+ * `text` 就是整行。
+ */
+export function parseLogLine(raw: string): LogLine {
+  const m = LOG_TS_RE.exec(raw)
+  if (!m) return { text: raw, level: detectLogLevel(raw) }
+  const text = (m[1] ?? '') + raw.slice(m[0].length)
+  return { ts: m[2]!, text, level: detectLogLevel(text) }
+}
+
+/**
+ * 时间戳的展示形态：`2026-09-30T08:00:00.123456789Z` → `2026-09-30 08:00:00Z`。
+ *
+ * 只做无损的排版（去 `T`、去亚秒），**保留时区后缀**（Z / ±HH:MM）以免读者误读成本地时间；
+ * 形状意外的原样返回。完整原串仍可由 ts 字段取回（悬停可见）。
+ */
+export function formatLogTs(ts: string): string {
+  const m = ts.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.\d+)?(Z|[+-]\d{2}:\d{2})?$/)
+  return m ? `${m[1]} ${m[2]}${m[3] ?? ''}` : ts
+}
+
+/** 跟随态（跟随流生命周期）：跟随中 / 已暂停 / 已结束。 */
+export type FollowState = 'live' | 'paused' | 'ended'
+
+/** 跟随态的三态词（取代静态「共 N 行」，让「当前是不是在跟」一眼可读）。 */
+export function followStateText(state: FollowState): string {
+  if (state === 'paused') return '已暂停'
+  if (state === 'ended') return '已结束'
+  return '正在跟随'
+}
+
+/**
  * 缓冲尾部 + 关键字过滤。
  *
  * 两点口径：
- * 1. **纯文本**：返回的只是文本，页面用文本插值渲染（`{{ }}`）—— 日志是不可信文本，
- *    任何 HTML 拼接都是注入面，故这里不做也不返回任何富文本。
+ * 1. **纯文本**：`text` 与逐行 `lines[].text` 都只是字符串，页面用文本插值渲染（`{{ }}`）
+ *    —— 日志是不可信文本，任何 HTML 拼接都是注入面，故这里不返回任何富文本；`lines`
+ *    只把时间戳/级别**解析成结构化字段**（ts/level），正文仍原样交回。
  * 2. 顺序是「先截到缓冲上限、再按关键字过滤」：与「仅显示最近 5000 行」的文案一致
  *    （关键字是在留下的这一段里找）。反过来先把全部行过滤一遍再截，既费时，也会让
  *    「共 N 行」与眼前的内容对不上。
+ *
+ * `text`（拼接串，含时间戳原样）服务复制/下载；`lines`（逐行，时间戳已摘出）服务渲染 ——
+ * 两者同源（同一批 shown 行），不会各说各话。
  *
  * 关键字命中是行内子串且**大小写敏感**（与 grep 同口径：日志里的人为约定—— ERROR 与
  * error 常常是两回事）。全空白的关键字视为「不过滤」。
@@ -58,6 +139,7 @@ export function visibleLines(text: string, keyword = '', maxLines = MAX_LOG_LINE
   const shown = kw ? kept.filter((line) => line.includes(kw)) : kept
   return {
     text: shown.join('\n'),
+    lines: shown.map(parseLogLine),
     totalCount: all.length,
     shownCount: shown.length,
     truncated

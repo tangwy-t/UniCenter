@@ -169,6 +169,9 @@
               :key="`${ctx.hostId}:${containerId}`"
               :host-id="ctx.hostId"
               :container-id="containerId"
+              :running="isRunning"
+              @start="onToggle"
+              @open-logs="onTabChange('logs')"
             />
           </ElTabPane>
 
@@ -308,7 +311,7 @@
     type ContainerInspectView,
     type Phase1Action
   } from '../../utils/cmd'
-  import { containerStateText, portsText } from '../../utils/display'
+  import { containerStateZh, portsText } from '../../utils/display'
   import { hostLabel } from '../../utils/host'
   import { provideDockerHost } from '../../utils/host-context'
   import { createLogFeed } from '../../utils/stream'
@@ -470,16 +473,23 @@
   /**
    * 状态结论。
    *
-   * - 运行中：用快照的原生状态句（"Up 16 hours"）—— 与列表逐字一致。
-   * - 已停止：说结论与退出码（「已退出（退出码 0）」）—— 退出码是判因的第一条线索，
-   *   而 Docker 的原生句子把它混在一串相对时间里（"Exited (0) 8 months ago"）。
+   * - 快照在、且其状态与权威值（inspect 优先）一致：走与列表「状态」列同一个本地化函数
+   *   （containerStateZh）—— 原始状态码、原生状态句里的英文时长与 health 都译成中文
+   *   （「运行中 16 小时」「已退出（退出码 143）26 小时前」），与列表逐字一致。
+   * - 快照未到，或写指令后 inspect 已领先于尚未重拉的陈旧快照：inspect 只有原始 state
+   *   （没有原生状态句），退回状态码的中文兜底；已退出/已死亡优先说退出码（inspect 里有
+   *   它，是判因的第一条线索）—— 不拿陈旧快照的状态句冒充当下。
    */
   const stateText = computed(() => {
     const state = stateRaw.value
     if (!state) return ''
-    // 原生状态句走共用展示函数（列表页的「状态」列用的是同一个），不在这里另造一句。
-    if (state === 'running' && snapshotItem.value) return containerStateText(snapshotItem.value)
-    if (state === 'running') return STATE_TEXT.running
+    // 快照在**且状态与权威值一致**时：走与列表「状态」列同一个本地化函数（containerStateZh）——
+    // 原始状态码、原生状态句里的英文时长与 health 都译成中文，与列表逐字一致。
+    const snap = snapshotItem.value
+    if (snap && snap.state === state) return containerStateZh(snap)
+    // 其余情形（快照未到；或写指令后 inspect 已领先于尚未重拉的陈旧快照）：inspect 只有
+    // 原始 state，退回状态码的中文兜底；已退出/已死亡优先说退出码（inspect 里有它，是判因的
+    // 第一条线索）—— 不拿陈旧快照的状态句冒充当下。
     if (state === 'exited' || state === 'dead') {
       const code = view.value?.exitCode
       return code === undefined || code === null ? STATE_TEXT[state] : `已退出（退出码 ${code}）`

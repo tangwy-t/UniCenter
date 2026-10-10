@@ -56,7 +56,8 @@ const HOSTS = {
       primaryIp: '192.168.12.105',
       online: true,
       dockerOk: true,
-      agentVersion: '0.5.4'
+      agentVersion: '0.5.4',
+      group: '机房A'
     },
     {
       id: 'h2',
@@ -279,12 +280,14 @@ beforeEach(() => {
 describe('聚合数据源（跨主机端点 + 服务端过滤）', () => {
   it('镜像页首拉：?host 深链为主机筛选初始值，三个筛选参数全部发给端点', async () => {
     await mountPage(Images, { host: 'h1' })
-    expect(api.fetchDockerImages).toHaveBeenCalledWith({
-      hostId: 'h1',
-      keyword: undefined,
-      dangling: undefined,
-      unused: undefined
-    })
+    expect(api.fetchDockerImages).toHaveBeenCalledWith(
+      expect.objectContaining({
+        hostId: 'h1',
+        keyword: undefined,
+        dangling: undefined,
+        unused: undefined
+      })
+    )
   })
 
   it('不带 host 的进入是全部主机首拉（hostId 不发）', async () => {
@@ -320,12 +323,14 @@ describe('聚合数据源（跨主机端点 + 服务端过滤）', () => {
     bar.vm.$emit('search')
     await flush()
 
-    expect(api.fetchDockerImages).toHaveBeenCalledWith({
-      hostId: 'h2',
-      keyword: 'mysql',
-      dangling: true,
-      unused: undefined
-    })
+    expect(api.fetchDockerImages).toHaveBeenCalledWith(
+      expect.objectContaining({
+        hostId: 'h2',
+        keyword: 'mysql',
+        dangling: true,
+        unused: undefined
+      })
+    )
   })
 
   it('重置清空三项参数（undefined 不发）', async () => {
@@ -337,12 +342,14 @@ describe('聚合数据源（跨主机端点 + 服务端过滤）', () => {
     bar.vm.$emit('reset')
     await flush()
 
-    expect(api.fetchDockerImages).toHaveBeenCalledWith({
-      hostId: undefined,
-      keyword: undefined,
-      dangling: undefined,
-      unused: undefined
-    })
+    expect(api.fetchDockerImages).toHaveBeenCalledWith(
+      expect.objectContaining({
+        hostId: undefined,
+        keyword: undefined,
+        dangling: undefined,
+        unused: undefined
+      })
+    )
   })
 })
 
@@ -372,8 +379,13 @@ describe('工具条合计（可见行与后端账目的两种口径）', () => {
     })
     const { wrapper: w } = await mountPage(Images)
 
-    // 主行仍是可见清单的合计（Σ 条目 SizeMB：91.8 + 596.2 + 1200 = 1888）。
-    expect(w.find('.docker-total').text()).toContain('合计 3 个 · 1.84 GB')
+    // 计数句（去重后）并入可见清单的合计容量：Σ 条目 SizeMB = 91.8 + 596.2 + 1200
+    // = 1888 → 1.84 GB。原「合计 3 个 · 1.84 GB」与「共 3 个镜像」同值，整块删除。
+    const count = w.find('.docker-count').text()
+    expect(count).toContain('共 3 个镜像')
+    expect(count).toContain('1.84 GB')
+    // 与计数同值的第二遍计数（旧 .docker-total 行）不再存在。
+    expect(w.find('.docker-total').exists()).toBe(false)
     // 副行是账目求和（0.002 + 12.5 = 12.502 → 12.5 MB），不是 1.2 GB。
     const sub = w.find('.docker-total__sub').text()
     expect(sub).toContain('3 个可回收')
@@ -450,13 +462,14 @@ describe('主机列 + 主机筛选（跨主机形态的核心）', () => {
     const items = searchBarOf(w).props('items') as {
       key: string
       filterable?: boolean
-      options?: { label: string; value: string }[]
+      options?: { label: string; value: string; group?: string }[]
     }[]
     const host = items.find((i) => i.key === 'host')
     expect(host, '筛选面板缺少主机项').toBeTruthy()
+    // 主机选项按分组渲染：有分组的带组名，无分组的归入「未分组」（ArtSearchBar 追加式）。
     expect(host?.options).toEqual([
-      { label: 'bogon', value: 'h1' },
-      { label: 'nas', value: 'h2' }
+      { label: 'bogon', value: 'h1', group: '机房A' },
+      { label: 'nas', value: 'h2', group: '未分组' }
     ])
     // 主机下拉可搜（filterable）：主机多了要能敲名字找（QA 实测不可搜）
     expect(host?.filterable).toBe(true)
@@ -513,12 +526,12 @@ describe('失败口径（D-1 的页对应面）', () => {
     expect(rowsOf(w)).toHaveLength(2)
   })
 
-  it('计数/合计文本的 ready 门控：失败/无可管主机时不报「共 0 个」假话', async () => {
-    // 首拉失败（还没有任何数据）：错误态下不出现计数/合计文本（数据面不得伪装新鲜）。
+  it('计数文本的 ready 门控：失败/无可管主机时不报「共 0 个」假话', async () => {
+    // 首拉失败（还没有任何数据）：错误态下不出现计数文本（数据面不得伪装新鲜）。
     api.fetchDockerImages.mockRejectedValueOnce(new Error('network down'))
     const { wrapper: errorW } = await mountPage(Images)
     expect(errorW.find('.docker-count').exists()).toBe(false)
-    expect(errorW.find('.docker-total').exists()).toBe(false)
+    expect(errorW.find('.docker-total__sub').exists()).toBe(false)
 
     // 无可管主机（pageState=empty）：同样不报 —— 「0 个」不是这里的结论（「尚无可管主机」才是）。
     api.fetchDockerHosts.mockResolvedValue({ list: [] })
@@ -526,15 +539,24 @@ describe('失败口径（D-1 的页对应面）', () => {
     const { wrapper: emptyW } = await mountPage(Volumes)
     expect(emptyW.text()).toContain('尚无可管主机')
     expect(emptyW.find('.docker-count').exists()).toBe(false)
-    expect(emptyW.find('.docker-total').exists()).toBe(false)
     expect(emptyW.find('.docker-total__sub').exists()).toBe(false)
   })
 
-  it('服务端截断：total 全量 + 前 N 条说出口', async () => {
+  it('服务端分页：total 全量 + 分页器渲染（不再有「列表显示前 N 条」）', async () => {
     api.fetchDockerVolumes.mockResolvedValue({ items: VOLUMES.items, total: 640 })
     const { wrapper: w } = await mountPage(Volumes, { host: 'h1' })
     expect(w.text()).toContain('共 640 个数据卷')
-    expect(w.text()).toContain('列表显示前 1 条')
+    expect(w.text()).not.toContain('列表显示前')
+    const table = w.findComponent({ name: 'ArtTable' })
+    const pag = (table.vm as unknown as { $attrs: Record<string, unknown> }).$attrs.pagination as {
+      current: number
+      size: number
+      total: number
+    }
+    expect(pag).toMatchObject({ current: 1, size: 50, total: 640 })
+    expect(api.fetchDockerVolumes).toHaveBeenCalledWith(
+      expect.objectContaining({ page: 1, pageSize: 50 })
+    )
   })
 })
 

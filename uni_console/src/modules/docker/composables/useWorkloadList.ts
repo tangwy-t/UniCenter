@@ -1,6 +1,6 @@
 /**
  * 跨主机统一工作负载表的数据生命周期（从 containers.vue 收口，地位对齐单主机
- * 页的 useDockerHostState）：拉取 + seq 守卫 + 四态 + 截断结论 + 10s 自动刷新
+ * 页的 useDockerHostState）：拉取 + seq 守卫 + 四态 + 10s 自动刷新
  * （含 keep-alive 失活停表 —— 照抄 overview.vue 刚落地的实现）。
  *
  * 与 useDockerHostState 的分野（为什么另立而不是加参数）：
@@ -10,7 +10,8 @@
  *   - 失败口径沿用 D-1 的精神但形状不同：首拉失败 → 紧凑失败态 + 重试（没有
  *     旧数据可保）；其后静默刷新失败 → 保留最后已知数据并在工具条标注
  *     （「数据获取失败」与「上次数据仍在」是两种事实，不共用一句话）；
- *   - total 如实报全量、items 截 500：truncated 结论交给页面说出口。
+ *   - total 如实报**过滤后全量**，items 是**服务端分页**的一页（Wave 2）——
+ *     翻页/排序参数从 params 快照透传，页面持有分页态并把它塞进 params。
  *（原「页头副标题」随列表页纯化删除：hero 已整块移除，页面直接消费 refreshError
  * 在工具条渲染刷新失败标注；本 composable 不再产出展示文案。）
  *
@@ -23,14 +24,21 @@ import {
   fetchDockerContainers,
   fetchDockerHosts,
   type DockerHostItem,
+  type DockerUnavailableHostItem,
   type DockerWorkloadItem
 } from '../api'
 
-/** 统一表查询参数的响应式来源（页面持有筛选表单，这里只读快照）。 */
+/** 统一表查询参数的响应式来源（页面持有筛选表单与分页态，这里只读快照）。 */
 export type WorkloadParamsSource = () => {
   hostId?: string
   state?: string
   keyword?: string
+  /** 服务端分页（页面持有；pageSize 显式传，不靠后端默认）。 */
+  page?: number
+  pageSize?: number
+  /** 服务端排序（白名单：state/image + 通用 hostId/name；空 = 默认次序）。 */
+  sortBy?: string
+  sortOrder?: 'asc' | 'desc'
 }
 
 export interface UseWorkloadListOptions {
@@ -43,6 +51,8 @@ export interface UseWorkloadListOptions {
 export function useWorkloadList(options: UseWorkloadListOptions) {
   const rows = ref<DockerWorkloadItem[]>([])
   const total = ref(0)
+  /** 本页响应里报「采集失败」的主机（部分主机不可用）：页面如实列出，不解释。 */
+  const unavailableHosts = ref<DockerUnavailableHostItem[]>([])
   /** 主机清单（筛选下拉的数据源；拉不到时静默降级为只有「全部主机」）。 */
   const hosts = ref<DockerHostItem[]>([])
   const loading = ref(false)
@@ -54,9 +64,6 @@ export function useWorkloadList(options: UseWorkloadListOptions) {
   const refreshError = ref(false)
   /** 请求序号：手动刷新、自动刷新、筛选变化并发时，旧响应晚到不得覆盖新数据。 */
   let loadSeq = 0
-
-  /** 服务端截断（items 上限 500）：截断必须说出口，否则用户以为筛选完了就这么多。 */
-  const truncated = computed(() => total.value > rows.value.length)
 
   const pageState = computed<'loading' | 'error' | 'empty' | 'ready'>(() => {
     if (hasError.value) return 'error'
@@ -81,11 +88,17 @@ export function useWorkloadList(options: UseWorkloadListOptions) {
       const resp = await fetchDockerContainers({
         hostId: p.hostId || undefined,
         state: p.state as 'running' | 'stopped' | undefined,
-        keyword: p.keyword || undefined
+        keyword: p.keyword || undefined,
+        // 服务端分页/排序：pageSize 显式传（不靠后端默认）；未选定排序时不发两键。
+        page: p.page,
+        pageSize: p.pageSize,
+        sortBy: p.sortBy as 'state' | 'image' | 'hostId' | 'name' | undefined,
+        sortOrder: p.sortBy ? p.sortOrder : undefined
       })
       if (seq !== loadSeq) return
       rows.value = resp.items ?? []
       total.value = resp.total ?? 0
+      unavailableHosts.value = resp.unavailableHosts ?? []
       hasData.value = true
       hasError.value = false
       refreshError.value = false
@@ -168,12 +181,12 @@ export function useWorkloadList(options: UseWorkloadListOptions) {
   return {
     rows,
     total,
+    unavailableHosts,
     hosts,
     loading,
     hostsLoading,
     hasError,
     refreshError,
-    truncated,
     pageState,
     autoRefresh,
     /** 拉一次（搜索/筛选变化、手动刷新走它）。 */

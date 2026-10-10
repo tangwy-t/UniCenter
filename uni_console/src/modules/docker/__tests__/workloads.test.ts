@@ -201,11 +201,24 @@ describe('统一表渲染（多主机条目）', () => {
     expect(rows[1]).toMatchObject({ hostId: 'h2', hostname: 'nas' })
   })
 
-  it('服务端截断时计数说出口（total 全量 + 前 N 条）', async () => {
+  it('服务端分页：total 如实报全量 + 分页器渲染（计数句不再有「显示前 N 条」）', async () => {
     api.fetchDockerContainers.mockResolvedValue({ items: ALL.items, total: 640 })
     const w = await mountPage()
-    expect(w.html()).toContain('共 640 个容器')
-    expect(w.html()).toContain('显示前 2 条')
+    expect(w.text()).toContain('共 640 个容器')
+    // 「列表显示前 N 条」那半句随截断结论一起退役（翻页由分页器表达）。
+    expect(w.text()).not.toContain('列表显示前')
+    // 分页器配置（ArtTable 替身把 pagination 落在 $attrs）照 device 口径。
+    const table = w.findComponent({ name: 'ArtTable' })
+    const pag = (table.vm as unknown as { $attrs: Record<string, unknown> }).$attrs.pagination as {
+      current: number
+      size: number
+      total: number
+    }
+    expect(pag).toMatchObject({ current: 1, size: 50, total: 640 })
+    // 请求显式带分页参数（pageSize 不靠后端默认）。
+    expect(api.fetchDockerContainers).toHaveBeenCalledWith(
+      expect.objectContaining({ page: 1, pageSize: 50 })
+    )
   })
 })
 
@@ -219,11 +232,13 @@ describe('筛选参数全部发给端点（服务端过滤）', () => {
     bar.vm.$emit('search')
     await new Promise((r) => setTimeout(r, 0))
 
-    expect(api.fetchDockerContainers).toHaveBeenCalledWith({
-      hostId: 'h2',
-      state: 'stopped',
-      keyword: 'mysql'
-    })
+    expect(api.fetchDockerContainers).toHaveBeenCalledWith(
+      expect.objectContaining({
+        hostId: 'h2',
+        state: 'stopped',
+        keyword: 'mysql'
+      })
+    )
   })
 
   it('重置清空三项参数（undefined 不发）', async () => {
@@ -233,11 +248,13 @@ describe('筛选参数全部发给端点（服务端过滤）', () => {
     bar.vm.$emit('reset')
     await new Promise((r) => setTimeout(r, 0))
 
-    expect(api.fetchDockerContainers).toHaveBeenLastCalledWith({
-      hostId: undefined,
-      state: undefined,
-      keyword: undefined
-    })
+    expect(api.fetchDockerContainers).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        hostId: undefined,
+        state: undefined,
+        keyword: undefined
+      })
+    )
   })
 })
 

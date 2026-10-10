@@ -45,13 +45,15 @@
       <div class="pwh__actions">
         <!-- 生命周期动作条：六个项目级动作照 projects.vue 展开区头部的语义 ——
              确认档/保护档的分流在父页（onProjectAction），这里只管渲染与禁用；
-             受保护且无强制权限时整组禁用，结论句就在按钮旁（就近原则）。 -->
+             受保护且无强制权限时整组禁用，结论句就在按钮旁（就近原则）。
+             色调走 composeHeroButtonTone（视觉语义与注册表的确认档 danger 分开）：
+             Up -d 实心 primary（主操作）、停止/下线… 描边 danger、其余中性 default。 -->
         <ElButton
           v-for="btn in buttons"
           :key="btn.action"
           size="small"
-          :type="btn.entry.danger === 'normal' ? undefined : 'danger'"
-          :plain="btn.entry.danger !== 'normal'"
+          :type="btn.tone === 'default' ? undefined : btn.tone"
+          :plain="btn.tone === 'danger'"
           :disabled="actionDisabled"
           @click="emit('action', btn.action)"
         >
@@ -78,7 +80,7 @@
   import ArtButtonTable from '@/components/core/forms/art-button-table/index.vue'
   import ArtSvgIcon from '@/components/core/base/art-svg-icon/index.vue'
   import HostSwitcher from '../host-switcher.vue'
-  import { lookupDockerAction } from '../../utils/actions'
+  import { lookupDockerAction, composeHeroButtonTone } from '../../utils/actions'
   import type { DockerProjectItem } from '../../api'
 
   defineOptions({ name: 'DockerProjectHero' })
@@ -123,13 +125,15 @@
     { action: 'compose:down', label: '下线…' }
   ] as const
 
-  /** 按权限过滤后的按钮集（无权限不渲染 ≠ 禁用，spec §11.0 分期控件矩阵）。 */
+  /** 按权限过滤后的按钮集（无权限不渲染 ≠ 禁用，spec §11.0 分期控件矩阵）。
+   *  色调来自 composeHeroButtonTone —— 与注册表的确认档 danger 分开（Up -d 是主操作
+   *  实心 primary，不因「重建要强确认」而误涂红）。 */
   const buttons = computed(() =>
     HERO_ACTIONS.flatMap((h) => {
       // 注册表里没有的动作不渲染（与 DockerActionMenu 同一取向：宁可少一项，也不生成
       // 一个没权限/没确认档的裸按钮）。
       const entry = lookupDockerAction(h.action)
-      return entry && hasAuth(entry.perm) ? [{ ...h, entry }] : []
+      return entry && hasAuth(entry.perm) ? [{ ...h, tone: composeHeroButtonTone(h.action) }] : []
     })
   )
 

@@ -34,7 +34,14 @@ import type { DockerProjectListItem } from '../api'
 
 const HOSTS = {
   list: [
-    { id: 'h1', hostname: 'bogon', primaryIp: '192.168.12.105', online: true, dockerOk: true },
+    {
+      id: 'h1',
+      hostname: 'bogon',
+      primaryIp: '192.168.12.105',
+      online: true,
+      dockerOk: true,
+      group: '机房A'
+    },
     { id: 'h2', hostname: 'nas', primaryIp: '192.168.12.106', online: true, dockerOk: true }
   ]
 }
@@ -181,11 +188,21 @@ describe('跨主机索引渲染（9b：聚合数据源）', () => {
     expect(hostCol?.hideBelow).toBe('tablet')
   })
 
-  it('服务端截断时计数说出口（total 全量 + 前 N 条）', async () => {
+  it('服务端分页：total 全量 + 分页器渲染（不再有「列表显示前 N 条」）', async () => {
     api.fetchDockerProjects.mockResolvedValue({ items: PROJECTS, total: 640 })
     const w = await mountPage()
-    expect(w.html()).toContain('共 640 个 Compose 项目')
-    expect(w.html()).toContain('列表显示前 2 条')
+    expect(w.text()).toContain('共 640 个 Compose 项目')
+    expect(w.text()).not.toContain('列表显示前')
+    const table = w.findComponent({ name: 'ArtTable' })
+    const pag = (table.vm as unknown as { $attrs: Record<string, unknown> }).$attrs.pagination as {
+      current: number
+      size: number
+      total: number
+    }
+    expect(pag).toMatchObject({ current: 1, size: 50, total: 640 })
+    expect(api.fetchDockerProjects).toHaveBeenCalledWith(
+      expect.objectContaining({ page: 1, pageSize: 50 })
+    )
   })
 
   it('状态列给点 + 文字结论（与工作台 hero 同一批口径）', async () => {
@@ -232,9 +249,11 @@ describe('筛选（ArtSearchBar 统一形态；服务端过滤）', () => {
       options?: { label: string; value: string }[]
     }[]
     expect(items.map((i) => i.key)).toEqual(['keyword', 'state', 'host'])
+    // 主机选项按分组渲染（ArtSearchBar 追加式分组能力）：有分组的带自己的组名，
+    // 无分组的归入「未分组」。group 字段是分组渲染的触发键。
     expect(items.find((i) => i.key === 'host')?.options).toEqual([
-      { label: 'bogon', value: 'h1' },
-      { label: 'nas', value: 'h2' }
+      { label: 'bogon', value: 'h1', group: '机房A' },
+      { label: 'nas', value: 'h2', group: '未分组' }
     ])
     // 主机下拉可搜（filterable）：主机多了要能敲名字找（QA 实测不可搜）
     expect(items.find((i) => i.key === 'host')?.filterable).toBe(true)
@@ -253,11 +272,13 @@ describe('筛选（ArtSearchBar 统一形态；服务端过滤）', () => {
     bar.vm.$emit('search')
     await new Promise((r) => setTimeout(r, 0))
 
-    expect(api.fetchDockerProjects).toHaveBeenCalledWith({
-      hostId: 'h2',
-      keyword: 'media',
-      state: 'stopped'
-    })
+    expect(api.fetchDockerProjects).toHaveBeenCalledWith(
+      expect.objectContaining({
+        hostId: 'h2',
+        keyword: 'media',
+        state: 'stopped'
+      })
+    )
   })
 
   it('重置清空三项参数（undefined 不发）', async () => {
@@ -267,11 +288,13 @@ describe('筛选（ArtSearchBar 统一形态；服务端过滤）', () => {
     bar.vm.$emit('reset')
     await new Promise((r) => setTimeout(r, 0))
 
-    expect(api.fetchDockerProjects).toHaveBeenLastCalledWith({
-      hostId: undefined,
-      keyword: undefined,
-      state: undefined
-    })
+    expect(api.fetchDockerProjects).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        hostId: undefined,
+        keyword: undefined,
+        state: undefined
+      })
+    )
   })
 
   it('?host 深链作主机筛选初始值：首拉就带 hostId', async () => {

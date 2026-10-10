@@ -24,12 +24,24 @@ export type DockerWorkloadItem = Api.Docker.DockerWorkloadItem
 export type DockerWorkloadListResp = Api.Docker.DockerWorkloadListResp
 export type DockerImageListItem = Api.Docker.DockerImageListItem
 export type DockerImageListResp = Api.Docker.DockerImageListResp
+export type DockerImageDriftItem = Api.Docker.DockerImageDriftItem
+export type DockerImageDriftResp = Api.Docker.DockerImageDriftResp
+export type DockerImageDriftOutlier = Api.Docker.DockerImageDriftOutlier
+export type DockerImageDriftHostRef = Api.Docker.DockerImageDriftHostRef
+export type DockerImageTargetItem = Api.Docker.DockerImageTargetItem
+export type DockerImageTargetListResp = Api.Docker.DockerImageTargetListResp
 export type DockerVolumeListItem = Api.Docker.DockerVolumeListItem
 export type DockerVolumeListResp = Api.Docker.DockerVolumeListResp
 export type DockerNetworkListItem = Api.Docker.DockerNetworkListItem
 export type DockerNetworkListResp = Api.Docker.DockerNetworkListResp
 export type DockerProjectListItem = Api.Docker.DockerProjectListItem
 export type DockerProjectListResp = Api.Docker.DockerProjectListResp
+/** 五个列表响应里的「不可用主机」条目（Wave 2：部分主机采集失败时如实报出来）。 */
+export type DockerUnavailableHostItem = Api.Docker.DockerUnavailableHostItem
+/** 全局跨资源检索响应与分组成员（Wave 4d）。 */
+export type DockerSearchResp = Api.Docker.DockerSearchResp
+export type DockerSearchGroup = Api.Docker.DockerSearchGroup
+export type DockerSearchItem = Api.Docker.DockerSearchItem
 export type DockerRegistryItem = Api.Docker.DockerRegistryItem
 export type DockerRegistryListResp = Api.Docker.DockerRegistryListResp
 export type DockerTaskItem = Api.Docker.DockerTaskItem
@@ -61,14 +73,35 @@ export interface DockerCmdBody {
   confirm?: string
 }
 
+/** 服务端排序方向（五端点同形；登记的键仅 `asc` 生效、其余回落 `desc`）。 */
+export type DockerSortOrder = 'asc' | 'desc'
+
+/**
+ * 五个列表端点共用的分页参数（Wave 2）。
+ *
+ * `pageSize` 上限 100、不传时后端默认 50 —— 前端一律**显式传**（不靠后端默认，
+ * 免得「以为传了 10」与后端默认 50 打架）。排序键的白名单各端点不同，非法值
+ * 后端静默回落默认（不 400）；默认（不传 sortBy）= hostId↑ + name↑，**默认键
+ * 忽略 sortOrder**。
+ */
+export interface DockerListPaging {
+  /** 页码（1 起；缺省 1）。 */
+  page?: number
+  /** 每页条数（缺省 50、上限 100）。 */
+  pageSize?: number
+}
+
 /** 统一工作负载表的查询参数（三项都可选且相互独立，先主机、再状态、再关键字收窄）。 */
-export interface DockerWorkloadQuery {
+export interface DockerWorkloadQuery extends DockerListPaging {
   /** 限定单主机（留空 = 全部主机）。 */
   hostId?: string
   /** 运行态：running / stopped（stopped = 一切非 running 的统称）。 */
   state?: 'running' | 'stopped'
   /** 容器名/镜像名的子串匹配（大小写不敏感）。 */
   keyword?: string
+  /** 排序列（白名单：state/image + 通用 hostId/name；非法值静默回落）。 */
+  sortBy?: 'state' | 'image' | 'hostId' | 'name'
+  sortOrder?: DockerSortOrder
 }
 
 /** 可管主机清单（主机切换器的数据源）。 */
@@ -84,6 +117,33 @@ export function fetchDockerHosts() {
  */
 export function fetchDockerOverview() {
   return request.get<DockerOverviewResp>({ url: `${PREFIX}/docker/overview` })
+}
+
+/** 全局跨资源检索的查询参数。 */
+export interface DockerSearchQuery {
+  /** 关键字：名称子串（大小写不敏感）；容器**额外**匹配镜像名、镜像按 tag 串匹配。
+   *  空/缺省 = 空结果（200 + 5 个空组，不报错）。 */
+  q?: string
+  /** 每组返回上限（缺省 20、上限 100；超限服务端夹断不报错）。逐组独立限量。 */
+  limit?: number
+}
+
+/**
+ * 全局跨资源检索（GET /docker/search，docker:list）：一个关键字跨容器/镜像/数据卷/
+ * 网络/Compose **五类**资源子串匹配。每组**独立限量** + 逐组 `truncated`（部分结果
+ * 必须说出口 —— 「共 N 条」由 total 承载、截断由 truncated 承载）；采集失败的主机
+ * 落在 `unavailableHosts` 里，页面据此提示 —— **不能让「搜到 3 条」掩盖「2 台主机
+ * 没搜」**。groups 固定 5 组、顺序固定、空组也出现（空数组非 null）。
+ *
+ * 不走 showErrorMessage：搜索框就开着，结论（空结果/失败）就地显示 —— 与
+ * fetchDockerTasks 同一条「页面开着，结论不放 toast」的纪律。
+ */
+export function fetchDockerSearch(params: DockerSearchQuery = {}) {
+  return request.get<DockerSearchResp>({
+    url: `${PREFIX}/docker/search`,
+    params,
+    showErrorMessage: false
+  })
 }
 
 /** 一台主机的资源快照（含服务端算好的陈旧结论）。 */
@@ -109,7 +169,7 @@ export function fetchDockerContainers(params: DockerWorkloadQuery = {}) {
 // 非法值（如 projects 的 state）由服务端给 400 结论句。
 
 /** 跨主机镜像清单查询参数（形状对齐 uni_core 的 request.DockerImageQuery）。 */
-export interface DockerImagesQuery {
+export interface DockerImagesQuery extends DockerListPaging {
   /** 限定单主机（留空 = 全部主机）。 */
   hostId?: string
   /** repoTag 子串匹配（大小写不敏感；多标签 join(" ") 后匹配，与后端同一句）。 */
@@ -118,6 +178,9 @@ export interface DockerImagesQuery {
   dangling?: boolean
   /** 只取未被任何容器使用的镜像。 */
   unused?: boolean
+  /** 排序列（白名单：size/created + 通用 hostId/name；非法值静默回落）。 */
+  sortBy?: 'size' | 'created' | 'hostId' | 'name'
+  sortOrder?: DockerSortOrder
 }
 
 /** 跨主机镜像清单（GET /docker/images）：镜像 tab 的数据源。 */
@@ -125,13 +188,100 @@ export function fetchDockerImages(params: DockerImagesQuery = {}) {
   return request.get<DockerImageListResp>({ url: `${PREFIX}/docker/images`, params })
 }
 
+/**
+ * 镜像版本一致性（漂移）查询参数（形状对齐 uni_core 的 request.DockerImageDriftQuery）。
+ *
+ * 端点按 **repoTag** 聚合全部可管主机的镜像摘要（digest），算出每个标签在各主机
+ * 上的分布：多数派（dominantDigest + 其主机数）与少数派（outliers，每种摘要的
+ * 主机清单）。分页在**聚合后的 repoTag 维度**上做 —— 故前端不逐页扫 /docker/images
+ * 也能拿到全量漂移账目。
+ */
+export interface DockerImageDriftQuery extends DockerListPaging {
+  /** repoTag 子串匹配（大小写不敏感）。 */
+  keyword?: string
+  /** 主机分组（单值精确匹配；留空 = 全部）。 */
+  group?: string
+  /** 排序列（白名单：repoTag/hostCount/distinctDigests；非法值后端静默回落）。 */
+  sortBy?: DockerImageDriftSortKey
+  sortOrder?: DockerSortOrder
+}
+
+/**
+ * 排序键白名单（三个结构化列）：与后端 docker_image_drift.go 登记的键逐字一致。
+ *
+ * 默认（不传 sortBy）= **distinctDigests 降序** —— 最不齐的排最前（漂移视图的
+ * 立身之本：一眼先看到最需要处理的标签）。`sortOrder` 随 `sortBy` 才发（默认键
+ * 忽略方向）。
+ */
+export type DockerImageDriftSortKey = 'repoTag' | 'hostCount' | 'distinctDigests'
+
+/**
+ * 镜像版本一致性视图（GET /docker/image-drift）：版本一致性页的数据源。
+ *
+ * 走 `showErrorMessage` 默认封装（与四个资源清单端点同一条：整页四态由页面编排，
+ * 首拉失败同时给全局 toast 与页内错误态）。
+ */
+export function fetchImageDrift(params: DockerImageDriftQuery = {}) {
+  return request.get<DockerImageDriftResp>({ url: `${PREFIX}/docker/image-drift`, params })
+}
+
+// ── 声明式目标版本（Wave 4c：POST/DELETE/GET /docker/image-targets）──────────
+// 漂移视图的「待对齐」基准：为一个 repoTag 声明目标内容摘要（digest），据此算出
+// 哪些主机已对齐、哪些待对齐。写面（声明/清除）docker:manage、读面 docker:list。
+// 三条都走「对话框/页面动作开着，结论就地显示」的纪律（showErrorMessage:false）——
+// 与 sendDockerCmd 同一条：统一弹 toast 会把「摘要不合法」与「无权限」说成同一句话。
+
+/** 声明/覆盖一个 repoTag 的目标摘要的请求体（形状对齐 request.DockerImageTargetSaveReq）。 */
+export interface DockerImageTargetSaveBody {
+  repoTag: string
+  targetDigest: string
+}
+
+/**
+ * 声明/覆盖一个 repoTag 的目标内容摘要（POST /docker/image-targets，upsert）。
+ *
+ * `targetDigest` 必须以 `sha256:` 开头，否则服务端给 400 结论句；同 repoTag 覆盖旧声明。
+ */
+export function setImageTarget(data: DockerImageTargetSaveBody) {
+  return request.post<DockerImageTargetItem>({
+    url: `${PREFIX}/docker/image-targets`,
+    data,
+    showErrorMessage: false
+  })
+}
+
+/**
+ * 清除一个 repoTag 的目标（DELETE /docker/image-targets?repoTag=…，幂等）。
+ *
+ * repoTag 含 `:` 与 `/`，无法安全放进 path 段 —— 走 query（axios 负责 urlencode）；
+ * 清除不存在的目标幂等成功。
+ */
+export function clearImageTarget(repoTag: string) {
+  return request.del<void>({
+    // repoTag 含 `:` 与 `/`，走 query 且显式 urlencode（不依赖 params 序列化器）。
+    url: `${PREFIX}/docker/image-targets?repoTag=${encodeURIComponent(repoTag)}`,
+    showErrorMessage: false
+  })
+}
+
+/** 已声明目标版本清单（GET /docker/image-targets，docker:list）。 */
+export function fetchImageTargets() {
+  return request.get<DockerImageTargetListResp>({
+    url: `${PREFIX}/docker/image-targets`,
+    showErrorMessage: false
+  })
+}
+
 /** 跨主机卷清单查询参数（形状对齐 request.DockerVolumeQuery）。 */
-export interface DockerVolumesQuery {
+export interface DockerVolumesQuery extends DockerListPaging {
   hostId?: string
   /** 卷名子串匹配（大小写不敏感）。 */
   keyword?: string
   /** 只取未被任何容器挂载的卷。 */
   unused?: boolean
+  /** 排序列（白名单：size + 通用 hostId/name；非法值静默回落）。 */
+  sortBy?: 'size' | 'hostId' | 'name'
+  sortOrder?: DockerSortOrder
 }
 
 /** 跨主机卷清单（GET /docker/volumes）：数据卷 tab 的数据源。 */
@@ -140,12 +290,15 @@ export function fetchDockerVolumes(params: DockerVolumesQuery = {}) {
 }
 
 /** 跨主机网络清单查询参数（形状对齐 request.DockerNetworkQuery）。 */
-export interface DockerNetworksQuery {
+export interface DockerNetworksQuery extends DockerListPaging {
   hostId?: string
   /** 网络名子串匹配（大小写不敏感）。 */
   keyword?: string
   /** 只取 internal 网络（不接外网的隔离网络）。 */
   internal?: boolean
+  /** 排序列（白名单：containers + 通用 hostId/name；非法值静默回落）。 */
+  sortBy?: 'containers' | 'hostId' | 'name'
+  sortOrder?: DockerSortOrder
 }
 
 /** 跨主机网络清单（GET /docker/networks）：网络 tab 的数据源。 */
@@ -154,12 +307,15 @@ export function fetchDockerNetworks(params: DockerNetworksQuery = {}) {
 }
 
 /** 跨主机项目清单查询参数（形状对齐 request.DockerProjectQuery）。 */
-export interface DockerProjectsQuery {
+export interface DockerProjectsQuery extends DockerListPaging {
   hostId?: string
   /** 项目名子串匹配（大小写不敏感）。 */
   keyword?: string
   /** 项目态：running / stopped（stopped = 一切非 running，partial 归入 stopped）。 */
   state?: 'running' | 'stopped'
+  /** 排序列（白名单：state/services + 通用 hostId/name；非法值静默回落）。 */
+  sortBy?: 'state' | 'services' | 'hostId' | 'name'
+  sortOrder?: DockerSortOrder
 }
 
 /** 跨主机项目清单（GET /docker/projects）：项目索引页的数据源。 */

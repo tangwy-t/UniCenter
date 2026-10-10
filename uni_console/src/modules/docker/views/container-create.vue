@@ -46,6 +46,7 @@
                   v-model="formHostId"
                   class="cc-field__input"
                   placeholder="选择主机"
+                  filterable
                   @change="onHostChange"
                 >
                   <ElOption

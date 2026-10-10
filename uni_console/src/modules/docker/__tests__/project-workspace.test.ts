@@ -12,7 +12,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent, h, nextTick } from 'vue'
-import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
+import { mount, flushPromises, DOMWrapper, type VueWrapper } from '@vue/test-utils'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 
 const api = vi.hoisted(() => ({
@@ -508,8 +508,37 @@ describe('服务卡动作派发（语义平移自列表页：按容器逐个发�
     // needForce 分流：container:stop 一条都没发（没勾「强制操作」前发出去必被拒）。
     expect(callsOf('container:stop')).toHaveLength(0)
     // 确认弹窗已打开，且「强制操作」开关在场（受保护 + 有 exec 权限的唯一输入面）。
-    expect(w.find('.el-dialog').exists()).toBe(true)
-    expect(w.find('.ac-force').exists()).toBe(true)
+    // 确认弹窗走 append-to-body → DOM 挂到 document.body（wrapper 里查不到）——
+    // 先 wrapper、再 document.body 双处命中（范式照 container-detail-page.test.ts）。
+    const body = new DOMWrapper(document.body)
+    expect(w.find('.el-dialog').exists() || body.find('.el-dialog').exists()).toBe(true)
+    expect(w.find('.ac-force').exists() || body.find('.ac-force').exists()).toBe(true)
+  })
+})
+
+describe('hero 动作条色调（红=危险的约定：Up -d 不是红）', () => {
+  it('Up -d 实心 primary；停止/下线… 描边 danger；启动/重启/拉取 中性 default', async () => {
+    const w = await mountWorkspace()
+    const actions = w.find('.pwh__actions')
+    const btn = (label: string) => {
+      const b = actions.findAll('button').find((n) => n.text() === label)
+      expect(b, `hero 动作条里找不到按钮「${label}」`).toBeTruthy()
+      return b!
+    }
+    // 主操作：实心 primary（Up -d 是把项目带起来的第一个动作，不该是红）。
+    expect(btn('Up -d').classes()).toContain('el-button--primary')
+    expect(btn('Up -d').classes()).not.toContain('is-plain')
+    // 危险：停止/下线…（描边红，与容器/镜像详情 hero 的「删除」同款 —— AA 见样式块）。
+    for (const l of ['停止', '下线…']) {
+      expect(btn(l).classes()).toContain('el-button--danger')
+      expect(btn(l).classes()).toContain('is-plain')
+    }
+    // 中性：启动/重启/拉取（默认描边按钮，不沾语义色）。
+    for (const l of ['启动', '重启', '拉取']) {
+      const c = btn(l).classes()
+      expect(c).not.toContain('el-button--primary')
+      expect(c).not.toContain('el-button--danger')
+    }
   })
 })
 

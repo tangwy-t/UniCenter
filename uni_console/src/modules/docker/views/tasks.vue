@@ -52,12 +52,16 @@
           <li v-for="item in items" :key="item.ref" class="tk-item">
             <!-- 状态点：pending = 旋转动画（在执行）；succeeded = 绿；failed/timeout = 红；
                  未知终态照实给中性点 + 原文 —— 服务端加了新状态时页面不冒充它认识。 -->
-            <span class="tk-item__dot" :class="dotClass(item.status)">
-              <ArtSvgIcon
-                v-if="statusKind(item.status) === 'pending'"
-                icon="ri:loader-4-line"
-                class="tk-spin"
-              />
+            <span
+              class="tk-item__dot"
+              :class="{ 'is-pending': isPending(item.status) }"
+              :style="
+                isPending(item.status)
+                  ? undefined
+                  : { color: statusDotColor(taskStatusTone(item.status)) }
+              "
+            >
+              <ArtSvgIcon v-if="isPending(item.status)" icon="ri:loader-4-line" class="tk-spin" />
             </span>
             <div class="tk-item__main">
               <div class="tk-item__line">
@@ -85,8 +89,11 @@
               </div>
               <!-- 元信息行：状态词 + 归属主机（设备已删时回退 hostId）+ 发起人 + 相对时间。 -->
               <div class="tk-item__meta">
-                <span class="tk-item__status" :class="`is-${statusKind(item.status)}`">
-                  {{ statusText(item.status) }}
+                <span
+                  class="tk-item__status"
+                  :style="{ color: statusTextColor(taskStatusTone(item.status)) }"
+                >
+                  {{ taskStatusText(item.status) }}
                 </span>
                 <span class="tk-item__host">@ {{ item.hostname || item.hostId }}</span>
                 <span class="tk-item__user">{{ item.username || '—' }}</span>
@@ -193,6 +200,7 @@
   import TaskProgress from '../components/task-progress.vue'
   import { lookupDockerAction } from '../utils/actions'
   import { eventRelativeTime } from '../utils/events'
+  import { statusDotColor, statusTextColor, taskStatusText, taskStatusTone } from '../utils/status'
 
   defineOptions({ name: 'DockerTasksPage' })
 
@@ -370,50 +378,13 @@
   onBeforeUnmount(stopPoll)
 
   // ── 行渲染的映射（纯函数，测试经组件渲染断言钉住） ──────────
+  // 状态文案与色收敛到 utils/status（与容器状态列/项目态同一来源）：taskStatusText
+  // 出中文标签、taskStatusTone 出语义档，点/字色再经 statusDotColor / statusTextColor
+  // （点 = EP 语义基色、字 = AA token）。本页只剩「进行中用旋转图标」这条结构判定。
 
-  type StatusKind = 'pending' | 'ok' | 'fail' | 'unknown'
-
-  function statusKind(status: string): StatusKind {
-    switch (status) {
-      case 'pending':
-        return 'pending'
-      case 'succeeded':
-        return 'ok'
-      case 'failed':
-      case 'timeout':
-        return 'fail'
-      default:
-        return 'unknown'
-    }
-  }
-
-  function statusText(status: string): string {
-    switch (status) {
-      case 'pending':
-        return '进行中'
-      case 'succeeded':
-        return '成功'
-      case 'failed':
-        return '失败'
-      case 'timeout':
-        return '超时'
-      default:
-        return status || '—'
-    }
-  }
-
-  /** 状态点 class（pending 用旋转图标，见模板；颜色即结论：绿 = 成功、红 = 失败/超时）。 */
-  function dotClass(status: string): string {
-    switch (statusKind(status)) {
-      case 'pending':
-        return 'is-pending'
-      case 'ok':
-        return 'is-ok'
-      case 'fail':
-        return 'is-fail'
-      default:
-        return 'is-unknown'
-    }
+  /** 进行中判定：pending 用旋转图标（8px 圆点放不下动画的表意），不是普通圆点。 */
+  function isPending(status: string): boolean {
+    return status === 'pending'
   }
 
   /** 动作的展示名：注册表 label 优先，查不到原样显示（调用处加等宽 class）。 */
@@ -570,7 +541,8 @@
       border-top: 1px solid var(--el-border-color-lighter);
     }
 
-    // 状态点：pending 是旋转图标（8px 圆点放不下动画的表意），其余是 8px 圆点。
+    // 状态点：pending 是旋转图标，其余是 8px 圆点。圆点色不写死 —— 走内联的
+    // statusDotColor(tone)（与状态文字同源一档），伪元素只画形（background:currentColor）。
     &__dot {
       display: flex;
       flex: none;
@@ -580,30 +552,18 @@
       justify-content: center;
       margin-top: 2px;
 
-      &.is-ok::after,
-      &.is-fail::after,
-      &.is-unknown::after {
+      &::after {
         display: block;
         width: 8px;
         height: 8px;
         border-radius: 50%;
         content: '';
+        background: currentColor;
       }
 
-      &.is-ok::after {
-        background: var(--el-color-success);
-      }
-
-      &.is-fail::after {
-        background: var(--el-color-danger);
-      }
-
-      // 未知终态：中性点 —— 服务端加了新状态时页面不冒充认识（原文显示在元信息行）。
-      // 非文本图形对比度（WCAG 1.4.11，门槛 3:1；终审 QA D2 同源 #a8abb2 盘点）：
-      // placeholder 档 #a8abb2 对白底 2.3:1 不达标 → 升到 secondary 档（本页已把
-      // secondary 定为 regular，#606266 于白底 ≈6.1:1；状态点与文字同源一档）。
-      &.is-unknown::after {
-        background: var(--el-text-color-secondary);
+      // pending 用旋转图标（8px 圆点放不下动画的表意），不画圆点。
+      &.is-pending::after {
+        display: none;
       }
     }
 
@@ -643,7 +603,7 @@
       overflow: hidden;
       color: var(--el-text-color-regular);
       font-size: 13px;
-      font-family: var(--el-font-family-mono, ui-monospace, 'SFMono-Regular', Consolas, monospace);
+      font-family: var(--art-font-family-mono);
       text-overflow: ellipsis;
       white-space: nowrap;
     }
@@ -677,19 +637,10 @@
       line-height: 1.6;
     }
 
+    // 状态文字色由内联的 statusTextColor(tone) 给（AA token）；此处不持有色值，
+    // 「颜色永不单独传达」—— 文字本身就是结论。
     &__status {
-      color: var(--el-text-color-secondary);
-
-      // 文字对比度 AA（收尾批）：原 EP 基色（白底 1.72/3.27）改走 token。
-      &.is-ok {
-        color: var(--aa-success-text);
-      }
-
-      &.is-fail {
-        color: var(--aa-danger-text);
-      }
-
-      // pending 保持次要色：旋转图标已经在说「在动」，文字再上色只会喧宾夺主。
+      font-size: 12px;
     }
 
     &__host,

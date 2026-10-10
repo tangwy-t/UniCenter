@@ -37,7 +37,9 @@
           </template>
         </ElTableColumn>
         <ElTableColumn prop="statusText" label="状态句" min-width="190" show-overflow-tooltip>
-          <template #default="{ row }">{{ row.statusText || '—' }}</template>
+          <!-- 状态句本地化（Wave 3d）：与容器列表/镜像详情同一把尺（containerStateZh）——
+               原生串「Exited (143) 4 days ago」不再直接渲染（同屏两种语言的病灶）。 -->
+          <template #default="{ row }">{{ anomalyStatusZh(row) }}</template>
         </ElTableColumn>
         <ElTableColumn prop="hostname" label="主机" min-width="140" show-overflow-tooltip />
         <ElTableColumn label="保护" width="96">
@@ -53,8 +55,21 @@
           </template>
         </ElTableColumn>
       </ElTable>
-      <!-- 截断口径由纯函数给出（Total 是截断前全量数；不靠前端猜上限） -->
-      <div v-if="truncation" class="dov-anoms__more">{{ truncation }}</div>
+      <!-- 截断口径由纯函数给出（Total 是截断前全量数；不靠前端猜上限）+ 真实出口：
+           这张表封顶 50 条是抽查不是全表，出口把人交棒给容器页的「已停止」筛选
+           （文字只写去向词，去向由容器页承接 —— 零解释文案纪律）。用真 <a href>：
+           中键/新标签页可直达全表；@click.prevent 后仍走页面层的 router.push
+           （导航收口在 overview.vue，组件只 emit，不直接碰 router）。 -->
+      <div v-if="truncation" class="dov-anoms__more">
+        <span>{{ truncation }}</span>
+        <a
+          class="dov-anoms__all"
+          href="/docker/containers?state=stopped"
+          @click.prevent="emit('viewAll')"
+        >
+          查看全部异常
+        </a>
+      </div>
     </template>
     <!-- 零异常是结论不是空缺：给一句可读的确认（绿点），而不是一块空表 -->
     <div v-else class="dov-anoms__ok">
@@ -75,13 +90,20 @@
   import { computed } from 'vue'
   import { ElTable, ElTableColumn } from 'element-plus'
   import ArtSvgIcon from '@/components/core/base/art-svg-icon/index.vue'
-  import { anomalyStateText, anomalyStateTone, anomalyTruncation } from '../utils/overview'
+  import {
+    anomalyStateText,
+    anomalyStateTone,
+    anomalyStatusZh,
+    anomalyTruncation
+  } from '../utils/overview'
 
   defineOptions({ name: 'DockerOverviewAnomalyTable' })
 
   const props = defineProps<{ anomalies: Api.Docker.DockerOverviewAnomalies }>()
   const emit = defineEmits<{
     (e: 'open', row: Api.Docker.DockerOverviewAnomalyItem): void
+    /** 截断时的出口：交棒给容器页的「已停止」筛选（导航在页面层收口）。 */
+    (e: 'viewAll'): void
   }>()
 
   const items = computed(() => props.anomalies?.items ?? [])
@@ -160,12 +182,40 @@
   }
 
   .dov-anoms__more {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
     margin-top: 8px;
     padding-top: 8px;
     border-top: 1px solid var(--default-border);
     color: var(--el-text-color-secondary);
     font-size: 12px;
-    text-align: center;
+  }
+
+  /* 截断出口：文字按钮，只写去向词（无解释句）—— 色值走 AA token，
+     与磁盘面板的清理入口同款（「去别处」语义不用实心按钮）。 */
+  .dov-anoms__all {
+    padding: 0;
+    border: none;
+    background: none;
+    font: inherit;
+    font-size: 12px;
+    color: var(--aa-primary-text);
+    cursor: pointer;
+    text-decoration: underline dotted;
+    text-underline-offset: 3px;
+    transition: color 0.2s ease;
+  }
+
+  .dov-anoms__all:hover {
+    color: var(--aa-primary-text-hover);
+  }
+
+  .dov-anoms__all:focus-visible {
+    outline: 2px solid var(--el-color-primary);
+    outline-offset: 2px;
+    border-radius: 3px;
   }
 
   .dov-anoms__ok {

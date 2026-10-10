@@ -173,6 +173,36 @@
         </ElButton>
       </template>
     </ElDialog>
+
+    <!-- ============ 设置分组 / 标签（两字段小编辑，部分更新）============ -->
+    <ElDialog v-model="groupDialogVisible" title="设置分组" width="440px">
+      <ElForm label-width="72px">
+        <ElFormItem label="分组">
+          <ElInput
+            v-model="groupForm.group"
+            placeholder="请输入分组"
+            maxlength="64"
+            show-word-limit
+            clearable
+          />
+        </ElFormItem>
+        <ElFormItem label="标签">
+          <ElInput
+            v-model="groupForm.tags"
+            placeholder="多个标签用逗号分隔"
+            maxlength="255"
+            show-word-limit
+            clearable
+          />
+        </ElFormItem>
+      </ElForm>
+      <template #footer>
+        <ElButton @click="groupDialogVisible = false">取消</ElButton>
+        <ElButton type="primary" :loading="groupSubmitting" @click="submitGroupDialog">
+          保存
+        </ElButton>
+      </template>
+    </ElDialog>
   </div>
 </template>
 
@@ -184,6 +214,7 @@
     PermDeviceDelete,
     PermDeviceDisable,
     PermDeviceEnable,
+    PermDeviceGroup,
     PermDeviceQuery,
     PermDeviceUpgrade
   } from '@/enums/permission'
@@ -194,7 +225,7 @@
   import ArtButtonTable from '@/components/core/forms/art-button-table/index.vue'
   import ArtButtonMore from '@/components/core/forms/art-button-more/index.vue'
   import WatermarkBar from '../components/watermark-bar.vue'
-  import type { DeviceQuery, DeviceSortBy } from '../api'
+  import type { DeviceGroupTagsPayload, DeviceQuery, DeviceSortBy } from '../api'
   import {
     disableDevice,
     dispatchDeviceUpgrade,
@@ -203,7 +234,8 @@
     fetchDevice,
     fetchDevices,
     previewDeviceUpgrade,
-    removeDevice
+    removeDevice,
+    updateDeviceGroup
   } from '../api'
   import { availableVersions, skipText, skipTotal, tagTypeOf, upgradeBadge } from '../utils/upgrade'
   import { EMPTY_TEXT, formatRelative, formatUnixSeconds } from '../utils/display'
@@ -225,8 +257,14 @@
     online?: boolean
     primaryIp?: string
     agentVersion?: string
+    group?: string
   }>({})
   const showSearchBar = ref(false)
+
+  // 分组筛选下拉的选项源：跨次加载**累积**去重（列表分页，单页去重会漏掉不在
+  // 本页的分组；保留历史值保证「切到某分组后仍能切回其它分组」）。
+  const knownGroups = ref<string[]>([])
+  const groupOptions = computed(() => knownGroups.value.map((g) => ({ label: g, value: g })))
   const searchItems = computed(() => [
     {
       key: 'hostname',
@@ -258,6 +296,18 @@
       clearable: true,
       // 精确匹配（后端 =）：placeholder 直接给结论「精确匹配」，不解释。
       props: { onKeyup: (e: KeyboardEvent) => e.key === 'Enter' && handleSearch() }
+    },
+    {
+      // 分组筛选：**select**（非 input）—— 分组名是自填的自由文本，input 精确匹配
+      // 要人凭记忆复述、错一个字符即静默 0 命中；下拉给出「当前确实存在的分组」，
+      // 免记忆、免拼错。选项来自跨次加载累积去重的 knownGroups（分页列表的可靠源）。
+      key: 'group',
+      label: '分组',
+      type: 'select',
+      placeholder: '请选择分组',
+      clearable: true,
+      filterable: true,
+      options: groupOptions.value
     },
     {
       key: 'status',
@@ -609,6 +659,7 @@
       ...(searchForm.value.hostname ? { hostname: searchForm.value.hostname } : {}),
       ...(searchForm.value.primaryIp ? { primaryIp: searchForm.value.primaryIp } : {}),
       ...(searchForm.value.agentVersion ? { agentVersion: searchForm.value.agentVersion } : {}),
+      ...(searchForm.value.group ? { group: searchForm.value.group } : {}),
       ...(searchForm.value.status !== undefined && searchForm.value.status !== null
         ? { status: Number(searchForm.value.status) }
         : {}),
@@ -620,7 +671,7 @@
 
   /** 生效筛选的 chips（label + 实际值）：纯数据，不解释。 */
   interface FilterChip {
-    key: 'hostname' | 'status' | 'online' | 'primaryIp' | 'agentVersion'
+    key: 'hostname' | 'status' | 'online' | 'primaryIp' | 'agentVersion' | 'group'
     label: string
     text: string
   }
@@ -638,6 +689,9 @@
         label: 'Agent 版本',
         text: searchForm.value.agentVersion
       })
+    }
+    if (searchForm.value.group) {
+      chips.push({ key: 'group', label: '分组', text: searchForm.value.group })
     }
     if (searchForm.value.status !== undefined && searchForm.value.status !== null) {
       chips.push({
@@ -680,6 +734,13 @@
   /** 正在切启停态的设备 id：用于禁用行内按钮，避免重复提交。 */
   const togglingId = ref<string | null>(null)
 
+  /** 累积本次会话已见过的非空分组（升序去重）：分组筛选下拉的选项源。 */
+  function collectGroups(rows: Api.Device.DeviceListItem[]) {
+    const set = new Set(knownGroups.value)
+    for (const r of rows) if (r.group) set.add(r.group)
+    knownGroups.value = [...set].sort((a, b) => a.localeCompare(b))
+  }
+
   async function loadList() {
     loading.value = true
     try {
@@ -689,6 +750,7 @@
         ...(searchForm.value.hostname ? { hostname: searchForm.value.hostname } : {}),
         ...(searchForm.value.primaryIp ? { primaryIp: searchForm.value.primaryIp } : {}),
         ...(searchForm.value.agentVersion ? { agentVersion: searchForm.value.agentVersion } : {}),
+        ...(searchForm.value.group ? { group: searchForm.value.group } : {}),
         ...(searchForm.value.status !== undefined && searchForm.value.status !== null
           ? { status: Number(searchForm.value.status) }
           : {}),
@@ -705,6 +767,7 @@
         ...(await statusDict.ensure(), {})
       })
       data.value = res.list
+      collectGroups(res.list)
       pagination.total = res.total
       loadError.value = false
     } catch {
@@ -784,6 +847,56 @@
     await loadList()
   }
 
+  // ── 设置分组 / 标签（部分更新对话框）──────────────────────────────
+  //
+  // 轻量编辑（两个字段）：用**小对话框**而非抽屉/新页 —— 本仓裁决「页面优先于
+  // 抽屉」针对的是**展示面**；两字段写操作与模块内其它小编辑（删除/回滚确认）
+  // 同形制，对话框是恰当的载体。
+  const groupDialogVisible = ref(false)
+  const groupTarget = ref<Api.Device.DeviceListItem | null>(null)
+  const groupSubmitting = ref(false)
+  /** 编辑态与提交前的快照：只有**变化**的字段才进 PATCH body（部分更新语义）。 */
+  const groupForm = reactive({ group: '', tags: '' })
+  const groupOriginal = reactive({ group: '', tags: '' })
+
+  function openGroupDialog(row: Api.Device.DeviceListItem) {
+    groupTarget.value = row
+    groupForm.group = row.group ?? ''
+    groupForm.tags = row.tags ?? ''
+    groupOriginal.group = groupForm.group
+    groupOriginal.tags = groupForm.tags
+    groupDialogVisible.value = true
+  }
+
+  /**
+   * 提交分组/标签：只把**与打开时不同**的字段放进 body（未动的字段不出现，
+   * 后端不动它）；清空是显式空串（如把有分组的设备改回未分组）。两字段都没变
+   * 就不发请求，直接关框。
+   */
+  async function submitGroupDialog() {
+    const row = groupTarget.value
+    if (!row) return
+    const payload: DeviceGroupTagsPayload = {}
+    if (groupForm.group !== groupOriginal.group) payload.group = groupForm.group
+    if (groupForm.tags !== groupOriginal.tags) payload.tags = groupForm.tags
+    if (Object.keys(payload).length === 0) {
+      groupDialogVisible.value = false
+      return
+    }
+    groupSubmitting.value = true
+    try {
+      await updateDeviceGroup(row.id, payload)
+      ElMessage.success('已保存')
+      groupDialogVisible.value = false
+      await loadList()
+    } catch (e) {
+      // 400（超长）/404（设备不存在）的结论句由 HttpError 透出，如实呈现。
+      ElMessage.error(errText(e, '保存失败'))
+    } finally {
+      groupSubmitting.value = false
+    }
+  }
+
   const { columns, columnChecks } = useTableColumns<Api.Device.DeviceListItem>(() => {
     const operationColumnConfig = operationColumn<Api.Device.DeviceListItem>({
       // 列宽按「实际渲染的按钮位」计算（助手公式：max(80, count×44+16)）。
@@ -791,7 +904,10 @@
       // 注意：下拉**内部**的条目不再各占一位 —— 它们共享「更多」那一个按钮位。
       count:
         (hasAuth(PermDeviceQuery) ? 1 : 0) +
-        (hasAuth(PermDeviceEnable) || hasAuth(PermDeviceDisable) || hasAuth(PermDeviceDelete)
+        (hasAuth(PermDeviceEnable) ||
+        hasAuth(PermDeviceDisable) ||
+        hasAuth(PermDeviceDelete) ||
+        hasAuth(PermDeviceGroup)
           ? 1
           : 0),
       formatter: (row) => {
@@ -821,6 +937,14 @@
                 label: '回滚 Agent',
                 icon: 'ri:arrow-go-back-line',
                 auth: PermDeviceUpgrade
+              },
+              {
+                // 设置分组/标签（部分更新）：按 device:index:group 门控，
+                // ArtButtonMore 会按 item.auth 自行过滤（无权限即不出现）。
+                key: 'setGroup',
+                label: '设置分组',
+                icon: 'ri:price-tag-3-line',
+                auth: PermDeviceGroup
               },
               enabled
                 ? {
@@ -929,6 +1053,17 @@
                 row.primaryIp
               )
             : h('span', null, EMPTY_TEXT)
+      },
+      // 主机分组（运维自填的自由文本，可按它把设备按角色/机房归类）：平板起显示，
+      // 单行溢出省略（与列表页其它文本列同形制）。缺值「—」（未分组 devices 后端
+      // 该字段缺省），不把「未分组」渲染成字面值混淆真实分组名。
+      {
+        prop: 'group',
+        label: '分组',
+        minWidth: 130,
+        hideBelow: 'tablet',
+        showOverflowTooltip: true,
+        formatter: (row: Api.Device.DeviceListItem) => row.group || EMPTY_TEXT
       },
       {
         prop: 'agentVersion',
@@ -1048,6 +1183,7 @@
     const key = String(item.key)
     if (key === 'detail') openDetail(row)
     else if (key === 'upgrade' || key === 'rollback') onUpgradeAction(key, row)
+    else if (key === 'setGroup') openGroupDialog(row)
     else if (key === 'toggle') await onToggleStatus(row)
     else if (key === 'delete') await onRemove(row)
   }

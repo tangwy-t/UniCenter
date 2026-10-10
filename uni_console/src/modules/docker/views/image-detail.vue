@@ -236,7 +236,7 @@
     type Phase1Action
   } from '../utils/cmd'
   import {
-    containerStateText,
+    containerStateZh,
     formatRelativeTime,
     imageRefText,
     inUseText,
@@ -361,8 +361,24 @@
   // 「时间」列在手机横屏（<768）隐藏，保留「层大小（标识）+ 指令（内容）」。
   const layerColumns = [
     // 解压差值的口径在列头 —— 合计与镜像大小不同口径这件事，跟着数字所在的列说。
-    { prop: 'sizeText', label: '层大小（解压差值）', minWidth: 150 },
-    { prop: 'timeText', label: '时间', minWidth: 130, hideBelow: 'tablet' as const },
+    // 数字列右对齐 + tabular-nums（Wave 3a）。
+    {
+      prop: 'sizeText',
+      label: '层大小（解压差值）',
+      minWidth: 150,
+      // 单行不变量（Wave 3c）：数据列一律 nowrap（showOverflowTooltip）。
+      showOverflowTooltip: true,
+      align: 'right' as const,
+      className: 'is-num'
+    },
+    {
+      prop: 'timeText',
+      label: '时间',
+      minWidth: 130,
+      // 单行不变量（Wave 3c）：数据列一律 nowrap。
+      showOverflowTooltip: true,
+      hideBelow: 'tablet' as const
+    },
     {
       prop: 'createdBy',
       label: '指令',
@@ -406,8 +422,8 @@
       label: '状态',
       minWidth: 180,
       showOverflowTooltip: true,
-      // 原生状态句（"Up 16 hours"）与容器列表逐字一致，不在这里另造措辞。
-      formatter: (row: DockerContainerItem) => containerStateText(row)
+      // 中文状态句（Wave 1）：与容器列表逐字一致（同一个 containerStateZh）。
+      formatter: (row: DockerContainerItem) => containerStateZh(row)
     },
     {
       // 操作性列（内容宽度恒定）是唯一保留固定 width 的一列。
@@ -781,7 +797,7 @@
 
     &__id {
       color: var(--el-text-color-secondary);
-      font-family: var(--el-font-family-mono, ui-monospace, 'SFMono-Regular', Consolas, monospace);
+      font-family: var(--art-font-family-mono);
     }
 
     &__actions {
@@ -852,7 +868,7 @@
   // 指令列与入口点/命令：Dockerfile 指令是代码，等宽才分得清参数边界。
   // h() 造出的节点拿不到 scoped 属性，故从有作用域的外层用 :deep 穿进去。
   :deep(.imd-mono) {
-    font-family: var(--el-font-family-mono, ui-monospace, 'SFMono-Regular', Consolas, monospace);
+    font-family: var(--art-font-family-mono);
   }
 
   .imd-code {
@@ -870,7 +886,7 @@
     }
 
     &__value {
-      font-family: var(--el-font-family-mono, ui-monospace, 'SFMono-Regular', Consolas, monospace);
+      font-family: var(--art-font-family-mono);
       word-break: break-all;
     }
   }

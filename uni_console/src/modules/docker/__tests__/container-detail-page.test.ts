@@ -335,12 +335,13 @@ describe('概览（container:inspect，host 取 query）', () => {
     expect(text).toContain('3306 → 3306/tcp')
   })
 
-  it('实体头给出容器名、短 id 与行归属主机；状态句用快照的原生句子', async () => {
+  it('实体头给出容器名、短 id 与行归属主机；状态句用快照的中文本地化句子', async () => {
     const w = await mountPage()
     expect(w.find('.cd-hero__title').text()).toBe('mysql')
     expect(w.find('.cd-hero__id').text()).toBe('abcdef123456')
     expect(w.find('.cd-hero__host').text()).toContain('nas')
-    expect(w.text()).toContain('Up 16 hours')
+    // hero 状态与列表「状态」列同源（同一个 containerStateZh）：'Up 16 hours' → 「运行中 16 小时」。
+    expect(w.text()).toContain('运行中 16 小时')
   })
 
   it('快照未到时保护显示「—」（不猜一个「未受保护」）', async () => {
@@ -544,7 +545,9 @@ describe('概览 · 实时统计（container:stats 流）', () => {
     // 历史 GET 同一道门：不运行的容器没有可回看的曲线，空请求只会换回错误。
     expect(api.fetchDockerStatsHistory).not.toHaveBeenCalled()
     expect(api.openDockerStatsStream).not.toHaveBeenCalled()
-    expect(w.text()).toContain('容器未运行，暂无实时统计')
+    // 表头状态签说「容器未运行」，正文只补后果「暂无实时统计」（不再重复同一句）。
+    expect(w.text()).toContain('容器未运行')
+    expect(w.text()).toContain('暂无实时统计')
   })
 
   it('无 docker:inspect 权限时不挂统计组件（不渲染 ≠ 禁用）', async () => {

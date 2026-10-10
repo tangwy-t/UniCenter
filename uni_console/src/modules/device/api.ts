@@ -45,6 +45,9 @@ export interface DeviceQuery {
   primaryIp?: string
   /** Agent 版本**精确**匹配（0.6 ≠ 0.6.0，后端 =，非 LIKE）。 */
   agentVersion?: string
+  /** 主机分组**精确**匹配（form 值 = 完整分组名）；空 = 不过滤。
+   *  后端按完整串比较，不按逗号拆分（分组名本身允许逗号）。 */
+  group?: string
   /** 排序列（后端白名单，非法值静默回落 lastSeenAt）。 */
   sortBy?: DeviceSortBy
   /** 排序方向（非法值回落 desc）；不传排序时后端默认 lastSeenAt desc。 */
@@ -91,6 +94,28 @@ export function disableDevice(id: string) {
 /** 删除设备（`device:delete`）。 */
 export function removeDevice(id: string) {
   return request.del<void>({ url: `${PREFIX}/devices/${id}` })
+}
+
+/**
+ * 分组 / 标签的部分更新载荷（`device:index:group`）。
+ *
+ * **部分更新**语义：出现的字段才写、未出现的字段不动；**空串表示清空**
+ * （不是「不动」）—— 故「清空分组」必须显式传 `group: ''`，而不是省略该字段。
+ */
+export interface DeviceGroupTagsPayload {
+  group?: string
+  tags?: string
+}
+
+/**
+ * 设置设备的分组与标签（`PATCH /devices/:id`，部分更新）。
+ *
+ * `tags` 是**逗号分隔**字符串（非数组）；`group` 超 64 字符 / `tags` 超 255
+ * 字符后端返回 400、id 不存在返回 404 —— 结论句由 `request` 的 HttpError
+ * 透出，调用方用 errText 呈现即可。
+ */
+export function updateDeviceGroup(id: string, payload: DeviceGroupTagsPayload) {
+  return request.request<void>({ url: `${PREFIX}/devices/${id}`, method: 'PATCH', data: payload })
 }
 
 /**

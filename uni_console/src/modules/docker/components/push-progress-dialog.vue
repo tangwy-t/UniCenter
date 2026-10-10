@@ -20,17 +20,22 @@
          对话框本身就是一次明确的确认（选镜像 + 开始推送两步），协议也不要求
          confirm 值（与拉取对话框同一条论证）。 -->
     <div v-if="phase === 'input'" class="sp-input">
-      <ElSelect
-        v-model="targetChoice"
-        class="sp-input__select"
-        placeholder="搜索或输入镜像引用"
-        filterable
-        allow-create
-        default-first-option
-        :disabled="accepting"
-      >
-        <ElOption v-for="o in targetOptions" :key="o" :label="o" :value="o" />
-      </ElSelect>
+      <!-- 字段标签与兄弟弹窗（pull / build）同形制：选择框上方一条可见标签，
+           不再只靠 placeholder（评审 E §1.4：同一族弹窗两套做法）。 -->
+      <div class="sp-field">
+        <label class="sp-field__label">镜像引用</label>
+        <ElSelect
+          v-model="targetChoice"
+          class="sp-input__select"
+          placeholder="搜索或输入镜像引用"
+          filterable
+          allow-create
+          default-first-option
+          :disabled="accepting"
+        >
+          <ElOption v-for="o in targetOptions" :key="o" :label="o" :value="o" />
+        </ElSelect>
+      </div>
       <!-- 清单为空（快照未到/读取失败）：不说「没有镜像」，那是「没读到」——
            手输兜底（allow-create），daemon 是存在性的最终事实。判据看清单本身
           （而不是选项数）：预填引用在场时选项非空，但「没清单可选」仍是事实。 -->
@@ -43,6 +48,7 @@
            选项 = 已存凭据的仓库地址（凭据键本身，不含任何秘密；密码由服务端受理
            时注入）；默认「不使用」= options 不带 registry 字段。 -->
       <div v-if="canConfig" class="sp-creds">
+        <label class="sp-field__label">仓库凭据（可选）</label>
         <ElSelect
           v-if="registryItems.length > 0"
           v-model="registryChoice"
@@ -126,10 +132,19 @@
 
     <template #footer>
       <template v-if="phase === 'input'">
-        <ElButton :disabled="accepting" @click="requestClose">关闭</ElButton>
-        <ElButton type="primary" :disabled="!canStart" :loading="accepting" @click="startPush">
-          开始推送
-        </ElButton>
+        <!-- 禁用原因（评审 E §1.3）：「开始推送」在引用为空时禁用，这里把「缺什么」
+             就地写在主按钮旁（只说缺什么，不下定义）；填上即消失。 -->
+        <div class="sp-footer">
+          <span v-if="targetChoice.trim() === '' && !accepting" class="sp-footer__reason">
+            先选择或填写镜像引用
+          </span>
+          <div class="sp-footer__btns">
+            <ElButton :disabled="accepting" @click="requestClose">关闭</ElButton>
+            <ElButton type="primary" :disabled="!canStart" :loading="accepting" @click="startPush">
+              开始推送
+            </ElButton>
+          </div>
+        </div>
       </template>
       <!-- 推送在途两条出口，彼此独立：关闭 = 收起这场观看（服务端只解除接入，
            推送照常跑完）；取消推送 = 调显式取消端点下发一帧 cancel（best-effort，
@@ -741,20 +756,9 @@
   // 的 primary-text-aa（终审 QA D2·浅色实测 3.68:1）。
   @include t.primary-text-aa;
 
-  // 非模态 = **真的不挡页面**：EP 的对话框包壳（.el-overlay / .el-overlay-dialog）
-  // 铺满视口，即使 :modal="false" 也会吃掉整个页面的点击（外侧点击落在包壳上，
-  // 页面收不到，还会被当成「点外面」把窗收掉）。这里让包壳对指针透明、只有对话框
-  // 本体可交互 —— 在途时用户照常翻列表/切筛选/开别的窗口；关窗只有显式路径
-  //（X / ESC / 页脚关闭）。两种写法都给：包壳既可能是本组件根元素（拿到 scoped
-  // 属性），也可能是它的后代，只写一种会在 EP 的 DOM 形状变化时静默失效。
-  :global(.docker-progress-nonblocking),
-  :global(.docker-progress-nonblocking .el-overlay-dialog) {
-    pointer-events: none;
-  }
-
-  :global(.docker-progress-nonblocking .el-dialog) {
-    pointer-events: auto;
-  }
+  // 指针穿透（观看档）的机制规则已收敛到 assets/styles/core/el-ui.scss 的
+  // .el-dialog 段（全局唯一一份）；本组件只保留 :modal="false" +
+  // modal-class="docker-progress-nonblocking" 的意图（见模板注释）。
 
   // 输入态：错误句与提示句都是对话框内的就地结论（对话框开着，结论不放 toast）。
   .sp-input {
@@ -782,9 +786,53 @@
     }
   }
 
-  // 凭据选择：与镜像选择同一列（对话框是单列表单，下拉不另起一行标签）。
+  // 字段：与 pull / build 同形制（可见标签在控件上方）。
+  .sp-field {
+    display: block;
+    margin-bottom: 10px;
+
+    &__label {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 13px;
+      color: var(--el-text-color-regular);
+    }
+  }
+
+  // 页脚：原因句居左、按钮组居右（对话框底栏默认右对齐，这里用 flex 把两簇分开，
+  // 原因句紧挨主按钮，不与之挤成一串）。
+  .sp-footer {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    justify-content: flex-end;
+
+    &__reason {
+      margin-right: auto;
+      color: var(--el-text-color-secondary);
+      font-size: 12px;
+    }
+
+    &__btns {
+      display: flex;
+      gap: 8px;
+    }
+
+    // 主按钮禁用态的视觉档（评审 E §1.3）：EP 对实心 primary 的禁用态落
+    // --el-color-primary-light-5（浅蓝），与可点时的实心档（el-ui.scss 的
+    // --el-color-primary-dark-2）并列读起来像「第二种主按钮」。这里把禁用态归到
+    // EP 的中性禁用槽（与默认档禁用按钮同一档：灰底 + 浅描边 + 占位色文字），
+    // 「实心蓝 = 可点、灰 = 不可点」各成一档；不新造色值，全走 --el-* 变量。
+    &__btns :deep(.el-button--primary.is-disabled) {
+      --el-button-disabled-bg-color: var(--el-fill-color-light);
+      --el-button-disabled-border-color: var(--el-border-color-light);
+      --el-button-disabled-text-color: var(--el-text-color-placeholder);
+    }
+  }
+
+  // 凭据选择：与镜像选择同一列；标签同在控件上方（不再只靠 placeholder）。
   .sp-creds {
-    margin-top: 10px;
+    margin-top: 0;
 
     &__select {
       width: 100%;

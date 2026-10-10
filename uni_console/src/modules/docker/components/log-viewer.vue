@@ -6,7 +6,7 @@
         <ElSwitch v-model="followingModel" size="small" />
         <span class="log-viewer__follow-label">跟随</span>
       </span>
-      <span class="log-viewer__hint">{{ hint }}</span>
+      <span class="log-viewer__hint">{{ followState || hint }}</span>
       <ElInput
         v-model="keyword"
         size="small"
@@ -25,15 +25,21 @@
     <!--
       纯文本渲染：`{{ }}` 是文本插值，日志里的标签不会被解析。
       **不要**改成 v-html —— 日志内容是不可信文本，任何 HTML 拼接都是注入面。
+      逐行 <span v-for> 只为「时间戳分列 + 级别着色」：ts 与 level 是解析出的结构化字段，
+      正文仍走文本插值。**务必**保持标签间无空白字符（<pre> 内的空白会被原样渲染成缩进）。
     -->
-    <pre ref="bodyRef" class="log-viewer__body" @scroll="onScroll">{{ rendered }}</pre>
+    <pre
+      ref="bodyRef"
+      class="log-viewer__body"
+      @scroll="onScroll"
+    ><span v-for="(line, i) in bodyLines" :key="i" class="log-viewer__line"><span v-if="line.ts" class="log-viewer__ts" :title="line.ts">{{ formatLogTs(line.ts) }}</span><span class="log-viewer__text" :class="levelClass(line.level)">{{ line.text }}</span>{{ '\n' }}</span></pre>
   </div>
 </template>
 
 <script setup lang="ts">
   import { computed, nextTick, ref, watch } from 'vue'
   import { ElButton, ElInput, ElMessage, ElSwitch } from 'element-plus'
-  import { logHint, visibleLines } from '../utils/log'
+  import { followStateText, formatLogTs, logHint, visibleLines, type LogLevel } from '../utils/log'
 
   const props = withDefaults(
     defineProps<{
@@ -76,7 +82,18 @@
   const source = computed(() => frozen.value ?? props.lines)
   /** 缓冲上限（5000 行）与关键字过滤都在 utils/log 的纯函数里（那里有测试）。 */
   const visible = computed(() => visibleLines(source.value, keyword.value))
+  /** 整段文本（含时间戳原样）：复制/下载的保真路径。 */
   const rendered = computed(() => visible.value.text)
+  /** 逐行结构：时间戳分列 + 级别着色（正文仍走文本插值）。 */
+  const bodyLines = computed(() => visible.value.lines)
+
+  /** 级别 → 着色类；info 无色（绝大多数行不喧哗）。 */
+  function levelClass(level: LogLevel): string {
+    return level === 'info' ? '' : `is-${level}`
+  }
+
+  /** 是否发生过跟随：让「已结束」只在跟随结束后出现，不在一次性拉取时误报。 */
+  const everFollowed = ref(false)
 
   const pausedCount = computed(() =>
     frozen.value !== null && props.following ? Math.max(0, props.totalLines - frozenTotal.value) : 0
@@ -96,6 +113,16 @@
       props.following && frozen.value === null ? props.totalLines : undefined
     )
   )
+  /**
+   * 跟随态：跟随中 / 已暂停 / 已结束。跟随流下取代静态「共 N 行」——
+   * 「当前是不是在跟」是这一屏的第一句话，行数在暂停计数/缓冲提示里另有其位。
+   * 非跟随（一次性拉取、或从未跟随过）时不显示状态词，回到行数提示。
+   */
+  const followState = computed(() => {
+    if (!props.followable) return ''
+    if (props.following) return followStateText(paused.value ? 'paused' : 'live')
+    return everFollowed.value ? followStateText('ended') : ''
+  })
 
   /**
    * 上滚即暂停。
@@ -147,6 +174,8 @@
         frozen.value = null
         return
       }
+      // 记下「跟随过」：关闭/结束后状态词显示「已结束」，而非跟随过的一次性拉取不显示。
+      everFollowed.value = true
       if (paused.value) freeze()
     }
   )
@@ -239,6 +268,27 @@
       font-family: var(--el-font-family-mono, ui-monospace, 'SFMono-Regular', Consolas, monospace);
       font-size: 12px;
       line-height: 1.7;
+    }
+
+    // 时间戳列：等宽数字对齐、次要色（它是线索不是正文）——与 __body 同一等宽字体。
+    &__ts {
+      margin-right: 8px;
+      color: var(--el-text-color-secondary);
+      font-variant-numeric: tabular-nums;
+    }
+
+    // 级别着色：**必须带非色彩通道**（字重）—— 单靠颜色对色觉障碍用户等于没标。
+    // 色走 AA token（aa-text.scss），字重 600 是第二通道。
+    &__text {
+      &.is-warn {
+        color: var(--aa-warning-text);
+        font-weight: 600;
+      }
+
+      &.is-error {
+        color: var(--aa-danger-text);
+        font-weight: 600;
+      }
     }
   }
 

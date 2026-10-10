@@ -1,6 +1,6 @@
 /**
  * 跨主机资源清单（镜像/卷/网络/项目）的数据生命周期 —— 与 useWorkloadList
- * （容器统一表）同一范式：拉取 + seq 守卫 + 四态 + 截断结论 + 静默重拉。
+ * （容器统一表）同一范式：拉取 + seq 守卫 + 四态 + 静默重拉。
  *
  * 为什么另收一份而不是复用 useWorkloadList：那一个是容器统一表的专用件
  * （端点、参数形态、条目类型全定死）。四个资源端点（GET /docker/images|volumes|
@@ -15,12 +15,15 @@
  *     一份（原 resources 收敛页三 tab 共用一份随 tab 页退役），本件只经 getters
  *     读它做「没有可管主机」的空态判定。
  *
+ * total 如实报**过滤后全量**，items 是**服务端分页**的一页（Wave 2）—— 翻页/排序
+ * 参数从 params 快照透传，页面持有分页态并把它塞进 params。
+ *
  * 失败口径沿用 D-1 的精神（与统一工作负载表同一句）：首拉失败 → 整页/整 tab 的
  * 错误态 + 重试（没有旧数据可保）；其后静默刷新失败 → 保留最后已知数据并在
  * 表头标注（「数据获取失败」与「上次数据仍在」是两种事实，不共用一句话）。
  */
 import { computed, onMounted, ref, type Ref } from 'vue'
-import { fetchDockerHosts, type DockerHostItem } from '../api'
+import { fetchDockerHosts, type DockerHostItem, type DockerUnavailableHostItem } from '../api'
 
 /**
  * 资源清单的公共查询参数（四个端点各取所需；键名与后端 form 名一致）。
@@ -42,12 +45,20 @@ export interface ResourceQueryParams {
   internal?: boolean
   /** 项目态：running / stopped（项目端点）。 */
   state?: string
+  /** 服务端分页（页面持有；pageSize 显式传，不靠后端默认）。 */
+  page?: number
+  pageSize?: number
+  /** 服务端排序（白名单随端点：size/created/containers/state/services + 通用 hostId/name）。 */
+  sortBy?: string
+  sortOrder?: 'asc' | 'desc'
 }
 
-/** 端点响应里本件用到的两个字段（四个 ListResp 同形）。 */
+/** 端点响应里本件用到的字段（四个 ListResp 同形）。 */
 export interface ResourceListPage<T> {
   items: T[]
   total: number
+  /** 本页响应里报「采集失败」的主机（部分主机不可用）：页面如实列出，不解释。 */
+  unavailableHosts?: DockerUnavailableHostItem[]
 }
 
 export interface UseResourceListOptions<T> {
@@ -64,6 +75,8 @@ export interface UseResourceListOptions<T> {
 export function useResourceList<T>(options: UseResourceListOptions<T>) {
   const rows = ref([]) as Ref<T[]>
   const total = ref(0)
+  /** 本页响应里报「采集失败」的主机（部分主机不可用）：页面如实列出，不解释。 */
+  const unavailableHosts = ref<DockerUnavailableHostItem[]>([])
   const loading = ref(false)
   /** 首拉失败（还没有任何数据可给）：整块错误态 + 重试。 */
   const hasError = ref(false)
@@ -72,9 +85,6 @@ export function useResourceList<T>(options: UseResourceListOptions<T>) {
   const refreshError = ref(false)
   /** 请求序号：搜索/重置/静默重拉并发时，旧响应晚到不得覆盖新数据。 */
   let loadSeq = 0
-
-  /** 服务端截断（items 上限 500）：截断必须说出口，否则用户以为「筛完就这么点」。 */
-  const truncated = computed(() => total.value > rows.value.length)
 
   const pageState = computed<'loading' | 'error' | 'empty' | 'ready'>(() => {
     if (hasError.value) return 'error'
@@ -101,6 +111,7 @@ export function useResourceList<T>(options: UseResourceListOptions<T>) {
       if (seq !== loadSeq) return
       rows.value = resp.items ?? []
       total.value = resp.total ?? 0
+      unavailableHosts.value = resp.unavailableHosts ?? []
       hasData.value = true
       hasError.value = false
       refreshError.value = false
@@ -132,11 +143,11 @@ export function useResourceList<T>(options: UseResourceListOptions<T>) {
   return {
     rows,
     total,
+    unavailableHosts,
     loading,
     hasError,
     hasData,
     refreshError,
-    truncated,
     pageState,
     load,
     refresh,

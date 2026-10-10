@@ -2,8 +2,11 @@
   <section class="wkl-stats">
     <div class="wkl-stats__head">
       <span class="wkl-stats__title">实时统计</span>
-      <!-- 状态行：连接中 / 实时 / 已结束（结论句，次要色）；失败才用错误色 + 重试。 -->
-      <span v-if="phase === 'connecting'" class="wkl-stats__note">正在连接…</span>
+      <!-- 状态行：未运行 / 连接中 / 实时 / 已结束 / 失败（结论句，次要色；失败才用错误色 + 重试）。
+           未运行排在最前：此时组件从不发起 stats 流，phase 永远停在初值 —— 若先判 phase，
+           屏上会同时出现「正在连接…」与下方的「容器未运行」，自相矛盾。 -->
+      <span v-if="!running" class="wkl-stats__note">容器未运行</span>
+      <span v-else-if="phase === 'connecting'" class="wkl-stats__note">正在连接…</span>
       <ElTag v-else-if="phase === 'live'" size="small" effect="plain" class="wkl-stats__live">
         实时
       </ElTag>
@@ -15,8 +18,9 @@
       <span class="wkl-stats__meta">{{ metaText }}</span>
     </div>
 
-    <!-- 未运行：曲线区缺席要有解释（而不是留下一个空框让人猜）。 -->
-    <p v-if="!running" class="wkl-stats__off">容器未运行，暂无实时统计。</p>
+    <!-- 未运行：曲线区缺席要有解释（而不是留下一个空框让人猜）。「容器未运行」这一因
+         已由表头状态签给出，正文只补它的后果「暂无实时统计」，同屏不重复同一句。 -->
+    <p v-if="!running" class="wkl-stats__off">暂无实时统计。</p>
 
     <template v-else>
       <!-- 读数行 = 曲线的直标通道（浅色模式 teal/amber 对比度 < 3:1 时的缓解层）：

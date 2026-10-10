@@ -260,7 +260,7 @@
     <div v-if="doc.volumes.keys.length === 0" class="form-mode__hint">没有数据卷定义</div>
 
     <!-- ── 添加服务：模板 + 名称（spec §8 模板化） ──────────────────────── -->
-    <ElDialog v-model="tplDialog.visible" title="添加服务" width="min(560px, 92vw)">
+    <ElDialog v-model="tplDialog.visible" title="添加服务" width="min(560px, 92vw)" append-to-body>
       <div class="fm-tpl">
         <ElRadioGroup v-model="tplDialog.templateKey" class="fm-tpl__list">
           <ElRadio v-for="t in SERVICE_TEMPLATES" :key="t.key" :value="t.key" class="fm-tpl__item">

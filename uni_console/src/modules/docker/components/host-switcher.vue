@@ -5,6 +5,7 @@
       :model-value="ctx.hostId"
       class="docker-host__select"
       placeholder="选择主机"
+      filterable
       :loading="ctx.loading"
       @change="ctx.selectHost"
     >

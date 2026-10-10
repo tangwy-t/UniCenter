@@ -335,6 +335,25 @@
     return id.replace(/^sha256:/, '').slice(0, 12)
   }
 
+  /** 长十六进制 id（容器/镜像的 64/40 位 id，可带 sha256: 前缀）。 */
+  const HEX_ID_RE = /^[0-9a-f]{32,}$/i
+
+  /**
+   * 对象列展示文本：**缩短而非截断**。
+   *
+   * 病灶（评审 D）：某些事件的 `actor_name` 本身就是一串完整 sha256（71 字符 =
+   * `sha256:` + 64 位），直接渲染会把整串 id 铺满一格。这里对「看起来是十六进制 id」
+   * 的取值一律取前 12 位短 id（模块「长 id 短显」惯例）；名称（容器名/镜像名/网络名）
+   * 原样显示。全值仍在 title 里（完整引用是排障钥匙）。
+   */
+  function shortActor(name: string, id: string): string {
+    if (name) {
+      const bare = name.replace(/^sha256:/, '')
+      return HEX_ID_RE.test(bare) ? bare.slice(0, 12) : name
+    }
+    return shortActorId(id) || '—'
+  }
+
   const rows = computed<EventRow[]>(() => {
     const src = frozen.value ?? entries.value
     return src.map((e) => {
@@ -347,7 +366,7 @@
         typeLabel: eventTypeLabel(e.type),
         action: eventActionText(e.action),
         rawAction: e.action,
-        actor: e.actorName || shortId || '—',
+        actor: shortActor(e.actorName, e.actorId),
         actorTitle:
           e.actorName && shortId ? `${e.actorName} · ${shortId}` : e.actorId || e.actorName || '—',
         host: e.hostname || `主机 ${e.hostId}`,
@@ -673,7 +692,7 @@
   }
 
   .ev-mono {
-    font-family: var(--el-font-family-mono, monospace);
+    font-family: var(--art-font-family-mono);
   }
 
   /* ---------- 连接态文本（工具条的硬数据；呼吸点已删，不再只靠颜色表意） ---------- */

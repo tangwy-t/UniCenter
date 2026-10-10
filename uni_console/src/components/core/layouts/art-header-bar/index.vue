@@ -96,10 +96,22 @@
               </div>
             </template>
             <template #default>
-              <p
-                >点击这里查看<span :style="{ color: systemThemeColor }"> 主题风格 </span>、
-                <span :style="{ color: systemThemeColor }"> 开启顶栏菜单 </span>等更多配置
-              </p>
+              <!-- 内联样式：ElPopover 的内容默认 teleport 到 body，scoped 类够不着它
+                   （既有那两处彩色 span 也用内联 :style，同一原因）。 -->
+              <div style="display: flex; gap: 8px; align-items: flex-start">
+                <p style="flex: 1; margin: 0"
+                  >点击这里查看<span :style="{ color: systemThemeColor }"> 主题风格 </span>、
+                  <span :style="{ color: systemThemeColor }"> 开启顶栏菜单 </span>等更多配置
+                </p>
+                <!-- 首访引导必须可关：否则会长期盖住顶栏工具区与页签。点 × 即收起
+                     （不点设置按钮也能关掉，不必先进面板）。 -->
+                <ArtIconButton
+                  icon="ri:close-line"
+                  :style="{ flexShrink: 0, opacity: 0.6, cursor: 'pointer' }"
+                  title="关闭引导"
+                  @click="dismissSettingGuide"
+                />
+              </div>
             </template>
           </ElPopover>
         </div>
@@ -250,6 +262,11 @@
     if (showSettingGuide.value) {
       settingStore.hideSettingGuide()
     }
+  }
+
+  /** 首访引导的可关闭入口（点浮层里的 ×）：与进入设置面板同一收尾，持久化语义不变。 */
+  const dismissSettingGuide = (): void => {
+    settingStore.hideSettingGuide()
   }
 
   /**

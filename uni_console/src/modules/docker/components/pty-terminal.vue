@@ -1,11 +1,20 @@
 <template>
-  <div class="pty-terminal">
+  <div class="pty-terminal" :class="{ 'is-failed': failed }">
     <!-- xterm 的宿主：尺寸由 CSS 给（fit addon 按这个盒子算行列）。 -->
     <div ref="screenRef" class="pty-terminal__screen"></div>
-    <!-- 连接/失败期的浮层：只给一句结论（失败时带「重试」）。 -->
+    <!-- 连接/失败期的浮层：结论 + 原因 + 出口。失败时「原因」用卷过来的 errorText 说清
+         「为什么连不上」；出口复用宿主页动作（启动容器 / 查看日志），不在这里另造页面级
+         动作；「重试」降为次要档（text）。 -->
     <div v-if="overlayText" class="pty-terminal__overlay">
       <p class="pty-terminal__message">{{ overlayText }}</p>
-      <ElButton v-if="retryable" size="small" @click="retry">重试</ElButton>
+      <p v-if="failureCause" class="pty-terminal__cause">{{ failureCause }}</p>
+      <div v-if="retryable" class="pty-terminal__exits">
+        <ElButton v-if="!running" type="primary" size="small" @click="emit('start')">
+          启动容器
+        </ElButton>
+        <ElButton size="small" @click="emit('open-logs')">查看日志</ElButton>
+        <ElButton size="small" text @click="retry">重试</ElButton>
+      </div>
     </div>
   </div>
 </template>
@@ -33,7 +42,21 @@
   import { pollDelay } from '../utils/cmd'
   import { createFrameTextDecoder } from '../utils/stream'
 
-  const props = defineProps<{ hostId: string; containerId: string }>()
+  const props = withDefaults(
+    defineProps<{
+      hostId: string
+      containerId: string
+      /** 容器是否在运行：未运行时失败态的「启动容器」出口才成立（缺省视为在运行）。 */
+      running?: boolean
+    }>(),
+    { running: true }
+  )
+
+  /**
+   * 出口走**宿主页的动作**（页面优先纪律）：本组件不认识路由/写指令，
+   * 「启动容器」= 宿主页的启停动作、「查看日志」= 宿主页切到日志 Tab。
+   */
+  const emit = defineEmits<{ (e: 'start'): void; (e: 'open-logs'): void }>()
 
   /** 连接生命周期：idle(未开始) → connecting → ready → ended/closed/failed。 */
   type PtyState = 'idle' | 'connecting' | 'ready' | 'ended' | 'closed' | 'failed'
@@ -57,10 +80,14 @@
 
   const overlayText = computed(() => {
     if (state.value === 'connecting' || state.value === 'idle') return '正在连接容器终端…'
-    if (state.value === 'failed') return errorText.value || '无法连接容器终端，请稍后重试'
+    if (state.value === 'failed') return '无法连接容器终端'
     if (state.value === 'closed') return '终端连接已断开。'
     return ''
   })
+  /** 失败态：收窄黑幕（详见样式），并驱动外层 is-failed。 */
+  const failed = computed(() => state.value === 'failed')
+  /** 失败原因：卷过来的具体结论句（errorText）——不是「重试」那种没有信息的兜底句。 */
+  const failureCause = computed(() => (state.value === 'failed' ? errorText.value : ''))
   const retryable = computed(() => state.value === 'failed' || state.value === 'closed')
 
   onMounted(() => {
@@ -328,6 +355,15 @@
       background: #101418;
     }
 
+    // 失败态收窄黑幕：420px 的固定高度在「连接失败」时只剩一大块黑 —— 结论与出口都挤在
+    // 中缝。改 min-height（由内容撑高）让失败屏紧凑。
+    &.is-failed {
+      .pty-terminal__screen {
+        height: auto;
+        min-height: 200px;
+      }
+    }
+
     &__overlay {
       position: absolute;
       inset: 0;
@@ -344,6 +380,24 @@
       margin: 0;
       color: #e6e6e6;
       font-size: 13px;
+    }
+
+    // 失败原因：比结论句更细一档，读得出「为什么」，但仍是次要信息。
+    &__cause {
+      max-width: 90%;
+      margin: 0;
+      color: #c8ccd2;
+      font-size: 12px;
+      text-align: center;
+    }
+
+    // 出口：复用宿主页动作（启动容器 / 查看日志）+ 次要档重试。
+    &__exits {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      justify-content: center;
     }
   }
 

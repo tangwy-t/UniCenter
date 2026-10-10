@@ -247,6 +247,18 @@ describe('事件流详版页：加载序与列的事实', () => {
     expect(w.find('.ev-exit').text()).toBe('—')
   })
 
+  it('对象列缩短而非截断：actor_name 本身就是完整 sha256（71 字符）时取 12 位短 id', async () => {
+    const fullSha = 'sha256:' + 'a'.repeat(64) // 7 + 64 = 71 字符（评审 D 的越界渲染）
+    api.fetchDockerEventHistory.mockResolvedValue(
+      historyResp([historyItem({ t: BASE_SEC * 1000 - 120_000, actorName: fullSha })])
+    )
+    const w = await mountEvents()
+    const actor = w.find('.ev-actor').text()
+    expect(actor).toBe('aaaaaaaaaaaa') // 12 位短 id（模块「长 id 短显」惯例）
+    expect(actor.length).toBe(12)
+    expect(actor).not.toContain('sha256:')
+  })
+
   it('退出码：≠0 红染、0 中性（die 系的事实，三值语义的显示半边）', async () => {
     api.fetchDockerEventHistory.mockResolvedValue(
       historyResp([

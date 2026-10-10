@@ -1,10 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import {
   containerStateText,
+  containerStateZh,
+  cpuText,
   formatRelativeTime,
   inUseText,
   layersTotalMB,
   memText,
+  memUsage,
+  midEllipsis,
   netText,
   portsText
 } from '../utils/display'
@@ -34,13 +38,80 @@ describe('容器状态与用量文案', () => {
     )
   })
 
+  it('中文状态句：状态码本地化 + 时长/health 从原生串解析（Wave 1 守卫）', () => {
+    // 运行中：Up <时长> (health) —— 英文时长与括号里的 health 都译成中文补充。
+    expect(containerStateZh(c({ state: 'running', statusText: 'Up 32 hours (healthy)' }))).toBe(
+      '运行中 32 小时（健康）'
+    )
+    expect(containerStateZh(c({ state: 'running', statusText: 'Up 2 hours (unhealthy)' }))).toBe(
+      '运行中 2 小时（异常）'
+    )
+    expect(
+      containerStateZh(c({ state: 'running', statusText: 'Up 5 seconds (health: starting)' }))
+    ).toBe('运行中 5 秒（健康检查中）')
+    // 没有 health 段时只给「运行中 <时长>」。
+    expect(containerStateZh(c({ state: 'running', statusText: 'Up 3 minutes' }))).toBe(
+      '运行中 3 分钟'
+    )
+    // 已退出：退出码与「N 小时前」都保留（退出码是判因的第一条线索）。
+    expect(containerStateZh(c({ state: 'exited', statusText: 'Exited (143) 26 hours ago' }))).toBe(
+      '已退出（退出码 143）26 小时前'
+    )
+    expect(containerStateZh(c({ state: 'exited', statusText: 'Exited (0) 8 months ago' }))).toBe(
+      '已退出（退出码 0）8 月前'
+    )
+    // 非 0 退出码同样如实给出（不能只报 0）。
+    expect(
+      containerStateZh(c({ state: 'exited', statusText: 'Exited (1) About an hour ago' }))
+    ).toBe('已退出（退出码 1）约 1 小时前')
+    // 其余状态码直接本地化。
+    expect(containerStateZh(c({ state: 'created', statusText: 'Created' }))).toBe('已创建')
+    expect(containerStateZh(c({ state: 'paused' }))).toBe('已暂停')
+    expect(containerStateZh(c({ state: 'restarting' }))).toBe('重启中')
+    expect(containerStateZh(c({ state: 'removing' }))).toBe('移除中')
+    expect(containerStateZh(c({ state: 'dead' }))).toBe('已死亡')
+    // 认不出的状态码原样返回（不编措辞）；状态为空给「—」。
+    expect(containerStateZh(c({ state: 'weird' }))).toBe('weird')
+    expect(containerStateZh(c({ state: '' }))).toBe('—')
+  })
+
   it('非运行容器的用量显示「—」而不是 0（0% 会被当成「真的很闲」）', () => {
     expect(memText(c({ state: 'exited' }))).toBe('—')
     expect(memText(c({ memUsageMb: 91, memLimitMb: 1024 }))).toContain('91')
   })
 
-  it('内存显示带换算单位（不出现裸字节数）', () => {
-    expect(memText(c({ memUsageMb: 1536, memLimitMb: 2048 }))).toMatch(/GB|MB/)
+  it('内存文案「已用 / 上限」（Wave 3a：单位 MB 进列头，正文只留数值）', () => {
+    expect(memText(c({ memUsageMb: 1536, memLimitMb: 2048 }))).toBe('1536 / 2048')
+    // 缺分母（老 agent / limit 为 0）只给已用，不编一个假分母。
+    expect(memText(c({ memUsageMb: 512, memLimitMb: 0 }))).toBe('512')
+  })
+
+  it('CPU 文案只留数值（单位 % 进列头；未运行「—」）', () => {
+    expect(cpuText(c({ cpuPercent: 12.34 }))).toBe('12.3')
+    expect(cpuText(c({ state: 'exited' }))).toBe('—')
+  })
+
+  it('内存分解给 meter 用（未运行 null —— 缺值画「—」不画空条；分母缺省 pct 记 0）', () => {
+    expect(memUsage(c({ state: 'exited' }))).toBeNull()
+    const u = memUsage(c({ memUsageMb: 91, memLimitMb: 1024 }))
+    expect(u).toMatchObject({ usedMb: 91, limitMb: 1024, pct: 9 })
+    expect(memUsage(c({ memUsageMb: 91, memLimitMb: 0 }))!.pct).toBe(0)
+  })
+
+  it('中段省略：超长时保留头 + 尾、切掉中间（保住 tag 与 /tcp）', () => {
+    const ref = 'quay.io/minio/minio:RELEASE.2024-01-16T22-43-05Z'
+    const out = midEllipsis(ref, 20, 12)
+    expect(out.startsWith('quay.io/minio/minio:')).toBe(true)
+    expect(out.endsWith('16T22-43-05Z')).toBe(true)
+    expect(out).toContain('…')
+    expect(out.length).toBeLessThan(ref.length)
+
+    const longPort = '20080 → 6379/tcp +7'
+    expect(midEllipsis(longPort, 6, 8).endsWith('/tcp +7')).toBe(true)
+  })
+
+  it('中段省略：未超预算时原样返回（不打省略号）', () => {
+    expect(midEllipsis('mysql:8.0', 12, 8)).toBe('mysql:8.0')
   })
 
   it('端口按「宿主→容器」显示，无映射显示「—」', () => {
@@ -106,14 +177,26 @@ const img = (over: Partial<DockerImageItem> = {}): DockerImageItem =>
   }) as DockerImageItem
 
 describe('镜像使用状态与相对时间', () => {
-  it('相对时间分四档（分钟/小时/天/月），未来时刻不说负数', () => {
+  it('相对时间分四档（分钟/小时/天/月）', () => {
     const now = 1_700_000_000
     expect(formatRelativeTime(now - 90, now)).toBe('1 分钟前')
     expect(formatRelativeTime(now - 3600 * 5, now)).toBe('5 小时前')
     expect(formatRelativeTime(now - 86400 * 3, now)).toBe('3 天前')
     expect(formatRelativeTime(now - 86400 * 30 * 4, now)).toBe('4 月前')
-    // 时钟偏差：容器/镜像的时间来自远端主机，比浏览器快时绝不能显示「-N 分钟前」。
-    expect(formatRelativeTime(now + 600, now)).toBe('1 分钟前')
+  })
+
+  it('异常时间戳给稳定兜底，绝不渲染成巨大月数（Wave 1 守卫）', () => {
+    const now = 1_700_000_000
+    // Go 零时刻哨兵（0001-01-01）——反算 diff 恰好会得到「24663 月前」这个荒唐字面。
+    const GO_ZERO = -62135596800
+    expect(formatRelativeTime(GO_ZERO, now)).toBe('未知')
+    expect(formatRelativeTime(GO_ZERO, now)).not.toContain('月')
+    // 非正（epoch 之前 / 0）与未来（时钟偏差或坏值）同样兜底，不出负数也不出巨大月数。
+    expect(formatRelativeTime(0, now)).toBe('未知')
+    expect(formatRelativeTime(-1, now)).toBe('未知')
+    expect(formatRelativeTime(now + 600, now)).toBe('未知')
+    expect(formatRelativeTime(Number.NaN, now)).toBe('未知')
+    expect(formatRelativeTime(Number.POSITIVE_INFINITY, now)).toBe('未知')
   })
 
   it('「使用」列把悬空、未使用、在用说成三句不同的话（悬空就是可回收的那批）', () => {

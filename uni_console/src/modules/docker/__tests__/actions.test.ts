@@ -19,6 +19,7 @@ import { describe, expect, it } from 'vitest'
 import { COMPOSE_LOGS_ACTIONS, PHASE1_ACTIONS } from '../utils/cmd'
 import {
   actionGuarded,
+  composeHeroButtonTone,
   confirmKind,
   DOCKER_ACTION_REGISTRY,
   expectedConfirm,
@@ -371,5 +372,35 @@ describe('protectedGate：受保护目标的额外要求（spec §10.1）', () =
         expect(text, `结论句泄露了内部术语「${term}」`).not.toContain(term)
       }
     }
+  })
+})
+
+describe('composeHeroButtonTone：hero 动作条的视觉档位（红=破坏性，与确认档 danger 分开）', () => {
+  it('Up -d 是主操作（primary）—— 不因重建要强确认而误涂红', () => {
+    // 注册表里 compose:up 的 danger='danger'（确认档语义）；视觉档位必须独立，否则
+    // hero 上的主操作会渲染成红（评审 E §8 的病灶）。
+    expect(lookupDockerAction('compose:up')!.danger).toBe('danger')
+    expect(composeHeroButtonTone('compose:up')).toBe('primary')
+  })
+
+  it('停止/下线… 危险档；启动/重启/拉取 中性档', () => {
+    expect(composeHeroButtonTone('compose:stop')).toBe('danger')
+    expect(composeHeroButtonTone('compose:down')).toBe('danger')
+    expect(composeHeroButtonTone('compose:start')).toBe('default')
+    expect(composeHeroButtonTone('compose:restart')).toBe('default')
+    expect(composeHeroButtonTone('compose:pull')).toBe('default')
+  })
+
+  it('未登记动作回退中性（不上语义色最保守）', () => {
+    expect(composeHeroButtonTone('container:remove')).toBe('default')
+    expect(composeHeroButtonTone('nope')).toBe('default')
+  })
+
+  it('不影响其它动作的红色语义：删除类在注册表里仍是 danger', () => {
+    // 本映射只覆盖六个 compose 动作；container:remove / image:remove 等的 danger
+    // 语义（红色）不受牵连。
+    expect(lookupDockerAction('container:remove')!.danger).toBe('danger')
+    expect(lookupDockerAction('image:remove')!.danger).toBe('danger')
+    expect(composeHeroButtonTone('container:remove')).toBe('default')
   })
 })

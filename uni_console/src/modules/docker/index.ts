@@ -158,6 +158,44 @@ const plugin: PluginManifest = {
       meta: { title: '事件流', icon: 'ri:pulse-line', isHide: true, authMark: PermDockerList }
     },
     {
+      // 镜像版本一致性（漂移）视图（Wave 4b）：跨主机按 repoTag 聚合镜像摘要，
+      // 报出每个标签的多数派/少数派分布 —— 排查「同名标签在不同机器上其实不是
+      // 同一个镜像」。入口长在**镜像页工具条**（ArtButtonTable 图标钮），
+      // **不加后端菜单种子**（与任务中心/事件流同款裁定：docker 六页平铺是既有
+      // 裁决，v015 种子守卫钉住「六菜单」）。
+      //
+      // 形态与 /docker/tasks、/docker/events 逐条同源：RouteRegistry 只注册菜单树里
+      // 出现的路由，可见（非 isHide）且无菜单种子的插件路由根本进不了 menuList
+      //（既注册不了、也过不了守卫的「路径在菜单权限内」检查 —— 直接输 URL 404）；
+      // isHide 的语义恰好是「注册但不上侧边栏」。authMark 与 GET /docker/image-drift
+      // 的静态 perm 同档（docker:list）。
+      path: '/docker/image-drift',
+      name: 'DockerImageDrift',
+      component: () => import('./views/image-drift.vue'),
+      meta: {
+        title: '版本一致性',
+        icon: 'ri:git-branch-line',
+        isHide: true,
+        authMark: PermDockerList
+      }
+    },
+    {
+      // 全局跨资源检索（Wave 4d 收尾件）：一个关键字跨容器/镜像/数据卷/网络/Compose
+      // 五类资源子串匹配（每组独立限量 + 逐组 truncated）。入口长在**总览 hero**
+      // （图标钮），**不加后端菜单种子**（与任务中心/事件流/版本一致性同款裁定：
+      // docker 六页平铺是既有裁决，v015 种子守卫钉住「六菜单」）。
+      //
+      // 形态与 /docker/tasks、/docker/events、/docker/image-drift 逐条同源：
+      // RouteRegistry 只注册菜单树里出现的路由，可见（非 isHide）且无菜单种子的插件
+      // 路由根本进不了 menuList（既注册不了、也过不了守卫的「路径在菜单权限内」检查
+      // —— 直接输 URL 404）；isHide 的语义恰好是「注册但不上侧边栏」。authMark 与
+      // GET /docker/search 的静态 perm 同档（docker:list）。
+      path: '/docker/search',
+      name: 'DockerSearch',
+      component: () => import('./views/search.vue'),
+      meta: { title: '全局检索', icon: 'ri:search-line', isHide: true, authMark: PermDockerList }
+    },
+    {
       // 项目工作台（5b）：把项目升格为「变更工作台」（Dockge 的洞见嫁接）。
       // 隐藏路由，不在后端菜单里，isHide + authMark 过滤（权限码与 compose:logs /
       // 快照读取同档：docker:inspect）。
@@ -184,7 +222,12 @@ const plugin: PluginManifest = {
       path: '/docker/image-detail/:id',
       name: 'DockerImageDetail',
       component: () => import('./views/image-detail.vue'),
-      meta: { title: '镜像详情', icon: 'pajamas:container-image', isHide: true, authMark: PermDockerInspect }
+      meta: {
+        title: '镜像详情',
+        icon: 'pajamas:container-image',
+        isHide: true,
+        authMark: PermDockerInspect
+      }
     }
   ]
 }

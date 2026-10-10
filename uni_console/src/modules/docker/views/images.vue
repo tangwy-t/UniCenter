@@ -7,6 +7,7 @@
       v-show="showSearchBar"
       v-model="searchForm"
       :items="searchItems"
+      :default-expanded="true"
       @search="onSearch"
       @reset="onReset"
     />
@@ -16,6 +17,7 @@
         v-model:columns="columnChecks"
         v-model:showSearchBar="showSearchBar"
         :loading="loading"
+        :has-active-filter="hasFilter"
         @refresh="refreshAll"
       >
         <template #left>
@@ -24,7 +26,10 @@
                  没有「当前主机」）：无行目标的整体动作（拉取/构建/载入/清理）面向
                  **主机筛选选定的那台**（没选且全场只有一台可管主机时就是它；否则
                  禁用，禁用理由写进 title —— 不设常驻提示句）。仓库凭据（4c）与镜像
-                 写动作不同档（docker:config），不被 manage/delete 顺带挡掉。 -->
+                 写动作不同档（docker:config），不被 manage/delete 顺带挡掉。
+                 **统一中性色**（Wave 3a 去彩虹）：此前一次用满 5 种色相（theme/
+                 secondary/info/danger/warning），色相是装饰而非信息 —— 统一主色档，
+                 破坏性动作的危险语汇由确认弹窗承载（弹窗里仍是 danger 档）。 -->
             <ArtButtonTable
               v-if="canManage"
               type="add"
@@ -35,7 +40,7 @@
             <ArtButtonTable
               v-if="canManage"
               icon="ri:hammer-line"
-              iconClass="bg-secondary/12 text-secondary"
+              iconClass="bg-theme/12 text-theme"
               :disabled="hostActionDisabled"
               :title="hostActionTitle('构建镜像…')"
               @click="askBuild"
@@ -43,7 +48,7 @@
             <ArtButtonTable
               v-if="canManage"
               icon="ri:file-upload-line"
-              iconClass="bg-info/12 text-info"
+              iconClass="bg-theme/12 text-theme"
               :disabled="hostActionDisabled"
               :title="hostActionTitle('载入镜像…')"
               @click="askLoad"
@@ -51,7 +56,7 @@
             <ArtButtonTable
               v-if="canDelete"
               icon="ri:brush-line"
-              iconClass="bg-danger/12 text-danger"
+              iconClass="bg-theme/12 text-theme"
               :disabled="hostActionDisabled"
               :title="hostActionTitle('清理悬空镜像…')"
               @click="openPrune"
@@ -59,9 +64,21 @@
             <ArtButtonTable
               v-if="canConfig"
               icon="ri:key-2-line"
-              iconClass="bg-warning/12 text-warning"
+              iconClass="bg-theme/12 text-theme"
               title="仓库凭据…"
               @click="registryVisible = true"
+            />
+
+            <!-- 版本一致性视图入口（Wave 4b）：按 repoTag 聚合各主机的镜像摘要，报出
+                 多数派/少数派（同名标签未必是同一个镜像）。与「任务中心/事件流」同款 ——
+                 隐藏路由（isHide，不进侧边栏），入口在工具条；权限与镜像页读面同档
+                 （docker:list），无权限不渲染。 -->
+            <ArtButtonTable
+              v-if="canList"
+              icon="ri:git-branch-line"
+              iconClass="bg-theme/12 text-theme"
+              title="版本一致性"
+              @click="goDrift"
             />
 
             <!-- 选中态动作：打标签/导出 tar 一次只作用于选中的那一行，恰选中一行时
@@ -69,33 +86,29 @@
             <template v-if="canManage && singleSelected">
               <ArtButtonTable
                 icon="ri:price-tag-3-line"
-                iconClass="bg-secondary/12 text-secondary"
+                iconClass="bg-theme/12 text-theme"
                 :disabled="busy"
                 :title="selectedActionTitle('打标签…')"
                 @click="onTagSelected"
               />
               <ArtButtonTable
                 icon="ri:file-download-line"
-                iconClass="bg-secondary/12 text-secondary"
+                iconClass="bg-theme/12 text-theme"
                 :disabled="busy"
                 :title="selectedActionTitle('导出 tar…')"
                 @click="onSaveSelected"
               />
             </template>
 
-            <!-- 硬数据文本：计数（total 如实报全量、items 截 500，截断必须说出口）+
-                 合计（与表格里的行同源）+ 可回收（后端的主机级账目求和，null = 没有
-                 任何主机报账 → 如实说「不可用」，不折算成 0）+ 静默刷新失败标注。
-                 前三个只在 pageState=ready（握有数据）时报 —— 首拉/失败/无可管主机时
+            <!-- 硬数据文本：计数（total = 过滤后全量，翻页由分页器表达 —— 不再有
+                 「列表显示前 N 条」那半句）+ 可见行合计容量 + 可回收（后端的主机级
+                 账目求和，null = 没有任何主机报账 → 如实说「不可用」，不折算成 0）
+                 + 不可用主机清单 + 静默刷新失败标注。
+                 两处只在 pageState=ready（握有数据）时报 —— 首拉/失败/无可管主机时
                  报「共 0 个」是假话（数据面不得伪装新鲜）；刷新失败标注不受它管
                  （那是「上次数据仍在」的另一种事实）。 -->
             <span v-if="pageState === 'ready'" class="docker-count">
-              共 {{ total }} 个镜像<template v-if="truncated">
-                · 列表显示前 {{ rows.length }} 条</template
-              >
-            </span>
-            <span v-if="pageState === 'ready'" class="docker-total">
-              合计 {{ totals.count }} 个 · {{ formatByUnit('MB', totals.totalMB) }}
+              共 {{ total }} 个镜像 · {{ formatByUnit('MB', totals.totalMB) }}
             </span>
             <span v-if="pageState === 'ready'" class="docker-total__sub">
               <template v-if="reclaim">
@@ -103,6 +116,8 @@
               </template>
               <template v-else>可回收账目不可用</template>
             </span>
+            <!-- 部分主机不可用（Wave 2）：只列主机名 + reason 原文，不加解释句。零值不渲染。 -->
+            <span v-if="unavailableText" class="docker-refresh-note">{{ unavailableText }}</span>
             <span v-if="refreshError" class="docker-refresh-note">
               刷新失败，正在显示上次结果
             </span>
@@ -126,6 +141,10 @@
           :loading="listLoading"
           :data="rows"
           :columns="columns"
+          :pagination="pagination"
+          @pagination:size-change="handleSizeChange"
+          @pagination:current-change="handleCurrentChange"
+          @sort-change="handleSortChange"
           @selection-change="onSelectionChange"
         />
         <ElEmpty
@@ -188,7 +207,7 @@
    * 的禁用理由）。下钻语义保持：详情仍是单主机窗口 —— `/docker/image-detail/:id?host=`
    * 的 host 取**行主机**。
    */
-  import { computed, h, ref, watch } from 'vue'
+  import { computed, h, reactive, ref, watch } from 'vue'
   import { useRoute, useRouter } from 'vue-router'
   import { ElButton, ElCard, ElCheckbox, ElEmpty, ElMessage } from 'element-plus'
   import { formatByUnit } from '@/modules/device/utils/display'
@@ -198,6 +217,7 @@
     PermDockerConfig,
     PermDockerDelete,
     PermDockerInspect,
+    PermDockerList,
     PermDockerManage
   } from '@/enums/permission'
   import ArtButtonTable from '@/components/core/forms/art-button-table/index.vue'
@@ -224,7 +244,14 @@
   import { useHostList, useResourceList } from '../composables/useResourceList'
   import { lookupDockerAction } from '../utils/actions'
   import { imageReclaimTotals, imageTotals } from '../utils/snapshot'
-  import { formatRelativeTime, imageRefText, inUseText } from '../utils/display'
+  import {
+    formatRelativeTime,
+    imageRefText,
+    IMAGE_MID_HEAD,
+    IMAGE_MID_TAIL,
+    inUseText,
+    midEllipsis
+  } from '../utils/display'
   import { hostLabel } from '../utils/host'
 
   defineOptions({ name: 'DockerImages' })
@@ -253,6 +280,8 @@
   const canDelete = computed(() => hasAuth(PermDockerDelete))
   /** 仓库凭据管理权限（4c）：与镜像写动作不同档 —— 服务端 /docker/registries 的静态 perm。 */
   const canConfig = computed(() => hasAuth(PermDockerConfig))
+  /** 版本一致性视图（Wave 4b）入口权限：与 GET /docker/image-drift 及该隐藏路由同档（docker:list）。 */
+  const canList = computed(() => hasAuth(PermDockerList))
 
   // ── 可管主机清单（筛选下拉与「尚无可管主机」判定）────────────────────
   const { hosts, hostsLoading, loadHosts } = useHostList()
@@ -271,9 +300,9 @@
   const {
     rows,
     total,
+    unavailableHosts,
     loading,
     refreshError,
-    truncated,
     pageState,
     load,
     refresh,
@@ -287,22 +316,81 @@
         keyword: p.keyword || undefined,
         // 开关只发 true（「仅悬空/未被使用」是单侧开关）；false 侧语义留给端点。
         dangling: p.dangling ? true : undefined,
-        unused: p.unused ? true : undefined
+        unused: p.unused ? true : undefined,
+        // 服务端分页/排序：pageSize 显式传；未选定排序时不发两键。
+        page: p.page,
+        pageSize: p.pageSize,
+        sortBy: p.sortBy as 'size' | 'created' | 'hostId' | 'name' | undefined,
+        sortOrder: p.sortBy ? p.sortOrder : undefined
       })
       if (seq === diskSeq) imageDisk.value = resp.disk ?? []
       return resp
     },
     // UI 的 key（danglingOnly/unusedOnly）在这里映射成端点参数（dangling/unused）——
-    // 不让筛选项的 key 泄漏进数据层（与容器页同一句分工）。
+    // 不让筛选项的 key 泄漏进数据层（与容器页同一句分工）。分页/排序态一并在快照里现取。
     params: () => ({
       hostId: searchForm.value.host,
       keyword: searchForm.value.keyword,
       dangling: searchForm.value.danglingOnly === true ? true : undefined,
-      unused: searchForm.value.unusedOnly === true ? true : undefined
+      unused: searchForm.value.unusedOnly === true ? true : undefined,
+      page: pagination.current,
+      pageSize: pagination.size,
+      sortBy: sortBy.value || undefined,
+      sortOrder: sortBy.value ? sortOrder.value : undefined
     }),
     hosts: () => hosts.value,
     hostsLoading: () => hostsLoading.value
   })
+
+  // ── 服务端分页 / 排序（Wave 2）────────────────────────────────────
+  // 分页态照 device：page/pageSize 显式发（pageSize 取 50，与后端默认一致）；载入后
+  // total 从响应同步。排序只认白名单列（列 prop → 后端 sortBy 键），未知 prop 忽略。
+  const pagination = reactive({ current: 1, size: 50, total: 0 })
+  watch(total, (v) => {
+    pagination.total = v
+  })
+  /** 列 prop → 后端排序键（白名单：size/created + 通用 hostId/name）。 */
+  const SORT_KEYS: Record<string, string> = {
+    repoTags: 'name',
+    hostname: 'hostId',
+    sizeMb: 'size',
+    created: 'created'
+  }
+  const sortBy = ref('')
+  const sortOrder = ref<'asc' | 'desc'>('asc')
+  function handleSortChange({ prop, order }: { prop?: string; order?: string | null }) {
+    const key = prop ? SORT_KEYS[prop] : undefined
+    if (!key) return
+    if (order === 'ascending') {
+      sortBy.value = key
+      sortOrder.value = 'asc'
+    } else if (order === 'descending') {
+      sortBy.value = key
+      sortOrder.value = 'desc'
+    } else {
+      // 三态循环的第三态：清回默认排序（sortBy 空即忽略方向）。
+      sortBy.value = ''
+    }
+    pagination.current = 1
+    void load()
+  }
+  function handleSizeChange(size: number) {
+    pagination.size = size
+    pagination.current = 1
+    void load()
+  }
+  function handleCurrentChange(current: number) {
+    pagination.current = current
+    void load()
+  }
+
+  /** 部分主机不可用（Wave 2）：只列主机名 + reason 原文（页面零解释文案）。 */
+  const unavailableText = computed(() =>
+    unavailableHosts.value.length === 0
+      ? ''
+      : `${unavailableHosts.value.length} 台主机不可用：` +
+        unavailableHosts.value.map((h) => `${h.hostname || h.hostId}（${h.reason}）`).join('、')
+  )
 
   /** 表格的加载态：清单在拉，或主机清单还没到（后者尚不知有没有主机，不能先喊「没有」）。 */
   const listLoading = computed(() => loading.value || hostsLoading.value)
@@ -320,6 +408,11 @@
       const id = raw ? String(raw) : ''
       const had = searchForm.value.host ?? ''
       searchForm.value.host = id
+      // ?host 深链进入时自动展开搜索栏：从总览磁盘面板下钻进来的人看到的是一张被
+      // 过滤的表，筛选线索必须在明处。immediate 首跑（old 为 undefined）也走这句。
+      if (id) showSearchBar.value = true
+      // 筛选变化（含深链首拉）回第一页。
+      pagination.current = 1
       // immediate 首跑（old 为 undefined）必拉一次；此后仅 query 真的变化时重拉 ——
       // 没 host 深链时 id 与 had 都是 ''，靠 old 区分「首次进入」与「同值重复」。
       if (id !== had || old === undefined) void load()
@@ -327,7 +420,11 @@
     { immediate: true }
   )
 
-  const hostOptions = computed(() => hosts.value.map((h) => ({ label: hostLabel(h), value: h.id })))
+  // 主机选项按分组渲染（ArtSearchBar 追加式分组能力：option 带 group 即分组）。
+  // 无分组的归入「未分组」组；组名是数据分类，不是解释文案。
+  const hostOptions = computed(() =>
+    hosts.value.map((h) => ({ label: hostLabel(h), value: h.id, group: h.group || '未分组' }))
+  )
 
   const searchItems = computed(() => [
     {
@@ -367,13 +464,15 @@
   const reclaim = computed(() => imageReclaimTotals(imageDisk.value))
 
   function onSearch() {
-    // 服务端过滤：搜索按钮即重拉（无分页可重置）。
+    // 服务端过滤：搜索按钮即重拉，筛选变化回第一页。
     showSearchBar.value = true
+    pagination.current = 1
     void load()
   }
 
   function onReset() {
     searchForm.value = {}
+    pagination.current = 1
     void load()
   }
 
@@ -731,6 +830,15 @@
     })
   }
 
+  /**
+   * 版本一致性视图（Wave 4b）：跨主机按 repoTag 聚合的漂移面。隐藏路由（无菜单入口），
+   * 站内跳转一律 path 形态（菜单页注册名是 menu-<menuId>，只有隐藏路由保名 —— 而本路由
+   * 保名也照 path 走，与 tasks/events 的入口同款）。
+   */
+  function goDrift() {
+    void router.push({ path: '/docker/image-drift' })
+  }
+
   // ── 表格列 ──
 
   // 列设置经 useTableColumns（对齐系统管理，列弹层可用）：工厂只在 setup 求值一次
@@ -750,33 +858,53 @@
         prop: 'repoTags',
         label: '仓库:标签',
         minWidth: 240,
+        // 单行不变量（Wave 3c）：3a 只留 midEllipsis、漏了 nowrap —— 窄视口下这条
+        // 会折行堆高行。补回 showOverflowTooltip（EP 负责 nowrap/省略号），
+        // midEllipsis 负责可见那截（仓库前缀 + :tag），全文由 title 承载。
         showOverflowTooltip: true,
-        formatter: (row: DockerImageListItem) => imageRefText(row)
+        sortable: 'custom' as const,
+        // 中段省略（Wave 3a）：尾部省略会切掉 tag（唯一有信息的那段），改保留头+尾
+        // （仓库前缀 + `:tag`）。
+        formatter: (row: DockerImageListItem) => {
+          const full = imageRefText(row)
+          return h('span', { title: full }, midEllipsis(full, IMAGE_MID_HEAD, IMAGE_MID_TAIL))
+        }
       },
       {
         // 主机列是跨主机表的核心：同名镜像可能散在多台机器，排查时
         // 「先定位在哪台」是第一句（与容器统一表同一档：平板竖屏起可见）。
+        // 渲染成胶囊 chip：主机是事实上的分组键，不再是最弱的灰文本。
         prop: 'hostname',
         label: '主机',
         minWidth: 120,
         showOverflowTooltip: true,
         hideBelow: 'tablet',
-        formatter: (row: DockerImageListItem) => row.hostname || row.hostId
+        sortable: 'custom' as const,
+        formatter: (row: DockerImageListItem) =>
+          h('span', { class: 'docker-host' }, hostLabel({ id: row.hostId, hostname: row.hostname }))
       },
       {
         prop: 'sizeMb',
         label: '大小',
         minWidth: 110,
+        // 单行不变量（Wave 3c）：数据列一律 nowrap。
+        showOverflowTooltip: true,
+        align: 'right' as const,
+        className: 'is-num',
         // 大小是元数据（工具条合计里已有），低于桌面隐藏。
         hideBelow: 'desktop',
+        sortable: 'custom' as const,
         formatter: (row: DockerImageListItem) => formatByUnit('MB', row.sizeMb)
       },
       {
         prop: 'created',
         label: '创建于',
         minWidth: 140,
+        // 单行不变量（Wave 3c）：数据列一律 nowrap。
+        showOverflowTooltip: true,
         // 相对时间是元数据，精确时刻在详情页给。
         hideBelow: 'desktop',
+        sortable: 'custom' as const,
         formatter: (row: DockerImageListItem) =>
           row.created ? formatRelativeTime(row.created) : '—'
       },
@@ -821,6 +949,14 @@
 </script>
 
 <style lang="scss" scoped>
+  @use './overview-tokens' as t;
+
+  // 主机 chip（胶囊）：主机是事实上的分组键，跨主机镜像表里不再是最弱的灰文本
+  // （与项目/容器/卷/网络页同一全局类 docker-host + t.pill 制）。
+  :global(.docker-host) {
+    @include t.pill;
+  }
+
   .docker-images-page {
     /* 次要文字对比度 AA（逐页口径，与收敛页同款处置）：EP 默认
        --el-text-color-secondary(#909399) 对白底只有 3.08:1，低于 AA 正文线 →
@@ -841,11 +977,8 @@
       color: var(--el-text-color-secondary);
     }
 
-    // 合计（主数字）与可回收（副行）随工具条同排、副行弱化。
-    .docker-total {
-      font-size: 13px;
-    }
-
+    // 可回收（副行）随工具条同排、弱化。合计容量已并入计数句（.docker-count），
+    // 不再是独立一行（去重后的新形态）。
     .docker-total__sub {
       font-size: 12px;
       color: var(--el-text-color-secondary);

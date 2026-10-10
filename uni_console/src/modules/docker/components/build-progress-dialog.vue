@@ -1,6 +1,6 @@
 <template>
   <!-- 单根（single-root 守卫扫描全模块的 .vue）：ElDialog 是唯一根（与
-       pull-progress-dialog / action-confirm 同一挂法，原地渲染不搬 body）。
+       pull-progress-dialog 同一挂法，原地渲染不搬 body）。
        **非模态**（modal=false）：构建进度是「观看」，不该挡住页面 —— 构建在途时
        用户可以拖开本窗（draggable）或直接关掉（关掉 = 收起观看，构建照常跑完，
        去任务中心展开任务行还能接着看）。 -->
@@ -998,20 +998,20 @@
   // 的 primary-text-aa（终审 QA D2·浅色实测 3.68:1）。
   @include t.primary-text-aa;
 
-  // 非模态 = **真的不挡页面**：EP 的对话框包壳（.el-overlay / .el-overlay-dialog）
-  // 铺满视口，即使 :modal="false" 也会吃掉整个页面的点击（外侧点击落在包壳上，
-  // 页面收不到，还会被当成「点外面」把窗收掉）。这里让包壳对指针透明、只有对话框
-  // 本体可交互 —— 在途时用户照常翻列表/切筛选/开别的窗口；关窗只有显式路径
-  //（X / ESC / 页脚关闭）。两种写法都给：包壳既可能是本组件根元素（拿到 scoped
-  // 属性），也可能是它的后代，只写一种会在 EP 的 DOM 形状变化时静默失效。
-  :global(.docker-progress-nonblocking),
-  :global(.docker-progress-nonblocking .el-overlay-dialog) {
-    pointer-events: none;
+  // 主按钮禁用态视觉档（评审 E §1.3，与 pull/push 对话框同款收口 —— Wave 1b 已给
+  // 那两个对话框加了本条，build 本波补齐）：EP 对实心 primary 的禁用态落
+  // --el-color-primary-light-5（浅蓝），与可点时的实心档并列读起来像「第二种主按钮」。
+  // 这里把禁用态归到 EP 的中性禁用槽（与默认档禁用按钮同一档：灰底 + 浅描边 +
+  // 占位色文字）。只在 docker 侧 scoped，不动全局 el-ui.scss。
+  :deep(.el-dialog__footer .el-button--primary.is-disabled) {
+    --el-button-disabled-bg-color: var(--el-fill-color-light);
+    --el-button-disabled-border-color: var(--el-border-color-light);
+    --el-button-disabled-text-color: var(--el-text-color-placeholder);
   }
 
-  :global(.docker-progress-nonblocking .el-dialog) {
-    pointer-events: auto;
-  }
+  // 指针穿透（观看档）的机制规则已收敛到 assets/styles/core/el-ui.scss 的
+  // .el-dialog 段（全局唯一一份）；本组件只保留 :modal="false" +
+  // modal-class="docker-progress-nonblocking" 的意图（见模板注释）。
 
   // 输入态：一张四字段表单（标签在输入框上方 —— 字段多了，与拉取的单列无标签
   // 形态分道；就地结论（错误句/提示句）都是对话框内的结论，不放 toast）。
@@ -1111,7 +1111,7 @@
     }
 
     &__name {
-      font-family: var(--el-font-family-mono, ui-monospace, 'SFMono-Regular', Consolas, monospace);
+      font-family: var(--art-font-family-mono);
       word-break: break-all;
     }
 
@@ -1184,7 +1184,7 @@
     gap: 8px;
     font-size: 12px;
     line-height: 1.7;
-    font-family: var(--el-font-family-mono, ui-monospace, 'SFMono-Regular', Consolas, monospace);
+    font-family: var(--art-font-family-mono);
     word-break: break-all;
 
     &__id {

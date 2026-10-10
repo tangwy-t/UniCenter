@@ -6,6 +6,7 @@
       width="min(900px, 94vw)"
       top="6vh"
       :close-on-click-modal="false"
+      append-to-body
       @closed="reset"
     >
       <div v-loading="loading" class="compose-editor__body">
@@ -91,7 +92,12 @@
     </ElDialog>
 
     <!-- diff 预览（保存收尾的第 b 步；写全文时给逐行差异，走最小改动时给变更明细）。 -->
-    <ElDialog v-model="preview.visible" title="保存预览" width="min(760px, 94vw)">
+    <ElDialog
+      v-model="preview.visible"
+      title="保存预览"
+      width="min(760px, 94vw)"
+      append-to-body
+    >
       <div class="compose-editor__preview">
         <p class="compose-editor__summary">{{ preview.summary }}</p>
         <ul v-if="preview.details.length > 0" class="compose-editor__details">

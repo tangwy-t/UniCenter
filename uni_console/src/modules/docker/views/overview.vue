@@ -18,6 +18,16 @@
           </p>
         </div>
         <div class="ml-auto flex items-center gap-1">
+          <!-- 全局检索入口（Wave 4d 收尾件）：一个关键字跨容器/镜像/数据卷/网络/Compose
+               五类资源子串匹配 —— 与任务中心同款（隐藏路由 isHide 不进侧边栏、图标钮
+               入口、权限与端点同档 docker:list，无权限不渲染）。 -->
+          <ArtButtonTable
+            v-if="canList"
+            icon="ri:search-line"
+            iconClass="bg-theme/12 text-theme"
+            title="全局检索"
+            @click="goSearch"
+          />
           <!-- 任务中心入口（6b 抽屉 → 8c 整页）：hero 与容器页 hero 两条入口是同一双
                眼睛 —— 总览盯「舰队健康吗」，任务中心盯「刚才受理的操作都怎么样了」。
                权限与 GET /docker/tasks 同档（docker:list），无权限不渲染。不挂 pending
@@ -85,18 +95,12 @@
 
       <!-- ============ 正常态 ============ -->
       <template v-else>
-        <!-- KPI 磁贴：舰队账目。六块资源维度（2 / 3 / 6 列，对齐服务监控的 6 磁贴栅格）
-             + 第七块「磁盘占用」跨满整行（它是跨资源的存储总账，与逐资源计数不同类，
-             满行也避免 7 块在 6 列栅格里留下孤块）。磁贴本体在子组件（可点击下钻；
-             分项语义色见 buildOverviewKpis）。 -->
+        <!-- KPI 磁贴：舰队账目。六块资源维度（2 / 3 / 6 列全部整除 —— 首位两档的对齐
+             是 6 的公倍数）。磁盘占用**不在本栅格**：它已有独立分区（下方 #dov-disk），
+             且作为「跨资源的存储总账」与逐资源计数不同类，混进来会让三档列数都除不尽。
+             磁贴本体在子组件（可点击下钻；图标底一律中性色、分项语义色见 buildOverviewKpis）。 -->
         <div class="dov-kpis kpi-grid grid grid-cols-2 gap-4 md:grid-cols-3 2xl:grid-cols-6">
-          <OverviewKpiTile
-            v-for="t in kpis"
-            :key="t.key"
-            :tile="t"
-            :class="t.key === 'disk' ? 'col-span-2 md:col-span-3 2xl:col-span-6' : ''"
-            @select="onKpiClick"
-          />
+          <OverviewKpiTile v-for="t in kpis" :key="t.key" :tile="t" @select="onKpiClick" />
         </div>
 
         <!-- ============ 主机卡片网格（控制塔的就绪板） ============ -->
@@ -132,7 +136,11 @@
           <div class="dov-section__head">
             <span class="dov-section__title">异常容器</span>
           </div>
-          <OverviewAnomalyTable :anomalies="anomalies" @open="goContainerDetail" />
+          <OverviewAnomalyTable
+            :anomalies="anomalies"
+            @open="goContainerDetail"
+            @view-all="goAllAnomalies"
+          />
         </section>
 
         <!-- ============ 活动流（刚才发生了什么） ============ -->
@@ -349,9 +357,20 @@
     })
   }
 
+  /** 异常清单截断时的出口 → 容器页「已停止」筛选（端点两档：stopped = 一切非
+   *  running，与总览 KPI 同一句；本页封顶 50 条，全表在容器页）。 */
+  function goAllAnomalies() {
+    void router.push({ path: '/docker/containers', query: { state: 'stopped' } })
+  }
+
   /** 任务中心（8c 整页）：跨主机长任务收口页，入口在总览 hero 与容器页 hero 上。 */
   function goTasks() {
     void router.push({ path: '/docker/tasks' })
+  }
+
+  /** 全局检索（Wave 4d 收尾件）：隐藏路由 /docker/search 的入口（hero 图标钮）。 */
+  function goSearch() {
+    void router.push({ path: '/docker/search' })
   }
 </script>
 
@@ -449,7 +468,7 @@
 
   /* ---------- KPI 栅格（磁贴本体在子组件 overview-kpi-tile） ---------- */
 
-  /* 入场错峰：序号越大越晚（与监控 KPI 栅格同一节奏，七块补第七档） */
+  /* 入场错峰：序号越大越晚（与监控 KPI 栅格同一节奏，六块写到第 6 档） */
   .kpi-grid > *:nth-child(2) {
     animation-delay: 40ms;
   }
@@ -464,9 +483,6 @@
   }
   .kpi-grid > *:nth-child(6) {
     animation-delay: 200ms;
-  }
-  .kpi-grid > *:nth-child(7) {
-    animation-delay: 240ms;
   }
 
   /* ---------- 分区标题（对齐 .do-section__head） ---------- */

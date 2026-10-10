@@ -495,6 +495,47 @@ describe('列集合随视口分档（hideBelow 的不变量守卫）', () => {
   })
 })
 
+/* ── W1：?host= 深链自动展开搜索栏 + 筛选激活态接线 ──────────────────────
+ * 修复前：五页的 ?host= watch 只写 searchForm.host、不展开搜索栏 —— 从总览主机卡/
+ * 磁盘面板下钻进来的人看到的是一张被过滤的表，却看不到筛选线索。这里从**真正挂起
+ * 来的页面**上钉住：带 host 进来时搜索栏可见、不带时保持收起；并钉住页面把已有的
+ * hasFilter 接到了 ArtTableHeader 的 has-active-filter（激活态的唯一来源）。
+ * 搜索钮的激活类/小点本身由 w1-list-ux.test.ts 用真组件单独守卫。 */
+describe('W1 列表页筛选可见性（深链展开 + 激活态接线）', () => {
+  const PAGES: [string, Component][] = [
+    ['容器', Containers],
+    ['镜像', Images],
+    ['数据卷', Volumes],
+    ['网络', Networks],
+    ['项目', Projects]
+  ]
+
+  it.each(PAGES)('%s页：带 ?host= 进入时搜索栏自动展开', async (_name, component) => {
+    const w = await mountPage(component, { host: 'h1' })
+    expect(w.find('[data-stub="ArtSearchBar"]').isVisible()).toBe(true)
+  })
+
+  it.each(PAGES)(
+    '%s页：不带 host 进入时搜索栏保持收起（不被无谓放大）',
+    async (_name, component) => {
+      const w = await mountPage(component, {})
+      expect(w.find('[data-stub="ArtSearchBar"]').isVisible()).toBe(false)
+    }
+  )
+
+  it('搜索钮的 has-active-filter 随 hasFilter 接线：带 host 为真，不带为假', async () => {
+    const withHost = await mountPage(Images, { host: 'h1' })
+    expect(withHost.find('[data-stub="ArtTableHeader"]').attributes('has-active-filter')).toBe(
+      'true'
+    )
+
+    const without = await mountPage(Images, {})
+    expect(without.find('[data-stub="ArtTableHeader"]').attributes('has-active-filter')).toBe(
+      'false'
+    )
+  })
+})
+
 describe('主机上下文：同组件 provide 之后自用（本次白屏的根因，逐条钉住）', () => {
   it('页面组件内 provideDockerHost() 后调 useDockerHost() 能拿到上下文', async () => {
     const { provideDockerHost, useDockerHost } = await import('../utils/host-context')

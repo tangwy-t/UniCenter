@@ -36,11 +36,28 @@
               >
                 <!-- 下拉选择 -->
                 <template v-if="item.type === 'select' && getProps(item)?.options">
-                  <ElOption
-                    v-for="option in getProps(item).options"
-                    v-bind="option"
-                    :key="option.value"
-                  />
+                  <!-- 分组模式（任一 option 带 group 字段）：按组折叠渲染；
+                       扁平用法（无 group）走下面的原路径，逐字不变。 -->
+                  <template v-if="isGroupedOptions(item)">
+                    <ElOptionGroup
+                      v-for="bucket in groupedOptions(item)"
+                      :key="bucket.group"
+                      :label="bucket.group"
+                    >
+                      <ElOption
+                        v-for="option in bucket.options"
+                        v-bind="optionAttrs(option)"
+                        :key="option.value"
+                      />
+                    </ElOptionGroup>
+                  </template>
+                  <template v-else>
+                    <ElOption
+                      v-for="option in getProps(item).options"
+                      v-bind="option"
+                      :key="option.value"
+                    />
+                  </template>
                 </template>
 
                 <!-- 复选框组 -->
@@ -115,6 +132,7 @@
     ElInput,
     ElInputTag,
     ElInputNumber,
+    ElOptionGroup,
     ElRadioGroup,
     ElRate,
     ElSelect,
@@ -301,6 +319,45 @@
     const props = { ...item }
     rootProps.forEach((key) => delete (props as Record<string, any>)[key])
     return props
+  }
+
+  /**
+   * 选项是否按**分组**渲染：任一 option 带非空 `group` 字段即为分组模式。
+   *
+   * 追加式能力 —— 不带 group 的既有扁平用法逐字不变（仍平铺 ElOption）。
+   */
+  const isGroupedOptions = (item: SearchFormItem) => {
+    const options = getProps(item)?.options
+    return (
+      Array.isArray(options) &&
+      options.some((o: any) => o && o.group !== undefined && o.group !== null && o.group !== '')
+    )
+  }
+
+  /**
+   * 把 options 按 `group` 字段折叠成 `[{ group, options }]`（保持**首次出现**的
+   * 组序，组内保持原顺序）。空/缺 group 归入空串组，组名由调用方（页面）给出。
+   */
+  const groupedOptions = (item: SearchFormItem) => {
+    const options: Record<string, any>[] = getProps(item)?.options || []
+    const order: string[] = []
+    const buckets = new Map<string, Record<string, any>[]>()
+    for (const o of options) {
+      const g = (o && o.group) || ''
+      if (!buckets.has(g)) {
+        buckets.set(g, [])
+        order.push(g)
+      }
+      buckets.get(g)!.push(o)
+    }
+    return order.map((g) => ({ group: g, options: buckets.get(g)! }))
+  }
+
+  /** 去掉 option 上的 `group` 字段再绑到 ElOption（避免它落成一个 DOM 属性）。 */
+  const optionAttrs = (option: Record<string, any>): any => {
+    const rest = { ...option }
+    delete rest.group
+    return rest
   }
 
   // 获取插槽

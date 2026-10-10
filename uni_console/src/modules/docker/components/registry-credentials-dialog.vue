@@ -1,8 +1,9 @@
 <template>
   <!-- 单根（single-root 守卫扫描全模块的 .vue）：ElDialog 是唯一根，与
        pull-progress-dialog 同挂法（原地渲染、append-to-body 未开）。删除确认
-       （DockerActionConfirm）挂在默认插槽里 —— EP 弹层各走 z-index 计数，后开的
-       确认恒在上层；页内没有第二个嵌套层，不需要搬到 body。 -->
+       （DockerActionConfirm）挂在默认插槽里，但该确认件自身开了 append-to-body
+       —— 渲染时 teleport 到 body，脱离本窗的 DOM 树（也脱离工作台 .pw-card 的
+       transform 包含块），后开的确认恒在上层。 -->
   <ElDialog
     :model-value="modelValue"
     :title="mode === 'form' ? (editing ? '编辑凭据' : '新增凭据') : '仓库凭据'"

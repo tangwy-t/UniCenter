@@ -30,6 +30,14 @@
     }
   }
 
+  // 数字列排版（Wave 3a）：tabular-nums 让数字按位对齐（等宽字形），配合列的
+  // align:'right' 读起来才是一列数字、不是一串散字。类存在才生效 —— is-num 只由
+  // 需要右对齐的数字列显式挂上（docker 侧），其余表零回归面。单元格在 ElTable
+  // 内部（scope 属性到不了），故 :deep。
+  :deep(.is-num) {
+    font-variant-numeric: tabular-nums;
+  }
+
   .pagination {
     display: flex;
     margin-top: 13px;

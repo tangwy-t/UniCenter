@@ -53,6 +53,14 @@
 
   /* Element Component Active Color */
   --art-el-active-color: #f2f4f5;
+
+  /* Monospace Font Family（等宽 token 的单一来源，Wave 3a）：镜像引用 / 容器 id /
+     端口 / 原始动作码这类「要读参数边界」的文本统一走它。此前全仓 20+ 处
+     var(--el-font-family-mono, <stack>) 都在吃 fallback（该变量从未定义），且三种
+     拼写并存（--el- / --art- / --el-font-family-monospace）—— 收敛为一个 --art-* token。
+     主题无关（明暗同栈），只在此定义一次。 */
+  --art-font-family-mono:
+    ui-monospace, 'SFMono-Regular', 'SF Mono', Consolas, 'Liberation Mono', Menlo, monospace;
 }
 
 /* ==================== Dark Mode Variables ==================== */

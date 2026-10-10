@@ -1,6 +1,6 @@
 <template>
   <!-- 单根（single-root 守卫在库：布局的 Transition 只支持单根，双根切页白屏）。 -->
-  <div class="docker-containers-page art-full-height">
+  <div ref="pageRoot" class="docker-containers-page art-full-height">
     <ArtSearchBar
       v-show="showSearchBar"
       v-model="searchForm"
@@ -20,6 +20,7 @@
       <ArtTableHeader
         v-model:showSearchBar="showSearchBar"
         :loading="loading"
+        :has-active-filter="hasFilter"
         layout="search,refresh,size,fullscreen,settings"
         @refresh="reloadAll"
       >
@@ -56,15 +57,14 @@
               :title="autoRefresh ? '关闭自动刷新（每 10 秒）' : '开启自动刷新（每 10 秒）'"
               @click="autoRefresh = !autoRefresh"
             />
-            <!-- total 如实报全量、items 截 500：截断必须说出口，否则用户以为
-                 「筛选完了就这么多」而漏看排在 500 名之后的行。
+            <!-- 计数（total = 过滤后全量，翻页由分页器表达 —— 不再有「列表显示前 N 条」
+                 那半句）+ 不可用主机清单 + 静默刷新失败标注。
                  只在 pageState=ready（握有数据）时报数 —— 首拉/失败/无可管主机时
                  报「共 0 个」是假话（数据面不得伪装新鲜）。 -->
-            <span v-if="pageState === 'ready'" class="docker-count">
-              共 {{ total }} 个容器<template v-if="truncated">
-                · 列表显示前 {{ rows.length }} 条</template
-              >
-            </span>
+            <span v-if="pageState === 'ready'" class="docker-count">共 {{ total }} 个容器</span>
+            <!-- 部分主机不可用（Wave 2）：采集失败的主机是一次「数据不全」的硬事实，
+                 只列主机名 + reason 原文，不加解释句（页面零解释文案）。零值不渲染。 -->
+            <span v-if="unavailableText" class="docker-refresh-note">{{ unavailableText }}</span>
             <!-- 静默刷新失败：保留最后已知清单并说出口（与镜像/卷/网络页 的
                  docker-refresh-note 同一形态：小字、琥珀 token）。 -->
             <span v-if="refreshError" class="docker-refresh-note">刷新失败，正在显示上次结果</span>
@@ -97,6 +97,10 @@
           :has-filter="hasFilter"
           :pending-id="pendingId"
           :batch-busy="batchBusy"
+          :pagination="pagination"
+          @pagination:size-change="handleSizeChange"
+          @pagination:current-change="handleCurrentChange"
+          @sort-change="handleSortChange"
           @menu-select="onMenuSelect"
           @open-detail="(row) => openDetail(row)"
           @selection-change="onSelectionChange"
@@ -111,6 +115,7 @@
           :selected="selected"
           :busy="busy"
           :refresh="refreshSilent"
+          :bottom-offset="batchBottomOffset"
           @busy-change="batchBusy = $event"
         />
       </template>
@@ -149,7 +154,7 @@
    * 交给表体自身（WorkloadTable 的 ArtTable :loading），首拉失败走紧凑失败态
    * （ElEmpty + 重试），刷新失败保留旧数据并在工具条标注「刷新失败，正在显示上次结果」。
    */
-  import { computed, ref, watch } from 'vue'
+  import { computed, nextTick, reactive, ref, watch } from 'vue'
   import { useRoute, useRouter } from 'vue-router'
   import { ElButton, ElCard, ElEmpty, ElMessage } from 'element-plus'
   import ArtButtonTable from '@/components/core/forms/art-button-table/index.vue'
@@ -180,9 +185,9 @@
   const {
     rows,
     total,
+    unavailableHosts,
     hosts,
     loading,
-    truncated,
     refreshError,
     pageState,
     autoRefresh,
@@ -193,9 +198,77 @@
     params: () => ({
       hostId: searchForm.value.host,
       state: searchForm.value.state,
-      keyword: searchForm.value.keyword
+      keyword: searchForm.value.keyword,
+      page: pagination.current,
+      pageSize: pagination.size,
+      sortBy: sortBy.value || undefined,
+      sortOrder: sortBy.value ? sortOrder.value : undefined
     })
   })
+
+  // ── 服务端分页 / 排序（Wave 2）────────────────────────────────────
+  // 分页态照 device：page/pageSize 显式发（pageSize 取 50，与后端默认一致）；载入后
+  // total 从响应同步（列由子组件 WorkloadTable 透传给 ArtTable）。排序只认白名单列
+  // （列 prop → 后端 sortBy 键：state|image + 通用 hostId|name），未知 prop 一律忽略。
+  const pagination = reactive({ current: 1, size: 50, total: 0 })
+  watch(total, (v) => {
+    pagination.total = v
+  })
+  /** 列 prop → 后端排序键（容器白名单：state/image + 通用 hostId/name）。 */
+  const SORT_KEYS: Record<string, string> = {
+    name: 'name',
+    image: 'image',
+    statusText: 'state',
+    hostname: 'hostId'
+  }
+  const sortBy = ref('')
+  const sortOrder = ref<'asc' | 'desc'>('asc')
+  function handleSortChange({ prop, order }: { prop?: string; order?: string | null }) {
+    const key = prop ? SORT_KEYS[prop] : undefined
+    if (!key) return
+    if (order === 'ascending') {
+      sortBy.value = key
+      sortOrder.value = 'asc'
+    } else if (order === 'descending') {
+      sortBy.value = key
+      sortOrder.value = 'desc'
+    } else {
+      // 三态循环的第三态：清回默认排序（sortBy 空即忽略方向）。
+      sortBy.value = ''
+    }
+    pagination.current = 1
+    void load()
+  }
+  function handleSizeChange(size: number) {
+    pagination.size = size
+    pagination.current = 1
+    void load()
+  }
+  function handleCurrentChange(current: number) {
+    pagination.current = current
+    void load()
+  }
+
+  /** 部分主机不可用（Wave 2）：只列主机名 + reason 原文（页面零解释文案）。 */
+  const unavailableText = computed(() =>
+    unavailableHosts.value.length === 0
+      ? ''
+      : `${unavailableHosts.value.length} 台主机不可用：` +
+        unavailableHosts.value.map((h) => `${h.hostname || h.hostId}（${h.reason}）`).join('、')
+  )
+
+  // ── 批量栏吸底 × 分页器（Wave 2）──────────────────────────────────
+  // 分页器渲染在表内底部、批量栏（sticky bottom:0）之前 —— 不处理则吸底块会盖住
+  // 分页器。把吸底块的 sticky bottom 抬到分页器上缘（= 分页器高度 + 间距，间距照
+  // ArtTable 的 PAGINATION_SPACING=6），二者不叠。数据/加载变化后重测（分页器随
+  // 数据出现/消失、随断点换行改变高度）；jsdom 里 offsetHeight=0 → 退回 bottom:0。
+  const pageRoot = ref<HTMLElement>()
+  const batchBottomOffset = ref(0)
+  function measureBatchOffset() {
+    const el = pageRoot.value?.querySelector('.pagination') as HTMLElement | null
+    batchBottomOffset.value = el ? el.offsetHeight + 6 : 0
+  }
+  watch([rows, loading, pagination], () => nextTick(measureBatchOffset), { flush: 'post' })
 
   const hasFilter = computed(
     () =>
@@ -204,7 +277,11 @@
       Boolean(searchForm.value.host)
   )
 
-  const hostOptions = computed(() => hosts.value.map((h) => ({ label: hostLabel(h), value: h.id })))
+  // 主机选项按分组渲染（ArtSearchBar 追加式分组能力：option 带 group 即分组）。
+  // 无分组的归入「未分组」组；组名是数据分类，不是解释文案。
+  const hostOptions = computed(() =>
+    hosts.value.map((h) => ({ label: hostLabel(h), value: h.id, group: h.group || '未分组' }))
+  )
 
   const searchItems = computed(() => [
     {
@@ -241,28 +318,43 @@
   ])
 
   function onSearch() {
-    // 服务端过滤：搜索按钮即重拉（无分页可重置）。
+    // 服务端过滤：搜索按钮即重拉，筛选变化回第一页。
     showSearchBar.value = true
+    pagination.current = 1
     void load()
   }
 
   function onReset() {
     searchForm.value = {}
+    pagination.current = 1
     void load()
   }
 
-  // `/docker/containers?host=` 深链兼容（总览主机卡片的既有链路）：query 里的主机
-  // 作为**主机筛选初始值** —— 单向（用户改筛选不回写 query，host 从此是筛选状态
-  // 而不是页面状态）。8a 起 ?host 不再与 ?id 结伴（详情已是独立页），host 语义不变。
+  // `/docker/containers?host=&state=` 深链兼容：query 里的主机/状态作为**筛选初始值**
+  // —— 单向（用户改筛选不回写 query，host/state 从此是筛选状态而不是页面状态）。
+  // ?host 是总览主机卡片的既有链路（8a 起不再与 ?id 结伴，详情已是独立页）；
+  // ?state=stopped 是总览异常清单的出口（Wave 3b 把出口指向这里，此前无代码消费、
+  // 是死链 —— 本波接线）。两条一起 watch：合并成一次首拉，避免两个 immediate watch
+  // 在挂载时各拉一次。
+  let filterInited = false
   watch(
-    () => route.query.host,
-    (raw, old) => {
-      const id = raw ? String(raw) : ''
-      const had = searchForm.value.host ?? ''
-      searchForm.value.host = id
-      // immediate 首跑（old 为 undefined）必拉一次；此后仅 query 真的变化时重拉 ——
-      // 没 host 深链时 id 与 had 都是 ''，靠 old 区分「首次进入」与「同值重复」。
-      if (id !== had || old === undefined) void load()
+    [() => route.query.host, () => route.query.state],
+    ([rawHost, rawState]) => {
+      const host = rawHost ? String(rawHost) : ''
+      // state 只在 query 有值时写入（空串下发给端点无意义；undefined = 不过滤）。
+      const state = rawState ? String(rawState) : undefined
+      const hadHost = searchForm.value.host ?? ''
+      const hadState = searchForm.value.state ?? ''
+      searchForm.value.host = host
+      searchForm.value.state = state
+      // 深链进入时自动展开搜索栏：从总览下钻进来的人看到的是一张被过滤的表，
+      // 筛选线索必须在明处（面板不展开则看不出为什么少了）。
+      if (host || state) showSearchBar.value = true
+      // 筛选变化（含深链首拉）回第一页。
+      pagination.current = 1
+      // 首跑（filterInited=false）必拉一次；此后仅 query 真的变化时重拉。
+      if (host !== hadHost || state !== hadState || !filterInited) void load()
+      filterInited = true
     },
     { immediate: true }
   )

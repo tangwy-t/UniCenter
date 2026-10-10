@@ -36,7 +36,7 @@
     </ElDropdown>
 
     <!-- 选中一版后的详情：可核对的信息 + 一键回滚（回滚仍有独立强确认，由调用方弹）。 -->
-    <ElDialog v-model="detail.visible" title="备份详情" width="min(460px, 92vw)">
+    <ElDialog v-model="detail.visible" title="备份详情" width="min(460px, 92vw)" append-to-body>
       <div v-if="detail.backup" class="backup-history__detail">
         <div class="backup-history__row">
           <span class="backup-history__label">备份时间</span>

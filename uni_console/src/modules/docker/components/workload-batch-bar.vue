@@ -1,51 +1,68 @@
 <template>
   <!-- 单根包装（single-root 守卫扫全模块 .vue）：批量栏与删除确认弹窗是兄弟节点。 -->
   <div class="wkl-batch-root">
-    <!-- 勾选栏（spec §11.1）：批量动作的入口。只有选中时才有意义，未选中时不占版面。 -->
-    <div v-if="selected.length" class="wkl-batch">
-      <span class="wkl-batch__count">已选 {{ selected.length }} 项</span>
-      <ElButton v-if="canManage" size="small" :disabled="disabled" @click="run('container:start')">
-        启动
-      </ElButton>
-      <ElButton v-if="canManage" size="small" :disabled="disabled" @click="run('container:stop')">
-        停止
-      </ElButton>
-      <ElButton
-        v-if="canManage"
-        size="small"
-        :disabled="disabled"
-        @click="run('container:restart')"
-      >
-        重启
-      </ElButton>
-      <ElButton
-        v-if="canDelete"
-        size="small"
-        type="danger"
-        plain
-        :disabled="disabled"
-        @click="openRemove"
-      >
-        删除…
-      </ElButton>
-    </div>
+    <!-- 吸底批量区（spec §11.1）：勾选栏 + 波次反馈收在同一块里，选中/批量期间贴在
+         表卡可视区底缘（sticky）—— 行数多时原「留在文档流尾部」的入口会被挤到可视
+         区外（实拍选中后入口被裁 / 完全不可见）。勾选栏只有选中时才有意义；波次反馈
+         不依赖勾选（批量期间列表重拉会让勾选闪空），故本块的 v-if 是二者的并集。
+         `bottomOffset`：本波引入分页器后，分页器渲染在表内底部（本块之后）；把吸底块
+         的 sticky bottom 抬到分页器上缘（= 分页器高度 + 间距）即与之不重叠。零值
+         （未传 / 无分页器）时退回 CSS 的 bottom: 0，行为与 W1 完全一致。 -->
+    <div
+      v-if="selected.length || waveCurrent || waveNotes.length"
+      class="wkl-batch"
+      :style="bottomOffset > 0 ? { bottom: bottomOffset + 'px' } : undefined"
+    >
+      <template v-if="selected.length">
+        <span class="wkl-batch__count">已选 {{ selected.length }} 项</span>
+        <ElButton
+          v-if="canManage"
+          size="small"
+          :disabled="disabled"
+          @click="run('container:start')"
+        >
+          启动
+        </ElButton>
+        <ElButton v-if="canManage" size="small" :disabled="disabled" @click="run('container:stop')">
+          停止
+        </ElButton>
+        <ElButton
+          v-if="canManage"
+          size="small"
+          :disabled="disabled"
+          @click="run('container:restart')"
+        >
+          重启
+        </ElButton>
+        <ElButton
+          v-if="canDelete"
+          size="small"
+          type="danger"
+          plain
+          :disabled="disabled"
+          @click="openRemove"
+        >
+          删除…
+        </ElButton>
+      </template>
 
-    <!-- 波次推进（6d）：跨主机批量按主机分波、逐波推进 —— 当前波给「正在执行 主机 B
-         （3/12）」的节奏行，完成的波逐行给波级结论（「主机 A：12/12 成功（web、…）」，
-         成功项列名、失败项带原因；拼装见 utils/batch 的 waveConclusion）。
-         渲染不依赖勾选：批量期间列表重拉会让勾选闪空（行对象被换掉），反馈行跟着
-         勾选消失的话恰好在最该看的时候看不见。下一轮批量开始时清空重记。 -->
-    <div v-if="waveCurrent || waveNotes.length" class="wkl-batch__waves">
-      <div v-if="waveCurrent" class="wkl-batch__wave is-current">
-        正在执行 {{ waveCurrent.host }}…（{{ waveCurrent.done }}/{{ waveCurrent.total }}）
-      </div>
-      <div
-        v-for="(note, i) in waveNotes"
-        :key="i"
-        class="wkl-batch__wave"
-        :class="{ 'is-failed': note.failed }"
-      >
-        {{ note.text }}
+      <!-- 波次推进（6d）：跨主机批量按主机分波、逐波推进 —— 当前波给「正在执行 主机 B
+           （3/12）」的节奏行，完成的波逐行给波级结论（「主机 A：12/12 成功（web、…）」，
+           成功项列名、失败项带原因；拼装见 utils/batch 的 waveConclusion）。
+           渲染不依赖勾选：批量期间列表重拉会让勾选闪空（行对象被换掉），反馈行跟着
+           勾选消失的话恰好在最该看的时候看不见。下一轮批量开始时清空重记。 -->
+      <div v-if="waveCurrent || waveNotes.length" class="wkl-batch__waves">
+        <div v-if="waveCurrent" class="wkl-batch__wave is-current">
+          正在执行 {{ waveCurrent.host }}…（{{ waveCurrent.done }}/{{ waveCurrent.total }}）
+        </div>
+        <div
+          v-for="(note, i) in waveNotes"
+          :key="i"
+          class="wkl-batch__wave"
+          :class="{ 'is-failed': note.failed }"
+        >
+          {{ note.text }}
+        </div>
       </div>
     </div>
 
@@ -125,8 +142,13 @@
       busy?: boolean
       /** 成功后的列表重拉（useDockerCmds 的 refresh）。 */
       refresh?: () => void | Promise<void>
+      /**
+       * 吸底块从表卡底缘上抬的像素（Wave 2：分页器高度 + 间距）——留出分页器高度，
+       * 二者不重叠。缺省 0 = 退回 CSS 的 bottom: 0（无分页器时与 W1 一致）。
+       */
+      bottomOffset?: number
     }>(),
-    { selected: () => [], busy: false, refresh: undefined }
+    { selected: () => [], busy: false, refresh: undefined, bottomOffset: 0 }
   )
 
   const emit = defineEmits<{
@@ -286,13 +308,24 @@
     display: contents;
   }
 
-  // 勾选栏：只有选中时出现（随勾选在表下展开）。
+  // 勾选栏（含波次反馈）：选中或批量期间出现（随勾选在表下展开）。
+  // 吸底（W1）：留在文档流尾部时，行数多则入口被挤到表卡可视区之外（实拍选中后
+  // 入口被裁 / 完全不可见）。sticky 把整块钉在表卡滚动区底缘 —— 短视口（单滚动链，
+  // app.scss 的 art-single-scroll-chain：卡体是 flex 列）与常规档（卡体 overflow:
+  // hidden，内容溢出被裁）两档都常驻可视。背景取卡片底色（同值，无接缝），顶部
+  // 1px 分隔把吸底块与滚过的表体分开；不设任何高度上限（表格高度政策不变）。
   .wkl-batch {
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
     align-items: center;
-    padding: 12px 16px 0;
+    padding: 12px 16px;
+
+    position: sticky;
+    bottom: 0;
+    z-index: 3; // 高于表内容（本波未引入分页器，值先留位）
+    background: var(--default-box-color);
+    box-shadow: 0 -1px 0 var(--el-border-color-lighter);
 
     &__count {
       color: var(--el-text-color-secondary);
@@ -300,13 +333,14 @@
     }
   }
 
-  // 波次反馈（6d）：勾选栏下方的行内账目。渲染不依赖勾选（批量中重拉会闪空勾选），
-  // 自占一栏；批量结束后保留到下一轮（批末 toast 转瞬即逝，账目要能回看）。
+  // 波次反馈（6d）：勾选栏下方的行内账目，随吸底块同排（自占一整行 —— flex-basis
+  // 100% 换行到入口行下方）。批量结束后保留到下一轮（批末 toast 转瞬即逝，账目要
+  // 能回看）。
   .wkl-batch__waves {
     display: flex;
     flex-direction: column;
     gap: 2px;
-    padding: 8px 16px 0;
+    flex: 1 0 100%;
   }
 
   .wkl-batch__wave {

@@ -5,6 +5,7 @@
     width="460px"
     :close-on-click-modal="false"
     :close-on-press-escape="!loading"
+    append-to-body
     @update:model-value="emit('update:modelValue', $event)"
     @closed="reset"
   >
