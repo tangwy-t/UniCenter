@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -92,11 +93,11 @@ func TestDeviceFindPagePrimaryIpAndAgentVersionFilters(t *testing.T) {
 }
 
 // TestDeviceSortWhitelistAndFallback 钉住排序契约的**守卫**：
-//   1. 白名单列映射正确：lastSeenAt→last_seen_at、hostname→hostname、
-//      agentVersion→agent_version（各列按 asc 排出的顺序必须真的变）；
-//   2. 非法 sortBy / sortOrder **静默回落默认**（last_seen_at DESC, id DESC），
-//      与「不传排序」逐字同行为 —— 不抛错、不 400（旧客户端不能断）；
-//   3. 任意方向都带 id DESC 锚（并列值不抖动）。
+//  1. 白名单列映射正确：lastSeenAt→last_seen_at、hostname→hostname、
+//     agentVersion→agent_version（各列按 asc 排出的顺序必须真的变）；
+//  2. 非法 sortBy / sortOrder **静默回落默认**（last_seen_at DESC, id DESC），
+//     与「不传排序」逐字同行为 —— 不抛错、不 400（旧客户端不能断）；
+//  3. 任意方向都带 id DESC 锚（并列值不抖动）。
 func TestDeviceSortWhitelistAndFallback(t *testing.T) {
 	db := newDeviceTestDB(t)
 	old := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
@@ -454,5 +455,262 @@ func TestDeviceSetStatusAndDeleteReturnNotFoundSentinel(t *testing.T) {
 	// 命中：Delete 走软删，不报错
 	if err := repo.Delete(ctx, 1001); err != nil {
 		t.Fatalf("命中时 Delete 不应报错: %v", err)
+	}
+}
+
+// ── 主机分组 / 标签（平台级）──────────────────────────────────────────
+
+// seedDeviceGrouped 在 seedDeviceFull 之上补 group_name / tags —— 本组用例的主角。
+func seedDeviceGrouped(t *testing.T, db *gorm.DB, id uint64, instanceID, tokenHash, hostname,
+	primaryIP, agentVersion, group, tags string, seen *time.Time) {
+	t.Helper()
+	d := entity.Device{
+		BaseEntity: entity.BaseEntity{ID: id},
+		InstanceID: instanceID, TokenHash: tokenHash, Hostname: hostname,
+		OS: "linux", Arch: "amd64", AgentVersion: agentVersion, PrimaryIP: primaryIP,
+		GroupName: group, Tags: tags,
+		Status: entity.DeviceStatusEnabled, LastSeenAt: seen,
+	}
+	if err := db.Create(&d).Error; err != nil {
+		t.Fatalf("seed device: %v", err)
+	}
+}
+
+// TestDeviceHostGroupColumnsSchema 是主机分组/标签两列的 **schema 守卫**（本仓结构
+// 变更由 AutoMigrate 按 entity 建、无版本化 DDL，故守卫落在测试而非迁移）：
+//  1. 两列存在；
+//  2. 两列 NOT NULL 且 DEFAULT ”（一次消除「NULL vs 空串」的二义）；
+//  3. 未设置分组/标签的设备，用原始 INSERT（绕过 GORM 字段填充）落库后读出为 ""，
+//     既不是 NULL 报错、也不是零值异常。
+//
+// 任一条失守都意味着实体的 gorm tag 被改坏（如有人把 not null/default 去掉），
+// 而这类破坏平时完全静默（读出来碰巧是 ""，页面上看不出来）。
+func TestDeviceHostGroupColumnsSchema(t *testing.T) {
+	db := newDeviceTestDB(t)
+	cols, err := db.Migrator().ColumnTypes(&entity.Device{})
+	if err != nil {
+		t.Fatalf("ColumnTypes: %v", err)
+	}
+	byName := make(map[string]gorm.ColumnType, len(cols))
+	for _, c := range cols {
+		byName[c.Name()] = c
+	}
+	for _, name := range []string{"group_name", "tags"} {
+		c, ok := byName[name]
+		if !ok {
+			t.Fatalf("device 表缺列 %s（entity.Device 字段或 autoMigrateEntities 清单可能被破坏）", name)
+		}
+		if nullable, ok := c.Nullable(); !ok || nullable {
+			t.Fatalf("%s 必须 NOT NULL（消除 NULL vs 空串的二义）, got nullable=%v ok=%v", name, nullable, ok)
+		}
+		def, ok := c.DefaultValue()
+		if !ok {
+			t.Fatalf("%s 必须有 DEFAULT 值（滚动发布对加列的硬要求）", name)
+		}
+		// 不同方言对空串默认的取词不同（SQLite 回 "''"、MySQL 回 ""），故按「去引号后为空」
+		// 判定，而不是死抠字面量。
+		if strings.Trim(def, `'"`) != "" {
+			t.Fatalf("%s 的 DEFAULT 应为空串, got %q", name, def)
+		}
+	}
+
+	// 缺省插入（不写这两列）落库为 '' 而非 NULL：用原始 INSERT 绕过 GORM 的字段填充。
+	if err := db.Exec("INSERT INTO device (id, instance_id, hostname, status) VALUES (?, ?, ?, ?)",
+		7001, "i-grp", "web-grp", entity.DeviceStatusEnabled).Error; err != nil {
+		t.Fatalf("raw insert: %v", err)
+	}
+	repo := NewDeviceRepository(db)
+	got, err := repo.FindByID(context.Background(), 7001)
+	if err != nil {
+		t.Fatalf("FindByID: %v", err)
+	}
+	if got.GroupName != "" || got.Tags != "" {
+		t.Fatalf("未设置分组/标签的设备应读出空串, got group=%q tags=%q", got.GroupName, got.Tags)
+	}
+}
+
+// TestDeviceFindPageGroupFilter 钉住主机分组筛选的语义：**单值精确匹配**
+// （不是 LIKE、不是逗号分隔多值）—— 选 "prod" 不得带出 "prod-archive"。
+func TestDeviceFindPageGroupFilter(t *testing.T) {
+	db := newDeviceTestDB(t)
+	seen := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	seedDeviceGrouped(t, db, 2001, "i1", "h1", "web-01", "10.0.0.1", "0.6.0", "prod", "web,cn", &seen)
+	seedDeviceGrouped(t, db, 2002, "i2", "h2", "web-02", "10.0.0.2", "0.6.0", "prod", "web", &seen)
+	seedDeviceGrouped(t, db, 2003, "i3", "h3", "db-01", "10.0.0.3", "0.6.0", "prod-archive", "db", &seen)
+	seedDeviceGrouped(t, db, 2004, "i4", "h4", "edge-01", "10.0.0.4", "0.6.0", "", "", &seen)
+	repo := NewDeviceRepository(db)
+	ctx := context.Background()
+
+	// 精确：prod 命中 2 台，绝不含 prod-archive（子串误命中）
+	list, total, err := repo.FindPage(ctx, &request.DeviceQuery{Group: "prod"}, seen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 2 || len(list) != 2 {
+		t.Fatalf("group=prod 应精确命中 2 台（不含 prod-archive）, got total=%d len=%d", total, len(list))
+	}
+	for _, d := range list {
+		if d.GroupName != "prod" {
+			t.Fatalf("group=prod 结果混入了 %q（子串误命中）", d.GroupName)
+		}
+	}
+	// 组名更长的不被误命中
+	_, total, _ = repo.FindPage(ctx, &request.DeviceQuery{Group: "prod-archive"}, seen)
+	if total != 1 {
+		t.Fatalf("group=prod-archive 应命中 1 台, got %d", total)
+	}
+	// 空 = 不过滤（含未分组那台共 4 台）
+	_, total, _ = repo.FindPage(ctx, &request.DeviceQuery{Group: ""}, seen)
+	if total != 4 {
+		t.Fatalf("group 空 = 不过滤，应 4 台, got %d", total)
+	}
+	// 不存在的组：0 台
+	_, total, _ = repo.FindPage(ctx, &request.DeviceQuery{Group: "nope"}, seen)
+	if total != 0 {
+		t.Fatalf("不存在的分组应 0 台, got %d", total)
+	}
+}
+
+// TestDeviceSortByGroup 钉住 group 列进了排序白名单（group→group_name），
+// 且它的加入**不放宽回落纪律**：非法 sortBy 仍静默回落默认、不得 400。
+func TestDeviceSortByGroup(t *testing.T) {
+	db := newDeviceTestDB(t)
+	seen := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	seedDeviceGrouped(t, db, 3001, "i1", "h1", "a", "10.0.0.1", "0.6.0", "beta", "", &seen)
+	seedDeviceGrouped(t, db, 3002, "i2", "h2", "b", "10.0.0.2", "0.6.0", "alpha", "", &seen)
+	seedDeviceGrouped(t, db, 3003, "i3", "h3", "c", "10.0.0.3", "0.6.0", "gamma", "", &seen)
+	repo := NewDeviceRepository(db)
+	ctx := context.Background()
+
+	list, _, err := repo.FindPage(ctx, &request.DeviceQuery{SortBy: "group", SortOrder: "asc"}, seen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idsOf := func(l []entity.Device) []uint64 {
+		ids := make([]uint64, len(l))
+		for i, d := range l {
+			ids[i] = d.ID
+		}
+		return ids
+	}
+	if got := idsOf(list); !equalIDs(got, []uint64{3002, 3001, 3003}) {
+		t.Fatalf("sortBy=group asc 顺序 = %v, want [3002 3001 3003]（alpha<beta<gamma）", got)
+	}
+
+	// 非法 sortBy（注入尝试）仍回落默认排序（last_seen_at DESC, id DESC = [3003 3002 3001]）
+	list, _, _ = repo.FindPage(ctx, &request.DeviceQuery{SortBy: "group_name; DROP TABLE device"}, seen)
+	if got := idsOf(list); !equalIDs(got, []uint64{3003, 3002, 3001}) {
+		t.Fatalf("非法 sortBy 必须回落默认排序, got %v", got)
+	}
+}
+
+// TestDeviceUpdateGroupTagsPartialSemantics 钉住 UpdateGroupTags 的**部分更新**语义（③）：
+//   - group 与 tags 都是 *string：nil = 不动该列、空串 = 清空；
+//   - 只传 group 时 tags 不动（反之亦然）；
+//   - 空串用 map 形式的 Updates 让零值也落库（struct 形式会跳过）；
+//   - 双 nil 命中行是 no-op、不改动；不存在的 id 无论单列还是双 nil 都必须报 ErrNotFound。
+func TestDeviceUpdateGroupTagsPartialSemantics(t *testing.T) {
+	db := newDeviceTestDB(t)
+	seen := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	seedDeviceGrouped(t, db, 4001, "i1", "h1", "web-01", "10.0.0.1", "0.6.0", "prod", "web,cn", &seen)
+	repo := NewDeviceRepository(db)
+	ctx := context.Background()
+	strp := func(s string) *string { return &s }
+
+	read := func() (string, string) {
+		d, err := repo.FindByID(ctx, 4001)
+		if err != nil {
+			t.Fatalf("FindByID: %v", err)
+		}
+		return d.GroupName, d.Tags
+	}
+
+	// 只传 group：tags 必须保持
+	if err := repo.UpdateGroupTags(ctx, 4001, strp("staging"), nil); err != nil {
+		t.Fatalf("UpdateGroupTags: %v", err)
+	}
+	if g, tg := read(); g != "staging" || tg != "web,cn" {
+		t.Fatalf("只传 group 时 tags 不得变动: group=%q tags=%q", g, tg)
+	}
+
+	// 只传 tags：group 必须保持
+	if err := repo.UpdateGroupTags(ctx, 4001, nil, strp("db,cn")); err != nil {
+		t.Fatalf("UpdateGroupTags: %v", err)
+	}
+	if g, tg := read(); g != "staging" || tg != "db,cn" {
+		t.Fatalf("只传 tags 时 group 不得变动: group=%q tags=%q", g, tg)
+	}
+
+	// 空串 = 清空（map 形式 Updates 让零值也落库）
+	if err := repo.UpdateGroupTags(ctx, 4001, strp(""), strp("")); err != nil {
+		t.Fatalf("UpdateGroupTags: %v", err)
+	}
+	if g, tg := read(); g != "" || tg != "" {
+		t.Fatalf("空串必须清空: group=%q tags=%q", g, tg)
+	}
+
+	// 双 nil：命中行 → no-op 不报错，且不改动
+	if err := repo.UpdateGroupTags(ctx, 4001, nil, nil); err != nil {
+		t.Fatalf("双 nil 命中行不得报错: %v", err)
+	}
+	if g, tg := read(); g != "" || tg != "" {
+		t.Fatalf("双 nil 不得改动: group=%q tags=%q", g, tg)
+	}
+}
+
+// TestDeviceUpdateGroupTagsMissingRowErrors 钉住「不存在的 id」契约：单列与双 nil
+// 两条路径都必须返回 ErrNotFound 哨兵，且兼容既有的 gorm.ErrRecordNotFound 判定。
+func TestDeviceUpdateGroupTagsMissingRowErrors(t *testing.T) {
+	db := newDeviceTestDB(t)
+	repo := NewDeviceRepository(db)
+	ctx := context.Background()
+	strp := func(s string) *string { return &s }
+
+	cases := []struct {
+		name         string
+		group, tags  *string
+	}{
+		{"只传 group", strp("prod"), nil},
+		{"只传 tags", nil, strp("web")},
+		{"双 nil", nil, nil},
+	}
+	for _, c := range cases {
+		err := repo.UpdateGroupTags(ctx, 9999, c.group, c.tags)
+		if !errors.Is(err, ErrNotFound) {
+			t.Fatalf("%s：不存在的 id 必须报 ErrNotFound 哨兵, got %v", c.name, err)
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			t.Fatalf("%s：哨兵必须兼容 gorm.ErrRecordNotFound, got %v", c.name, err)
+		}
+		if errors.Is(err, errOtherRepoFailure) {
+			t.Fatalf("%s：哨兵不得与无关错误混淆, got %v", c.name, err)
+		}
+	}
+}
+
+// TestDeviceUpdateGroupTagsIdempotentReplayIsNotNotFound 钉住「重放同一值不报 404」：
+// 把分组/标签设为它们已经是的值（值未改变）是合法 no-op，绝不是「设备不存在」。
+//
+// 这条守的是 UpdateGroupTags 里 RowsAffected==0 的分支：MySQL 默认把「值未改变的
+// UPDATE」计为 0 行受影响，若直接据此报 ErrNotFound，用户重放同一次 PATCH 就会看到
+// 「设备不存在」。（SQLite 夹具把同值更新也计入受影响行，故此测试在夹具上无法触发
+// 那条分支，但仍钉住「重放必须无错」这一契约。）
+func TestDeviceUpdateGroupTagsIdempotentReplayIsNotNotFound(t *testing.T) {
+	db := newDeviceTestDB(t)
+	seen := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	seedDeviceGrouped(t, db, 4001, "i1", "h1", "web-01", "10.0.0.1", "0.6.0", "prod", "web,cn", &seen)
+	repo := NewDeviceRepository(db)
+	ctx := context.Background()
+	strp := func(s string) *string { return &s }
+
+	if err := repo.UpdateGroupTags(ctx, 4001, strp("prod"), strp("web,cn")); err != nil {
+		t.Fatalf("重放同一分组值必须 no-op（不得报未命中）: %v", err)
+	}
+	d, err := repo.FindByID(ctx, 4001)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.GroupName != "prod" || d.Tags != "web,cn" {
+		t.Fatalf("重放后值不得变动: group=%q tags=%q", d.GroupName, d.Tags)
 	}
 }

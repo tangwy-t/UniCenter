@@ -11,6 +11,7 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/request"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/response"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/apperror"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockerstate"
 	agentproto "github.com/tangwy-t/UniCenter/uni_protocol"
@@ -266,19 +267,12 @@ func TestDockerWorkloadsKeywordCaseInsensitive(t *testing.T) {
 	}
 }
 
-// TestDockerWorkloadsCap 上限 500 条且**截断先报全量**：Total 是截断前的真数，
-// Items 只留排序后的前 500（砍掉的是尾部，不是运气）。
-func TestDockerWorkloadsCap(t *testing.T) {
-	mr := miniredis.RunT(t)
-	rdb := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
-	store := dockerstate.NewStore(rdb)
-	ctx := context.Background()
-	now := time.Now()
-	svc := newDockerOverviewSvc(t, store, now)
-
-	// 主机 7 报 600 个容器（超上限），主机 8 报 1 个（排在 7 之后，截断后不在场）。
-	big := make([]agentproto.DockerContainer, 0, 600)
-	for i := 0; i < 600; i++ {
+// seedWorkloadsBig 造「主机 7 报 n 个 dead-XXX（排序在前）+ 主机 8 报 1 个 ok
+// （排序在其后）」的数据 —— 分页与默认页大小用例共用同一副形状。
+func seedWorkloadsBig(t *testing.T, store *dockerstate.Store, ctx context.Context, now time.Time, n int) {
+	t.Helper()
+	big := make([]agentproto.DockerContainer, 0, n)
+	for i := 0; i < n; i++ {
 		big = append(big, overviewContainer(fmt.Sprintf("dead-%03d", i), "exited", false))
 	}
 	if err := store.Save(ctx, 7, &agentproto.DockerState{T: now.UnixMilli(), DockerOK: true,
@@ -289,26 +283,221 @@ func TestDockerWorkloadsCap(t *testing.T) {
 		Containers: []agentproto.DockerContainer{overviewContainer("ok", "running", false)}}, now); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestDockerWorkloadsPagination 真分页：601 条数据、page=2&pageSize=100 →
+// Total=601（过滤后全量）、len(Items)=100、Items[0] 是**排序后的第 101 条**
+// （钉住「先排序后切片」—— 先切片会拿到枚举运气的前 100，页边界就抖）。
+func TestDockerWorkloadsPagination(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rdb := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	store := dockerstate.NewStore(rdb)
+	ctx := context.Background()
+	now := time.Now()
+	svc := newDockerOverviewSvc(t, store, now)
+	seedWorkloadsBig(t, store, ctx, now, 600)
+
+	q := &request.DockerWorkloadQuery{}
+	q.Page, q.PageSize = 2, 100
+	resp, err := svc.Workloads(ctx, q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Total != 601 {
+		t.Fatalf("Total 必须是过滤后全量 = 601, got %d", resp.Total)
+	}
+	if resp.Page != 2 || resp.PageSize != 100 {
+		t.Fatalf("生效页参数必须回显: page=%d pageSize=%d", resp.Page, resp.PageSize)
+	}
+	if len(resp.Items) != 100 {
+		t.Fatalf("第 2 页应收 100 条, got %d", len(resp.Items))
+	}
+	// 排序后索引 100..199 = dead-100..dead-199（主机 7 的 dead-000..dead-599 在前 600）。
+	if resp.Items[0].Name != "dead-100" || resp.Items[99].Name != "dead-199" {
+		t.Fatalf("第 2 页必须是排序后的第 101..200 条: 首=%s 尾=%s", resp.Items[0].Name, resp.Items[99].Name)
+	}
+	for i, it := range resp.Items {
+		if it.HostID != 7 {
+			t.Fatalf("第 2 页应全来自主机 7: 第 %d 行 hostId=%d", i, it.HostID)
+		}
+	}
+}
+
+// TestDockerWorkloadsDefaultPageSize 不传 pageSize 时默认 50（不是「全部返回」，
+// 也不是 app.PageRequest 的 10）：601 条数据默认只回 50 条、Total 仍报 601。
+func TestDockerWorkloadsDefaultPageSize(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rdb := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	store := dockerstate.NewStore(rdb)
+	ctx := context.Background()
+	now := time.Now()
+	svc := newDockerOverviewSvc(t, store, now)
+	seedWorkloadsBig(t, store, ctx, now, 600)
 
 	resp, err := svc.Workloads(ctx, &request.DockerWorkloadQuery{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if resp.Total != 601 {
-		t.Fatalf("Total 必须是截断前全量 = 601, got %d", resp.Total)
+		t.Fatalf("Total 必须是全量 = 601, got %d", resp.Total)
 	}
-	if len(resp.Items) != 500 {
-		t.Fatalf("Items 必须截到 500 条, got %d", len(resp.Items))
+	if resp.Page != 1 || resp.PageSize != dockerDefaultPageSize {
+		t.Fatalf("默认页参数应为 1/%d, got %d/%d", dockerDefaultPageSize, resp.Page, resp.PageSize)
 	}
-	// 截断必须发生在排序之后：留下的是 dead-000..dead-499（主机 7 的前 500），
-	// 而不是枚举运气给出的任意 500 行。
-	if resp.Items[0].Name != "dead-000" || resp.Items[499].Name != "dead-499" {
-		t.Fatalf("截断必须砍排序后的尾部: 首=%s 尾=%s", resp.Items[0].Name, resp.Items[499].Name)
+	if len(resp.Items) != dockerDefaultPageSize {
+		t.Fatalf("默认应回 %d 条（不是全部 601）, got %d", dockerDefaultPageSize, len(resp.Items))
 	}
-	for i, it := range resp.Items {
-		if it.HostID != 7 {
-			t.Fatalf("前 500 行必须都来自主机 7（8 排在其后）: 第 %d 行 hostId=%d", i, it.HostID)
+	if resp.Items[0].Name != "dead-000" {
+		t.Fatalf("默认页首条应为排序后的第一条: %s", resp.Items[0].Name)
+	}
+}
+
+// TestDockerWorkloadsDefaultOrderUnchanged 评审回归点：不传 sortBy 时的次序与
+// 改造前逐字一致（hostId 升序、同主机按容器名升序）——数据量小于默认页大小时
+// 结果整份等同「排序后的全量」。
+func TestDockerWorkloadsDefaultOrderUnchanged(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rdb := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	store := dockerstate.NewStore(rdb)
+	ctx := context.Background()
+	now := time.Now()
+	svc := newDockerOverviewSvc(t, store, now)
+
+	// 主机 8 先写、主机 7 后写；主机 7 内部按非字母序写入（beta 先、alpha 后）。
+	if err := store.Save(ctx, 8, &agentproto.DockerState{T: now.UnixMilli(), DockerOK: true,
+		Containers: []agentproto.DockerContainer{overviewContainer("solo", "running", false)}}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(ctx, 7, &agentproto.DockerState{T: now.UnixMilli(), DockerOK: true,
+		Containers: []agentproto.DockerContainer{
+			overviewContainer("beta", "running", false),
+			overviewContainer("alpha", "exited", false),
+		}}, now); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := svc.Workloads(ctx, &request.DockerWorkloadQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []struct {
+		host uint64
+		name string
+	}{{7, "alpha"}, {7, "beta"}, {8, "solo"}}
+	if resp.Total != 3 || len(resp.Items) != 3 {
+		t.Fatalf("应回全量 3 条（< 默认页大小）: total=%d items=%d", resp.Total, len(resp.Items))
+	}
+	for i, w := range want {
+		if resp.Items[i].HostID != w.host || resp.Items[i].Name != w.name {
+			t.Fatalf("第 %d 行 = %d/%s, want %d/%s（默认次序不得变）",
+				i, resp.Items[i].HostID, resp.Items[i].Name, w.host, w.name)
 		}
+	}
+}
+
+// TestDockerWorkloadsSortWhitelistAndFallback 排序白名单（照抄
+// repository/device_test.go 的形状）：
+//   - 白名单键（image）asc/desc 真的改变顺序；
+//   - 非法 sortBy（含注入串）静默回落默认（不 400）；
+//   - 非法 sortOrder（带空格）回落 desc。
+func TestDockerWorkloadsSortWhitelistAndFallback(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rdb := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	store := dockerstate.NewStore(rdb)
+	ctx := context.Background()
+	now := time.Now()
+	svc := newDockerOverviewSvc(t, store, now)
+
+	// 命名与镜像名故意错位：默认按 name 排得 [alpha,beta,gamma]，
+	// 按 image 排得完全不同的顺序 —— 才能区分「sortBy 真的生效」。
+	if err := store.Save(ctx, 7, &agentproto.DockerState{T: now.UnixMilli(), DockerOK: true,
+		Containers: []agentproto.DockerContainer{
+			{ID: "a", Name: "alpha", Image: "zzz:1", State: "running"},
+			{ID: "b", Name: "beta", Image: "aaa:1", State: "running"},
+		}}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(ctx, 8, &agentproto.DockerState{T: now.UnixMilli(), DockerOK: true,
+		Containers: []agentproto.DockerContainer{
+			{ID: "g", Name: "gamma", Image: "mmm:1", State: "running"},
+		}}, now); err != nil {
+		t.Fatal(err)
+	}
+	order := func(resp *response.DockerWorkloadListResp) string {
+		s := ""
+		for _, it := range resp.Items {
+			s += fmt.Sprintf("%d/%s ", it.HostID, it.Name)
+		}
+		return s
+	}
+
+	// 默认（不传 sortBy）：现状次序 hostId 升序、同机按 name。
+	def, err := svc.Workloads(ctx, &request.DockerWorkloadQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := order(def); got != "7/alpha 7/beta 8/gamma " {
+		t.Fatalf("默认次序 = %q", got)
+	}
+
+	// 白名单键 image asc：aaa(beta)/mmm(gamma)/zzz(alpha)。
+	asc, err := svc.Workloads(ctx, &request.DockerWorkloadQuery{SortBy: "image", SortOrder: "asc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := order(asc); got != "7/beta 8/gamma 7/alpha " {
+		t.Fatalf("sortBy=image asc 次序 = %q", got)
+	}
+	// image desc：完全反向。
+	desc, err := svc.Workloads(ctx, &request.DockerWorkloadQuery{SortBy: "image", SortOrder: "desc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := order(desc); got != "7/alpha 8/gamma 7/beta " {
+		t.Fatalf("sortBy=image desc 次序 = %q", got)
+	}
+
+	// 非法 sortBy（注入尝试）→ 静默回落默认，不报错。
+	inj, err := svc.Workloads(ctx, &request.DockerWorkloadQuery{SortBy: "hostId; DROP TABLE x", SortOrder: "asc"})
+	if err != nil {
+		t.Fatalf("非法 sortBy 不得报错（静默回落）: %v", err)
+	}
+	if got := order(inj); got != "7/alpha 7/beta 8/gamma " {
+		t.Fatalf("非法 sortBy 必须回落默认, got %q", got)
+	}
+
+	// 非法 sortOrder（带空格）→ 回落 desc（不是 asc）。
+	badOrder, err := svc.Workloads(ctx, &request.DockerWorkloadQuery{SortBy: "image", SortOrder: "DESC "})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := order(badOrder); got != "7/alpha 8/gamma 7/beta " {
+		t.Fatalf("非法 sortOrder 必须回落 desc, got %q", got)
+	}
+}
+
+// TestDockerWorkloadsOutOfRangePage 越界页（page 超总页数）→ 空 items + Total
+// 不变，且 items 为空数组而非 null（与 /docker/tasks 的越界语义同句）。
+func TestDockerWorkloadsOutOfRangePage(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rdb := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	store := dockerstate.NewStore(rdb)
+	ctx := context.Background()
+	now := time.Now()
+	svc := newDockerOverviewSvc(t, store, now)
+	seedWorkloadsBig(t, store, ctx, now, 3)
+
+	q := &request.DockerWorkloadQuery{}
+	q.Page, q.PageSize = 99, 10
+	resp, err := svc.Workloads(ctx, q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Total != 4 {
+		t.Fatalf("Total 不随越界页改变 = 4, got %d", resp.Total)
+	}
+	if len(resp.Items) != 0 || resp.Items == nil {
+		t.Fatalf("越界页应为空数组而非 null: %+v", resp.Items)
 	}
 }
 
@@ -351,13 +540,59 @@ func TestDockerWorkloadsReadFailureSkipsHost(t *testing.T) {
 	if resp.Items[0].HostID != 8 || resp.Items[0].Name != "console" {
 		t.Fatalf("留下的必须是读成功主机的那行: %+v", resp.Items[0])
 	}
-	// hostId 指向读失败主机：空表而非错误（与「未上报」同一句「没有容器」）。
+	// 行被跳过**且**该主机出现在不可用清单（Reason 非空）——「少了几行、少的是谁、
+	// 为什么」显式告知读者。
+	if len(resp.UnavailableHosts) != 1 {
+		t.Fatalf("读失败主机必须列进 UnavailableHosts: %+v", resp.UnavailableHosts)
+	}
+	if u := resp.UnavailableHosts[0]; u.HostID != 7 || u.Hostname != "uni-105" || u.Reason != dockerStateReadFailed {
+		t.Fatalf("UnavailableHosts 条目不符: %+v", u)
+	}
+	// hostId 指向读失败主机：空表而非错误（与「未上报」同一句「没有容器」），
+	// 且该主机同样列进不可用清单。
 	only, err := svc.Workloads(ctx, &request.DockerWorkloadQuery{HostID: 7})
 	if err != nil {
 		t.Fatalf("指向读失败主机不得报错: %v", err)
 	}
 	if only.Total != 0 || len(only.Items) != 0 {
 		t.Fatalf("读失败主机应给出空表: %+v", only)
+	}
+	if len(only.UnavailableHosts) != 1 || only.UnavailableHosts[0].HostID != 7 {
+		t.Fatalf("hostId 收窄后该主机仍须在不可用清单里: %+v", only.UnavailableHosts)
+	}
+}
+
+// TestDockerWorkloadsNeverReportedUnavailable 「从未上报」主机（集合里有它、快照键
+// 却没写过）也列进不可用清单，且 Reason 与「读失败」是两句不同的话。
+func TestDockerWorkloadsNeverReportedUnavailable(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rdb := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	store := dockerstate.NewStore(rdb)
+	ctx := context.Background()
+	now := time.Now()
+	svc := newDockerOverviewSvc(t, store, now)
+
+	if err := store.Save(ctx, 8, &agentproto.DockerState{T: now.UnixMilli(), DockerOK: true,
+		Containers: []agentproto.DockerContainer{overviewContainer("console", "running", false)}}, now); err != nil {
+		t.Fatal(err)
+	}
+	// 主机 7 只在 docker:hosts 集合里、没有快照键（SAdd 直接登记，不写 state）。
+	if err := rdb.SAdd(ctx, dockerstate.HostsKey, 7).Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := svc.Workloads(ctx, &request.DockerWorkloadQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Total != 1 || len(resp.Items) != 1 || resp.Items[0].HostID != 8 {
+		t.Fatalf("从未上报主机不得贡献行: %+v", resp)
+	}
+	if len(resp.UnavailableHosts) != 1 {
+		t.Fatalf("从未上报主机必须列进不可用清单: %+v", resp.UnavailableHosts)
+	}
+	if u := resp.UnavailableHosts[0]; u.HostID != 7 || u.Hostname != "uni-105" || u.Reason != dockerStateNeverReported {
+		t.Fatalf("从未上报的 Reason 应是另一句结论: %+v", u)
 	}
 }
 

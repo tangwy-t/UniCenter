@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -75,6 +76,61 @@ func TestDeviceListItemCarriesPrimaryIP(t *testing.T) {
 	}
 	if items[0].PrimaryIP != "10.1.2.3" {
 		t.Fatalf("列表项 primaryIp = %q, want 10.1.2.3（IPv4-mapped 必须归一）", items[0].PrimaryIP)
+	}
+}
+
+// TestDeviceListItemCarriesHostGroupAndTags 钉住「列表项带分组/标签」的投影：
+// entity 的 group_name / tags 必须原样进 DeviceListItem（Tags 保持逗号分隔串，
+// 服务端不拆分），且 group 筛选经 service 端到端生效。
+func TestDeviceListItemCarriesHostGroupAndTags(t *testing.T) {
+	svc, db, _, _ := newDeviceTestEnv(t)
+	ctx := context.Background()
+
+	rows := []*entity.Device{
+		{BaseEntity: entity.BaseEntity{ID: 2001}, InstanceID: "i-g1", TokenHash: "h-g1", Hostname: "web-01",
+			OS: "linux", Arch: "amd64", AgentVersion: "0.6.0",
+			Status: entity.DeviceStatusEnabled, GroupName: "prod", Tags: "web,cn"},
+		{BaseEntity: entity.BaseEntity{ID: 2002}, InstanceID: "i-g2", TokenHash: "h-g2", Hostname: "db-01",
+			OS: "linux", Arch: "amd64", AgentVersion: "0.6.0",
+			Status: entity.DeviceStatusEnabled, GroupName: "staging", Tags: "db"},
+	}
+	for _, d := range rows {
+		if err := db.Create(d).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 全量：两台都带出各自的分组/标签
+	pr, err := svc.List(ctx, &request.DeviceQuery{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	items, ok := pr.List.([]response.DeviceListItem)
+	if !ok {
+		t.Fatalf("List 元素类型 = %T, want []response.DeviceListItem", pr.List)
+	}
+	byID := map[uint64]response.DeviceListItem{}
+	for _, it := range items {
+		byID[it.ID] = it
+	}
+	if got := byID[2001]; got.Group != "prod" || got.Tags != "web,cn" {
+		t.Fatalf("2001 分组/标签投影丢值: group=%q tags=%q", got.Group, got.Tags)
+	}
+	if got := byID[2002]; got.Group != "staging" || got.Tags != "db" {
+		t.Fatalf("2002 分组/标签投影丢值: group=%q tags=%q", got.Group, got.Tags)
+	}
+
+	// 按分组筛选：只回 prod 那台，且其标签照常带出
+	pr, err = svc.List(ctx, &request.DeviceQuery{Group: "prod"})
+	if err != nil {
+		t.Fatalf("List(group=prod): %v", err)
+	}
+	items, _ = pr.List.([]response.DeviceListItem)
+	if len(items) != 1 || items[0].ID != 2001 {
+		t.Fatalf("group=prod 应只回 2001, got %+v", items)
+	}
+	if items[0].Group != "prod" || items[0].Tags != "web,cn" {
+		t.Fatalf("筛选后的项仍须带分组/标签: %+v", items[0])
 	}
 }
 
@@ -420,10 +476,11 @@ func mustErr2[T any](_ T, err error) error { return err }
 
 // stubDeviceRepo 是可注入错误的 DeviceRepository 桩（只为触发错误分支）。
 type stubDeviceRepo struct {
-	findErr      error
-	findDevice   *entity.Device
-	setStatusErr error
-	deleteErr    error
+	findErr        error
+	findDevice     *entity.Device
+	setStatusErr   error
+	updateGroupErr error
+	deleteErr      error
 }
 
 func (s *stubDeviceRepo) FindByID(context.Context, uint64) (*entity.Device, error) {
@@ -435,7 +492,12 @@ func (s *stubDeviceRepo) FindPage(context.Context, *request.DeviceQuery, time.Ti
 }
 
 func (s *stubDeviceRepo) SetStatus(context.Context, uint64, int8) error { return s.setStatusErr }
-func (s *stubDeviceRepo) Delete(context.Context, uint64) error          { return s.deleteErr }
+
+func (s *stubDeviceRepo) UpdateGroupTags(context.Context, uint64, *string, *string) error {
+	return s.updateGroupErr
+}
+
+func (s *stubDeviceRepo) Delete(context.Context, uint64) error { return s.deleteErr }
 
 // stubResourceRepo 是 DeviceResourceRepository 的最小桩。
 type stubResourceRepo struct {
@@ -535,5 +597,170 @@ func TestDeviceEnableDisableMapsRepositoryFailureToInternal(t *testing.T) {
 				t.Fatalf("Internal 必须携带原始 cause（便于日志定位）: %v", err)
 			}
 		})
+	}
+}
+
+// ── 主机分组 / 标签写路径（PATCH /devices/:id 的 service 半边）──────────────
+
+func deviceStrPtr(s string) *string { return &s }
+
+// TestDeviceServiceUpdateGroupTrimsAndValidates 钉住校验（④）：
+//   - 两端空白必须被 trim（存进去的是归一后的值）；
+//   - group ≤64、tags ≤255 按**字符数**计（CJK 按字符不按字节）；
+//   - 超长 → 400（用户输入校验显式报错，不静默截断）。
+func TestDeviceServiceUpdateGroupTrimsAndValidates(t *testing.T) {
+	svc, db, _, _ := newDeviceTestEnv(t)
+	ctx := context.Background()
+	if err := db.Create(&entity.Device{BaseEntity: entity.BaseEntity{ID: 1001},
+		InstanceID: "i1", Status: entity.DeviceStatusEnabled}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	// trim 生效
+	if err := svc.UpdateGroup(ctx, 1001, deviceStrPtr("  prod  "), deviceStrPtr("  web,cn ")); err != nil {
+		t.Fatalf("UpdateGroup: %v", err)
+	}
+	got, _ := svc.GetByID(ctx, 1001)
+	if got.Group != "prod" || got.Tags != "web,cn" {
+		t.Fatalf("trim 未生效: group=%q tags=%q", got.Group, got.Tags)
+	}
+
+	// 边界：恰好 64 / 255 字符（CJK 计数按字符）通过
+	if err := svc.UpdateGroup(ctx, 1001, deviceStrPtr(strings.Repeat("测", 64)), deviceStrPtr(strings.Repeat("标", 255))); err != nil {
+		t.Fatalf("恰好等于上限应通过: %v", err)
+	}
+	// 超长：65 / 256 字符 → 400
+	if err := svc.UpdateGroup(ctx, 1001, deviceStrPtr(strings.Repeat("测", 65)), nil); appErrStatus(err) != 400 {
+		t.Fatalf("group 65 字符必须 400, got %d err=%v", appErrStatus(err), err)
+	}
+	if err := svc.UpdateGroup(ctx, 1001, nil, deviceStrPtr(strings.Repeat("标", 256))); appErrStatus(err) != 400 {
+		t.Fatalf("tags 256 字符必须 400, got %d err=%v", appErrStatus(err), err)
+	}
+	// trim 后再判长：64 字符 + 两端空白 = 合法（证明判定发生在 trim 之后）
+	if err := svc.UpdateGroup(ctx, 1001, deviceStrPtr("  "+strings.Repeat("测", 64)+"  "), nil); err != nil {
+		t.Fatalf("trim 后等于上限应通过: %v", err)
+	}
+}
+
+// TestDeviceServiceUpdateGroupPartialSemantics 钉住部分更新语义：
+// 只传 group 时 tags 不动；传空串时清空；双 nil 是无副作用 no-op。
+func TestDeviceServiceUpdateGroupPartialSemantics(t *testing.T) {
+	svc, db, _, _ := newDeviceTestEnv(t)
+	ctx := context.Background()
+	if err := db.Create(&entity.Device{BaseEntity: entity.BaseEntity{ID: 1001},
+		InstanceID: "i1", GroupName: "prod", Tags: "web,cn",
+		Status: entity.DeviceStatusEnabled}).Error; err != nil {
+		t.Fatal(err)
+	}
+	read := func() (string, string) {
+		d, err := repository.NewDeviceRepository(db).FindByID(ctx, 1001)
+		if err != nil {
+			t.Fatalf("FindByID: %v", err)
+		}
+		return d.GroupName, d.Tags
+	}
+
+	// 只传 group：tags 不动
+	if err := svc.UpdateGroup(ctx, 1001, deviceStrPtr("staging"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if g, tg := read(); g != "staging" || tg != "web,cn" {
+		t.Fatalf("只更新 group 时 tags 不得变动: group=%q tags=%q", g, tg)
+	}
+
+	// 只传 tags：group 不动
+	if err := svc.UpdateGroup(ctx, 1001, nil, deviceStrPtr("db")); err != nil {
+		t.Fatal(err)
+	}
+	if g, tg := read(); g != "staging" || tg != "db" {
+		t.Fatalf("只更新 tags 时 group 不得变动: group=%q tags=%q", g, tg)
+	}
+
+	// 空串清空
+	if err := svc.UpdateGroup(ctx, 1001, deviceStrPtr(""), deviceStrPtr("")); err != nil {
+		t.Fatal(err)
+	}
+	if g, tg := read(); g != "" || tg != "" {
+		t.Fatalf("空串必须清空: group=%q tags=%q", g, tg)
+	}
+
+	// 双 nil：无副作用 no-op
+	if err := svc.UpdateGroup(ctx, 1001, nil, nil); err != nil {
+		t.Fatalf("双 nil 应是无副作用 no-op: %v", err)
+	}
+	if g, tg := read(); g != "" || tg != "" {
+		t.Fatalf("双 nil 不得改动: group=%q tags=%q", g, tg)
+	}
+}
+
+// TestDeviceServiceUpdateGroupNotFoundAndErrors 钉住错误映射：
+// 不存在的 id → 404（真仓储走哨兵）；DB 故障 → 500（不得伪装成 404）。
+func TestDeviceServiceUpdateGroupNotFoundAndErrors(t *testing.T) {
+	ctx := context.Background()
+
+	// 真仓储：不存在的设备 → 404
+	svc, _, _, _ := newDeviceTestEnv(t)
+	if err := svc.UpdateGroup(ctx, 999999, deviceStrPtr("prod"), nil); appErrStatus(err) != 404 {
+		t.Fatalf("不存在的设备必须 404, got %d err=%v", appErrStatus(err), err)
+	}
+	// 双 nil + 不存在的设备 → 同样 404（空对象也不能绕过存在性检查）
+	if err := svc.UpdateGroup(ctx, 999999, nil, nil); appErrStatus(err) != 404 {
+		t.Fatalf("双 nil + 不存在必须 404, got %d err=%v", appErrStatus(err), err)
+	}
+
+	// 桩：仓储故障 → 500 且带 cause
+	dbDown := fmt.Errorf("db: connection refused")
+	repo := &stubDeviceRepo{updateGroupErr: dbDown}
+	svcErr := NewDeviceService(repo, &stubResourceRepo{}, stubPurger{}, stubLatestReader{}, stubCfg{}, nil, nil, logger.NewNop())
+	err := svcErr.UpdateGroup(ctx, 1001, deviceStrPtr("prod"), nil)
+	if appErrStatus(err) != 500 {
+		t.Fatalf("DB 故障必须 500, got %d err=%v", appErrStatus(err), err)
+	}
+	if !errors.Is(err, dbDown) {
+		t.Fatalf("Internal 必须携带 cause: %v", err)
+	}
+
+	// 桩：未命中哨兵 → 404
+	repoMiss := &stubDeviceRepo{updateGroupErr: repository.ErrNotFound}
+	svcMiss := NewDeviceService(repoMiss, &stubResourceRepo{}, stubPurger{}, stubLatestReader{}, stubCfg{}, nil, nil, logger.NewNop())
+	if err := svcMiss.UpdateGroup(ctx, 999999, deviceStrPtr("prod"), nil); appErrStatus(err) != 404 {
+		t.Fatalf("未命中哨兵必须 404, got %d err=%v", appErrStatus(err), err)
+	}
+}
+
+// TestDeviceServiceUpdateGroupRoundTrip 端到端（⑥）：写完再 GET /devices 能读回新分组，
+// 且 group 筛选命中该设备 —— 证明写路径与读路径在同一份数据上闭环。
+func TestDeviceServiceUpdateGroupRoundTrip(t *testing.T) {
+	svc, db, _, _ := newDeviceTestEnv(t)
+	ctx := context.Background()
+	if err := db.Create(&entity.Device{BaseEntity: entity.BaseEntity{ID: 1001},
+		InstanceID: "i1", Hostname: "web-01", Status: entity.DeviceStatusEnabled}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.UpdateGroup(ctx, 1001, deviceStrPtr("prod"), deviceStrPtr("web,cn")); err != nil {
+		t.Fatalf("UpdateGroup: %v", err)
+	}
+
+	// 详情读回
+	detail, err := svc.GetByID(ctx, 1001)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Group != "prod" || detail.Tags != "web,cn" {
+		t.Fatalf("详情未读回新分组: group=%q tags=%q", detail.Group, detail.Tags)
+	}
+
+	// 列表 + 分组筛选读回
+	pr, err := svc.List(ctx, &request.DeviceQuery{Group: "prod"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, ok := pr.List.([]response.DeviceListItem)
+	if !ok {
+		t.Fatalf("列表元素类型 = %T", pr.List)
+	}
+	if len(items) != 1 || items[0].ID != 1001 || items[0].Group != "prod" || items[0].Tags != "web,cn" {
+		t.Fatalf("列表未按新分组读回: %+v", items)
 	}
 }

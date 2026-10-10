@@ -18,6 +18,7 @@ func All() []string {
 		PermDeviceDelete,
 		PermDeviceDisable,
 		PermDeviceEnable,
+		PermDeviceGroup,
 		PermDeviceList,
 		PermDeviceQuery,
 		PermDeviceReleaseDelete,
@@ -125,6 +126,12 @@ const (
 	PermDeviceDelete  = "device:delete"
 	PermDeviceEnable  = "device:enable"
 	PermDeviceDisable = "device:disable"
+	// PermDeviceGroup 是「写主机分组 / 标签」（PATCH /devices/:id 的部分更新）。
+	//
+	// 与 enable/disable/delete 一样是**管理侧写权限**，但独立成码：分组/标签是
+	// 平台级的分拣维度（同时被设备列表与 docker 主机清单消费），「能启停设备」
+	// 与「能改它的分组归属」是两种不同的能力，授权面分开授予。
+	PermDeviceGroup = "device:index:group"
 	// PermDeviceUpgrade 是「给设备下发升级/回滚目标」（单台 / 多选 / 按筛选）。
 	PermDeviceUpgrade = "device:upgrade"
 	// PermDeviceUpgradeGlobal 是「改全站目标版本」——它一次影响所有设备（含之后

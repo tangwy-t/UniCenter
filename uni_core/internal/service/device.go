@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/request"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/response"
@@ -39,6 +41,15 @@ const (
 	// 取 1 天：flush 每 5min 一轮，仍存在的资源每轮都会刷新 last_seen_at，
 	// 连续一天没刷新基本等于已卸载；同时容忍设备最长一天的离线。
 	resourceStaleMarkDays = 1
+)
+
+// 主机分组 / 标签的长度上限（**与 entity.Device 的列宽逐字一致**：
+// group_name size:64、tags size:255）。校验按**字符数**（rune）计，与 MySQL
+// varchar(n) 的「n 个字符」语义一致；超长在 service 层显式 400（用户输入校验），
+// 不静默截断 —— 截断会让用户以为整串存进去了。
+const (
+	maxGroupLen = 64
+	maxTagsLen  = 255
 )
 
 // DeviceService 是设备域的读写服务。
@@ -80,6 +91,7 @@ type DeviceRepository interface {
 	FindByID(ctx context.Context, id uint64) (*entity.Device, error)
 	FindPage(ctx context.Context, q *request.DeviceQuery, onlineSince time.Time) ([]entity.Device, int64, error)
 	SetStatus(ctx context.Context, id uint64, status int8) error
+	UpdateGroupTags(ctx context.Context, id uint64, group, tags *string) error
 	Delete(ctx context.Context, id uint64) error
 }
 
@@ -290,6 +302,54 @@ func (s *DeviceService) setStatus(ctx context.Context, id uint64, status int8) e
 	return nil
 }
 
+// UpdateGroup 写主机分组 / 标签（PATCH /devices/:id 的**部分更新**）。
+//
+// 语义（与 request.DeviceGroupUpdate 同源）：
+//   - group / tags 为 nil → 该字段保持不动；
+//   - 提供 "" → 清空该字段（未分组 / 无标签）；
+//   - 提供非空 → 覆盖（先 trim 两端空白）。
+//
+// 校验：group ≤ maxGroupLen、tags ≤ maxTagsLen（与列宽一致），超长 → 400 带清晰
+// 结论句。这是**用户输入校验**，必须显式报错 —— 与排序白名单「非法值静默回落」
+// 的取向不同：排序参数的非法值等价于「不排序」，而越界的分组名/标签没有合理的
+// 兜底解释，静默截断会让用户以为整串已经存进去。
+//
+// 未命中（设备不存在）由仓储的 ErrNotFound 哨兵 → 404；其它错误 → 500
+//（与 setStatus 同款映射，不把 DB 故障伪装成 404）。
+func (s *DeviceService) UpdateGroup(ctx context.Context, id uint64, group, tags *string) error {
+	normGroup, err := normalizeOptionalString("分组名", group, maxGroupLen)
+	if err != nil {
+		return err
+	}
+	normTags, err := normalizeOptionalString("标签", tags, maxTagsLen)
+	if err != nil {
+		return err
+	}
+	if err := s.repo.UpdateGroupTags(ctx, id, normGroup, normTags); err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return apperror.NotFound("设备不存在")
+		}
+		return apperror.Internal("内部错误", err)
+	}
+	return nil
+}
+
+// normalizeOptionalString 归一一个「提供即更新」的可选字符串字段：
+// trim 两端空白后按字符数校验上限。
+//
+// 返回 (nil, nil) 表示「未提供（保持不动）」；返回 (&值, nil) 表示归一后的值
+//（空串 = 清空）。超长 → 400，消息带上中文字段名与上限，直接给出结论。
+func normalizeOptionalString(label string, v *string, maxLen int) (*string, error) {
+	if v == nil {
+		return nil, nil
+	}
+	trimmed := strings.TrimSpace(*v)
+	if utf8.RuneCountInString(trimmed) > maxLen {
+		return nil, apperror.BadRequest(label + "长度不能超过 " + strconv.Itoa(maxLen) + " 个字符")
+	}
+	return &trimmed, nil
+}
+
 // Delete 软删设备，并**连带清理** Redis 侧（agent 水位/原始窗 + docker 快照与主机集合）
 // 与资源维度行。
 //
@@ -367,6 +427,9 @@ func (s *DeviceService) toListItem(d *entity.Device, w *agentmetrics.LatestSumma
 		// 列表也要按 IP 定位设备（详见 response.DeviceListItem.PrimaryIP）。
 		// 详情组装（GetByID）再覆盖一次同字段（值同源同口径，见其注释）。
 		PrimaryIP: normalizedIP(d.PrimaryIP),
+		// 平台级分组/标签：照 entity 原样带出（Tags 是逗号分隔串，服务端不拆）。
+		Group: d.GroupName,
+		Tags:  d.Tags,
 		// 升级字段全部来自升级域的同一份快照（含读时推导的相位）。
 		AgentUpgradeSupported: d.AgentUpgradeSupported == 1,
 		TargetVersion:         snap.EffectiveTargetVersion,

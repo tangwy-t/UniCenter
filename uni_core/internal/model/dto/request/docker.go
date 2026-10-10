@@ -81,6 +81,7 @@ type DockerCmdOptionsReq struct {
 // 非法值返回 400 结论句而不是静默忽略 —— 静默忽略会让用户以为「筛了但没生效」
 // （与 DeviceOverviewQuery.Ids 的取舍同一句话）。
 type DockerWorkloadQuery struct {
+	app.PageRequest
 	// HostID 限定单主机（兼容旧容器页按 host 切换的语义）。0 = 不过滤：
 	// 设备 id 是雪花值永不为 0，0 与「未传」同形，无需指针区分。
 	HostID uint64 `form:"hostId"`
@@ -90,6 +91,12 @@ type DockerWorkloadQuery struct {
 	State string `form:"state"`
 	// Keyword 是容器名或镜像名的子串匹配，大小写不敏感。
 	Keyword string `form:"keyword"`
+	// SortBy 排序白名单键（内存比较器；服务端是 Redis 快照切片，无 DB 列）。
+	// 未登记/非法值在服务端**静默回落默认**（不 400，避免旧客户端断），默认次序
+	// = 现状（hostId 升序、同主机按名称升序）。见 service 的 sortDockerRows。
+	SortBy string `form:"sortBy"`
+	// SortOrder 仅 asc / desc；未登记键下非法值回落 desc（默认键下 sortOrder 不参与）。
+	SortOrder string `form:"sortOrder"`
 }
 
 // DockerTasksQuery 是任务中心（GET /docker/tasks，6b）的查询参数。
@@ -138,6 +145,11 @@ type DockerEventHistoryQuery struct {
 }
 
 // ── 跨主机资源清单（9a：GET /docker/images|volumes|networks|projects）──────
+//
+// 四页与容器统一表同款：分页（app.PageRequest）+ 排序白名单（sortBy/sortOrder）。
+// sortBy 未登记 → 服务端静默回落默认次序（hostId 升序、同主机按名称升序），
+// sortOrder 仅 asc 生效、其余回落 desc —— 旧客户端、笔误参数都拿到与「不传排序」
+// 一致的行为，而不是被 400 挡在外面（与设备列表的排序纪律同族）。
 
 // DockerImageQuery 是跨主机镜像清单（GET /docker/images）的查询参数。
 //
@@ -147,6 +159,7 @@ type DockerEventHistoryQuery struct {
 // 开关只发 true，但 false 侧保留完整语义：值类型会把「显式 false」和「没传」
 // 压成同一个零值，等于让 API 失去一半表达力）。
 type DockerImageQuery struct {
+	app.PageRequest
 	// HostID 限定单主机。0 = 不过滤（雪花 id 永不为 0，无需指针区分）。
 	HostID uint64 `form:"hostId"`
 	// Keyword 是 repoTag 的子串匹配（大小写不敏感）：多个标签以空格连成一串再
@@ -156,30 +169,78 @@ type DockerImageQuery struct {
 	Dangling *bool `form:"dangling"`
 	// Unused 过滤未被任何容器使用的镜像。
 	Unused *bool `form:"unused"`
+	// SortBy 白名单键：hostId / name（首个 repoTag，悬空回落 ID）/ size / created。
+	// 未登记 → 静默回落默认次序。
+	SortBy string `form:"sortBy"`
+	// SortOrder 仅 asc 生效，其余回落 desc。
+	SortOrder string `form:"sortOrder"`
+}
+
+// ── 镜像版本一致性（本波：GET /docker/image-drift）──────────────────────
+
+// DockerImageDriftQuery 是跨主机镜像版本漂移视图（GET /docker/image-drift）的查询参数。
+//
+// 视图语义：以 **repoTag** 为行 —— 同一个标签在各主机上可能是不同的内容摘要
+//（digest），这一页就是把「同一标签的摘要分布」算出来（推新版本任务的前置：
+// 该推哪个；与验收：推齐了没）。
+//
+// 四个参数可选且相互独立（先分组、再关键字，逐层收窄）：
+//   - Group 按**主机分组**收窄（单值精确匹配；空 = 不过滤）。它收窄的是**主机范围**
+//     （哪些主机参与统计、哪些主机可能出现在 unavailableHosts），与「看哪些标签行」
+//     无关 —— 这与 hostId 在其余跨主机读面里的角色同族。
+//   - Keyword 按 repoTag 子串（大小写不敏感）收窄的是**标签行**，与主机范围无关。
+//   - SortBy 未登记 → 服务端静默回落默认次序（distinctDigests 降序、repoTag 升序作
+//     稳定锚）；SortOrder 仅 asc 生效、其余回落 desc。旧客户端/笔误参数拿到与
+//     「不传排序」一致的行为，而不是被 400 挡在外面（与四资源页同一条纪律）。
+//   - 分页复用 app.PageRequest（缺省 page=1/pageSize=50、页大小上限 100），
+//     与 Wave 2 的 dockerPageSlice 同口径。
+type DockerImageDriftQuery struct {
+	app.PageRequest
+	// Keyword 是 repoTag 的子串匹配（大小写不敏感）。
+	Keyword string `form:"keyword"`
+	// Group 按主机分组（设备行的 GroupName）单一精确匹配；空 = 不过滤。
+	// 它收窄主机范围，不参与标签行的匹配。
+	Group string `form:"group"`
+	// SortBy 排序白名单键：repoTag / hostCount / distinctDigests。
+	// 未登记 → 静默回落默认（distinctDigests 降序、repoTag 升序）。
+	SortBy string `form:"sortBy"`
+	// SortOrder 仅 asc 生效，其余回落 desc（默认键下 sortOrder 不参与）。
+	SortOrder string `form:"sortOrder"`
 }
 
 // DockerVolumeQuery 是跨主机卷清单（GET /docker/volumes）的查询参数。
 type DockerVolumeQuery struct {
+	app.PageRequest
 	// HostID 限定单主机。0 = 不过滤。
 	HostID uint64 `form:"hostId"`
 	// Keyword 是卷名的子串匹配（大小写不敏感）。
 	Keyword string `form:"keyword"`
 	// Unused 过滤未被任何容器挂载的卷。
 	Unused *bool `form:"unused"`
+	// SortBy 白名单键：hostId / name / size。未登记 → 静默回落默认次序。
+	SortBy string `form:"sortBy"`
+	// SortOrder 仅 asc 生效，其余回落 desc。
+	SortOrder string `form:"sortOrder"`
 }
 
 // DockerNetworkQuery 是跨主机网络清单（GET /docker/networks）的查询参数。
 type DockerNetworkQuery struct {
+	app.PageRequest
 	// HostID 限定单主机。0 = 不过滤。
 	HostID uint64 `form:"hostId"`
 	// Keyword 是网络名的子串匹配（大小写不敏感）。
 	Keyword string `form:"keyword"`
 	// Internal 过滤 internal 网络（不接外网的隔离网络）。
 	Internal *bool `form:"internal"`
+	// SortBy 白名单键：hostId / name / containers。未登记 → 静默回落默认次序。
+	SortBy string `form:"sortBy"`
+	// SortOrder 仅 asc 生效，其余回落 desc。
+	SortOrder string `form:"sortOrder"`
 }
 
 // DockerProjectQuery 是跨主机项目清单（GET /docker/projects）的查询参数。
 type DockerProjectQuery struct {
+	app.PageRequest
 	// HostID 限定单主机。0 = 不过滤。
 	HostID uint64 `form:"hostId"`
 	// Keyword 是项目名的子串匹配（大小写不敏感）。
@@ -188,4 +249,24 @@ type DockerProjectQuery struct {
 	// （partial 归入 stopped，与容器表同一句口径），合法值在 service 校验
 	// （那里给出 400 结论句）。项目态的细分由条目上的 state 字段承载。
 	State string `form:"state"`
+	// SortBy 白名单键：hostId / name / state / services。未登记 → 静默回落默认次序。
+	SortBy string `form:"sortBy"`
+	// SortOrder 仅 asc 生效，其余回落 desc。
+	SortOrder string `form:"sortOrder"`
+}
+
+// DockerImageTargetSaveReq 是声明镜像目标版本的请求（Wave 4c：POST /docker/image-targets）。
+//
+// 语义是 **upsert**：同 repoTag 覆盖 —— 声明式目标版本没有「创建冲突」，重设即覆盖。
+//
+// 不加 binding:required：字段级校验在 service 给出**显式结论句**（「repoTag 不能为空」
+// 这类），而不是回落成 gin 绑定的通用「请求参数不合法」—— 这是用户输入校验，
+// 报错口径必须指名道姓（与排序键那类白名单静默回落是两回事）。
+type DockerImageTargetSaveReq struct {
+	// RepoTag 是镜像引用（如 mysql:8.0.22）。trim 后非空、≤255。
+	RepoTag string `json:"repoTag"`
+	// TargetDigest 是目标内容摘要（`sha256:<hex>`）。trim 后非空且须 `sha256:` 前缀
+	//（形态闸在 service：漂移比对的是 docker 镜像 ID，强制前缀把「拼错的摘要永远
+	// 对不上」变成显式 400，而不是静默的永不命中）。
+	TargetDigest string `json:"targetDigest"`
 }

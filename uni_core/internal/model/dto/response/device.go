@@ -22,6 +22,15 @@ type DeviceListItem struct {
 	// 前端显示「—」，不臆造空串）。
 	PrimaryIP string `json:"primaryIp,omitempty"`
 
+	// ── 主机分组 / 标签（平台级）───────────────────────────────────────
+	//
+	// 与 entity.Device 同源。Group 是分组名，Tags 是**逗号分隔**的标签串
+	//（如 "prod,web,cn"）—— 服务端不做拆分：拆分本就该在消费端一次完成，
+	// 服务端拆再拼只会多一份「逗号是分隔符还是内容」的口径。
+	// omitempty：未分组 / 无标签时字段缺席（前端显示「未分组 / 无标签」）。
+	Group string `json:"group,omitempty"`
+	Tags  string `json:"tags,omitempty"`
+
 	// 以下来自 Redis latest（缺值省略 → 前端显示「—」）
 	CPUUsedPercent  *float64 `json:"cpuUsedPercent,omitempty"`
 	MemUsedPercent  *float64 `json:"memUsedPercent,omitempty"`

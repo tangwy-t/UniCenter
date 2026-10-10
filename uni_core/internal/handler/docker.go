@@ -2,6 +2,7 @@ package handler
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -123,12 +124,16 @@ func (h *DockerHandler) Overview(c *gin.Context) {
 // Workloads 返回跨主机统一工作负载表（docker:list）。
 //
 // @Summary      跨主机容器统一表
-// @Description  全部可管主机的容器并成一张表（每行带 hostId/hostname 归属）；hostId 限定单主机、state 过滤运行态（stopped=一切非 running，与总览 KPI 同口径）、keyword 按容器名或镜像名子串匹配；上限 500 条、total 如实报截断前全量；单台快照读失败跳过该主机（其故障在总览页如实呈现）
+// @Description  全部可管主机的容器并成一张表（每行带 hostId/hostname 归属）；hostId 限定单主机、state 过滤运行态（stopped=一切非 running，与总览 KPI 同口径）、keyword 按容器名或镜像名子串匹配；先排序（sortBy 白名单 hostId/name/state/image，默认 hostId/name 升序；非法值静默回落）后分页（page/pageSize，缺省 1/50、页大小上限 100），total 报过滤后全量；单台快照读失败/从未上报的主机被跳过并在 unavailableHosts 列出
 // @Tags         Docker 管理
 // @Produce      json
-// @Param        hostId   query  uint64  false  "限定单主机(缺省=全部可管主机)"
-// @Param        state    query  string  false  "运行态过滤(running/stopped)"
-// @Param        keyword  query  string  false  "容器名或镜像名子串(大小写不敏感)"
+// @Param        hostId    query  uint64  false  "限定单主机(缺省=全部可管主机)"
+// @Param        state     query  string  false  "运行态过滤(running/stopped)"
+// @Param        keyword   query  string  false  "容器名或镜像名子串(大小写不敏感)"
+// @Param        sortBy    query  string  false  "排序键(hostId/name/state/image；缺省 hostId)"
+// @Param        sortOrder query  string  false  "排序方向(asc/desc；缺省 desc)"
+// @Param        page      query  int     false  "页码(缺省 1)"
+// @Param        pageSize  query  int     false  "每页条数(缺省 50,上限 100)"
 // @Security     BearerAuth
 // @Success      200  {object}  app.Response{data=response.DockerWorkloadListResp}  "查询成功"
 // @Failure      400  {object}  app.Response  "参数错误(state 非 running/stopped)"
@@ -152,13 +157,17 @@ func (h *DockerHandler) Workloads(c *gin.Context) {
 // Images 返回跨主机镜像统一表（docker:list）。
 //
 // @Summary      跨主机镜像统一表
-// @Description  全部可管主机的镜像并成一张表（每行带 hostId/hostname 归属）；hostId 限定单主机、keyword 按 repoTag 子串匹配（大小写不敏感）、dangling/unused 三值过滤（缺省=不过滤）；上限 500 条、total 如实报截断前全量；单台快照读失败跳过该主机（其故障在总览页如实呈现）
+// @Description  全部可管主机的镜像并成一张表（每行带 hostId/hostname 归属）；hostId 限定单主机、keyword 按 repoTag 子串匹配（大小写不敏感）、dangling/unused 三值过滤（缺省=不过滤）；先排序（sortBy 白名单 hostId/name/size/created，默认 hostId/name 升序）后分页（page/pageSize，缺省 1/50、上限 100），total 报过滤后全量；disk 账目按主机整机收、不受分页影响；单台快照读失败/从未上报的主机被跳过并在 unavailableHosts 列出
 // @Tags         Docker 管理
 // @Produce      json
 // @Param        hostId    query  uint64  false  "限定单主机(缺省=全部可管主机)"
 // @Param        keyword   query  string  false  "repoTag 子串(大小写不敏感)"
 // @Param        dangling  query  bool    false  "悬空过滤(true=仅悬空，false=仅非悬空，缺省=不过滤)"
 // @Param        unused    query  bool    false  "未使用过滤(true=仅未使用，false=仅在使用，缺省=不过滤)"
+// @Param        sortBy    query  string  false  "排序键(hostId/name/size/created；缺省 hostId)"
+// @Param        sortOrder query  string  false  "排序方向(asc/desc；缺省 desc)"
+// @Param        page      query  int     false  "页码(缺省 1)"
+// @Param        pageSize  query  int     false  "每页条数(缺省 50,上限 100)"
 // @Security     BearerAuth
 // @Success      200  {object}  app.Response{data=response.DockerImageListResp}  "查询成功"
 // @Failure      400  {object}  app.Response  "参数错误"
@@ -182,12 +191,16 @@ func (h *DockerHandler) Images(c *gin.Context) {
 // Volumes 返回跨主机卷统一表（docker:list）。
 //
 // @Summary      跨主机卷统一表
-// @Description  全部可管主机的数据卷并成一张表（每行带 hostId/hostname 归属）；hostId 限定单主机、keyword 按卷名子串匹配（大小写不敏感）、unused 三值过滤（缺省=不过滤）；上限 500 条、total 如实报截断前全量；单台快照读失败跳过该主机（其故障在总览页如实呈现）
+// @Description  全部可管主机的数据卷并成一张表（每行带 hostId/hostname 归属）；hostId 限定单主机、keyword 按卷名子串匹配（大小写不敏感）、unused 三值过滤（缺省=不过滤）；先排序（sortBy 白名单 hostId/name/size，默认 hostId/name 升序）后分页（page/pageSize，缺省 1/50、上限 100），total 报过滤后全量；单台快照读失败/从未上报的主机被跳过并在 unavailableHosts 列出
 // @Tags         Docker 管理
 // @Produce      json
-// @Param        hostId   query  uint64  false  "限定单主机(缺省=全部可管主机)"
-// @Param        keyword  query  string  false  "卷名子串(大小写不敏感)"
-// @Param        unused   query  bool    false  "未使用过滤(true=仅未使用，false=仅在使用，缺省=不过滤)"
+// @Param        hostId    query  uint64  false  "限定单主机(缺省=全部可管主机)"
+// @Param        keyword   query  string  false  "卷名子串(大小写不敏感)"
+// @Param        unused    query  bool    false  "未使用过滤(true=仅未使用，false=仅在使用，缺省=不过滤)"
+// @Param        sortBy    query  string  false  "排序键(hostId/name/size；缺省 hostId)"
+// @Param        sortOrder query  string  false  "排序方向(asc/desc；缺省 desc)"
+// @Param        page      query  int     false  "页码(缺省 1)"
+// @Param        pageSize  query  int     false  "每页条数(缺省 50,上限 100)"
 // @Security     BearerAuth
 // @Success      200  {object}  app.Response{data=response.DockerVolumeListResp}  "查询成功"
 // @Failure      400  {object}  app.Response  "参数错误"
@@ -211,12 +224,16 @@ func (h *DockerHandler) Volumes(c *gin.Context) {
 // Networks 返回跨主机网络统一表（docker:list）。
 //
 // @Summary      跨主机网络统一表
-// @Description  全部可管主机的网络并成一张表（每行带 hostId/hostname 归属）；hostId 限定单主机、keyword 按网络名子串匹配（大小写不敏感）、internal 三值过滤（缺省=不过滤）；上限 500 条、total 如实报截断前全量；单台快照读失败跳过该主机（其故障在总览页如实呈现）
+// @Description  全部可管主机的网络并成一张表（每行带 hostId/hostname 归属）；hostId 限定单主机、keyword 按网络名子串匹配（大小写不敏感）、internal 三值过滤（缺省=不过滤）；先排序（sortBy 白名单 hostId/name/containers，默认 hostId/name 升序）后分页（page/pageSize，缺省 1/50、上限 100），total 报过滤后全量；单台快照读失败/从未上报的主机被跳过并在 unavailableHosts 列出
 // @Tags         Docker 管理
 // @Produce      json
-// @Param        hostId    query  uint64  false  "限定单主机(缺省=全部可管主机)"
-// @Param        keyword   query  string  false  "网络名子串(大小写不敏感)"
-// @Param        internal  query  bool    false  "隔离网络过滤(true=仅 internal，false=仅非 internal，缺省=不过滤)"
+// @Param        hostId     query  uint64  false  "限定单主机(缺省=全部可管主机)"
+// @Param        keyword    query  string  false  "网络名子串(大小写不敏感)"
+// @Param        internal   query  bool    false  "隔离网络过滤(true=仅 internal，false=仅非 internal，缺省=不过滤)"
+// @Param        sortBy     query  string  false  "排序键(hostId/name/containers；缺省 hostId)"
+// @Param        sortOrder  query  string  false  "排序方向(asc/desc；缺省 desc)"
+// @Param        page       query  int     false  "页码(缺省 1)"
+// @Param        pageSize   query  int     false  "每页条数(缺省 50,上限 100)"
 // @Security     BearerAuth
 // @Success      200  {object}  app.Response{data=response.DockerNetworkListResp}  "查询成功"
 // @Failure      400  {object}  app.Response  "参数错误"
@@ -240,12 +257,16 @@ func (h *DockerHandler) Networks(c *gin.Context) {
 // Projects 返回跨主机项目统一表（docker:list）。
 //
 // @Summary      跨主机项目统一表
-// @Description  全部可管主机的编排项目并成一张表（每行带 hostId/hostname 归属）；hostId 限定单主机、keyword 按项目名子串匹配（大小写不敏感）、state 过滤项目态（running/stopped，stopped=一切非 running，与容器表同口径）；上限 500 条、total 如实报截断前全量；单台快照读失败跳过该主机（其故障在总览页如实呈现）
+// @Description  全部可管主机的编排项目并成一张表（每行带 hostId/hostname 归属）；hostId 限定单主机、keyword 按项目名子串匹配（大小写不敏感）、state 过滤项目态（running/stopped，stopped=一切非 running，与容器表同口径）；先排序（sortBy 白名单 hostId/name/state/services，默认 hostId/name 升序）后分页（page/pageSize，缺省 1/50、上限 100），total 报过滤后全量；单台快照读失败/从未上报的主机被跳过并在 unavailableHosts 列出
 // @Tags         Docker 管理
 // @Produce      json
-// @Param        hostId   query  uint64  false  "限定单主机(缺省=全部可管主机)"
-// @Param        keyword  query  string  false  "项目名子串(大小写不敏感)"
-// @Param        state    query  string  false  "项目态过滤(running/stopped)"
+// @Param        hostId    query  uint64  false  "限定单主机(缺省=全部可管主机)"
+// @Param        keyword   query  string  false  "项目名子串(大小写不敏感)"
+// @Param        state     query  string  false  "项目态过滤(running/stopped)"
+// @Param        sortBy    query  string  false  "排序键(hostId/name/state/services；缺省 hostId)"
+// @Param        sortOrder query  string  false  "排序方向(asc/desc；缺省 desc)"
+// @Param        page      query  int     false  "页码(缺省 1)"
+// @Param        pageSize  query  int     false  "每页条数(缺省 50,上限 100)"
 // @Security     BearerAuth
 // @Success      200  {object}  app.Response{data=response.DockerProjectListResp}  "查询成功"
 // @Failure      400  {object}  app.Response  "参数错误(state 非 running/stopped)"
@@ -266,10 +287,141 @@ func (h *DockerHandler) Projects(c *gin.Context) {
 	app.Success(c, resp)
 }
 
+// ImageDrift 返回跨主机镜像版本漂移视图（docker:list）。
+//
+// @Summary      镜像版本漂移视图
+// @Description  以 repoTag 为行给出同一标签在各主机上的内容摘要分布（有几种摘要、各多少台、多数派与少数派主机清单）；group 按主机分组精确匹配收窄主机范围、keyword 按 repoTag 子串匹配（大小写不敏感）收窄标签行；先排序（sortBy 白名单 repoTag/hostCount/distinctDigests，默认 distinctDigests 降序、repoTag 升序，非法静默回落）后分页（page/pageSize，缺省 1/50、上限 100），total 报过滤后全量行数；分组范围内读失败/从未上报的主机不计入任何标签的主机数，并在 unavailableHosts 如实列出
+// @Tags         Docker 管理
+// @Produce      json
+// @Param        group     query  string  false  "按主机分组精确匹配(缺省=全部分组)"
+// @Param        keyword   query  string  false  "repoTag 子串(大小写不敏感)"
+// @Param        sortBy    query  string  false  "排序键(repoTag/hostCount/distinctDigests；缺省 distinctDigests 降序)"
+// @Param        sortOrder query  string  false  "排序方向(asc/desc；缺省 desc)"
+// @Param        page      query  int     false  "页码(缺省 1)"
+// @Param        pageSize  query  int     false  "每页条数(缺省 50,上限 100)"
+// @Security     BearerAuth
+// @Success      200  {object}  app.Response{data=response.DockerImageDriftResp}  "查询成功"
+// @Failure      400  {object}  app.Response  "参数错误"
+// @Failure      401  {object}  app.Response  "未登录"
+// @Failure      403  {object}  app.Response  "无权限"
+// @Router       /docker/image-drift [get]
+func (h *DockerHandler) ImageDrift(c *gin.Context) {
+	var q request.DockerImageDriftQuery
+	if err := c.ShouldBindQuery(&q); err != nil {
+		app.Error(c, apperror.BadRequest("请求参数不合法"))
+		return
+	}
+	resp, err := h.svc.ImageDrift(c.Request.Context(), &q)
+	if err != nil {
+		app.Error(c, err)
+		return
+	}
+	app.Success(c, resp)
+}
+
+// Search 全局跨资源检索（docker:list）。
+//
+// @Summary      全局跨资源检索
+// @Description  跨主机、跨资源类型（容器/镜像/卷/网络/项目）按名称子串（大小写不敏感）检索；容器额外匹配镜像名；每组限量（缺省 20、上限 100，可传 limit）并给出 total 与 truncated（部分结果显式告知）；空 q 返回 5 个空组（200，不报错）；宿主范围内快照读失败/从未上报的主机进 unavailableHosts
+// @Tags         Docker 管理
+// @Produce      json
+// @Param        q      query  string  false  "名称关键词子串（大小写不敏感；空=返回空结果）"
+// @Param        limit  query  int     false  "每组限量（缺省 20，上限 100）"
+// @Security     BearerAuth
+// @Success      200  {object}  app.Response{data=response.DockerSearchResp}  "查询成功"
+// @Failure      401  {object}  app.Response  "未登录"
+// @Failure      403  {object}  app.Response  "无权限"
+// @Router       /docker/search [get]
+func (h *DockerHandler) Search(c *gin.Context) {
+	// limit 解析失败/缺省一律回落默认（与 pageSize 的「上限是服务端的事」同一条纪律：
+	// 一个可选的软上限，不值得为它报到 400 把检索框打成红的）。service 侧再夹一次上限。
+	limit := 0
+	if raw := c.Query("limit"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			limit = n
+		}
+	}
+	resp, err := h.svc.Search(c.Request.Context(), c.Query("q"), limit)
+	if err != nil {
+		app.Error(c, err)
+		return
+	}
+	app.Success(c, resp)
+}
+
+// ListImageTargets 返回全部已声明的镜像目标版本（docker:list）。
+//
+// @Summary      镜像目标版本清单
+// @Description  枚举全部已声明的镜像目标版本（repoTag / 目标摘要 / 更新时间）；声明式目标版本是漂移视图「待对齐」的基准
+// @Tags         Docker 管理
+// @Produce      json
+// @Security     BearerAuth
+// @Success      200  {object}  app.Response{data=response.DockerImageTargetListResp}  "查询成功"
+// @Failure      401  {object}  app.Response  "未登录"
+// @Failure      403  {object}  app.Response  "无权限"
+// @Router       /docker/image-targets [get]
+func (h *DockerHandler) ListImageTargets(c *gin.Context) {
+	resp, err := h.svc.ListImageTargets(c.Request.Context())
+	if err != nil {
+		app.Error(c, err)
+		return
+	}
+	app.Success(c, resp)
+}
+
+// SetImageTarget 声明/覆盖一个 repoTag 的目标内容摘要（docker:manage，upsert）。
+//
+// @Summary      声明镜像目标版本
+// @Description  为一个 repoTag 声明目标内容摘要（同 repoTag 覆盖，upsert）；repoTag 非空且≤255、targetDigest 非空且以 sha256: 开头，非法给显式 400
+// @Tags         Docker 管理
+// @Accept       json
+// @Produce      json
+// @Param        body  body      request.DockerImageTargetSaveReq  true  "目标声明请求"
+// @Security     BearerAuth
+// @Success      200  {object}  app.Response{data=response.DockerImageTargetItem}  "声明成功"
+// @Failure      400  {object}  app.Response  "参数错误"
+// @Failure      401  {object}  app.Response  "未登录"
+// @Failure      403  {object}  app.Response  "无权限"
+// @Router       /docker/image-targets [post]
+func (h *DockerHandler) SetImageTarget(c *gin.Context) {
+	var req request.DockerImageTargetSaveReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		app.Error(c, apperror.BadRequest("请求参数不合法"))
+		return
+	}
+	resp, err := h.svc.SetImageTarget(c.Request.Context(), &req)
+	if err != nil {
+		app.Error(c, err)
+		return
+	}
+	app.Success(c, resp)
+}
+
+// ClearImageTarget 清除一个 repoTag 的目标（docker:manage，幂等）。
+//
+// @Summary      清除镜像目标版本
+// @Description  按 repoTag 清除已声明的目标（走 query 参数 —— repoTag 含 : 与 /，无法安全放进 path 段）；清除不存在的目标幂等成功
+// @Tags         Docker 管理
+// @Produce      json
+// @Param        repoTag  query     string  true  "镜像标签（如 mysql:8.0.22）"
+// @Security     BearerAuth
+// @Success      200  {object}  app.Response  "清除成功"
+// @Failure      400  {object}  app.Response  "参数错误"
+// @Failure      401  {object}  app.Response  "未登录"
+// @Failure      403  {object}  app.Response  "无权限"
+// @Router       /docker/image-targets [delete]
+func (h *DockerHandler) ClearImageTarget(c *gin.Context) {
+	repoTag := c.Query("repoTag")
+	if err := h.svc.ClearImageTarget(c.Request.Context(), repoTag); err != nil {
+		app.Error(c, err)
+		return
+	}
+	app.Success(c, nil)
+}
+
 // State 返回一台主机的快照（docker:list）。
 //
 // @Summary      主机资源快照
-// @Description  返回一台主机的容器/镜像/卷/网络/编排项目清单与陈旧结论（离线可读，只标 stale）
 // @Tags         Docker 管理
 // @Produce      json
 // @Param        id   path      uint64  true  "设备ID"

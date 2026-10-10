@@ -31,6 +31,10 @@ func newDockerOverviewSvc(t *testing.T, store *dockerstate.Store, now time.Time)
 		d.LastSeenAt = &now
 		devs[id] = d
 	}
+	// 主机 7 预置平台级分组/标签：供 TestDockerOverviewHostsCarryHostGroupAndTags
+	// 断言总览 hosts 条目与 /docker/hosts 同源带出（其余用例不读这两列，无副作用）。
+	devs[7].GroupName = "prod"
+	devs[7].Tags = "web,db"
 	svc := NewDockerService(store,
 		fakeDeviceReader{devs: devs},
 		fakeConfigGetter{vals: map[string]string{
@@ -468,5 +472,30 @@ func TestDockerOverviewStaleHostsCountInKPI(t *testing.T) {
 	}
 	if resp.Fleet.Hosts.DockerOK != 2 {
 		t.Fatalf("stale 主机的 dockerOk 结论仍计入: %+v", resp.Fleet.Hosts)
+	}
+}
+
+// TestDockerOverviewHostsCarryHostGroupAndTags 钉住总览的 hosts 条目与
+// /docker/hosts 一样带出设备的平台级分组/标签（同一 toHostItem 出口）——
+// 两处「同一主机说同一句话」的既有纪律，分组/标签也不例外。
+func TestDockerOverviewHostsCarryHostGroupAndTags(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rdb := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	store := dockerstate.NewStore(rdb)
+	ctx := context.Background()
+	now := time.Now()
+	svc := newDockerOverviewSvc(t, store, now)
+
+	// 主机 7（夹具里已带 group=prod / tags=web,db）：Save 即登记集合、进 hosts 列表。
+	if err := store.Save(ctx, 7, &agentproto.DockerState{T: now.UnixMilli(), DockerOK: true}, now); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := svc.Overview(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := hostByID(t, resp.Hosts, 7)
+	if h.Group != "prod" || h.Tags != "web,db" {
+		t.Fatalf("总览 hosts 条目未带出平台级分组/标签: group=%q tags=%q", h.Group, h.Tags)
 	}
 }

@@ -22,6 +22,7 @@ export const PermDeptSort = 'system:dept:sort' as const
 export const PermDeviceDelete = 'device:delete' as const
 export const PermDeviceDisable = 'device:disable' as const
 export const PermDeviceEnable = 'device:enable' as const
+export const PermDeviceGroup = 'device:index:group' as const
 export const PermDeviceList = 'device:list' as const
 export const PermDeviceQuery = 'device:query' as const
 export const PermDeviceReleaseDelete = 'device:release:delete' as const

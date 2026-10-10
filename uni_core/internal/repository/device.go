@@ -104,7 +104,7 @@ func (r *DeviceRepo) Touch(ctx context.Context, id uint64, at time.Time) error {
 // deviceSortClause 把排序参数收敛成白名单 SQL 片段（防 ORDER BY 注入），
 // 与 repository/file.go 的 fileSortClause 同款纪律。
 //
-// 白名单**严格限定为 DB 列**：lastSeenAt(默认) / hostname / agentVersion。
+// 白名单**严格限定为 DB 列**：lastSeenAt(默认) / hostname / agentVersion / group。
 // 水位列（CPU/内存/磁盘使用率）由 service 从 Redis latest 拼进响应，**不是
 // DB 列**，无法也不得出现在这里 —— 对它们排序需要先落库（读时拼装的行
 // 无法 SQL ORDER BY）。
@@ -112,6 +112,7 @@ func (r *DeviceRepo) Touch(ctx context.Context, id uint64, at time.Time) error {
 // 非法值（不在白名单 / 非 asc|desc）**静默回落默认**而不是报 400：
 //   - sortBy 未登记 → last_seen_at；
 //   - sortOrder 不是 asc → desc。
+//
 // 这样旧客户端、笔误的参数都拿到与「不传排序」完全一致的行为，而不是被
 // 400 挡在外面。回落后的默认组合 = lastSeenAt desc, id desc，与引入排序
 // 参数之前 FindPage 的硬编码**逐字一致**（评审回归点：默认排序不变）。
@@ -125,6 +126,10 @@ func deviceSortClause(sortBy, sortOrder string) string {
 		column = "hostname"
 	case "agentVersion":
 		column = "agent_version"
+	case "group":
+		// 分组列：按分区分组浏览时把同组设备聚在一起（空串 = 未分组，排在最前/最后
+		// 由方向决定，与普通字符串一致）。
+		column = "group_name"
 	}
 	direction := " DESC"
 	if sortOrder == "asc" {
@@ -157,6 +162,12 @@ func (r *DeviceRepo) applyFilters(db *gorm.DB, q *request.DeviceQuery, onlineSin
 	// 把 0.6 与 0.6.0 混进同一结果）。
 	if q.AgentVersion != "" {
 		db = db.Where("agent_version = ?", q.AgentVersion)
+	}
+	// 主机分组精确匹配（见 request.DeviceQuery.Group 的语义裁决：单值精确，
+	// 空 = 不过滤）。精确而非 LIKE：分组名作为「桶」的身份，子串匹配会让
+	// 选「prod」也带出「prod-archive」，与「看这一组」的意图不符。
+	if q.Group != "" {
+		db = db.Where("group_name = ?", q.Group)
 	}
 	return db
 }
@@ -229,6 +240,58 @@ func (r *DeviceRepo) SetStatus(ctx context.Context, id uint64, status int8) erro
 		return res.Error
 	}
 	if res.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// UpdateGroupTags 写主机分组 / 标签（**部分更新**：只写这次提供的列）。
+//
+// group / tags 为 nil 表示「这次不改这一列」；提供空串表示**清空**。用 map 形式的
+// Updates 让「清空（写入空串）」也生效（struct 形式的 Updates 会跳过零值字段）。
+//
+// 两列都未提供（双 nil）时没有列可写：此时仍按 id 做一次存在性检查 —— PATCH 端点
+// 依赖「不存在的 id → ErrNotFound」这一契约，不能因为请求体恰好是空对象就静默成功。
+//
+// RowsAffected==0 有两种可能，必须分开（否则幂等重放会误报 404）：
+//   - 行不存在 → ErrNotFound；
+//   - 写入值与该行现值相同（**值未改变**）→ 合法 no-op。
+//
+// MySQL 默认把「值未改变的 UPDATE」计为 0 行受影响（DSN 未开 clientFoundRows，
+// 见 config.mysqlDSN），故「把分组设成它已经是的值」会命中 0 行 —— 若直接据此报
+// 404，用户重放同一次 PATCH 就会看到「设备不存在」。故 0 行时再用一次存在性检查
+// 把二者分开。未命中返回 ErrNotFound 哨兵（与 SetStatus/Delete 同契约）；其它错误 500。
+func (r *DeviceRepo) UpdateGroupTags(ctx context.Context, id uint64, group, tags *string) error {
+	updates := make(map[string]any, 2)
+	if group != nil {
+		updates["group_name"] = *group
+	}
+	if tags != nil {
+		updates["tags"] = *tags
+	}
+	if len(updates) == 0 {
+		return r.ensureDeviceExists(ctx, id)
+	}
+	res := r.db.WithContext(ctx).Model(&entity.Device{}).
+		Where("id = ?", id).Updates(updates)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return r.ensureDeviceExists(ctx, id)
+	}
+	return nil
+}
+
+// ensureDeviceExists 命中（含软删排除）返回 nil，未命中返回 ErrNotFound 哨兵，
+// 查询故障原样返回。供 UpdateGroupTags 在「无列可写」与「0 行受影响」两处复用。
+func (r *DeviceRepo) ensureDeviceExists(ctx context.Context, id uint64) error {
+	var n int64
+	if err := r.db.WithContext(ctx).Model(&entity.Device{}).
+		Where("id = ?", id).Count(&n).Error; err != nil {
+		return err
+	}
+	if n == 0 {
 		return ErrNotFound
 	}
 	return nil

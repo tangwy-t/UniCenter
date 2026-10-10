@@ -3,7 +3,7 @@ package permission
 import "testing"
 
 func TestDevicePermsAreRegisteredInAll(t *testing.T) {
-	want := []string{PermDeviceDelete, PermDeviceDisable, PermDeviceEnable, PermDeviceList, PermDeviceQuery}
+	want := []string{PermDeviceDelete, PermDeviceDisable, PermDeviceEnable, PermDeviceGroup, PermDeviceList, PermDeviceQuery}
 
 	set := make(map[string]bool, len(All()))
 	for _, p := range All() {
@@ -18,7 +18,7 @@ func TestDevicePermsAreRegisteredInAll(t *testing.T) {
 
 func TestDevicePermsUseDevicePrefix(t *testing.T) {
 	const prefix = "device:"
-	for _, p := range []string{PermDeviceList, PermDeviceQuery, PermDeviceDelete, PermDeviceEnable, PermDeviceDisable} {
+	for _, p := range []string{PermDeviceList, PermDeviceQuery, PermDeviceDelete, PermDeviceEnable, PermDeviceDisable, PermDeviceGroup} {
 		if len(p) < len(prefix) || p[:len(prefix)] != prefix {
 			t.Fatalf("权限码 %q 必须使用 %s 前缀", p, prefix)
 		}

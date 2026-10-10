@@ -35,6 +35,26 @@ type Device struct {
 	// 空串表示「尚未观测到」（老设备在升级前 enroll 的行）。
 	PrimaryIP string `gorm:"column:primary_ip;size:64" json:"primaryIp,omitempty"`
 
+	// ── 主机分组 / 标签（平台级能力）──────────────────────────────────────
+	//
+	// 分组与标签是**平台级**事实（不是 docker 私有）：同一份数据同时服务于设备
+	// 列表与 docker 的主机清单/总览 —— docker 侧直接从设备行带出，不另存一份
+	// （否则「改了分组，docker 页却还显示旧的」这类分裂不可避免）。
+	//
+	// GroupName 是设备所属分组（空串 = 未分组）；分组名由运维自由填写。
+	// Tags 是设备标签，**逗号分隔**（如 "prod,web,cn"），空串 = 无标签。
+	//
+	// 为什么用 varchar 存逗号分隔串、不用 JSON 列：测试夹具是 SQLite，JSON 列的
+	// 方言差异大；逗号分隔的读写与过滤都只走普通字符串比较，跨方言零负担。
+	//
+	// not null;default:''（而非可空）：一次消除「NULL vs 空串」在筛选/展示上的
+	// 二义，也免掉把 NULL 扫进 Go string 的边界顾虑；这同样满足滚动发布对加列的
+	// 硬要求（给默认值比「允许 NULL」更强一档）—— 旧二进制不写该列时落 ''。
+	//
+	// omitempty：空串不出现（前端显示「未分组 / 无标签」，不臆造空串）。
+	GroupName string `gorm:"column:group_name;size:64;not null;default:''" json:"groupName,omitempty"`
+	Tags      string `gorm:"column:tags;size:255;not null;default:''"       json:"tags,omitempty"`
+
 	// ── Agent 升级（设计 §5.1）────────────────────────────────────────────
 	//
 	// 这里**只存终态**：「待升级 / 升级中」是读时推导出来的，不落库 ——

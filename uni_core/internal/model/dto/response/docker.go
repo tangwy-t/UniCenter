@@ -15,6 +15,11 @@ type DockerHostItem struct {
 	ID        uint64 `json:"id,string"`
 	Hostname  string `json:"hostname"`
 	PrimaryIP string `json:"primaryIp,omitempty"`
+	// Group / Tags 是设备的**平台级**分组与标签（来自设备行，见 entity.Device）：
+	// 与设备列表同源同字段，docker 侧不另存一份。Tags 是逗号分隔串（服务端不拆分）。
+	// omitempty：未分组 / 无标签时字段缺席（前端显示「未分组 / 无标签」）。
+	Group string `json:"group,omitempty"`
+	Tags  string `json:"tags,omitempty"`
 	// Online 由 last_seen_at 与 sys.agent.offlineThreshold 折算（与设备列表同口径）。
 	Online bool `json:"online"`
 	// DockerOK 是 agent 自报的能力信号；false 时前端不渲染任何操作按钮。
@@ -34,6 +39,25 @@ type DockerHostItem struct {
 	//（与卷条目 SizeMB=nil 同一纪律：不知道 ≠ 零）。只在总览响应填充（磁盘面板的
 	// 专供数据面）；主机清单页不消费它，omitempty 让字段在那边缺席。
 	Disk *DockerHostDiskItem `json:"disk,omitempty"`
+
+	// ── 宿主磁盘水位（Wave 4d，只**追加**，不改上面既有字段）──────────────────
+	//
+	// 注意这两枚与上面的 Disk **不是一回事**，绝不混用/互相覆盖：
+	//   - Disk 是 docker `system df` 的**占用账目**（镜像/卷/构建缓存各占多少字节、
+	//     能回收多少）—— 答「docker 用了多少」，只有**分子**；
+	//   - 下面两枚是**宿主整机磁盘水位**（来自设备指标宽表 device_metric_5m 最近一次
+	//     快照的 disk_used_percent / disk_total_gb）—— 答运维第一问「这台机器的盘
+	//     快满了吗」，同时给出**分母**（总容量）。
+	// 两者同帧不同源：Disk 缺报不代表水位缺报，反之亦然（一处有值不推断另一处）。
+	//
+	// nil / 字段缺省 = 该设备**从未上报过整机指标**（或那行未采集磁盘列）——
+	// **不填 0 或假值**：「没有数据」与「磁盘用了 0%」是两件事（与 Disk、卷
+	// SizeMB=nil 同一纪律：不知道 ≠ 零）。
+	//
+	// 阈值口径与设备侧同源（前端 modules/device/utils/overview.ts：≥80% 标「高」、
+	// ≥90% 标「告警」）—— 服务端只给原始百分比与分母，分档着色由前端按同源阈值做。
+	DiskUsedPercent *float64 `json:"diskUsedPercent,omitempty"`
+	DiskTotalGB     *float64 `json:"diskTotalGb,omitempty"`
 }
 
 // DockerHostListResp 是主机清单响应。
@@ -206,11 +230,21 @@ type DockerOverviewAnomalyItem struct {
 
 // DockerWorkloadListResp 是统一工作负载表响应：全部可管主机的容器并成一张表。
 type DockerWorkloadListResp struct {
+	// Items 是本页条目：服务端**先排序、后分页**（先全序再切片，页边界不随枚举
+	// 运气抖动）；空时为空数组而非 null。
 	Items []DockerWorkloadItem `json:"items"`
-	// Total 是**截断前**的全量数（过滤后）；Items 至多 500 条。两者并存的口径
-	// 与总览 anomalies 同一句话：Total 与 Items 长度不等即「截断了」的显式信号
-	//（不靠前端猜「还有多少」）。
+	// Total 是**过滤后**的全量数（分页前）——页头「共 N 条」与「还有下一页」读
+	// 的是同一个数字（不再有 500 硬截断：Total 与 Items 长度可以不等，那只是翻页）。
 	Total int `json:"total"`
+	// Page / PageSize 回显本次生效的页参数（缺省 page=1、pageSize=50；pageSize
+	// 上限 100）。与 /docker/tasks 同一回显纪律：前端与服务端对「第几页、一页几条」
+	// 保持同一句话。
+	Page     int `json:"page"`
+	PageSize int `json:"pageSize"`
+	// UnavailableHosts 是本次范围内「有主机、但资源事实不可用」的主机清单
+	//（快照读失败 / 从未上报）：这些主机的行被跳过（不编造「零容器」的假象），
+	// 此清单把「少了几行、少的是谁、为什么」显式告知读者。空数组而非 null。
+	UnavailableHosts []DockerUnavailableHostItem `json:"unavailableHosts"`
 }
 
 // DockerWorkloadItem 是统一表的一行（一台主机上的一个容器）。
@@ -232,27 +266,33 @@ type DockerWorkloadItem struct {
 // 四个端点把「容器统一表」（DockerWorkloadItem）的跨主机模式推广到资源页：
 // 条目 = 单主机快照条目**内嵌** + 归属两列（hostId/hostname）。为什么内嵌
 // 而不是平行造一套字段：与 DockerWorkloadItem 同一句话 —— 清单条目下次加列时，
-// 平行造的那份会静默漏掉这一侧（页面上少一列，没人报错）。四个响应的
-// total/items 截断口径也与统一工作负载表逐字同句（截断前全量 + 至多 500 条）。
+// 平行造的那份会静默漏掉这一侧（页面上少一列，没人报错）。四个响应与统一工作
+// 负载表逐字同句：**先排序、后分页**（先全序再切片），Total 报过滤后全量，
+// Page/PageSize 回显生效页参数，UnavailableHosts 显式告知被跳过的主机。
 //
-// 过滤/排序/跳过/截断的**行为**口径在服务端一处实现（service/docker.go 的
-// aggregateResourceRows），这份 DTO 只锁形状。
+// 过滤/排序/分页/跳过/不可用清单的**行为**口径在服务端一处实现
+//（service/docker.go 的 aggregateResourceRows），这份 DTO 只锁形状。
 
 // DockerImageListResp 是跨主机镜像清单响应。
 type DockerImageListResp struct {
+	// Items 是本页条目（先排序、后分页）；空时为空数组而非 null。
 	Items []DockerImageListItem `json:"items"`
-	// Total 是**截断前**的过滤后全量数；Items 至多 500 条（两者不等即
-	//「截断了」的显式信号，口径与统一工作负载表同一句）。
+	// Total 是**过滤后**的全量数（分页前）。
 	Total int `json:"total"`
+	// Page / PageSize 回显本次生效的页参数（缺省 page=1、pageSize=50）。
+	Page     int `json:"page"`
+	PageSize int `json:"pageSize"`
+	// UnavailableHosts 是本范围内「有主机、但资源事实不可用」的主机清单（读失败 /
+	// 从未上报）。空数组而非 null。
+	UnavailableHosts []DockerUnavailableHostItem `json:"unavailableHosts"`
 	// Disk 是**主机范围**内的可回收镜像账目（镜像页底栏「N 个可回收 · X」的数据面）：
 	// 每台主机一行，前端按行求和。与 Items 的分工是这一页两种口径的分工：
 	//
-	//   - Items 是**筛选后的行**（keyword/dangling/unused + 500 条截断都作用其上），
-	//     底栏「合计」跟着它走；
+	//   - Items 是**筛选后的行**（keyword/dangling/unused + 分页都作用其上）；
 	//   - Disk 是**主机范围的账**：keyword/dangling/unused 过筛**不影响**它 ——
 	//     prune 回收的就是这台主机当下的可回收批，与「此刻在看哪些行」无关；
-	//     hostId 过滤影响它（账目必须跟着主机范围收窄）。500 条截断同样影响不到它
-	//     （账目在截断之前按主机整机收）—— 旧前端口径 Σ 可见悬空行 SizeMB 会因
+	//     hostId 过滤影响它（账目必须跟着主机范围收窄）。分页同样影响不到它
+	//     （账目在分页之前按主机整机收）—— 旧前端口径 Σ 可见悬空行 SizeMB 会因
 	//     截断少算、也会把 prune 释放不了的共享层算进去，这里是唯一的修正口径。
 	//
 	// 口径与总览的磁盘账同一句话：可回收 = 执行 image:prune（默认只清悬空）真会
@@ -290,10 +330,107 @@ type DockerImageListItem struct {
 	Hostname string `json:"hostname"`
 }
 
+// ── 镜像版本漂移视图（本波：GET /docker/image-drift）──────────────────────
+//
+// 与「跨主机镜像清单」（GET /docker/images，行 = 一台主机上的一个镜像）是两种
+// 口径的视图：清单回答「哪台机上有哪些镜像」；本视图回答「同一个 repoTag 在舰队
+// 里散成了几种内容摘要、各多少台、哪些主机是少数派」——推新版本任务的前置
+//（该推哪个）与验收（推齐了没）都读这张表。
+//
+// **按 repoTag 展平**：一个镜像条目可带多个 tag，每个 tag 各自成一行
+//（同一个 digest 会出现在它挂的每一个 tag 行里）—— 「同一个镜像多 tag」在此
+// 是 N 个独立的漂移问题，不是一条。
+
+// DockerImageDriftResp 是镜像版本漂移视图的响应。
+type DockerImageDriftResp struct {
+	// Items 是本页漂移行（先排序、后分页）；空数组而非 null（本模块既有纪律）。
+	Items []DockerImageDriftItem `json:"items"`
+	// Total 是过滤后（keyword 收窄标签行）的**全量行数**（分页前）——
+	// 与四资源页的 Total 同义：它是「这个舰队有几种标签在漂」，不是页内行数。
+	Total int `json:"total"`
+	// Page / PageSize 回显本次生效的页参数（缺省 page=1、pageSize=50；上限 100）。
+	Page     int `json:"page"`
+	PageSize int `json:"pageSize"`
+	// UnavailableHosts 是本次**主机范围内**（group 过滤后）「有主机、但资源事实
+	// 不可用」的主机清单（快照读失败 / 从未上报）。与 Wave 2 四资源页同一形态、
+	// 同一判据：这些主机**不计入任何 tag 的 hostCount**（不编造「零镜像」的假象），
+	// 但「少算了谁、为什么」必须显式告知 —— 否则「9 台一致」可能是 10 台里漏了 1 台。
+	// 空数组而非 null。
+	UnavailableHosts []DockerUnavailableHostItem `json:"unavailableHosts"`
+}
+
+// DockerImageDriftItem 是漂移视图的一行（一个 repoTag 的摘要分布）。
+type DockerImageDriftItem struct {
+	// RepoTag 是本行的标签（镜像引用，如 mysql:8.0.22）。
+	RepoTag string `json:"repoTag"`
+	// HostCount 是**有该 tag** 的可管主机数（读过快照、且快照里这个 tag 出现过的主机）。
+	HostCount int `json:"hostCount"`
+	// DistinctDigests 是这些主机上该 tag 出现了几种不同的内容摘要（digest）。
+	// =1 表示全舰队一致；>1 表示漂移（本视图默认按它降序 —— 最不齐的排最前，
+	// 那正是运维要先处理的）。
+	DistinctDigests int `json:"distinctDigests"`
+	// DominantDigest / DominantHostCount 是**多数派**：出现主机数最多的那个摘要及
+	// 其主机数。并列时取摘要字典序最小者（确定性锚，避免同一份数据两次请求给出
+	// 不同的「多数派」）。
+	DominantDigest    string `json:"dominantDigest"`
+	DominantHostCount int    `json:"dominantHostCount"`
+	// Outliers 是**少数派**：除多数派外的其余摘要，每项给出该摘要的主机数与其主机
+	// 清单（按 hostId 升序）。distinctDigests=1 时为空数组（全舰队一致，无少数派）。
+	Outliers []DockerImageDriftOutlier `json:"outliers"`
+	// Summary 是供 UI 直接显示的一句话口径。**本端点留空**（omitempty 让字段缺席），
+	// 由前端按上面结构化字段（hostCount/distinctDigests/dominantHostCount）自拼 ——
+	// 契约显式允许留空，避免同一句话在服务端与前端各写一套。
+	Summary string `json:"summary,omitempty"`
+
+	// ── 声明式目标版本（Wave 4c，只**追加**，不改上面既有字段）──────────────
+	//
+	// 三枚字段只在「该 repoTag 已声明目标」时产出：无声明时**缺省**（omitempty 让
+	// 字段整体缺席）—— 绝不用「多数派摘要」臆造一个目标（那是观测事实，不是声明）。
+	//
+	// TargetDigest 是该 repoTag 已声明的目标内容摘要（与 host 侧 digest 同格式：docker
+	// 镜像 ID `sha256:<hex>`）。前端按「它是否在场」判断这一行有没有目标可对齐。
+	TargetDigest string `json:"targetDigest,omitempty"`
+	// PendingHosts 是**待对齐**主机清单：范围内（group 过滤后、快照可用）该 repoTag
+	// 的摘要 ≠ 目标摘要、**或该主机上根本没有这个 tag** 的主机，按 hostId 升序。
+	// 快照不可用的主机（读失败/从未上报）**不进这里** —— 它们进 unavailableHosts，
+	// 其摘要无从知晓，不编造「待对齐」（与「不知道 ≠ 零」同一纪律）。
+	// 有目标时为空数组时字段缺席（omitempty）；前端用 TargetDigest 在场与否区分
+	// 「无目标」与「已全部对齐」。
+	PendingHosts []DockerImageDriftHostRef `json:"pendingHosts,omitempty"`
+	// AlignedCount 是已对齐台数：范围内该 repoTag 的摘要 == 目标摘要的主机数。
+	// omitempty：0（含无目标）时字段缺席，前端按 TargetDigest 在场判断真实有无。
+	AlignedCount int `json:"alignedCount,omitempty"`
+}
+
+// DockerImageDriftOutlier 是一个漂移行里的一个少数派摘要。
+type DockerImageDriftOutlier struct {
+	// Digest 是内容摘要（镜像 ID，与 DockerImageItem.ID 同源）。
+	Digest string `json:"digest"`
+	// HostCount 是该摘要在这台舰队里的主机数。
+	HostCount int `json:"hostCount"`
+	// Hosts 是带该摘要的主机清单，**按 hostId 升序**（枚举顺序不保证，不排就是
+	// 按运气排；页边界/展示顺序都要确定）。
+	Hosts []DockerImageDriftHostRef `json:"hosts"`
+}
+
+// DockerImageDriftHostRef 是漂移视图里指向一台主机的最小引用（少数派主机清单的一行）。
+type DockerImageDriftHostRef struct {
+	HostID   uint64 `json:"hostId,string"`
+	Hostname string `json:"hostname"`
+	// Group 是主机的平台级分组（设备行，与主机清单/总览同源）；未分组时字段缺席。
+	Group string `json:"group,omitempty"`
+}
+
 // DockerVolumeListResp 是跨主机卷清单响应。
 type DockerVolumeListResp struct {
+	// Items 是本页条目（先排序、后分页）；空时为空数组而非 null。
 	Items []DockerVolumeListItem `json:"items"`
-	Total int                    `json:"total"`
+	// Total 是**过滤后**的全量数（分页前）。
+	Total    int `json:"total"`
+	Page     int `json:"page"`
+	PageSize int `json:"pageSize"`
+	// UnavailableHosts 是本范围内资源事实不可用的主机清单（读失败 / 从未上报）。
+	UnavailableHosts []DockerUnavailableHostItem `json:"unavailableHosts"`
 }
 
 // DockerVolumeListItem 是跨主机卷清单的一行（一台主机上的一个数据卷）。
@@ -305,8 +442,14 @@ type DockerVolumeListItem struct {
 
 // DockerNetworkListResp 是跨主机网络清单响应。
 type DockerNetworkListResp struct {
+	// Items 是本页条目（先排序、后分页）；空时为空数组而非 null。
 	Items []DockerNetworkListItem `json:"items"`
-	Total int                     `json:"total"`
+	// Total 是**过滤后**的全量数（分页前）。
+	Total    int `json:"total"`
+	Page     int `json:"page"`
+	PageSize int `json:"pageSize"`
+	// UnavailableHosts 是本范围内资源事实不可用的主机清单（读失败 / 从未上报）。
+	UnavailableHosts []DockerUnavailableHostItem `json:"unavailableHosts"`
 }
 
 // DockerNetworkListItem 是跨主机网络清单的一行（一台主机上的一个网络）。
@@ -318,8 +461,14 @@ type DockerNetworkListItem struct {
 
 // DockerProjectListResp 是跨主机项目清单响应。
 type DockerProjectListResp struct {
+	// Items 是本页条目（先排序、后分页）；空时为空数组而非 null。
 	Items []DockerProjectListItem `json:"items"`
-	Total int                     `json:"total"`
+	// Total 是**过滤后**的全量数（分页前）。
+	Total    int `json:"total"`
+	Page     int `json:"page"`
+	PageSize int `json:"pageSize"`
+	// UnavailableHosts 是本范围内资源事实不可用的主机清单（读失败 / 从未上报）。
+	UnavailableHosts []DockerUnavailableHostItem `json:"unavailableHosts"`
 }
 
 // DockerProjectListItem 是跨主机项目清单的一行（一台主机上的一个编排项目）。
@@ -327,6 +476,25 @@ type DockerProjectListItem struct {
 	DockerProjectItem
 	HostID   uint64 `json:"hostId,string"`
 	Hostname string `json:"hostname"`
+}
+
+// DockerUnavailableHostItem 是五个跨主机清单（容器统一表 + 四资源页）共用的
+// 「不可用主机」条目：范围（hostId 过滤后）内**有主机、但资源事实不可用**。
+//
+// 两类不可用、两句结论（Reason 承载，前端直接显示，不重复判断）：
+//   - 快照读失败（键值损坏 / Redis 抖动）→ dockerStateReadFailed；
+//   - 从未上报（集合里有它、快照键却没写过）→ dockerStateNeverReported。
+//
+// 为什么单开一份清单而不是把行留在 Items 里：这些主机没有可列的资源事实
+// （不编造「零容器 / 零镜像」的假象），但「少了几行」必须显式告知 —— 否则读者
+// 会把「这台机器故障了」误读成「这台机器上什么都没有」。
+type DockerUnavailableHostItem struct {
+	// HostID 是主机设备 ID（雪花值，string 编码与全站同纪律）。
+	HostID uint64 `json:"hostId,string"`
+	// Hostname 是主机名（设备行；hostRecords 保证不可用主机也有设备行）。
+	Hostname string `json:"hostname"`
+	// Reason 是「为什么不可用」的结论句（页面直接显示）。
+	Reason string `json:"reason"`
 }
 
 // DockerStateResp 是一台主机的完整快照。
@@ -634,4 +802,75 @@ type DockerEventHistoryItem struct {
 // 账目（随完成控制帧核对），对用户不可行动 —— 报出去只会变成第二个口径源头。
 type DockerBuildContextUploadResp struct {
 	FileName string `json:"filename"`
+}
+
+// ── 镜像目标版本（Wave 4c：GET/POST/DELETE /docker/image-targets）──────────
+
+// DockerImageTargetItem 是一条已声明的镜像目标版本。
+type DockerImageTargetItem struct {
+	// RepoTag 是镜像引用（声明/寻址的唯一键）。
+	RepoTag string `json:"repoTag"`
+	// TargetDigest 是声明的目标内容摘要（`sha256:<hex>`）。
+	TargetDigest string `json:"targetDigest"`
+	// UpdatedAt 是最近一次声明/覆盖的时刻（unix 秒）。
+	UpdatedAt int64 `json:"updatedAt,omitempty"`
+}
+
+// DockerImageTargetListResp 是镜像目标清单响应。
+type DockerImageTargetListResp struct {
+	// Items 是全部已声明的目标（按 repoTag 升序）；空时为空数组而非 null。
+	Items []DockerImageTargetItem `json:"items"`
+	// Total 是目标总数（= len(Items)；本清单不做分页）。
+	Total int `json:"total"`
+}
+
+// ── 全局跨资源检索（Wave 4d：GET /docker/search?q=&limit=）──────────────────
+//
+// 跨 100 台、跨 5 类资源（容器/镜像/卷/网络/Compose 项目）按**名称子串**找东西：
+// 分页已挡全量，逐页逐主机翻不可行 —— 这是报告 C 组「全局跨资源检索」的数据面。
+//
+// 形状：一次返回**按资源类型分组**的结果（groups 固定 5 组、顺序固定，空组也出现
+// —— 与全站「空数组而非 null」同一纪律，前端少一层判空、可依赖顺序）。每组给出
+// 命中**全量** total 与 truncated 标记：**部分结果必须说出口**（本模块既有纪律：
+// 限量必带显式截断口径，不靠前端猜）。
+
+// DockerSearchResp 是全局跨资源检索响应。
+type DockerSearchResp struct {
+	// Groups 按固定顺序给出 5 组：containers / images / volumes / networks / projects。
+	// 空查询（q 为空）时每组 items 为空数组、total=0、truncated=false（见 service.Search）。
+	Groups []DockerSearchGroup `json:"groups"`
+	// UnavailableHosts 是本次枚举范围内「有主机、但资源事实不可用」的主机清单
+	//（快照读失败 / 从未上报）—— 与其余跨主机读面同一形态、同一判据、同一结论句：
+	// 这些主机**不进任何组**（不知道 ≠ 没有），但「少算了谁、为什么」显式告知。
+	// 空数组而非 null。
+	UnavailableHosts []DockerUnavailableHostItem `json:"unavailableHosts"`
+}
+
+// DockerSearchGroup 是一类资源的命中分组。
+type DockerSearchGroup struct {
+	// Kind ∈ containers | images | volumes | networks | projects。
+	Kind string `json:"kind"`
+	// Items 是本组的命中条目（先按 hostId 升序、同主机按名称升序，再按每组限量截断）；
+	// 空数组而非 null。
+	Items []DockerSearchItem `json:"items"`
+	// Total 是**截断前**本组的命中全量（= 舰队里匹配该关键词的这类资源总数）：
+	// 与 Items 长度不等即「截断了」的显式口径（不靠前端猜）。
+	Total int `json:"total"`
+	// Truncated = Total > 本组限量（Items 被截到限量）：部分结果必须说出口。
+	Truncated bool `json:"truncated"`
+}
+
+// DockerSearchItem 是一条检索命中（跨资源类型共用一个最小形状）。
+type DockerSearchItem struct {
+	// Name 是该资源的展示名（容器名 / 镜像的首个 repoTag（悬空回落 ID）/ 卷名 /
+	// 网络名 / 项目名）。
+	Name string `json:"name"`
+	// HostID / Hostname 是归属主机（与其余跨主机读面同源、同 string 编码纪律）。
+	HostID   uint64 `json:"hostId,string"`
+	Hostname string `json:"hostname"`
+	// Group 是主机的平台级分组（设备行；未分组时字段缺席）—— 供 UI 按分组聚拢结果。
+	Group string `json:"group,omitempty"`
+	// Hint 是给 UI 的**次要线索**（各类型不同，形状见 service.Search 的映射注释）：
+	// 容器=镜像名、镜像=镜像 ID、卷/网络=驱动、项目=服务数。空时字段缺席。
+	Hint string `json:"hint,omitempty"`
 }

@@ -41,13 +41,20 @@ type stubDeviceSvc struct {
 
 	// 列表面：与总览同款 —— 记录实际传入的 DeviceQuery，断言 handler 把
 	// 新增的 IP/版本/排序参数原样绑定进 service（丢一个，前端筛选就静默失效）。
-	listQuery  *request.DeviceQuery
-	listCalls  int
-	listItems  []response.DeviceListItem
-	listErr    error
-	listPage   int
-	listSize   int
-	listTotal  int64
+	listQuery *request.DeviceQuery
+	listCalls int
+	listItems []response.DeviceListItem
+	listErr   error
+	listPage  int
+	listSize  int
+	listTotal int64
+
+	// 分组/标签写面：记录实际传入的 id 与指针参数 —— 断言 handler 把请求体
+	// 原样绑定（尤其是「未提供的字段必须是 nil」，否则部分更新会变成清空）。
+	updateID    uint64
+	updateGroup *string
+	updateTags  *string
+	updateCalls int
 }
 
 func (s *stubDeviceSvc) List(_ context.Context, q *request.DeviceQuery) (*app.PageResponse, error) {
@@ -106,6 +113,14 @@ func (s *stubDeviceSvc) Enable(context.Context, uint64) error  { return s.err }
 func (s *stubDeviceSvc) Disable(context.Context, uint64) error { return s.err }
 func (s *stubDeviceSvc) Delete(context.Context, uint64) error  { return s.err }
 
+func (s *stubDeviceSvc) UpdateGroup(_ context.Context, id uint64, group, tags *string) error {
+	s.updateID = id
+	s.updateGroup = group
+	s.updateTags = tags
+	s.updateCalls++
+	return s.err
+}
+
 func newGinCtx(method, target string) (*gin.Context, *httptest.ResponseRecorder) {
 	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()
@@ -114,15 +129,25 @@ func newGinCtx(method, target string) (*gin.Context, *httptest.ResponseRecorder)
 	return c, w
 }
 
+// newGinCtxBody 与 newGinCtx 同款，但带 JSON 请求体（PATCH 端点需要）。
+func newGinCtxBody(method, target, body string) (*gin.Context, *httptest.ResponseRecorder) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(method, target, strings.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	return c, w
+}
+
 // TestDeviceHandlerListBindsQuery 钉住列表端点把全部查询参数绑定进 service ——
-// 新增的 primaryIp / agentVersion / sortBy / sortOrder 丢一个，前端的筛选与
+// 新增的 primaryIp / agentVersion / group / sortBy / sortOrder 丢一个，前端的筛选与
 // 服务端排序就静默失效（页面照常出列表，只是条件被无视）。
 func TestDeviceHandlerListBindsQuery(t *testing.T) {
 	svc := &stubDeviceSvc{}
 	h := NewDeviceHandler(svc, svc, svc)
 	c, w := newGinCtx(http.MethodGet,
 		"/devices?page=2&pageSize=20&hostname=web&status=1&online=true"+
-			"&primaryIp=10.1.1.&agentVersion=0.6.0&sortBy=agentVersion&sortOrder=asc")
+			"&primaryIp=10.1.1.&agentVersion=0.6.0&group=prod&sortBy=agentVersion&sortOrder=asc")
 
 	h.List(c)
 
@@ -141,6 +166,9 @@ func TestDeviceHandlerListBindsQuery(t *testing.T) {
 	}
 	if q.AgentVersion != "0.6.0" {
 		t.Fatalf("agentVersion 未绑定: %q", q.AgentVersion)
+	}
+	if q.Group != "prod" {
+		t.Fatalf("group 未绑定: %q", q.Group)
 	}
 	if q.SortBy != "agentVersion" {
 		t.Fatalf("sortBy 未绑定: %q", q.SortBy)
@@ -346,8 +374,8 @@ func TestDeviceHandlerHasSwagAnnotations(t *testing.T) {
 			routers[r[1]+" "+strings.ToLower(r[2])] = true
 		}
 	}
-	if checked != 8 {
-		t.Fatalf("扫描到 %d 个 DeviceHandler 方法，want 8（方法增删时本守卫必须同步）", checked)
+	if checked != 9 {
+		t.Fatalf("扫描到 %d 个 DeviceHandler 方法，want 9（方法增删时本守卫必须同步）", checked)
 	}
 	want := map[string]bool{
 		"/devices get": true,
@@ -357,6 +385,7 @@ func TestDeviceHandlerHasSwagAnnotations(t *testing.T) {
 		"/devices/overview get":       true,
 		"/devices/{id} get":           true,
 		"/devices/{id} delete":        true,
+		"/devices/{id} patch":         true,
 		"/devices/{id}/metrics get":   true,
 		"/devices/{id}/resources get": true,
 		"/devices/{id}/enable post":   true,
@@ -369,5 +398,100 @@ func TestDeviceHandlerHasSwagAnnotations(t *testing.T) {
 	}
 	if len(routers) != len(want) {
 		t.Fatalf("swag 路由注解 = %v（%d 条）, want %d 条", routers, len(routers), len(want))
+	}
+}
+
+// TestDeviceHandlerUpdateGroupBindsBody 钉住 PATCH /devices/:id 的请求体绑定：
+// 出现的字段必须原样进 service。
+func TestDeviceHandlerUpdateGroupBindsBody(t *testing.T) {
+	svc := &stubDeviceSvc{}
+	h := NewDeviceHandler(svc, svc, svc)
+
+	c, w := newGinCtxBody(http.MethodPatch, "/devices/1001", `{"group":"prod","tags":"web,cn"}`)
+	c.Params = gin.Params{{Key: "id", Value: "1001"}}
+	h.UpdateGroup(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("HTTP 状态 = %d, want 200；body=%s", w.Code, w.Body.String())
+	}
+	if svc.updateCalls != 1 || svc.updateID != 1001 {
+		t.Fatalf("UpdateGroup 调用数/id = %d/%d, want 1/1001", svc.updateCalls, svc.updateID)
+	}
+	if svc.updateGroup == nil || *svc.updateGroup != "prod" {
+		t.Fatalf("group 未绑定: %v", svc.updateGroup)
+	}
+	if svc.updateTags == nil || *svc.updateTags != "web,cn" {
+		t.Fatalf("tags 未绑定: %v", svc.updateTags)
+	}
+}
+
+// TestDeviceHandlerUpdateGroupPartialBodyLeavesAbsentFieldNil 钉住**部分更新**的
+// 绑定语义：未提供的字段必须是 nil（= 不动），空串必须是非 nil 的空串指针（= 清空）。
+//
+// 若把未提供绑成了空串指针，PATCH 就会静默清空另一个字段 —— 这正是部分更新最容易
+// 出错的边界，故单独钉一条。
+func TestDeviceHandlerUpdateGroupPartialBodyLeavesAbsentFieldNil(t *testing.T) {
+	svc := &stubDeviceSvc{}
+	h := NewDeviceHandler(svc, svc, svc)
+
+	c, w := newGinCtxBody(http.MethodPatch, "/devices/1001", `{"group":"prod"}`)
+	c.Params = gin.Params{{Key: "id", Value: "1001"}}
+	h.UpdateGroup(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("HTTP 状态 = %d, want 200；body=%s", w.Code, w.Body.String())
+	}
+	if svc.updateGroup == nil || *svc.updateGroup != "prod" {
+		t.Fatalf("group 未绑定: %v", svc.updateGroup)
+	}
+	if svc.updateTags != nil {
+		t.Fatalf("未提供的 tags 必须保持 nil（否则部分更新会误清空）: %v", *svc.updateTags)
+	}
+
+	// 空串 = 清空：必须绑成**非 nil 的空串指针**，而不是 nil。
+	c2, _ := newGinCtxBody(http.MethodPatch, "/devices/1001", `{"group":""}`)
+	c2.Params = gin.Params{{Key: "id", Value: "1001"}}
+	h.UpdateGroup(c2)
+	if svc.updateGroup == nil || *svc.updateGroup != "" {
+		t.Fatalf("空串必须绑成非 nil 空串指针（=清空），got %v", svc.updateGroup)
+	}
+}
+
+// TestDeviceHandlerUpdateGroupPropagatesErrorAndBadInput 覆盖错误传播与三类非法输入：
+// service 的 404 必须原样透出；非法 JSON / 非法 id 必须 400 且**不触达 service**。
+func TestDeviceHandlerUpdateGroupPropagatesErrorAndBadInput(t *testing.T) {
+	// service 返回 404 → 不得 200
+	svc := &stubDeviceSvc{err: apperror.NotFound("设备不存在")}
+	h := NewDeviceHandler(svc, svc, svc)
+	c, w := newGinCtxBody(http.MethodPatch, "/devices/9999", `{"group":"prod"}`)
+	c.Params = gin.Params{{Key: "id", Value: "9999"}}
+	h.UpdateGroup(c)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("service 返回 NotFound 时 HTTP 状态 = %d, want 404", w.Code)
+	}
+
+	// 非法 JSON → 400，且不得触达 service
+	svc2 := &stubDeviceSvc{}
+	h2 := NewDeviceHandler(svc2, svc2, svc2)
+	c2, w2 := newGinCtxBody(http.MethodPatch, "/devices/1001", `{not-json}`)
+	c2.Params = gin.Params{{Key: "id", Value: "1001"}}
+	h2.UpdateGroup(c2)
+	if w2.Code != http.StatusBadRequest {
+		t.Fatalf("非法请求体 HTTP 状态 = %d, want 400", w2.Code)
+	}
+	if svc2.updateCalls != 0 {
+		t.Fatal("非法请求体不得触达 service")
+	}
+
+	// 非法 id → 400，且不得触达 service
+	svc3 := &stubDeviceSvc{}
+	h3 := NewDeviceHandler(svc3, svc3, svc3)
+	c3, w3 := newGinCtxBody(http.MethodPatch, "/devices/xx", `{"group":"prod"}`)
+	c3.Params = gin.Params{{Key: "id", Value: "xx"}}
+	h3.UpdateGroup(c3)
+	if w3.Code != http.StatusBadRequest {
+		t.Fatalf("非法 id HTTP 状态 = %d, want 400", w3.Code)
+	}
+	if svc3.updateCalls != 0 {
+		t.Fatal("非法 id 不得触达 service")
 	}
 }

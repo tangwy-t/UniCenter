@@ -606,6 +606,8 @@ declare namespace Api {
       online: boolean
       lastSeenAt?: number | null
       primaryIp?: string
+      group?: string
+      tags?: string
       cpuUsedPercent?: number | null
       memUsedPercent?: number | null
       diskUsedPercent?: number | null
@@ -629,6 +631,8 @@ declare namespace Api {
       online: boolean
       lastSeenAt?: number | null
       primaryIp?: string
+      group?: string
+      tags?: string
       cpuUsedPercent?: number | null
       memUsedPercent?: number | null
       diskUsedPercent?: number | null
@@ -903,6 +907,8 @@ declare namespace Api {
       id: string
       hostname: string
       primaryIp?: string
+      group?: string
+      tags?: string
       online: boolean
       dockerOk: boolean
       error?: string
@@ -913,6 +919,8 @@ declare namespace Api {
       lastSync?: number
       stale: boolean
       disk?: Api.Docker.DockerHostDiskItem | null
+      diskUsedPercent?: number | null
+      diskTotalGb?: number | null
     }
 
     interface DockerHostListResp {
@@ -1003,6 +1011,9 @@ declare namespace Api {
     interface DockerWorkloadListResp {
       items: Api.Docker.DockerWorkloadItem[]
       total: number
+      page: number
+      pageSize: number
+      unavailableHosts: Api.Docker.DockerUnavailableHostItem[]
     }
 
     interface DockerWorkloadItem {
@@ -1029,6 +1040,9 @@ declare namespace Api {
     interface DockerImageListResp {
       items: Api.Docker.DockerImageListItem[]
       total: number
+      page: number
+      pageSize: number
+      unavailableHosts: Api.Docker.DockerUnavailableHostItem[]
       disk: Api.Docker.DockerImageHostDiskItem[]
     }
 
@@ -1050,9 +1064,45 @@ declare namespace Api {
       hostname: string
     }
 
+    interface DockerImageDriftResp {
+      items: Api.Docker.DockerImageDriftItem[]
+      total: number
+      page: number
+      pageSize: number
+      unavailableHosts: Api.Docker.DockerUnavailableHostItem[]
+    }
+
+    interface DockerImageDriftItem {
+      repoTag: string
+      hostCount: number
+      distinctDigests: number
+      dominantDigest: string
+      dominantHostCount: number
+      outliers: Api.Docker.DockerImageDriftOutlier[]
+      summary?: string
+      targetDigest?: string
+      pendingHosts?: Api.Docker.DockerImageDriftHostRef[]
+      alignedCount?: number
+    }
+
+    interface DockerImageDriftOutlier {
+      digest: string
+      hostCount: number
+      hosts: Api.Docker.DockerImageDriftHostRef[]
+    }
+
+    interface DockerImageDriftHostRef {
+      hostId: string
+      hostname: string
+      group?: string
+    }
+
     interface DockerVolumeListResp {
       items: Api.Docker.DockerVolumeListItem[]
       total: number
+      page: number
+      pageSize: number
+      unavailableHosts: Api.Docker.DockerUnavailableHostItem[]
     }
 
     interface DockerVolumeListItem {
@@ -1069,6 +1119,9 @@ declare namespace Api {
     interface DockerNetworkListResp {
       items: Api.Docker.DockerNetworkListItem[]
       total: number
+      page: number
+      pageSize: number
+      unavailableHosts: Api.Docker.DockerUnavailableHostItem[]
     }
 
     interface DockerNetworkListItem {
@@ -1084,6 +1137,9 @@ declare namespace Api {
     interface DockerProjectListResp {
       items: Api.Docker.DockerProjectListItem[]
       total: number
+      page: number
+      pageSize: number
+      unavailableHosts: Api.Docker.DockerUnavailableHostItem[]
     }
 
     interface DockerProjectListItem {
@@ -1095,6 +1151,12 @@ declare namespace Api {
       protected: boolean
       hostId: string
       hostname: string
+    }
+
+    interface DockerUnavailableHostItem {
+      hostId: string
+      hostname: string
+      reason: string
     }
 
     interface DockerStateResp {
@@ -1254,6 +1316,37 @@ declare namespace Api {
 
     interface DockerBuildContextUploadResp {
       filename: string
+    }
+
+    interface DockerImageTargetItem {
+      repoTag: string
+      targetDigest: string
+      updatedAt?: number
+    }
+
+    interface DockerImageTargetListResp {
+      items: Api.Docker.DockerImageTargetItem[]
+      total: number
+    }
+
+    interface DockerSearchResp {
+      groups: Api.Docker.DockerSearchGroup[]
+      unavailableHosts: Api.Docker.DockerUnavailableHostItem[]
+    }
+
+    interface DockerSearchGroup {
+      kind: string
+      items: Api.Docker.DockerSearchItem[]
+      total: number
+      truncated: boolean
+    }
+
+    interface DockerSearchItem {
+      name: string
+      hostId: string
+      hostname: string
+      group?: string
+      hint?: string
     }
   }
 

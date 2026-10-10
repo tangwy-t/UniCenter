@@ -557,6 +557,90 @@ func TestDockerReadPathsEnvelope(t *testing.T) {
 		}
 	})
 
+	t.Run("统一工作负载表把全部查询参数绑定进 service", func(t *testing.T) {
+		env := newTestDockerHandler(t, []string{"docker:list"})
+		ctx := context.Background()
+		now := time.Now()
+
+		// 主机 7/8 登记进设备表 + 快照。命名与镜像名故意错位（sortBy=image 才改顺序），
+		// 并放一个停掉的容器（state 过滤可观测）。
+		dev7, dev8 := &entity.Device{Hostname: "uni-105"}, &entity.Device{Hostname: "uni-106"}
+		dev7.ID, dev8.ID = 7, 8
+		env.handler.svc = service.NewDockerService(env.store,
+			dockerDeviceReader{devs: map[uint64]*entity.Device{7: dev7, 8: dev8}}, dockerCfg{}, logger.NewNop())
+		if err := env.store.Save(ctx, 7, &agentproto.DockerState{T: now.UnixMilli(), DockerOK: true,
+			Containers: []agentproto.DockerContainer{
+				{ID: "a", Name: "alpha", Image: "zzz:1", State: "running"},
+				{ID: "b", Name: "beta", Image: "aaa:1", State: "running"},
+				{ID: "d", Name: "dead", Image: "bbb:1", State: "exited"},
+			}}, now); err != nil {
+			t.Fatal(err)
+		}
+		if err := env.store.Save(ctx, 8, &agentproto.DockerState{T: now.UnixMilli(), DockerOK: true,
+			Containers: []agentproto.DockerContainer{
+				{ID: "g", Name: "alpha-b", Image: "mmm:1", State: "running"},
+			}}, now); err != nil {
+			t.Fatal(err)
+		}
+
+		workloads := func(t *testing.T, rawQuery string) struct {
+			Total    int `json:"total"`
+			Page     int `json:"page"`
+			PageSize int `json:"pageSize"`
+			Items    []struct {
+				HostID uint64 `json:"hostId,string"`
+				Name   string `json:"name"`
+			} `json:"items"`
+		} {
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/docker/containers?"+rawQuery, nil)
+			env.handler.Workloads(c)
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 (%s)", w.Code, w.Body.String())
+			}
+			var body struct {
+				Data struct {
+					Total    int `json:"total"`
+					Page     int `json:"page"`
+					PageSize int `json:"pageSize"`
+					Items    []struct {
+						HostID uint64 `json:"hostId,string"`
+						Name   string `json:"name"`
+					} `json:"items"`
+				} `json:"data"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			return body.Data
+		}
+
+		// hostId + keyword + page + pageSize：hostId=7 收窄到主机 7（丢 → Total=2）、
+		// keyword=alpha 再收窄到 1（丢 → Total=2）、页码/页大小回显。
+		got := workloads(t, "hostId=7&keyword=alpha&page=3&pageSize=20")
+		if got.Total != 1 {
+			t.Fatalf("hostId/keyword 未绑定？Total = %d, want 1", got.Total)
+		}
+		if got.Page != 3 || got.PageSize != 20 {
+			t.Fatalf("page/pageSize 未绑定: page=%d pageSize=%d", got.Page, got.PageSize)
+		}
+
+		// sortBy=image&sortOrder=asc + pageSize：四类条目里 img aaa(beta) 最小 →
+		// 首条必须是 beta。丢 sortBy（回落默认 hostId+name）→ alpha 在前；丢 sortOrder
+		// （回落 desc）→ zzz(alpha) 在前 —— 两者都把首条变成 alpha，可区分。
+		sorted := workloads(t, "sortBy=image&sortOrder=asc&pageSize=2")
+		if len(sorted.Items) != 2 || sorted.Items[0].Name != "beta" {
+			t.Fatalf("sortBy/sortOrder 未绑定？首条 = %+v, want beta", sorted.Items)
+		}
+
+		// state=stopped：只剩停掉的 dead（丢 → Total=4）。
+		stopped := workloads(t, "state=stopped&pageSize=50")
+		if stopped.Total != 1 {
+			t.Fatalf("state 未绑定？Total = %d, want 1（仅 dead）", stopped.Total)
+		}
+	})
+
 	t.Run("统一表 state 非法 → 400 结论句", func(t *testing.T) {
 		w := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(w)

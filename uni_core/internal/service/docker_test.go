@@ -95,6 +95,40 @@ func TestDockerServiceHostList(t *testing.T) {
 	}
 }
 
+// TestDockerHostsCarryHostGroupAndTags 钉住 /docker/hosts 的主机条目带出设备的
+// **平台级**分组/标签（来自 device 行，与设备列表同源）—— 主机切换器/清单页据此
+// 展示分组与标签，docker 侧不另存一份。
+func TestDockerHostsCarryHostGroupAndTags(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rdb := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	store := dockerstate.NewStore(rdb)
+	ctx := context.Background()
+	now := time.Now()
+	dev := &entity.Device{Hostname: "bogon", Status: entity.DeviceStatusEnabled,
+		GroupName: "prod", Tags: "web,db"}
+	dev.ID = 7
+	dev.LastSeenAt = &now
+	svc := NewDockerService(store, fakeDeviceReader{devs: map[uint64]*entity.Device{7: dev}},
+		fakeConfigGetter{vals: map[string]string{"sys.docker.snapshotInterval": "30",
+			"sys.agent.offlineThreshold": "90"}}, nil)
+
+	// 历史快照：登记进 docker:hosts 集合（列表的唯一枚举源）。
+	if err := store.Save(ctx, 7, &agentproto.DockerState{T: now.UnixMilli(), DockerOK: true}, now); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := svc.Hosts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.List) != 1 {
+		t.Fatalf("应有一台主机: %+v", resp.List)
+	}
+	h := resp.List[0]
+	if h.Group != "prod" || h.Tags != "web,db" {
+		t.Fatalf("主机条目未带出平台级分组/标签: group=%q tags=%q", h.Group, h.Tags)
+	}
+}
+
 func TestDockerServiceStateNeverReported(t *testing.T) {
 	mr := miniredis.RunT(t)
 	rdb := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})

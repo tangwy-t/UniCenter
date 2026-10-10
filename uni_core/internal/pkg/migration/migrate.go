@@ -106,6 +106,11 @@ var autoMigrateEntities = []any{
 	// 默认 30 天）按受理时刻清理，不做分区（清理是删除而非归档，分区只会在审计上
 	// 引入第二种故障）。写入面只有 CmdStore 的终态钩子一条（service.DockerTaskHistoryRecorder）。
 	&entity.DockerTaskHistory{},
+	// ── Docker 镜像目标版本（4c）────────────────────────────────
+	// 普通表：量级是「每个声明了目标的 repoTag 一行」（运维手写的声明集合，个位数量级），
+	// 由 AutoMigrate 按实体建，无版本化 DDL（见文件顶注释）。repo_tag 唯一索引承载
+	// upsert 语义（同 repoTag 覆盖）。
+	&entity.DockerImageTarget{},
 	// 指标 6 表**刻意缺席**，见上方说明。
 }
 

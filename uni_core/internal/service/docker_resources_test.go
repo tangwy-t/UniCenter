@@ -11,6 +11,7 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/request"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/response"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/apperror"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockerstate"
 	agentproto "github.com/tangwy-t/UniCenter/uni_protocol"
@@ -273,15 +274,16 @@ func TestDockerImagesDanglingUnusedFilters(t *testing.T) {
 	}
 }
 
-// TestDockerImagesCap 上限 500 条且**截断先报全量**：Total 是截断前的真数，
-// Items 只留排序后的前 500（砍掉的是尾部，不是运气）。
-func TestDockerImagesCap(t *testing.T) {
+// TestDockerImagesPagination 真分页：601 条数据、page=2&pageSize=100 → Total=601
+// （过滤后全量）、len=100、Items[0] 是排序后第 101 条；且 disk 账目按主机整机收、
+// 不受分页影响（两种口径的分工在 DTO 注释里钉死）。
+func TestDockerImagesPagination(t *testing.T) {
 	f := newResFixture(t)
 	big := make([]agentproto.DockerImage, 0, 600)
 	for i := 0; i < 600; i++ {
 		big = append(big, resImage(fmt.Sprintf("img-%03d", i), fmt.Sprintf("cap-%03d:latest", i), false, false))
 	}
-	// 主机 7 带 df：账目在截断**之前**按整机收，600 条截到 500 也影响不到它。
+	// 主机 7 带 df：账目在分页**之前**按整机收，翻到第 2 页也影响不到它。
 	f.saveState(t, 7, &agentproto.DockerState{
 		Images:    big,
 		DiskUsage: &agentproto.DockerDiskUsage{ImagesTotalMB: 600, ImagesDanglingMB: 3},
@@ -290,29 +292,114 @@ func TestDockerImagesCap(t *testing.T) {
 		resImage("img-ok", "zzz:latest", true, false),
 	}})
 
-	resp, err := f.svc.Images(f.ctx, &request.DockerImageQuery{})
+	q := &request.DockerImageQuery{}
+	q.Page, q.PageSize = 2, 100
+	resp, err := f.svc.Images(f.ctx, q)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if resp.Total != 601 {
-		t.Fatalf("Total 必须是截断前全量 = 601, got %d", resp.Total)
+		t.Fatalf("Total 必须是过滤后全量 = 601, got %d", resp.Total)
 	}
-	if len(resp.Items) != 500 {
-		t.Fatalf("Items 必须截到 500 条, got %d", len(resp.Items))
+	if resp.Page != 2 || resp.PageSize != 100 {
+		t.Fatalf("生效页参数必须回显: page=%d pageSize=%d", resp.Page, resp.PageSize)
 	}
-	// 截断必须发生在排序之后：留下的是 cap-000..cap-499（主机 7 的前 500）。
-	if resp.Items[0].RepoTags[0] != "cap-000:latest" || resp.Items[499].RepoTags[0] != "cap-499:latest" {
-		t.Fatalf("截断必须砍排序后的尾部: 首=%v 尾=%v", resp.Items[0].RepoTags, resp.Items[499].RepoTags)
+	if len(resp.Items) != 100 {
+		t.Fatalf("第 2 页应收 100 条, got %d", len(resp.Items))
+	}
+	// 排序后索引 100..199 = cap-100..cap-199（主机 7 的 cap-000..cap-599 在前 600）。
+	if resp.Items[0].RepoTags[0] != "cap-100:latest" || resp.Items[99].RepoTags[0] != "cap-199:latest" {
+		t.Fatalf("第 2 页必须是排序后的第 101..200 条: 首=%v 尾=%v", resp.Items[0].RepoTags, resp.Items[99].RepoTags)
 	}
 	for i, it := range resp.Items {
 		if it.HostID != 7 {
-			t.Fatalf("前 500 行必须都来自主机 7（8 排在其后）: 第 %d 行 hostId=%d", i, it.HostID)
+			t.Fatalf("第 2 页应全来自主机 7: 第 %d 行 hostId=%d", i, it.HostID)
 		}
 	}
-	// 500 条截断不得影响账目：有 df 的主机照常整机收（主机 8 无 df → 缺席）。
+	// 账目与分页是两条口径：有 df 的主机照常整机收（主机 8 无 df → 缺席）。
 	if len(resp.Disk) != 1 || resp.Disk[0].HostID != 7 ||
 		resp.Disk[0].DanglingCount != 0 || resp.Disk[0].DanglingMB != 3 {
-		t.Fatalf("截断与账目是两条口径（账目按整机收）: %+v", resp.Disk)
+		t.Fatalf("分页不得影响账目（账目按整机收）: %+v", resp.Disk)
+	}
+}
+
+// TestDockerImagesSortWhitelistAndFallback 镜像页排序白名单（size）asc/desc 真的
+// 改变顺序；非法 sortBy（含注入串）静默回落默认；非法 sortOrder 回落 desc。
+func TestDockerImagesSortWhitelistAndFallback(t *testing.T) {
+	f := newResFixture(t)
+	mk := func(id, tag string, size float64) agentproto.DockerImage {
+		return agentproto.DockerImage{ID: id, RepoTags: []string{tag}, SizeMB: size, InUse: true}
+	}
+	// 名字与尺寸故意错位：默认按 name 排 [aaa,mmm,zzz]，按 size 排不同。
+	f.saveState(t, 7, &agentproto.DockerState{Images: []agentproto.DockerImage{
+		mk("i-z", "zzz:1", 30),
+		mk("i-a", "aaa:1", 10),
+	}})
+	f.saveState(t, 8, &agentproto.DockerState{Images: []agentproto.DockerImage{
+		mk("i-m", "mmm:1", 20),
+	}})
+	order := func(resp *response.DockerImageListResp) string {
+		s := ""
+		for _, it := range resp.Items {
+			s += it.ID + " "
+		}
+		return s
+	}
+
+	def, _ := f.svc.Images(f.ctx, &request.DockerImageQuery{})
+	if got := order(def); got != "i-a i-z i-m " {
+		t.Fatalf("默认次序（hostId+name） = %q", got)
+	}
+	asc, err := f.svc.Images(f.ctx, &request.DockerImageQuery{SortBy: "size", SortOrder: "asc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := order(asc); got != "i-a i-m i-z " {
+		t.Fatalf("sortBy=size asc 次序 = %q", got)
+	}
+	desc, err := f.svc.Images(f.ctx, &request.DockerImageQuery{SortBy: "size", SortOrder: "desc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := order(desc); got != "i-z i-m i-a " {
+		t.Fatalf("sortBy=size desc 次序 = %q", got)
+	}
+	// 非法 sortBy（注入尝试）→ 静默回落默认。
+	inj, err := f.svc.Images(f.ctx, &request.DockerImageQuery{SortBy: "size; DROP TABLE x", SortOrder: "asc"})
+	if err != nil {
+		t.Fatalf("非法 sortBy 不得报错: %v", err)
+	}
+	if got := order(inj); got != "i-a i-z i-m " {
+		t.Fatalf("非法 sortBy 必须回落默认, got %q", got)
+	}
+	// 非法 sortOrder（带空格）→ 回落 desc。
+	bad, err := f.svc.Images(f.ctx, &request.DockerImageQuery{SortBy: "size", SortOrder: "ASC "})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := order(bad); got != "i-z i-m i-a " {
+		t.Fatalf("非法 sortOrder 必须回落 desc, got %q", got)
+	}
+}
+
+// TestDockerImagesOutOfRangePage 越界页 → 空 items（非 null）+ Total 不变。
+func TestDockerImagesOutOfRangePage(t *testing.T) {
+	f := newResFixture(t)
+	f.saveState(t, 7, &agentproto.DockerState{Images: []agentproto.DockerImage{
+		resImage("img-a", "a:1", false, false),
+		resImage("img-b", "b:1", false, false),
+	}})
+	q := &request.DockerImageQuery{}
+	q.Page, q.PageSize = 50, 10
+	resp, err := f.svc.Images(f.ctx, q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Total != 2 {
+		t.Fatalf("Total 不随越界页改变 = 2, got %d", resp.Total)
+	}
+	if len(resp.Items) != 0 || resp.Items == nil {
+		t.Fatalf("越界页应为空数组而非 null: %+v", resp.Items)
 	}
 }
 
@@ -338,6 +425,11 @@ func TestDockerImagesReadFailureSkipsHost(t *testing.T) {
 	}
 	if resp.Total != 1 || len(resp.Items) != 1 || resp.Items[0].HostID != 8 {
 		t.Fatalf("读失败主机必须整台跳过（不编造零条目假象）: %+v", resp)
+	}
+	// 该主机必须列进不可用清单（Reason 非空）。
+	if len(resp.UnavailableHosts) != 1 ||
+		resp.UnavailableHosts[0].HostID != 7 || resp.UnavailableHosts[0].Reason == "" {
+		t.Fatalf("读失败主机必须列进 UnavailableHosts 并带 Reason: %+v", resp.UnavailableHosts)
 	}
 	// hostId 指向读失败主机：空表而非错误（与「未上报」同一句「没有条目」）。
 	only, err := f.svc.Images(f.ctx, &request.DockerImageQuery{HostID: 7})
@@ -460,6 +552,21 @@ func TestDockerImagesDiskAccount(t *testing.T) {
 	}
 	if len(dang.Disk) != 2 || dang.Disk[1].DanglingCount != 2 {
 		t.Fatalf("dangling=false 只过滤行，账目须保持整机口径: %+v", dang.Disk)
+	}
+
+	// 分页也不影响账目：翻到第 2 页（1 条/页）时账目仍是整机口径的两台。
+	paged := &request.DockerImageQuery{}
+	paged.Page, paged.PageSize = 2, 1
+	pg, err := f.svc.Images(f.ctx, paged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pg.Items) != 1 {
+		t.Fatalf("第 2 页应恰 1 条: %+v", pg.Items)
+	}
+	if len(pg.Disk) != 2 || pg.Disk[0].HostID != 7 || pg.Disk[1].HostID != 8 ||
+		pg.Disk[1].DanglingCount != 2 {
+		t.Fatalf("翻页不得改变账目（账目按整机收）: %+v", pg.Disk)
 	}
 
 	// 单台读取失败：账目同样整台缺席（没有账目可给，不编造零值）。
@@ -590,8 +697,9 @@ func TestDockerVolumesHostKeywordAndUnusedFilter(t *testing.T) {
 	requireEmptyNonNil(t, empty.Items, empty.Total, "未上报主机")
 }
 
-// TestDockerVolumesCap 上限 500 条且截断先报全量。
-func TestDockerVolumesCap(t *testing.T) {
+// TestDockerVolumesPagination 真分页：601 条、page=2&pageSize=100 → Total=601、
+// len=100、Items[0] 是排序后第 101 条（先排序后切片）。
+func TestDockerVolumesPagination(t *testing.T) {
 	f := newResFixture(t)
 	big := make([]agentproto.DockerVolume, 0, 600)
 	for i := 0; i < 600; i++ {
@@ -600,22 +708,27 @@ func TestDockerVolumesCap(t *testing.T) {
 	f.saveState(t, 7, &agentproto.DockerState{Volumes: big})
 	f.saveState(t, 8, &agentproto.DockerState{Volumes: []agentproto.DockerVolume{resVolume("zzz-pad", false)}})
 
-	resp, err := f.svc.Volumes(f.ctx, &request.DockerVolumeQuery{})
+	q := &request.DockerVolumeQuery{}
+	q.Page, q.PageSize = 2, 100
+	resp, err := f.svc.Volumes(f.ctx, q)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if resp.Total != 601 {
-		t.Fatalf("Total 必须是截断前全量 = 601, got %d", resp.Total)
+		t.Fatalf("Total 必须是过滤后全量 = 601, got %d", resp.Total)
 	}
-	if len(resp.Items) != 500 {
-		t.Fatalf("Items 必须截到 500 条, got %d", len(resp.Items))
+	if resp.Page != 2 || resp.PageSize != 100 {
+		t.Fatalf("生效页参数必须回显: page=%d pageSize=%d", resp.Page, resp.PageSize)
 	}
-	if resp.Items[0].Name != "cap-000" || resp.Items[499].Name != "cap-499" {
-		t.Fatalf("截断必须砍排序后的尾部: 首=%s 尾=%s", resp.Items[0].Name, resp.Items[499].Name)
+	if len(resp.Items) != 100 {
+		t.Fatalf("第 2 页应收 100 条, got %d", len(resp.Items))
+	}
+	if resp.Items[0].Name != "cap-100" || resp.Items[99].Name != "cap-199" {
+		t.Fatalf("第 2 页必须是排序后第 101..200 条: 首=%s 尾=%s", resp.Items[0].Name, resp.Items[99].Name)
 	}
 	for i, it := range resp.Items {
 		if it.HostID != 7 {
-			t.Fatalf("前 500 行必须都来自主机 7: 第 %d 行 hostId=%d", i, it.HostID)
+			t.Fatalf("第 2 页应全来自主机 7: 第 %d 行 hostId=%d", i, it.HostID)
 		}
 	}
 }
@@ -777,8 +890,9 @@ func TestDockerNetworksHostKeywordAndInternalFilter(t *testing.T) {
 	requireEmptyNonNil(t, empty.Items, empty.Total, "未上报主机")
 }
 
-// TestDockerNetworksCap 上限 500 条且截断先报全量。
-func TestDockerNetworksCap(t *testing.T) {
+// TestDockerNetworksPagination 真分页：601 条、page=2&pageSize=100 → Total=601、
+// len=100、Items[0] 是排序后第 101 条。
+func TestDockerNetworksPagination(t *testing.T) {
 	f := newResFixture(t)
 	big := make([]agentproto.DockerNetwork, 0, 600)
 	for i := 0; i < 600; i++ {
@@ -787,22 +901,27 @@ func TestDockerNetworksCap(t *testing.T) {
 	f.saveState(t, 7, &agentproto.DockerState{Networks: big})
 	f.saveState(t, 8, &agentproto.DockerState{Networks: []agentproto.DockerNetwork{resNetwork("zzz-pad", false)}})
 
-	resp, err := f.svc.Networks(f.ctx, &request.DockerNetworkQuery{})
+	q := &request.DockerNetworkQuery{}
+	q.Page, q.PageSize = 2, 100
+	resp, err := f.svc.Networks(f.ctx, q)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if resp.Total != 601 {
-		t.Fatalf("Total 必须是截断前全量 = 601, got %d", resp.Total)
+		t.Fatalf("Total 必须是过滤后全量 = 601, got %d", resp.Total)
 	}
-	if len(resp.Items) != 500 {
-		t.Fatalf("Items 必须截到 500 条, got %d", len(resp.Items))
+	if resp.Page != 2 || resp.PageSize != 100 {
+		t.Fatalf("生效页参数必须回显: page=%d pageSize=%d", resp.Page, resp.PageSize)
 	}
-	if resp.Items[0].Name != "cap-000" || resp.Items[499].Name != "cap-499" {
-		t.Fatalf("截断必须砍排序后的尾部: 首=%s 尾=%s", resp.Items[0].Name, resp.Items[499].Name)
+	if len(resp.Items) != 100 {
+		t.Fatalf("第 2 页应收 100 条, got %d", len(resp.Items))
+	}
+	if resp.Items[0].Name != "cap-100" || resp.Items[99].Name != "cap-199" {
+		t.Fatalf("第 2 页必须是排序后第 101..200 条: 首=%s 尾=%s", resp.Items[0].Name, resp.Items[99].Name)
 	}
 	for i, it := range resp.Items {
 		if it.HostID != 7 {
-			t.Fatalf("前 500 行必须都来自主机 7: 第 %d 行 hostId=%d", i, it.HostID)
+			t.Fatalf("第 2 页应全来自主机 7: 第 %d 行 hostId=%d", i, it.HostID)
 		}
 	}
 }
@@ -999,8 +1118,9 @@ func TestDockerProjectsRejectsInvalidState(t *testing.T) {
 	}
 }
 
-// TestDockerProjectsCap 上限 500 条且截断先报全量。
-func TestDockerProjectsCap(t *testing.T) {
+// TestDockerProjectsPagination 真分页：601 条、page=2&pageSize=100 → Total=601、
+// len=100、Items[0] 是排序后第 101 条。
+func TestDockerProjectsPagination(t *testing.T) {
 	f := newResFixture(t)
 	big := make([]agentproto.DockerProject, 0, 600)
 	for i := 0; i < 600; i++ {
@@ -1009,23 +1129,60 @@ func TestDockerProjectsCap(t *testing.T) {
 	f.saveState(t, 7, &agentproto.DockerState{Projects: big})
 	f.saveState(t, 8, &agentproto.DockerState{Projects: []agentproto.DockerProject{resProject("zzz-pad", "running")}})
 
-	resp, err := f.svc.Projects(f.ctx, &request.DockerProjectQuery{})
+	q := &request.DockerProjectQuery{}
+	q.Page, q.PageSize = 2, 100
+	resp, err := f.svc.Projects(f.ctx, q)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if resp.Total != 601 {
-		t.Fatalf("Total 必须是截断前全量 = 601, got %d", resp.Total)
+		t.Fatalf("Total 必须是过滤后全量 = 601, got %d", resp.Total)
 	}
-	if len(resp.Items) != 500 {
-		t.Fatalf("Items 必须截到 500 条, got %d", len(resp.Items))
+	if resp.Page != 2 || resp.PageSize != 100 {
+		t.Fatalf("生效页参数必须回显: page=%d pageSize=%d", resp.Page, resp.PageSize)
 	}
-	if resp.Items[0].Name != "cap-000" || resp.Items[499].Name != "cap-499" {
-		t.Fatalf("截断必须砍排序后的尾部: 首=%s 尾=%s", resp.Items[0].Name, resp.Items[499].Name)
+	if len(resp.Items) != 100 {
+		t.Fatalf("第 2 页应收 100 条, got %d", len(resp.Items))
+	}
+	if resp.Items[0].Name != "cap-100" || resp.Items[99].Name != "cap-199" {
+		t.Fatalf("第 2 页必须是排序后第 101..200 条: 首=%s 尾=%s", resp.Items[0].Name, resp.Items[99].Name)
 	}
 	for i, it := range resp.Items {
 		if it.HostID != 7 {
-			t.Fatalf("前 500 行必须都来自主机 7: 第 %d 行 hostId=%d", i, it.HostID)
+			t.Fatalf("第 2 页应全来自主机 7: 第 %d 行 hostId=%d", i, it.HostID)
 		}
+	}
+}
+
+// TestDockerProjectsSortByServices 项目页专有排序列（services）asc/desc 真的改变
+// 顺序 —— 顺带覆盖除镜像页 size 之外的第二张白名单键表。
+func TestDockerProjectsSortByServices(t *testing.T) {
+	f := newResFixture(t)
+	f.saveState(t, 7, &agentproto.DockerState{Projects: []agentproto.DockerProject{
+		{Name: "alpha", State: "running", Services: 3},
+		{Name: "beta", State: "running", Services: 1},
+		{Name: "gamma", State: "running", Services: 2},
+	}})
+	order := func(resp *response.DockerProjectListResp) string {
+		s := ""
+		for _, it := range resp.Items {
+			s += it.Name + " "
+		}
+		return s
+	}
+	asc, err := f.svc.Projects(f.ctx, &request.DockerProjectQuery{SortBy: "services", SortOrder: "asc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := order(asc); got != "beta gamma alpha " {
+		t.Fatalf("sortBy=services asc = %q", got)
+	}
+	desc, err := f.svc.Projects(f.ctx, &request.DockerProjectQuery{SortBy: "services", SortOrder: "desc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := order(desc); got != "alpha gamma beta " {
+		t.Fatalf("sortBy=services desc = %q", got)
 	}
 }
 

@@ -515,6 +515,12 @@ func Setup(deps Dependencies) *gin.Engine {
 			devices.GET("/:id/resources", perm(permission.PermDeviceQuery), deps.Device.DeviceHdl.Resources)
 			devices.POST("/:id/enable", perm(permission.PermDeviceEnable), deps.Device.DeviceHdl.Enable)
 			devices.POST("/:id/disable", perm(permission.PermDeviceDisable), deps.Device.DeviceHdl.Disable)
+			// 写主机分组 / 标签：**单资源部分更新**（PATCH /:id，与 GET/DELETE /:id
+			// 同一资源 URI）。分组/标签是设备资源属性，更新的是「这个 URI 的资源」
+			// 的字段内容 —— 正是 PATCH 的契约；POST 在本仓留给「无请求体的状态迁移
+			// 命令」（enable/disable…）。权限独立成码 device:index:group
+			//（见 permission.PermDeviceGroup 的说明）。
+			devices.PATCH("/:id", perm(permission.PermDeviceGroup), deps.Device.DeviceHdl.UpdateGroup)
 			devices.DELETE("/:id", perm(permission.PermDeviceDelete), deps.Device.DeviceHdl.Delete)
 			// ── Agent 升级 ──────────────────────────────────────────────
 			// 权限分档：单台/批量下发用 device:upgrade；**全站目标单独一个
@@ -579,6 +585,23 @@ func Setup(deps Dependencies) *gin.Engine {
 			docker.GET("/volumes", perm(permission.PermDockerList), deps.Docker.Hdl.Volumes)
 			docker.GET("/networks", perm(permission.PermDockerList), deps.Docker.Hdl.Networks)
 			docker.GET("/projects", perm(permission.PermDockerList), deps.Docker.Hdl.Projects)
+			// 全局跨资源检索（4d）：跨 100 台、跨 5 类资源（容器/镜像/卷/网络/项目）按
+			// 名称子串找东西 —— 分页已挡全量，逐页逐主机翻不可行。它与读面其余端点同档
+			// docker:list：它只是把「检索」的入口从「一页一类」提到全局，读的仍是同一批
+			// 快照事实（不改权限面）。
+			docker.GET("/search", perm(permission.PermDockerList), deps.Docker.Hdl.Search)
+			// 镜像版本漂移视图（本波）：以 repoTag 为行给出「同一标签在各主机上的
+			// 内容摘要分布」（有几种摘要、各多少台、哪些是少数派）—— 推新版本任务的
+			// 前置（该推哪个）与验收（推齐了没）都读它。它是镜像读面的一个**派生视图**
+			//（与 /docker/images 同源快照），权限与其余读面同档 docker:list。
+			docker.GET("/image-drift", perm(permission.PermDockerList), deps.Docker.Hdl.ImageDrift)
+			// 镜像目标版本（4c）：声明式目标版本 —— 为一个 repoTag 声明目标内容摘要，
+			// 漂移视图据此算出「待对齐 N 台」。读（清单）与其余读面同档 docker:list；
+			// 写（声明/清除）是分发决策，与 image:build 受理同档 docker:manage。
+			// repoTag 走 **query**（含 : 与 /，无法安全放进 path 段）。
+			docker.GET("/image-targets", perm(permission.PermDockerList), deps.Docker.Hdl.ListImageTargets)
+			docker.POST("/image-targets", perm(permission.PermDockerManage), deps.Docker.Hdl.SetImageTarget)
+			docker.DELETE("/image-targets", perm(permission.PermDockerManage), deps.Docker.Hdl.ClearImageTarget)
 			docker.GET("/hosts", perm(permission.PermDockerList), deps.Docker.Hdl.Hosts)
 			docker.GET("/hosts/:id/state", perm(permission.PermDockerList), deps.Docker.Hdl.State)
 			// 容器 stats 历史（P2 抽屉曲线的历史半边）：30 分钟环形留存（快照 ingest

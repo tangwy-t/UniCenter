@@ -402,7 +402,14 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 	dockerSvc := service.NewDockerService(dockerStore, deviceRepo, configSvc, log).
 		// stats 留存读面（P2）：查询历史曲线 + 设备删除时的连带清理（与上面的
 		// 写入挂钩共用同一个 store 实例 —— 两边读写的是同一族键）。
-		WithStatsHistory(dockerStatsHistory)
+		WithStatsHistory(dockerStatsHistory).
+		// 镜像目标版本声明（4c）：声明式目标存储面（docker_image_target 表），
+		// 漂移视图据此在每行追加 targetDigest/pendingHosts/alignedCount。
+		WithImageTargets(repository.NewDockerImageTargetRepo(db)).
+		// 宿主磁盘水位（4d）：设备指标宽表（device_metric_5m）最近一条整机行的磁盘列，
+		// 批量 join 进主机清单/总览的 diskUsedPercent/diskTotalGb（答「哪台快满」的分母）——
+		// 与 docker 占用账目（快照里的 DiskUsage）是两回事，互不覆盖。
+		WithHostDiskMetrics(repository.NewDockerHostDiskRepo(db))
 	// 任务面（6b / 8d）：任务中心的读面 = 实时（CmdStore，含在途）∪ 历史（持久层），
 	// 按 ref 合并去重（实时胜）、整体分页。设备表与上面读到的是同一个 repo；
 	// 历史面与终态钩子、清理任务共用同一个仓储实例。

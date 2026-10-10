@@ -19,6 +19,7 @@ type DeviceServiceInterface interface {
 	Resources(ctx context.Context, id uint64, kind string) (*response.DeviceResourcesResp, error)
 	Enable(ctx context.Context, id uint64) error
 	Disable(ctx context.Context, id uint64) error
+	UpdateGroup(ctx context.Context, id uint64, group, tags *string) error
 	Delete(ctx context.Context, id uint64) error
 }
 
@@ -72,7 +73,7 @@ func NewDeviceHandler(svc DeviceServiceInterface, metrics DeviceMetricsServiceIn
 
 // List handles GET /api/v1/devices — paginated device listing.
 // @Summary      设备列表
-// @Description  分页查询设备列表，支持按主机名、来源 IP（模糊）、启停态、在线状态、Agent 版本（精确）筛选，排序白名单 lastSeenAt/hostname/agentVersion；每行附带 Redis 水位
+// @Description  分页查询设备列表，支持按主机名、来源 IP（模糊）、启停态、在线状态、Agent 版本（精确）、主机分组（精确）筛选，排序白名单 lastSeenAt/hostname/agentVersion/group；每行附带 Redis 水位
 // @Tags         设备监控
 // @Accept       json
 // @Produce      json
@@ -83,7 +84,8 @@ func NewDeviceHandler(svc DeviceServiceInterface, metrics DeviceMetricsServiceIn
 // @Param        online       query  bool    false  "在线状态(true=在线 false=离线)"
 // @Param        primaryIp    query  string  false  "来源IP(模糊查询,服务端观测值)"
 // @Param        agentVersion query  string  false  "Agent版本(精确匹配)"
-// @Param        sortBy       query  string  false  "排序列(lastSeenAt默认/hostname/agentVersion,非法值回落默认)"
+// @Param        group        query  string  false  "主机分组(精确匹配,空=不过滤)"
+// @Param        sortBy       query  string  false  "排序列(lastSeenAt默认/hostname/agentVersion/group,非法值回落默认)"
 // @Param        sortOrder    query  string  false  "排序方向(asc/desc,默认desc)"
 // @Security     BearerAuth
 // @Success      200  {object}  app.Response{data=app.PageResponse}  "查询成功"
@@ -258,6 +260,46 @@ func (h *DeviceHandler) Disable(c *gin.Context) {
 		return
 	}
 	if err := h.svc.Disable(c.Request.Context(), id); err != nil {
+		app.Error(c, err)
+		return
+	}
+	app.Success(c, nil)
+}
+
+// UpdateGroup handles PATCH /api/v1/devices/:id — partial update of host group / tags.
+//
+// @Summary      设置主机分组 / 标签
+// @Description  部分更新设备的主机分组与标签：只更新请求体中出现的字段（未提供则保持不动），空串表示清空
+// @Description  group 长度 ≤64、tags 长度 ≤255（与列宽一致），两端空白会被 trim；超长返回 400
+// @Tags         设备监控
+// @Accept       json
+// @Produce      json
+// @Param        id    path  uint64                   true   "设备ID"
+// @Param        body  body  request.DeviceGroupUpdate  false  "分组/标签(均可选，提供即更新；空串=清空)"
+// @Security     BearerAuth
+// @Success      200  {object}  app.Response  "更新成功"
+// @Failure      400  {object}  app.Response  "参数错误(分组/标签超长，或请求体非法)"
+// @Failure      401  {object}  app.Response  "未登录"
+// @Failure      403  {object}  app.Response  "无权限"
+// @Failure      404  {object}  app.Response  "设备不存在"
+// @Router       /devices/{id} [patch]
+//
+// 为什么用 PATCH 而不是 POST /devices/:id/group：分组与标签是设备的**资源属性**，
+// 更新的是「这个 URI 所指资源」的字段内容，正是 PATCH（单资源部分更新）的契约。
+// POST 在本仓是留给「无请求体的状态迁移命令」的（enable/disable/pause…，见 router.go
+// 顶部的动词约定），而本端点带请求体、按字段部分更新，两者取向不同。用 PATCH /:id
+// 也天然为后续更多可写属性（如备注）留出同一入口，不必为每个属性各开一个子路径。
+func (h *DeviceHandler) UpdateGroup(c *gin.Context) {
+	id, ok := app.Uint64Param(c, "id")
+	if !ok {
+		return
+	}
+	var req request.DeviceGroupUpdate
+	if err := c.ShouldBindJSON(&req); err != nil {
+		app.Error(c, apperror.BadRequest("参数错误"))
+		return
+	}
+	if err := h.svc.UpdateGroup(c.Request.Context(), id, req.Group, req.Tags); err != nil {
 		app.Error(c, err)
 		return
 	}
