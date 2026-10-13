@@ -391,8 +391,16 @@ func IsDockerAction(action string) bool {
 var (
 	// 项目名：与 compose 的项目名规范化规则一致（首字符字母数字）。
 	dockerProjectNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
-	// tar 文件名：**不含路径分隔符与 ..**（协议上不出现路径，就不存在路径逃逸面）。
+	// tar 文件名（**写侧**：image:save 的产物命名）：**不含路径分隔符与 ..**
+	// （协议上不出现路径，就不存在路径逃逸面）。只收未压缩 `.tar` —— save 的产物
+	// 是 daemon 原生导出（未压缩），这是事实，不是口径选择。
 	dockerTarFilenameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*\.tar$`)
+	// 载入文件名（**读侧**：image:load 引用的产物）：同一纪律（只传名、不含路径
+	// 分隔符/反斜杠/`..`、首字符字母数字），后缀收 tar 的三种形态 —— `docker load`
+	// 原生解 gzip，从浏览器上传或从别处拿到的导出物常是 `...tar.gz`/`.tgz`。
+	// 与 dockerTarFilenameRe 的差别是**两侧事实的差别**（读侧由 docker 解压，
+	// 写侧由 daemon 原生导出），不是同一条规则的两份写法。
+	dockerLoadFilenameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*\.(tar|tar\.gz|tgz)$`)
 	// 镜像引用：仓库路径 + 可选 :tag + 可选 @sha256:digest。
 	dockerImageRefRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9/._:@-]*$`)
 	// 容器/卷/网络名：比项目名多了「允许首字符之外的更多符号」的余地不做扩展，保持一致。
@@ -422,8 +430,18 @@ var (
 // IsDockerProjectName 报告 s 是否是合法的 compose 项目名。
 func IsDockerProjectName(s string) bool { return s != "" && dockerProjectNameRe.MatchString(s) }
 
-// IsDockerTarFilename 报告 s 是否是合法的 tar 文件名（image:save/load 的唯一文件名口径）。
+// IsDockerTarFilename 报告 s 是否是合法的 tar 文件名（image:save 的**写侧**口径：
+// 产物命名/覆盖确认值；agent 的写侧路径解析同尺）。
 func IsDockerTarFilename(s string) bool { return s != "" && dockerTarFilenameRe.MatchString(s) }
+
+// IsDockerLoadFilename 报告 s 是否是合法的镜像载入文件名（image:load 的**读侧**
+// 口径）：未压缩 tar 与 `.tar.gz`/`.tgz` 两种 gzip 形态都收 —— `docker load` 原生
+// 解 gzip，用户手里的导出物（含从浏览器上传的）常是压缩形态。其余纪律与
+// IsDockerTarFilename 完全一致（只传名，路径分隔符/反斜杠/`..` 在形态上就出不去）。
+//
+// **不用于 image:save**：save 的产物是 daemon 原生未压缩导出，写侧放宽没有依据
+// （放宽写侧只会让「产物的名字」与「产物的内容」各说各话）。
+func IsDockerLoadFilename(s string) bool { return s != "" && dockerLoadFilenameRe.MatchString(s) }
 
 // IsDockerImageRef 报告 s 是否是合法的镜像引用（含 digest 形态）。
 func IsDockerImageRef(s string) bool { return s != "" && dockerImageRefRe.MatchString(s) }
@@ -738,8 +756,18 @@ func ValidateDockerCmdOptions(action string, o *DockerCmdOptions) error {
 			return err
 		}
 	}
-	if o.Filename != "" && !IsDockerTarFilename(o.Filename) {
-		return decodeErr(StagePayload, "filename", ErrInvalidPayload)
+	if o.Filename != "" {
+		// 读侧与写侧各自的事实源不同，**不共用一把尺**：load 读的是别人给的产物
+		// （docker 原生解 gzip，故收 tar/tar.gz/tgz），save 写的是 daemon 原生导出
+		// （故只收未压缩 .tar）。其余动作（不带 filename 语义）沿用严格那条，
+		// 免得「字段归属外」的宽输入在这里找到立足点。
+		if action == DockerActionImageLoad {
+			if !IsDockerLoadFilename(o.Filename) {
+				return decodeErr(StagePayload, "filename", ErrInvalidPayload)
+			}
+		} else if !IsDockerTarFilename(o.Filename) {
+			return decodeErr(StagePayload, "filename", ErrInvalidPayload)
+		}
 	}
 	if o.Src != "" && !IsDockerImageRef(o.Src) {
 		return decodeErr(StagePayload, "src", ErrInvalidPayload)

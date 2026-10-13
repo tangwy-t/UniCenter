@@ -2,6 +2,7 @@ package router
 
 import (
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -124,9 +125,9 @@ func shortName(handler string) string {
 // 击穿「core 中转零落盘」语义）。
 // 增删长活端点而不同步 nginx.conf，这里就红。
 func TestNginxLongLivedLocationsMatchRouterMounts(t *testing.T) {
-	conf, err := os.ReadFile("../../../uni_console/nginx.conf")
+	conf, err := os.ReadFile(nginxConfPath(t))
 	if err != nil {
-		t.Fatalf("读取 uni_console/nginx.conf 失败（monorepo 布局变了？）: %v", err)
+		t.Fatalf("读取 nginx.conf 失败: %v", err)
 	}
 	locs := parseNginxLocations(t, string(conf))
 	if len(locs) == 0 {
@@ -156,6 +157,33 @@ func TestNginxLongLivedLocationsMatchRouterMounts(t *testing.T) {
 type llSample struct {
 	method string // GET（流/下载/慢采集）或 POST（上传）
 	url    string // 实例化路径：:param → x，/*any → /anything
+}
+
+// nginxConfPath 定位仓库根的 uni_console/nginx.conf。
+//
+// 为什么不能写死相对路径：scripts/release-precheck.sh 会把 uni_core 单独拷到
+// .tmp-iso/ 验证「发布态」（自带 require + 离线载荷 + GOWORK=off）。那种隔离形态
+// 下**前端树根本不在**，写死 ../../../uni_console/nginx.conf 会让门禁因「布局」而非
+// 协议/构建问题变红。没有可比对的对象时跳过才是正确语义（与
+// internal/pkg/migration/migrations 的 repoRoot() 同一口径）：跳过不掩盖漂移 ——
+// 被校验的另一半此刻不在这台机器上。全仓（含前端）里跑时本函数正常返回，守卫照常生效。
+func nginxConfPath(t *testing.T) string {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("取工作目录: %v", err)
+	}
+	// 本包固定位于 <仓库根>/uni_core/internal/router，故仓库根在 3 层之上。
+	root := wd
+	for i := 0; i < 3; i++ {
+		root = filepath.Dir(root)
+	}
+	// 用 go.work 作为「这里就是仓库根」的判据（monorepo 的标志文件），
+	// 与 migrations 的 repoRoot() 同款。
+	if _, err := os.Stat(filepath.Join(root, "go.work")); err != nil {
+		t.Skipf("不在仓库根（%s 无 go.work）：本次为隔离副本构建，跳过 nginx 对齐守卫", root)
+	}
+	return filepath.Join(root, "uni_console", "nginx.conf")
 }
 
 // longLivedEndpointsFromRouter 逐行扫描 router.go，跟踪 Group 前缀链，收集全部

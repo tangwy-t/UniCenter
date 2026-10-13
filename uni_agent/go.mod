@@ -8,7 +8,7 @@ require (
 	github.com/docker/go-connections v0.8.1
 	github.com/gorilla/websocket v1.5.3
 	github.com/shirou/gopsutil/v3 v3.24.5
-	github.com/tangwy-t/UniCenter/uni_protocol v1.2.5
+	github.com/tangwy-t/UniCenter/uni_protocol v1.2.6
 	gopkg.in/yaml.v3 v3.0.1
 )
 

@@ -1,6 +1,8 @@
 package dockerops
 
 import (
+	"archive/tar"
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -14,10 +16,10 @@ import (
 
 // ── 构建上下文上传接收器（v1.3·agent 侧）────────────────────────────────
 //
-// 断言面：组装（字节逐位落盘）、sha256 终验、不匹配删除、gzip 魔数拒绝、
-// 序号纪律（乱序/重复/FINAL 之后）、中止与断连清理、24h 清扫的圈定范围、
-// 产物目录不可用的诚实失败。全部**不起真实 socket、不碰 docker daemon** ——
-// 接收器只依赖 transferDir 一个事实源（写执行器提供）。
+// 断言面：组装（字节逐位落盘）、sha256 终验、不匹配删除、早期形态闸（gzip 与
+// 未压缩 tar 都收、两者都不是则拒）、序号纪律（乱序/重复/FINAL 之后）、中止与
+// 断连清理、24h 清扫的圈定范围、产物目录不可用的诚实失败。全部**不起真实
+// socket、不碰 docker daemon** —— 接收器只依赖 transferDir 一个事实源（写执行器提供）。
 
 const testSession = uint64(1790000000000000888)
 
@@ -32,6 +34,24 @@ func newTestReceiver(t *testing.T, transferDir string, now func() time.Time) *bu
 
 // gz 给一包「gzip 魔数 + 正文」的分片流字节。
 func gz(b ...byte) []byte { return append([]byte{0x1f, 0x8b}, b...) }
+
+// tarBytes 用标准库 writer 造一份**真的**未压缩 tar（ustar 魔数落在偏移 257）——
+// 早期形态闸看的是真实 tar 字节，不是手搓的魔数假体。
+func tarBytes(t *testing.T, name string, content []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(content))}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
 
 func shaHex(b []byte) string {
 	sum := sha256.Sum256(b)
@@ -107,7 +127,7 @@ func TestBuildCtxReceiverFinishRejectionsDeleteProduct(t *testing.T) {
 			}, true,
 		},
 		{
-			"魔数从未凑齐（<2 字节的畸形流）", func(r *buildCtxReceiver) error {
+			"形态从未定型（短于一个校验窗口的畸形流）", func(r *buildCtxReceiver) error {
 				return r.Chunk(testSession, 1, true, []byte{0x1f})
 			},
 			func(r *buildCtxReceiver) error {
@@ -137,16 +157,70 @@ func TestBuildCtxReceiverFinishRejectionsDeleteProduct(t *testing.T) {
 	}
 }
 
-func TestBuildCtxReceiverMagicRejectsImmediately(t *testing.T) {
+// TestBuildCtxReceiverAcceptsPlainTar 钉住早期形态闸的**接受面**之一：未压缩 tar
+// （ustar 魔数）与 gzip 一样被放行 —— docker build/load 对明文 tar 本就合法，且
+// 从浏览器上传的镜像导出物可以是 `docker save` 的原生未压缩 tar。
+func TestBuildCtxReceiverAcceptsPlainTar(t *testing.T) {
+	payload := tarBytes(t, "Dockerfile", []byte("FROM scratch\n"))
+
+	t.Run("单帧整传", func(t *testing.T) {
+		dir := t.TempDir()
+		r := newTestReceiver(t, dir, nil)
+		if err := r.Chunk(testSession, 1, true, payload); err != nil {
+			t.Fatalf("明文 tar 上传必须被接受: %v", err)
+		}
+		if err := r.Finish(testSession, shaHex(payload), int64(len(payload)),
+			agentproto.DockerBuildCtxTransferName(testSession)); err != nil {
+			t.Fatalf("Finish: %v", err)
+		}
+		// 判读用的窗口字节是拷贝，产物必须仍是逐位一致的完整流。
+		got, err := os.ReadFile(filepath.Join(dir, agentproto.DockerBuildCtxTransferName(testSession)))
+		if err != nil {
+			t.Fatalf("产物读取: %v", err)
+		}
+		if !bytes.Equal(got, payload) {
+			t.Fatalf("产物被形态窗口截断/改写：len=%d want=%d", len(got), len(payload))
+		}
+	})
+
+	t.Run("小片跨帧攒够窗口再定型", func(t *testing.T) {
+		dir := t.TempDir()
+		r := newTestReceiver(t, dir, nil)
+		// 窗口 = 262 字节 ⇒ 40 字节的分片要跨 7 帧才够看 ustar 魔数；
+		// 攒够之前**不能**下结论（否则合法的明文 tar 会在前几帧被误杀）。
+		const chunk = 40
+		var seq uint64
+		for off := 0; off < len(payload); off += chunk {
+			end := off + chunk
+			if end > len(payload) {
+				end = len(payload)
+			}
+			seq++
+			if err := r.Chunk(testSession, seq, end == len(payload), payload[off:end]); err != nil {
+				t.Fatalf("分片 seq=%d（off=%d）: %v", seq, off, err)
+			}
+		}
+		if err := r.Finish(testSession, shaHex(payload), int64(len(payload)),
+			agentproto.DockerBuildCtxTransferName(testSession)); err != nil {
+			t.Fatalf("Finish: %v", err)
+		}
+	})
+}
+
+// TestBuildCtxReceiverFormGateRejectsNonArchive 钉住早期形态闸的**拒绝面**：
+// 既非 gzip 也非未压缩 tar 的内容，攒够一个校验窗口就立即弃会话（深度校验仍在
+// scanBuildContext —— 这里拒的是「形态根本不是归档」，不必等构建时才发现）。
+func TestBuildCtxReceiverFormGateRejectsNonArchive(t *testing.T) {
 	dir := t.TempDir()
 	r := newTestReceiver(t, dir, nil)
 
-	err := r.Chunk(testSession, 1, false, []byte("PK\x03\x04zip!"))
-	if err == nil {
-		t.Fatal("非 gzip 魔数必须拒绝")
+	// zip 头 + 足量正文：窗口内既无 gzip 魔数也无 ustar 魔数。
+	notArchive := append([]byte("PK\x03\x04zip!"), make([]byte, buildCtxMagicWindow)...)
+	if err := r.Chunk(testSession, 1, false, notArchive); err == nil {
+		t.Fatal("既非 gzip 也非 tar 的内容必须拒绝")
 	}
 	if _, statErr := os.Stat(filepath.Join(dir, agentproto.DockerBuildCtxTransferName(testSession))); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("魔数拒绝必须删掉半成品（stat err=%v）", statErr)
+		t.Fatalf("形态拒绝必须删掉半成品（stat err=%v）", statErr)
 	}
 	// 作废后的会话：后续分片一律「未知会话」。
 	if err := r.Chunk(testSession, 2, true, []byte("late")); err == nil {

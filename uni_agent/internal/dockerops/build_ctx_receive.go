@@ -27,11 +27,13 @@ import (
 //     落点 dir 仍走 transferDir（写执行器的同一事实源），文件不存在目录回退
 //     —— /tmp 回退是 cmd 结果的附注机制，上传没有结果通道，硬落在
 //     「产物目录不可用」的错误上（诚实失败，见 write.go 的附注机制说明）。
-//  2. **双段校验的分界**：上传段只验「这像个 tar.gz」（gzip 魔数）+ 尺寸;
-//     tar 条目/穿越/Dockerfile 存在性是 **image:build 执行时 scanBuildContext
-//     的职责** —— 单一校验事实源，这里抢做纵深校验就是把同一份判断拆成
-//     两处漂移的复制品（depth 校验若在上传段拦了，build 段的修复不会同步到
-//     这里 —— 反之亦然）。
+//  2. **双段校验的分界**：上传段只验「这像个 tar 归档」（gzip 魔数或未压缩 tar 的
+//     ustar 魔数）+ 尺寸；tar 条目/穿越/Dockerfile 存在性是 **image:build 执行时
+//     scanBuildContext 的职责** —— 单一校验事实源，这里抢做纵深校验就是把同一份
+//     判断拆成两处漂移的复制品（depth 校验若在上传段拦了，build 段的修复不会同步到
+//     这里 —— 反之亦然）。明文 tar 放行的直接收益：docker build/load 对未压缩 tar
+//     本就合法，上传的地基（transferDir 是 image:load 的读取目录）因此同时惠及
+//     构建上下文与从浏览器上传的镜像导出物。
 //  3. **失败取向 = 弃会话，不断连**：分片流是搭在连接上的旁路载荷，序号乱了、
 //     魔数错了、哈希对不上，作废的是**这个会话**（删除半成品文件）——
 //     指标/心跳/指令的主链路绝不陪葬。与 docker 的其它载荷（state/frame）
@@ -64,6 +66,38 @@ var maxBuildCtxUploadBytes = int64(agentproto.MaxDockerBuildContextBytes)
 // 0700、文件 0600 —— 与 transferDir 的「世界不可写」纪律同一条（§7.5）。
 const buildCtxFileMode = 0o600
 
+// ── 早期形态闸（上传段对内容的全部形态要求）──────────────────────────────
+
+// buildCtxUstarOffset 是 tar 头里 ustar 魔数的偏移（POSIX 1003.1 与 GNU 两种
+// 变体都以 "ustar" 开头：`ustar\0` 与 `ustar  `）。
+const buildCtxUstarOffset = 257
+
+// buildCtxUstarMagic 是未压缩 tar 的形态指纹。
+const buildCtxUstarMagic = "ustar"
+
+// buildCtxMagicWindow 是形态闸的校验窗口（字节数）：按两种形态里最长的取 ——
+// gzip 只看偏移 0 的两字节，未压缩 tar 要看到偏移 257 的 ustar 魔数（257 + 5）。
+// 窗口只**拷贝**前若干字节做判读，分片本身仍原样全量入文件（校验窗口不截断数据流）。
+const buildCtxMagicWindow = buildCtxUstarOffset + len(buildCtxUstarMagic)
+
+// buildCtxForm 判读形态窗口覆盖的字节是否属于两种合法形态之一，并报告窗口是否
+// 已足够下结论：
+//   - gzip：偏移 0 的 1f 8b（两字节即可定型）；
+//   - 未压缩 tar：偏移 257 的 ustar 魔数（需攒够一整窗）。
+//
+// 「还不知道」（decided=false）与「不是」（ok=false）必须分开：短流在攒够窗口前
+// 被误判成非法，就会把合法的明文 tar 挡在门外。两者都不是 = 早期形态闸拒绝
+// （**深度校验仍在 scanBuildContext**，本条只是「趁早认出不是我们认的形态」）。
+func buildCtxForm(head []byte) (ok, decided bool) {
+	if len(head) >= 2 && head[0] == gzipMagic[0] && head[1] == gzipMagic[1] {
+		return true, true
+	}
+	if len(head) >= buildCtxMagicWindow {
+		return string(head[buildCtxUstarOffset:buildCtxMagicWindow]) == buildCtxUstarMagic, true
+	}
+	return false, false
+}
+
 // buildCtxReceiver 是上传分片流的组装器（Runtime 持有，连接层经 hook 投喂）。
 type buildCtxReceiver struct {
 	// write 是 transferDir 的事实源（transferDirValue 取活值：配置会热更新）。
@@ -83,8 +117,8 @@ type buildCtxUploadSession struct {
 
 	nextSeq uint64 // 期望的下一个分片序号（从 1 起）
 	final   bool   // 已收到 FINAL 帧
-	magicOK bool   // gzip 魔数已确认
-	head    []byte // 魔数校验窗口（<2B 时的暂存）
+	formOK  bool   // 形态已定型（gzip 或未压缩 tar 之一）
+	head    []byte // 形态校验窗口（攒够 buildCtxMagicWindow 前的暂存）
 
 	h    hash.Hash // 递增 sha256（终验在 finish 时与期望比对，不必二次读文件）
 	f    *os.File
@@ -135,22 +169,24 @@ func (r *buildCtxReceiver) Chunk(sessionID, seq uint64, final bool, payload []by
 		r.drop(sess, "FINAL 之后仍有分片")
 		return fmt.Errorf("上传会话 %d 在 FINAL 之后收到分片", sessionID)
 	}
-	if !sess.magicOK {
-		// gzip 魔数初验：上传段对内容的全部形态要求（深度校验在 scanBuildContext）。
-		// 魔数字节**原样入文件**（校验窗口不截断数据流）。
-		if need := 2 - len(sess.head); need > 0 {
+	if !sess.formOK {
+		// 早期形态闸：gzip 魔数（偏移 0）或未压缩 tar 的 ustar 魔数（偏移 257）
+		// 之一即通过，两者都不是才弃会话（深度校验在 scanBuildContext）。
+		// 判读用的字节是**拷贝**，分片本身仍原样入文件（校验窗口不截断数据流）。
+		if need := buildCtxMagicWindow - len(sess.head); need > 0 {
 			take := need
 			if take > len(payload) {
 				take = len(payload)
 			}
 			sess.head = append(sess.head, payload[:take]...)
 		}
-		if len(sess.head) == 2 {
-			if sess.head[0] != gzipMagic[0] || sess.head[1] != gzipMagic[1] {
-				r.drop(sess, "内容不是 gzip 压缩的 tar 归档")
-				return fmt.Errorf("上传会话 %d 内容不是 gzip 压缩的 tar 归档", sessionID)
+		if ok, decided := buildCtxForm(sess.head); decided {
+			if !ok {
+				r.drop(sess, "内容既不是 tar 归档也不是 gzip 压缩的 tar 归档")
+				return fmt.Errorf("上传会话 %d 内容既不是 tar 归档也不是 gzip 压缩的 tar 归档", sessionID)
 			}
-			sess.magicOK = true
+			sess.formOK = true
+			sess.head = nil // 形态已定型，窗口不再需要
 		}
 	}
 	// 尺寸账目（defensive：core 已在上传端点拦 512MB，这里防的是「core 被攻陷/
@@ -197,9 +233,11 @@ func (r *buildCtxReceiver) Finish(sessionID uint64, sha256Hex string, size int64
 		r.drop(sess, "未收到 FINAL 分片")
 		return fmt.Errorf("上传会话 %d 分片未收全", sessionID)
 	}
-	if !sess.magicOK || size < 2 {
-		r.drop(sess, "内容不是 gzip 压缩的 tar 归档")
-		return fmt.Errorf("上传会话 %d 内容不是 gzip 压缩的 tar 归档", sessionID)
+	if !sess.formOK {
+		// 形态窗口从未定型：短于一个校验窗口的流（既无 gzip 魔数，也看不到
+		// ustar 魔数）。两种合法形态的最短长度都远超窗口，到不了的是坏输入。
+		r.drop(sess, "内容既不是 tar 归档也不是 gzip 压缩的 tar 归档")
+		return fmt.Errorf("上传会话 %d 内容既不是 tar 归档也不是 gzip 压缩的 tar 归档", sessionID)
 	}
 	if sess.size != size {
 		r.drop(sess, fmt.Sprintf("尺寸不符（期望 %d, 实收 %d）", size, sess.size))

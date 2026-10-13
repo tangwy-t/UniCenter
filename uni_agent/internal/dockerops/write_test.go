@@ -157,6 +157,41 @@ func TestWriteExecutorRejectsPathInFilename(t *testing.T) {
 	}
 }
 
+// 文件名后缀的读/写两侧分界（与协议 ValidateDockerCmdOptions 同一把尺）：
+// load 的读侧收 gzip 形态（docker load 原生解 gzip，从浏览器上传来的导出物常是
+// .tar.gz/.tgz），save 的写侧只收未压缩 tar（daemon 原生导出）—— 读侧的放宽
+// **不回流**到写侧，这条显式钉住。
+func TestWriteExecutorTransferFilenameSides(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	api := &stubAPI{}
+	e := newWriteExecutor(api, "", dir)
+
+	// 读侧：目录里的 .tar.gz 产物必须放行（load 读出的是解析后的真实路径）。
+	gzPath := filepath.Join(dir, "mysql-8.0.22.tar.gz")
+	if err := os.WriteFile(gzPath, []byte("gz"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Do(ctx, &agentproto.DockerCmd{Action: agentproto.DockerActionImageLoad,
+		Options: agentproto.DockerCmdOptions{Filename: "mysql-8.0.22.tar.gz"}}); err != nil {
+		t.Fatalf("load 必须接受 gzip 形态的产物名: %v", err)
+	}
+	if len(api.loaded) != 1 || api.loaded[0] != gzPath {
+		t.Fatalf("load 路径不符: %v", api.loaded)
+	}
+
+	// 写侧：同一个名字在 save 上必须被拒，且绝不触达 Docker API。
+	_, err := e.Do(ctx, &agentproto.DockerCmd{Action: agentproto.DockerActionImageSave,
+		Options: agentproto.DockerCmdOptions{Target: "mysql:8.0.22", Filename: "mysql-8.0.22.tar.gz"}})
+	var ee *ExecError
+	if !errors.As(err, &ee) {
+		t.Fatalf("save 的写侧不得接受 gzip 形态的名字，实际 err=%v", err)
+	}
+	if len(api.saved) != 0 {
+		t.Fatal("被拒的 save 绝不能触达 Docker API")
+	}
+}
+
 // save 的默认动作是**不覆盖**：目标已存在时回 already_exists 语义（失败结论 + 标志位），
 // 用户确认后带 overwrite=true 重发才允许截断。标志位必须一路走到 result（core 靠它
 // 让前端问「覆盖吗」——两段确认复用 cmd/result）。

@@ -72,6 +72,7 @@ SWAG_VERSION   ?= v1.16.6
         uni_core-swagger uni_core-clean \
         uni_protocol-test uni_protocol-vet uni_protocol-lint uni_protocol-fmt \
         uni_protocol-deps uni_protocol-contract uni_protocol-fuzz \
+        uni_protocol-payload-guard uni_protocol-payload-bake \
         uni_console-install uni_console-dev uni_console-build uni_console-serve uni_console-test uni_console-lint uni_console-fix uni_console-fmt \
         test lint fmt build run clean contract \
         docker-build docker-up docker-down docker-logs docker-ps \
@@ -83,7 +84,7 @@ SWAG_VERSION   ?= v1.16.6
 help: ## 显示本帮助
 	@printf "UniCenter 统一构建入口\n\n"
 	@printf "后端(uni_core) : make uni_core-run | uni_core-build | uni_core-test | uni_core-lint | uni_core-vet | uni_core-fmt | uni_core-swagger | uni_core-clean\n"
-	@printf "协议(uni_protocol)   : make uni_protocol-test | uni_protocol-lint | uni_protocol-fmt | uni_protocol-contract | uni_protocol-fuzz\n"
+	@printf "协议(uni_protocol)   : make uni_protocol-test | uni_protocol-lint | uni_protocol-fmt | uni_protocol-contract | uni_protocol-payload-guard | uni_protocol-fuzz\n"
 	@printf "前端(uni_console)    : make uni_console-install | uni_console-dev | uni_console-build | uni_console-serve | uni_console-test | uni_console-lint | uni_console-fix | uni_console-fmt\n"
 	@printf "全量         : make all | test | lint | fmt | build | run | clean\n"
 	@printf "Docker       : make docker-build | docker-up | docker-down | docker-logs | docker-ps\n"
@@ -202,6 +203,22 @@ uni_protocol-deps: ## 断言协议模块零第三方依赖
 uni_protocol-contract: uni_protocol-deps ## 协议契约门禁(形状漂移+单源守卫+golden+零依赖)
 	cd $(PROTO_DIR) && go test ./... -count=1 -v -run 'TestJSONTagConventions|TestUnknownFieldsAreTolerated|TestShapeDriftAdditiveOnly|TestGoldenFilesRoundTrip|TestRegistryIsCompleteAndConsistent|TestVersionsAreConsistent|TestCloseCodesAreExhaustivelyMapped|TestSnapshotDTORegistryCoversAllPayloads'
 
+# 载荷新鲜度守卫。
+# 为什么必须有一条:uni_core 的 Docker 构建**不走工作区** —— go.mod 自带
+# `require uni_protocol vX`,Dockerfile 的 GOPROXY 第一顺位是仓库内离线载荷
+# uni_core/.goproxy;core 只调协议里的 ValidateDockerCmdOptions,不直接引用新
+# 符号,故载荷陈旧时**照样编译通过**,行为却是旧的(2026-10-13 现场:「载入镜像」
+# 传 .tar.gz 被 400 打回,请求体却完全合法)。所有构建门禁都发现不了这种陈旧。
+# 本目标断言「载荷里最新版本的 zip 内容 == 当前 uni_protocol 工作树源码」
+# (逐文件 sha256;zip 整体字节/条目顺序/时间戳不参与比对),陈旧即红并给出重烘步骤。
+uni_protocol-payload-guard: ## 断言离线载荷最新版本与协议工作树一致(防「载荷陈旧」静默故障)
+	@python3 scripts/protocol-payload.py check
+
+# 重烘载荷:把当前工作树烘成载荷的下一个补丁版本(.info/.mod/.zip + list)。
+# 与守卫共用同一文件集口径,故烘完守卫必然转绿;随后仍须 bump go.mod 并复验。
+uni_protocol-payload-bake: ## 重烘离线载荷为当前工作树(下一个补丁版本;随后须 bump go.mod)
+	@python3 scripts/protocol-payload.py bake
+
 # 脱工作区可构建门禁(发布态)。
 # 「发布态」= uni_core/go.mod 自带 require + go.sum 有真校验和,不再依赖 go.work。
 #
@@ -270,7 +287,7 @@ fmt: uni_core-fmt uni_protocol-fmt uni_agent-fmt uni_console-fmt ## 全量格式
 
 contract: uni_protocol-contract ## 契约门禁(当前仅协议模块)
 
-release-precheck: uni_protocol-contract uni_protocol-release-precheck ## 发布前置门禁(契约 + 脱工作区可构建)
+release-precheck: uni_protocol-contract uni_protocol-payload-guard uni_protocol-release-precheck ## 发布前置门禁(契约 + 载荷新鲜度 + 脱工作区可构建)
 
 clean: uni_core-clean ## 清理(后端与 agent 产物;前端 dist 请在 uni_console/ 内单独处理或全局 git clean)
 	rm -rf $(AGENT_DIR)/bin/ dist/

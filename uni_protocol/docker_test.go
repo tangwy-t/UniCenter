@@ -152,6 +152,20 @@ func TestDockerOptionValidation(t *testing.T) {
 		{"镜像 ref 带 digest", DockerActionImagePull, ok(&DockerCmdOptions{Target: "reg.local:5000/a/b@sha256:abc"}), nil},
 		{"文件名非法（带路径）", DockerActionImageLoad, ok(&DockerCmdOptions{Filename: "../x.tar"}), ErrInvalidPayload},
 		{"文件名合法", DockerActionImageLoad, ok(&DockerCmdOptions{Filename: "mysql-8.0.22.tar"}), nil},
+		// 读侧放宽（只动 load，不动 save）：docker load 原生解 gzip，用户手里的
+		// 导出物（含浏览器上传的）常是压缩形态。
+		{"载入文件名 .tar.gz 合法", DockerActionImageLoad, ok(&DockerCmdOptions{Filename: "mysql.tar.gz"}), nil},
+		{"载入文件名 .tgz 合法", DockerActionImageLoad, ok(&DockerCmdOptions{Filename: "mysql-8.0.tgz"}), nil},
+		{"载入文件名带路径（.tar.gz 形态）仍被拒", DockerActionImageLoad, ok(&DockerCmdOptions{Filename: "../x.tar.gz"}), ErrInvalidPayload},
+		{"载入文件名非 tar 后缀被拒", DockerActionImageLoad, ok(&DockerCmdOptions{Filename: "mysql.zip"}), ErrInvalidPayload},
+		// **写侧不随读侧放宽**：save 的产物是 daemon 原生未压缩导出，`...tar.gz`
+		// 这个名字与产物内容不符 —— 这条显式钉住，防止「顺手放宽」。
+		{"导出文件名 .tar.gz 仍被拒（写侧不放宽）", DockerActionImageSave,
+			ok(&DockerCmdOptions{Target: "mysql:8.0.22", Filename: "mysql.tar.gz"}), ErrInvalidPayload},
+		{"导出文件名 .tgz 仍被拒（写侧不放宽）", DockerActionImageSave,
+			ok(&DockerCmdOptions{Target: "mysql:8.0.22", Filename: "mysql.tgz"}), ErrInvalidPayload},
+		{"导出文件名未压缩 tar 合法", DockerActionImageSave,
+			ok(&DockerCmdOptions{Target: "mysql:8.0.22", Filename: "mysql.tar"}), nil},
 		{"base_hash 非 sha256", DockerActionComposeFilePatch,
 			ok(&DockerCmdOptions{Target: "uni-center", BaseHash: "abc", Patch: map[string]any{"services": map[string]any{}}}), ErrInvalidPayload},
 		{"content 超 1MB", DockerActionComposeFileWrite,
@@ -190,6 +204,34 @@ func TestDockerOptionValidation(t *testing.T) {
 				t.Fatalf("err = %v, want errors.Is(..., %v)", err, c.want)
 			}
 		})
+	}
+}
+
+// TestDockerLoadFilenameShapes：载入文件名白名单的相邻判定（合法/非法边界各正反例）。
+//
+// 与 TestDockerBuildContextFilenameShapes 同款守卫，差别只在**同一条纪律下的两个
+// 后缀集**：load 是读侧（收 gzip），save 是写侧（只收未压缩 tar）—— 两边各自的
+// 事实源不同，任何一侧被「顺手统一」都会在这里变红。
+func TestDockerLoadFilenameShapes(t *testing.T) {
+	for _, s := range []string{"app.tar", "app.tar.gz", "app.tgz", "a1.tar", "x_y-z.tar.gz", "mysql-8.0.22.tar"} {
+		if !IsDockerLoadFilename(s) {
+			t.Fatalf("%q 应是合法载入文件名", s)
+		}
+	}
+	for _, s := range []string{"", ".tar", "../a.tar", "a/b.tar", "a.tar.gz/", "a.zip",
+		"a.tarv", "a.tar.g", "a gz.tar", "A.TAR.gz", "..tar", "-a.tar", `a\b.tar`} {
+		if IsDockerLoadFilename(s) {
+			t.Fatalf("%q 应是非法载入文件名", s)
+		}
+	}
+	// 写侧仍只认未压缩 tar：读侧的放宽**不回流**到 IsDockerTarFilename。
+	for _, s := range []string{"app.tar.gz", "app.tgz"} {
+		if IsDockerTarFilename(s) {
+			t.Fatalf("%q 不应通过写侧（save 产物命名）口径", s)
+		}
+	}
+	if !IsDockerTarFilename("app.tar") {
+		t.Fatal("写侧口径本身应仍接受 app.tar")
 	}
 }
 

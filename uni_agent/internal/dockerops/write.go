@@ -471,7 +471,14 @@ func describeTarget(t protectedTarget) string {
 func (e *WriteExecutor) transferPath(filename string, forRead bool) (string, error) {
 	// 反斜杠在 Linux 上不是分隔符，但它是另一套文件名的分隔符 —— 一律拒绝，
 	// 免得「文件名」在两个平台上不是同一个东西。
-	if !agentproto.IsDockerTarFilename(filename) ||
+	//
+	// 读侧与写侧各自的事实源不同（与协议 ValidateDockerCmdOptions 同一把尺）：
+	// 读（load）收 gzip 形态的产物，写（save）是 daemon 原生未压缩导出。
+	sane := agentproto.IsDockerTarFilename(filename)
+	if forRead {
+		sane = agentproto.IsDockerLoadFilename(filename)
+	}
+	if !sane ||
 		filepath.Base(filename) != filename || strings.ContainsRune(filename, '\\') {
 		return "", &ExecError{Msg: "文件名不合法（只能填文件名，不能带路径）"}
 	}
