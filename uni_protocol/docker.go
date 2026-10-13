@@ -1,6 +1,7 @@
 package agentproto
 
 import (
+	"fmt"
 	"math"
 	"regexp"
 	"strconv"
@@ -206,13 +207,32 @@ const (
 
 	// ── P2·镜像分发（image:build）的 options 上限 ─────────────────────────
 	//
-	// MaxDockerBuildContextBytes 是构建上下文 tar 的字节上限（512MB，**导出常量**：
+	// MaxDockerBuildContextBytes 是**构建上下文** tar 的字节上限（512MB，**导出常量**：
 	// agent 在文件边界上执行这道闸 —— 协议定义尺、agent 执法，两端同一个数）：
 	// 对齐 agent 升级发布物的下载上限（downloadCap，本仓库唯一现存的「文件级」
 	// 尺寸先例）—— 构建上下文是**新的输入面**（浏览器/scp 侧打包好的任意 tar），
 	// 上限挡住的是「解压炸弹 / 恶意大文件把 agent 的扫描与 daemon 的上传吃满」。
-	// 真实构建上下文（源码 + Dockerfile）远到不了这个量级。
+	// 真实构建上下文（源码 + Dockerfile）是**几十 MB 级**，512MB 已是极大余量。
+	//
+	// 与 MaxDockerImageLoadBytes 是**两把尺**：两者共用同一条上传通道（落点都是
+	// transferDir），但产物的量级差着一个数量级 —— **共用通道不等于共用尺度**，
+	// 见下一枚常量的说明。本值**不动**（构建上下文的真实量级与威胁面都没变）。
 	MaxDockerBuildContextBytes = 512 << 20
+	// MaxDockerImageLoadBytes 是**载入镜像**（image:load）上传产物的字节上限
+	//（8GB，**导出常量**：协议定义尺、两端同一个数）。
+	//
+	// 为什么必须与构建上下文分档：载入的产物是 `docker save` / `docker export`
+	// 的导出物，不是「源码目录打包」那个数级 —— 生产实测的镜像清单里随手就有
+	// 520MB / 643MB / 1.6GB / 2.87GB，沿用 512MB 会让「从浏览器上传」对一半以上
+	// 的真实镜像直接不可用（**实打实的拦路虎**，不是防呆余量不足）。8GB 是生产
+	// 已知最大导出物的三倍以上余量，同时仍是**有限上界**：它挡的还是同一类东西
+	//（把 agent 的盘与 daemon 的上传吃满），只是给真实量级留出位置。
+	//
+	// 分档的执法面在 **core**（上传端点按用途选档）；agent 侧只留一条**粗上界**
+	//（取两档的较大者，见 DockerUploadPurpose 的说明）—— 上传的发送方是
+	// **已认证的 core**、不是浏览器直连，用途在 core 侧已经分过，agent 那道闸的
+	// 职责退化为「不让一次上传吃爆自己的盘」。
+	MaxDockerImageLoadBytes = 8 << 30
 	// maxDockerBuildArgs 是 build-args 的条目上限（与 create 的 env 32 同档：
 	// 表单里一次构建用不到几十个参数，上限只为挡住畸形/恶意的巨映射）。
 	maxDockerBuildArgs = 32
@@ -258,6 +278,97 @@ const (
 	// 够表达又够安全。
 	MaxDockerScanVulnTitleBytes = 256
 )
+
+// ── 上传产物的**用途分档**（同一条通道载两件量级不同的产物）─────────────────
+//
+// 上传通道（POST /docker/hosts/:id/build-context）的落点都是 agent 的 transferDir，
+// 但载的是两件量级差一个数量级的东西：构建上下文（几十 MB 级）与载入镜像的
+// 导出物（GB 级）。用途由 core 在 HTTP 侧以 query 参数 kind 显式给出，**尺从这张
+// 表取** —— 上限值只有这里一处事实源（core 的 handler 与 service 各自读它，
+// 不各自写一遍 switch，也就不存在「两处 switch 漂移出两个上限」）。
+const (
+	// DockerUploadKindBuild 是构建上下文（image:build 的上传产物，512MB 档）。
+	DockerUploadKindBuild = "build"
+	// DockerUploadKindLoad 是载入镜像（image:load 的上传产物，8GB 档）。
+	DockerUploadKindLoad = "load"
+	// DockerDefaultUploadKind 是**缺省用途**：不带 kind 的调用走它 —— 缺省取
+	// **小档**（build），于是既有调用（老前端/老脚本/直接 curl）的行为零变化。
+	DockerDefaultUploadKind = DockerUploadKindBuild
+)
+
+// DockerUploadPurpose 是一条上传用途的静态属性（上限 + 结论句里的用途名）。
+//
+// 用途名也在协议里（而不是 core 各自拼字符串）：越界结论句要说明「当前用途的上限
+// 是多少」，主语与数字同源才不会出现「载入镜像的请求收到构建上下文的结论句」。
+type DockerUploadPurpose struct {
+	// Kind 是用途标识（query 参数 kind 的取值）。
+	Kind string
+	// Limit 是该用途上传产物的字节上限（两档之一，见各自的常量说明）。
+	Limit int64
+	// Label 是该用途的**用途名**（结论句的主语：如「构建上下文超过 512MB 上限」）。
+	Label string
+}
+
+// dockerUploadPurposes 是用途的**唯一枚举源**（照 dockerActionSpecs 的形状：
+// 查找与列表同一份数据，新增用途只改这一处）。
+//
+// 为什么 agent 不在这张表里选档：agent 是上传的**接收方**，发送方是**已认证的
+// core**（不是浏览器直连）—— 用途在 core 侧已经分过档，agent 侧再分一次只会多一条
+// 「两端对同一次上传的用途判断不一致」的失败路径；它的尺寸闸保留为**粗上界**
+// （两档的较大者），职责退化为「不让一次上传吃爆自己的盘」。
+var dockerUploadPurposes = []DockerUploadPurpose{
+	{Kind: DockerUploadKindBuild, Limit: MaxDockerBuildContextBytes, Label: "构建上下文"},
+	{Kind: DockerUploadKindLoad, Limit: MaxDockerImageLoadBytes, Label: "载入镜像的导出物"},
+}
+
+// LookupDockerUploadPurpose 按用途标识查找属性。kind == "" 视为**缺省**（build）——
+// 「没给」与「给了 build」取同一档。
+//
+// 第二个返回值是**标识是否合法**（空串合法：它是缺省形态，不是错值）。未知串必须
+// 被判非法而不是静默取小档：静默会让「kind 拼错」退化成一个「小文件能传、大文件被
+// 512MB 打回」的费解现场 —— 而拼错的调用方本可以在第一个字节之前就拿到一句
+// 说得清的话。
+func LookupDockerUploadPurpose(kind string) (DockerUploadPurpose, bool) {
+	if kind == "" {
+		kind = DockerDefaultUploadKind
+	}
+	for _, p := range dockerUploadPurposes {
+		if p.Kind == kind {
+			return p, true
+		}
+	}
+	return DockerUploadPurpose{}, false
+}
+
+// DockerUploadOversizeText 生成**越界**的结论句（如「载入镜像的导出物超过 8GB 上限」）。
+//
+// 为什么这句话在协议里成形：越界结论句必须同时说清「哪个用途」与「上限是多少」，
+// 而这两个值都来自本文件 —— 让 core 自己拼串，就是把「数值的事实源」与「数值的
+// 措辞」分到两处，改档时必然漏一处（何况两档的措辞主语本就不同）。
+func DockerUploadOversizeText(p DockerUploadPurpose) string {
+	return p.Label + "超过 " + dockerLimitText(p.Limit) + " 上限"
+}
+
+// DockerUploadInvalidKindText 生成**非法用途标识**的结论句（列全部合法值）。
+func DockerUploadInvalidKindText(kind string) string {
+	kinds := make([]string, 0, len(dockerUploadPurposes))
+	for _, p := range dockerUploadPurposes {
+		kinds = append(kinds, p.Kind)
+	}
+	return fmt.Sprintf("上传用途 kind=%q 不合法（合法值：%s）", kind, strings.Join(kinds, "、"))
+}
+
+// dockerLimitText 把上限折成 "512MB" / "8GB" 形态（档位值都是 2 的幂整数）。
+func dockerLimitText(n int64) string {
+	const gb = 1 << 30
+	if n >= gb && n%gb == 0 {
+		return strconv.FormatInt(n/gb, 10) + "GB"
+	}
+	if n >= 1<<20 && n%(1<<20) == 0 {
+		return strconv.FormatInt(n>>20, 10) + "MB"
+	}
+	return strconv.FormatInt(n, 10) + "B"
+}
 
 // DockerActionSpec 是 action 的静态属性中**两端都必须一致**的那部分。
 //

@@ -35,7 +35,8 @@ import (
 //   - 用 longLivedWriter 包住 c.Writer：每次 Write/WriteString/Flush 之前把截止
 //     推到 now+grace。数据照常流动的流不会被掐；对端卡死时最迟 grace 后写失败。
 //   - 同理清掉整请求读截止（ReadTimeout 也是从首字节起的绝对窗口）：长活请求体
-//     （构建上下文上传，上限 512MB）不该按「首字节起 30s 内必须传完」计；请求体
+//     （构建上下文 / 载入镜像的导出物上传，上限按用途 512MB / 8GB）不该按
+//     「首字节起 30s 内必须传完」计；请求体
 //     的读用 longLivedBody 按「每次读」续期 —— 上传人卡死同样是 grace 后被收住。
 //   - c.Next() 返回后给收尾留一个 grace 窗口：HTTP/1.1 chunked 的终结符
 //     （"0\r\n\r\n"）是 net/http 在 handler 返回之后才写的；若沿用「最后一帧之后

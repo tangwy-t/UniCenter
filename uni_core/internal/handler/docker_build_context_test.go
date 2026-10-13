@@ -64,11 +64,21 @@ func newBuildCtxHandlerFunc(ch *fakeUploadChannel, online bool) gin.HandlerFunc 
 }
 
 // uploadContext 造一条对着端点的 gin 上下文（带 JWT claims 的 uid —— 顺带
-// 钉住「处理器不依赖 claims 之外的会话状态」这一事实）。
+// 钉住「处理器不依赖 claims 之外的会话状态」这一事实）。kind = "" 表示**不带
+// query 参数**（缺省档：老客户端的线上形态）。
 func uploadContext(w *httptest.ResponseRecorder, ct string, body []byte, contentLen int64) (*gin.Context, context.CancelFunc) {
+	return uploadContextKind(w, ct, body, contentLen, "")
+}
+
+// uploadContextKind 同上，但带 kind query 参数（用途分档的那一面）。
+func uploadContextKind(w *httptest.ResponseRecorder, ct string, body []byte, contentLen int64, kind string) (*gin.Context, context.CancelFunc) {
 	c, _ := gin.CreateTestContext(w)
 	ctx, cancel := context.WithCancel(context.Background())
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/docker/hosts/7/build-context",
+	url := "/api/v1/docker/hosts/7/build-context"
+	if kind != "" {
+		url += "?kind=" + kind
+	}
+	req := httptest.NewRequest(http.MethodPost, url,
 		bytes.NewReader(body)).WithContext(ctx)
 	if ct != "" {
 		req.Header.Set("Content-Type", ct)
@@ -78,6 +88,16 @@ func uploadContext(w *httptest.ResponseRecorder, ct string, body []byte, content
 	c.Params = gin.Params{{Key: "id", Value: "7"}}
 	c.Set(middleware.CtxClaims, testClaims(42))
 	return c, cancel
+}
+
+// uploadErrMsg 从错误响应里取结论句（app.Response 的 msg）。
+func uploadErrMsg(t *testing.T, w *httptest.ResponseRecorder) string {
+	t.Helper()
+	var resp app.Response
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("响应不是 app.Response 信封: %v", err)
+	}
+	return resp.Message
 }
 
 // wantGzip 一段过魔数校验的 body（handler 层不关心 tar 内容）。
@@ -189,6 +209,81 @@ func TestBuildContextUploadBadContent(t *testing.T) {
 		newBuildCtxHandlerFunc(ch, true)(c)
 		if w.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want 400", w.Code)
+		}
+	})
+}
+
+// TestBuildContextUploadKindSelectsTier 钉住**端点侧的用途选档**（v1.2.7）。
+//
+// 为什么这一面必须在 handler 层再钉一次：query 参数是**这一层**的事实（service
+// 只拿到已解析的用途）—— 「永远取缺省档」这类错误在 service 层测试里全绿，
+// 而现场表现恰好就是本次要修的那个 bug（载入镜像超过 512MB 被拦）。
+func TestBuildContextUploadKindSelectsTier(t *testing.T) {
+	// 512MB+1：本次分档要放行的量级（旧的单一上限恰好卡在这里）。
+	overBuildTier := int64(agentproto.MaxDockerBuildContextBytes) + 1
+
+	t.Run("kind=load 放行 512MB+1（旧闸不再拦路）", func(t *testing.T) {
+		ch := &fakeUploadChannel{}
+		w := httptest.NewRecorder()
+		c, cancel := uploadContextKind(w, "application/octet-stream",
+			wantGzip(1024), overBuildTier, "load")
+		defer cancel()
+
+		newBuildCtxHandlerFunc(ch, true)(c)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200（载入镜像档下 512MB+1 必须放行；body: %s）",
+				w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("缺省（不带 kind）仍走 512MB 档", func(t *testing.T) {
+		ch := &fakeUploadChannel{}
+		w := httptest.NewRecorder()
+		c, cancel := uploadContext(w, "application/octet-stream", wantGzip(1024), overBuildTier)
+		defer cancel()
+
+		newBuildCtxHandlerFunc(ch, true)(c)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400（缺省 = 小档：老客户端行为零变化）", w.Code)
+		}
+		if msg := uploadErrMsg(t, w); !strings.Contains(msg, "构建上下文超过 512MB 上限") {
+			t.Fatalf("越界结论句必须点名当前用途与该档上限: %q", msg)
+		}
+	})
+
+	t.Run("kind=load 越 8GB → 400（结论句含用途与上限数字）", func(t *testing.T) {
+		ch := &fakeUploadChannel{}
+		w := httptest.NewRecorder()
+		c, cancel := uploadContextKind(w, "application/octet-stream", wantGzip(1024),
+			agentproto.MaxDockerImageLoadBytes+1, "load")
+		defer cancel()
+
+		newBuildCtxHandlerFunc(ch, true)(c)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", w.Code)
+		}
+		if msg := uploadErrMsg(t, w); !strings.Contains(msg, "载入镜像的导出物超过 8GB 上限") {
+			t.Fatalf("越界结论句必须点名当前用途与该档上限: %q", msg)
+		}
+	})
+
+	t.Run("非法 kind → 400 且点名合法值（不静默取小档）", func(t *testing.T) {
+		ch := &fakeUploadChannel{}
+		w := httptest.NewRecorder()
+		c, cancel := uploadContextKind(w, "application/octet-stream", wantGzip(1024), 1024, "image")
+		defer cancel()
+
+		newBuildCtxHandlerFunc(ch, true)(c)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", w.Code)
+		}
+		want := `上传用途 kind="image" 不合法（合法值：build、load）`
+		if msg := uploadErrMsg(t, w); !strings.Contains(msg, want) {
+			t.Fatalf("结论句 = %q, 必须含 %q", msg, want)
 		}
 	})
 }

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -372,7 +373,8 @@ func TestBuildCtxReceiverSizeCapDefense(t *testing.T) {
 	dir := t.TempDir()
 	r := newTestReceiver(t, dir, nil)
 
-	// 调小闸来驱动账目触线（不必真搬 512MB：纪律同 adapter 的 maxBuildContextEntries）。
+	// 调小闸来驱动账目触线（不必真搬 GB 级字节：纪律同 adapter 的
+	// maxBuildContextEntries）。
 	old := maxBuildCtxUploadBytes
 	maxBuildCtxUploadBytes = 16
 	t.Cleanup(func() { maxBuildCtxUploadBytes = old })
@@ -386,6 +388,120 @@ func TestBuildCtxReceiverSizeCapDefense(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, agentproto.DockerBuildCtxTransferName(testSession))); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("超限作废后产物必须已删除: %v", err)
 	}
+}
+
+// TestBuildCtxReceiverUploadCapIsCoarseTier 钉住 agent 侧尺寸闸的**口径**（v1.2.7）：
+// 它是两档上传产物的**较大者**（协议 MaxDockerImageLoadBytes），而不是构建上下文
+// 那一档 —— agent 不做用途分流（发送方是已认证的 core，见 maxBuildCtxUploadBytes
+// 的取舍说明），这条闸的职责只剩「不让一次上传吃爆自己的盘」。
+func TestBuildCtxReceiverUploadCapIsCoarseTier(t *testing.T) {
+	if maxBuildCtxUploadBytes != int64(agentproto.MaxDockerImageLoadBytes) {
+		t.Fatalf("agent 尺寸闸 = %d, want 较大者 %d",
+			maxBuildCtxUploadBytes, int64(agentproto.MaxDockerImageLoadBytes))
+	}
+	if maxBuildCtxUploadBytes <= int64(agentproto.MaxDockerBuildContextBytes) {
+		t.Fatalf("粗上界 %d 必须严格大于构建上下文档 %d（否则载入镜像的产物仍被拦）",
+			maxBuildCtxUploadBytes, int64(agentproto.MaxDockerBuildContextBytes))
+	}
+}
+
+// TestBuildCtxReceiverDiskRoomPrecheck 钉住**盘量预检**（v1.2.7）：盘不够时早失败、
+// 结论句说得清「需多少、剩多少」，半成品删干净；探测本身失败则**放行**（读不到盘量
+// 不是拒绝上传的理由）。全程用**可注入的假 statfs**，不碰真实磁盘。
+func TestBuildCtxReceiverDiskRoomPrecheck(t *testing.T) {
+	// setFree 注入固定/可变的可用字节数（err 非 nil = 模拟探测失败）。
+	setFree := func(t *testing.T, free *int64, probeErr error) {
+		t.Helper()
+		old := buildCtxFreeBytes
+		buildCtxFreeBytes = func(string) (int64, error) {
+			if probeErr != nil {
+				return 0, probeErr
+			}
+			return *free, nil
+		}
+		t.Cleanup(func() { buildCtxFreeBytes = old })
+	}
+
+	t.Run("开局即不足（连预留都占不出）→ 不建会话、不落文件", func(t *testing.T) {
+		free := int64(1 << 20) // 1MB，低于 64MB 预留
+		setFree(t, &free, nil)
+		dir := t.TempDir()
+		r := newTestReceiver(t, dir, nil)
+
+		err := r.Chunk(testSession, 1, false, gz([]byte("hi")...))
+		if err == nil {
+			t.Fatal("盘量不足必须在开局就早失败")
+		}
+		if want := "可用空间不足：需 64MB，剩 1MB"; !strings.Contains(err.Error(), want) {
+			t.Fatalf("结论句 = %q，必须含 %q（差多少要说得清）", err.Error(), want)
+		}
+		if _, statErr := os.Stat(filepath.Join(dir, agentproto.DockerBuildCtxTransferName(testSession))); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("盘量不足不得留下产物文件（stat err=%v）", statErr)
+		}
+		if r.sessions[testSession] != nil {
+			t.Fatal("拒绝后不得残留会话状态")
+		}
+	})
+
+	t.Run("组装期间盘被吃光 → 早于 ENOSPC 失败并删半成品", func(t *testing.T) {
+		free := int64(buildCtxDiskReserveBytes) * 2
+		setFree(t, &free, nil)
+		dir := t.TempDir()
+		r := newTestReceiver(t, dir, nil)
+
+		first := gz(make([]byte, 4096)...)
+		if err := r.Chunk(testSession, 1, false, first); err != nil {
+			t.Fatalf("开局盘够时必须能开始: %v", err)
+		}
+		// 别的写入把盘吃掉了（只剩不到预留）——下一片必须在**写之前**被拒。
+		free = buildCtxDiskReserveBytes - 1
+		second := make([]byte, 4096)
+		err := r.Chunk(testSession, 2, false, second)
+		if err == nil {
+			t.Fatal("盘量不足必须早失败（不等 ENOSPC）")
+		}
+		if !strings.Contains(err.Error(), diskShortText(int64(len(second))+buildCtxDiskReserveBytes, free)) {
+			t.Fatalf("结论句 = %q，必须含 %q", err.Error(),
+				diskShortText(int64(len(second))+buildCtxDiskReserveBytes, free))
+		}
+		if _, statErr := os.Stat(filepath.Join(dir, agentproto.DockerBuildCtxTransferName(testSession))); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("盘量不足作废后半成品必须删除（stat err=%v）", statErr)
+		}
+	})
+
+	t.Run("探测失败放行（读不到盘量不是拒绝上传的理由）", func(t *testing.T) {
+		free := int64(0)
+		setFree(t, &free, errors.New("statfs 不可用"))
+		dir := t.TempDir()
+		r := newTestReceiver(t, dir, nil)
+
+		payload := gz([]byte("no-probe")...)
+		if err := r.Chunk(testSession, 1, true, payload); err != nil {
+			t.Fatalf("探测失败必须放行（写失败仍是最后兜底）: %v", err)
+		}
+		if err := r.Finish(testSession, shaHex(payload), int64(len(payload)),
+			agentproto.DockerBuildCtxTransferName(testSession)); err != nil {
+			t.Fatalf("Finish: %v", err)
+		}
+	})
+
+	t.Run("humanBytes 的可读形态", func(t *testing.T) {
+		for _, tc := range []struct {
+			n    int64
+			want string
+		}{
+			{8 << 30, "8GB"},
+			{512 << 20, "512MB"},
+			{64 << 20, "64MB"},
+			{3 << 20, "3MB"},
+			{1500, "1.5KB"},
+			{512, "512B"},
+		} {
+			if got := humanBytes(tc.n); got != tc.want {
+				t.Fatalf("humanBytes(%d) = %q, want %q", tc.n, got, tc.want)
+			}
+		}
+	})
 }
 
 // TestRuntimeBuildCtxHooksDelegateToReceiver 钉住 Runtime 侧四个 hook 的接线：

@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	uni_protocol "github.com/tangwy-t/UniCenter/uni_protocol"
 )
 
 // 长活端点必须挂 middleware.LongLived 的**源码级守卫**（P0）。
@@ -42,7 +44,7 @@ func TestLongLivedRoutesCarryDeadlineMiddleware(t *testing.T) {
 		"Docker.Hdl.PullStream)":         "拉取进度流（P0 实测受害端点）",
 		"Docker.Hdl.BuildStream)":        "构建进度流（RUN 一步可能几分钟无输出）",
 		"Docker.Hdl.PushStream)":         "推送进度流（层大时 >30s）",
-		"Docker.Hdl.BuildContextUpload)": "构建上下文上传（≤512MB 请求体 + 转完才回响应）",
+		"Docker.Hdl.BuildContextUpload)": "构建上下文 / 载入镜像上传（请求体 ≤512MB / ≤8GB，按用途分档；转完才回响应）",
 		"File.FileHdl.Download)":         "文件下载（ServeContent 流式，大文件 >30s）",
 		"File.FileHdl.Preview)":          "文件预览（ServeContent 流式，支持 Range 拖动）",
 		"File.FileHdl.Upload)":           "文件上传（multipart 请求体，上限可配置）",
@@ -350,7 +352,7 @@ func checkNginxCovers(t *testing.T, locs []nginxLoc, port int, ep llSample) {
 	}
 	if ep.method == "POST" && !strings.Contains(loc.body, "proxy_request_buffering off") {
 		t.Errorf(":%d 的长活上传 %s 命中 location %q 缺 proxy_request_buffering off —— "+
-			"请求体会先在反代层落一份临时盘拷（512MB 构建上下文 = 512MB 临时落盘），"+
+			"请求体会先在反代层落一份临时盘拷（GB 级的上传产物 = 同量级的临时落盘），"+
 			"击穿「core 中转零落盘」语义，且上游要等 body 收满才能开始处理", port, ep.url, loc.pattern)
 	}
 }
@@ -363,5 +365,71 @@ func nginxTimeoutSeconds(body, name string) int {
 		return 0
 	}
 	n, _ := strconv.Atoi(m[1])
+	return n
+}
+
+// ── 跨层对齐守卫：nginx 传输层上传上限 ↔ 协议最大上传档 ────────────────────
+
+// TestNginxUploadBodyLimitCoversProtocolMax 断言 nginx 上传 location 的传输层
+// 上限（client_max_body_size）≥ 协议定义的最大上传档（P0）。
+//
+// 为什么需要它：上传请求穿过四层执法链 ——
+//  ① nginx 传输层   client_max_body_size（本 location 覆盖 server 级）
+//  ② core handler   http.MaxBytesReader（按用途选档封顶）
+//  ③ core service   Content-Length 预检（早退）
+//  ④ agent 组装闸   收分片后按粗上界（两档的较大者）封顶
+//
+// 应用层真上限按用途分档（协议常量）：构建上下文 MaxDockerBuildContextBytes=512MB、
+// 载入镜像 MaxDockerImageLoadBytes=8GB。**传输层必须 ≥ 最大那档**，否则门口的 413
+// 会把合法请求挡在 core 之前（生产实测：525MB 镜像 tar 走「载入镜像 → 从浏览器
+// 上传」被 server 级 512m 打回，请求根本没到 core）。本守卫取协议常量推导上限
+//（不手写数字）：有人把 location 上限调回 512m，或删掉这行（回落 server 级 512m），
+// 都红。
+func TestNginxUploadBodyLimitCoversProtocolMax(t *testing.T) {
+	conf, err := os.ReadFile(nginxConfPath(t))
+	if err != nil {
+		t.Fatalf("读取 nginx.conf 失败: %v", err)
+	}
+	locs := parseNginxLocations(t, string(conf))
+
+	// 样例取 docker build-context：它与 files / devices/releases 共用同一个上传
+	// 专属 location（见 nginx.conf 注释）。
+	sample := "/api/v1/docker/hosts/x/build-context"
+	loc := nginxWinner(locs, 80, sample)
+	if loc == nil {
+		t.Fatalf(":80 无任何 location 命中上传通道 %s —— 上传专属 location 被删了？", sample)
+	}
+	if !strings.Contains(loc.pattern, "build-context") {
+		t.Fatalf("上传通道 %s 命中的 location %q 不是上传专属 location —— 被改回普通 /api/（server 级 512m）了？",
+			sample, loc.pattern)
+	}
+
+	got := nginxSizeBytes(loc.body, "client_max_body_size")
+	want := int64(uni_protocol.MaxDockerImageLoadBytes)
+	if got < want {
+		t.Errorf("上传 location %q 的 client_max_body_size=%d 字节 < 协议最大档 %d 字节（%dGB）—— "+
+			"传输层必须 ≥ 最大上传档，否则合法请求在门口就被 413 挡掉（请求到不了 core）；"+
+			"应用层分档由 core handler/service 与 agent 组装闸裁决，门口只管放行",
+			loc.pattern, got, want, want>>30)
+	}
+}
+
+// nginxSizeBytes 读 location 体里 `name 8g;` / `512m;` / `1024k;` / 裸字节 形态的
+// 尺寸（后缀大小写不敏感，1k=1024B、1m=1MiB、1g=1GiB，与 nginx 口径一致）；
+// 未设置返回 0（= 未覆写，按 server 级兜底 / 缺配处理）。
+func nginxSizeBytes(body, name string) int64 {
+	m := regexp.MustCompile(`(?m)^\s*` + name + `\s+(\d+)([kKmMgG]?)\s*;`).FindStringSubmatch(body)
+	if m == nil {
+		return 0
+	}
+	n, _ := strconv.ParseInt(m[1], 10, 64)
+	switch strings.ToLower(m[2]) {
+	case "k":
+		n *= 1 << 10
+	case "m":
+		n *= 1 << 20
+	case "g":
+		n *= 1 << 30
+	}
 	return n
 }

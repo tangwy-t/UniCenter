@@ -8,7 +8,9 @@ import (
 	"hash"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	agentproto "github.com/tangwy-t/UniCenter/uni_protocol"
@@ -57,10 +59,73 @@ import (
 //     定时任务，起一把只干这个的钟是多余的第二套调度）。
 const buildCtxSweepAge = 24 * time.Hour
 
-// maxBuildCtxUploadBytes 是组装账目的尺寸闸（默认 = 协议 MaxDockerBuildContextBytes）。
-// var 而非 const：测试调小来驱动账目触线而不必真的搬运 512MB
+// maxBuildCtxUploadBytes 是组装账目的尺寸闸 = **两档上传产物的较大者**
+// （协议 MaxDockerImageLoadBytes，8GB）。
+//
+// 为什么 agent 不做用途分流（v1.2.7 的取舍）：上传的发送方是**已认证的 core**，
+// 不是浏览器直连 —— 用途分档在 core 侧执法（它按 query 参数 kind 选档），agent
+// 侧再分一次只会多一条「两端对同一次上传的用途判断不一致」的失败路径，还要么给
+// 二进制帧加一个 kind 字段（动线上帧结构），要么让 core 另发一条设置帧。取**较大
+// 者**的代价是「构建上下文在 agent 侧少了一道更紧的闸」，收益是这条闸的职责退化成
+// 它真正该管的那件事：**不让一次上传吃爆自己的盘**（那是与用途无关的）。
+//
+// var 而非 const：测试调小来驱动账目触线而不必真的搬运 GB 级字节
 // （与 adapter 的 maxBuildContextEntries 同一纪律）。
-var maxBuildCtxUploadBytes = int64(agentproto.MaxDockerBuildContextBytes)
+var maxBuildCtxUploadBytes = int64(agentproto.MaxDockerImageLoadBytes)
+
+// buildCtxDiskReserveBytes 是写盘预留：判「盘够不够」时要在本片之外多留出的余量。
+//
+// 为什么不留 0：本闸的职责是「不让一次上传吃爆自己的盘」—— 写到刚好 0 会让同一台
+// 主机上的 docker daemon 与容器一起停摆（上传失败是局部故障，整机停摆是全局故障）。
+// 64MB 是「写出收尾与 daemon 侧一点周转」的量级，对 4.9T 的现场盘不值一提。
+const buildCtxDiskReserveBytes = 64 << 20
+
+// buildCtxFreeBytes 探测目录所在文件系统的可用字节数。var：测试注入**假 statfs**
+// 驱动「盘量不足早失败」，不必真去把一块盘写满（与 maxBuildCtxUploadBytes 同一纪律）。
+var buildCtxFreeBytes = fsFreeBytes
+
+// fsFreeBytes 用 syscall.Statfs 取可用字节（不引第三方依赖）。
+//
+// 取 Bfree 而不是 Bavail：agent 以 root 运行（产物目录 0700、文件 0600），
+// Bavail 会把「root 本来就能用的保留块」排除在外 —— 那是**别人的**口径，不是本
+// 进程真能写的空间（本闸要判的正是后者）；「别把盘写满」的政策由
+// buildCtxDiskReserveBytes 显式承担。
+//
+// 只在 Linux 上编译：agent 的发布产物就是 linux/amd64（见 Makefile 的
+// uni_agent-release），没有第二平台需要这份探测。
+func fsFreeBytes(dir string) (int64, error) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(dir, &st); err != nil {
+		return 0, err
+	}
+	return int64(st.Bsize) * int64(st.Bfree), nil
+}
+
+// diskShortText 是盘量不足的**结论句**（可执行：说得清差多少）。
+// need = 本片字节 + 预留（见 buildCtxDiskReserveBytes）。
+func diskShortText(need, free int64) string {
+	return fmt.Sprintf("可用空间不足：需 %s，剩 %s", humanBytes(need), humanBytes(free))
+}
+
+// humanBytes 把字节折成结论句里的可读形态（"8GB" / "64MB" / "512B"）。
+// 只为上面这一句服务（agent 侧没有第二处需要它），故不引 humanize、
+// 也不做单位表：按 2 的幂逐级除，整数档给整数值，非整数档保留一位小数。
+func humanBytes(n int64) string {
+	type unit struct {
+		size int64
+		name string
+	}
+	units := []unit{{1 << 30, "GB"}, {1 << 20, "MB"}, {1 << 10, "KB"}}
+	for _, u := range units {
+		if n >= u.size {
+			if n%u.size == 0 {
+				return strconv.FormatInt(n/u.size, 10) + u.name
+			}
+			return strconv.FormatFloat(float64(n)/float64(u.size), 'f', 1, 64) + u.name
+		}
+	}
+	return strconv.FormatInt(n, 10) + "B"
+}
 
 // buildCtxFileMode 是临时产物的权限（0600）：agent 以 root 运行，产物目录
 // 0700、文件 0600 —— 与 transferDir 的「世界不可写」纪律同一条（§7.5）。
@@ -189,13 +254,22 @@ func (r *buildCtxReceiver) Chunk(sessionID, seq uint64, final bool, payload []by
 			sess.head = nil // 形态已定型，窗口不再需要
 		}
 	}
-	// 尺寸账目（defensive：core 已在上传端点拦 512MB，这里防的是「core 被攻陷/
+	// 尺寸账目（defensive：core 已在它那一档上拦过，这里防的是「core 被攻陷/
 	// 协议漂移」时把 agent 的盘写穿 —— 一行账目的成本，守住上传段与 build 段
-	// 共用同一把尺）。
+	// 共用同一把尺）。上限是**两档的较大者**（不做用途分流，见
+	// maxBuildCtxUploadBytes 的取舍说明）。
 	sess.size += int64(len(payload))
 	if sess.size > maxBuildCtxUploadBytes {
-		r.drop(sess, "构建上下文超过 512MB 上限")
-		return fmt.Errorf("上传会话 %d 超过 512MB 上限", sessionID)
+		r.drop(sess, fmt.Sprintf("上传产物超过 %s 上限", humanBytes(maxBuildCtxUploadBytes)))
+		return fmt.Errorf("上传会话 %d 超过 %s 上限",
+			sessionID, humanBytes(maxBuildCtxUploadBytes))
+	}
+	// 盘量预检（v1.2.7）：按「本片 + 预留」比对可用空间，不够就**早失败** ——
+	// 而不是写到一半撞 ENOSPC（那时错误句只会说 "no space left on device"，
+	// 差多少、该清什么全无从判断，半成品还占着盘）。
+	if err := r.diskRoom(sess.path, int64(len(payload))); err != nil {
+		r.drop(sess, err.Error())
+		return fmt.Errorf("上传会话 %d：%w", sessionID, err)
 	}
 	if _, err := sess.f.Write(payload); err != nil {
 		r.drop(sess, "写产物文件失败")
@@ -288,6 +362,11 @@ func (r *buildCtxReceiver) open(sessionID uint64) (*buildCtxUploadSession, error
 		// 读不到 —— 诚实拒绝，让上传者从日志看到这句结论。
 		return nil, fmt.Errorf("上传会话 %d：产物目录不可用（%s）", sessionID, dir)
 	}
+	// 盘量预检（开局那一段）：连预留都占不出来就不必开始 —— 在清扫与建文件之前
+	// 就把结论说清（more=0：此时还不知道总量，见 Chunk 里按片的那一段）。
+	if err := r.diskRoom(dir, 0); err != nil {
+		return nil, fmt.Errorf("上传会话 %d：%w", sessionID, err)
+	}
 	// 清扫挂在上传开头（上传是 build-ctx-* 的唯一产生源）：回收 ≥24h 的旧产物。
 	if n, err := r.sweep(dir); err == nil && n > 0 && r.log != nil {
 		r.log.Info("构建上下文清扫", "removed", n, "dir", dir)
@@ -309,6 +388,28 @@ func (r *buildCtxReceiver) open(sessionID uint64) (*buildCtxUploadSession, error
 	}
 	r.sessions[sessionID] = sess
 	return sess, nil
+}
+
+// diskRoom 预检「path 所在的文件系统还能不能装下 more 字节 + 预留」（more=0 即只判
+// 预留本身，开局那一段用）。
+//
+// path 既可以是产物目录本身、也可以是产物文件：statfs(2) 对两者都给出**所在文件
+// 系统**的账，不需要先取父目录（先取父目录反而会对「目录本身」多剥一层，
+// 在挂载点边界上算错一块盘）。
+//
+// 探测失败**放行**（返回 nil）：读不到盘量不是拒绝上传的理由 —— 本闸的职责是
+// 「早失败并说清差多少」，不是「没有探测就不许传」；写失败那一条仍是最后兜底，
+// 本闸只是把同一件事提前到**写之前**并说清差额。
+func (r *buildCtxReceiver) diskRoom(path string, more int64) error {
+	need := more + buildCtxDiskReserveBytes
+	free, err := buildCtxFreeBytes(path)
+	if err != nil {
+		return nil
+	}
+	if free < need {
+		return errors.New(diskShortText(need, free))
+	}
+	return nil
 }
 
 // drop 作废一个会话：删文件、关句柄、清表。**只删本会话自己的推导名文件** ——

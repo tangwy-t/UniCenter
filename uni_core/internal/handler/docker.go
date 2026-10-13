@@ -685,7 +685,7 @@ func (h *DockerHandler) CmdResult(c *gin.Context) {
 	app.Success(c, out)
 }
 
-// BuildContextUpload 接收浏览器直传的构建上下文 tar.gz（image:build 的输入准备段）。
+// BuildContextUpload 接收浏览器直传的上传产物（构建上下文 / 载入镜像的导出物）。
 //
 // 传输拓扑：本端点**不做存储** —— 字节流经 core 中转成 WSS 二进制分片直达
 // agent 的 transferDir（中间零落盘），全程 sha256 累计，转完由 agent 侧终验。
@@ -694,18 +694,25 @@ func (h *DockerHandler) CmdResult(c *gin.Context) {
 // 同档：上下文是「即将构建并留痕在镜像里的代码」，与分发同档的输入面），
 // 「发起人」语义在此不适用（上传不建立任何按用户归属的账目）。
 //
-// 响应 200 + {filename}：该值即 image:build 的 options.context（推导名纪律
-// 见协议 build_context.go —— 名字由会话号唯一推导，agent 不接受客户端命名）。
+// **用途分档（v1.2.7）**：同一条通道载两件量级差一个数量级的产物，字节上限由
+// query 参数 kind 显式选（build = 构建上下文 512MB / load = 载入镜像 8GB；
+// **缺省 = build**，老客户端行为零变化）。尺只有协议一处事实源，这里与 service
+// 各读一次同一张表 —— 两端不会各自记一个上限。非法 kind 在**吃任何字节之前**拒。
 //
-// @Summary      上传构建上下文
-// @Description  直传 gzip 压缩的 tar 构建上下文（octet-stream/chunked）；core 流式中转至 agent 的 transferDir 并逐字节累计 sha256，agent 终验后落名 build-ctx-<会话号>.tar.gz；返回文件名（image:build 的 context 值）
+// 响应 200 + {filename}：该值即 image:build 的 options.context（推导名纪律
+// 见协议 build_context.go —— 名字由会话号唯一推导，agent 不接受客户端命名）；
+// 载入镜像时代入 image:load 的 options.filename。
+//
+// @Summary      上传构建上下文 / 载入镜像的导出物
+// @Description  直传 tar 归档（octet-stream/chunked）；core 流式中转至 agent 的 transferDir 并逐字节累计 sha256，agent 终验后落名 build-ctx-<会话号>.tar.gz；返回文件名（image:build 的 context 值 / image:load 的 filename 值）。上限按用途分档：kind=build（缺省）512MB、kind=load 8GB
 // @Tags         Docker 管理
 // @Accept       application/octet-stream
 // @Produce      json
-// @Param        id   path      uint64  true  "设备ID"
+// @Param        id    path      uint64  true  "设备ID"
+// @Param        kind  query     string  false  "上传用途：build=构建上下文（512MB 上限，缺省）/ load=载入镜像的导出物（8GB 上限）"
 // @Security     BearerAuth
-// @Success      200  {object}  app.Response{data=response.DockerBuildContextUploadResp}  "上传完成（filename 即 context 值）"
-// @Failure      400  {object}  app.Response{data=response.DockerBuildContextUploadResp}  "参数错误 / 超过 512MB 上限 / 内容不是 gzip tar / 上传为空"
+// @Success      200  {object}  app.Response{data=response.DockerBuildContextUploadResp}  "上传完成（filename 即 context/filename 值）"
+// @Failure      400  {object}  app.Response{data=response.DockerBuildContextUploadResp}  "参数错误 / 超过该用途上限（结论句含用途与上限数字）/ 用途标识不合法 / 内容不是 tar 归档 / 上传为空"
 // @Failure      401  {object}  app.Response  "未登录"
 // @Failure      403  {object}  app.Response  "无权限(docker:manage)"
 // @Failure      503  {object}  app.Response  "设备离线 / 通道中断（上传未完成，请重试）"
@@ -728,15 +735,21 @@ func (h *DockerHandler) BuildContextUpload(c *gin.Context) {
 		app.Error(c, apperror.BadRequest("Content-Type 必须是 application/octet-stream"))
 		return
 	}
+	// 用途选档：在**读一个字节之前**（Content-Type 之后、MaxBytesReader 之前）
+	// —— 非法标识不能换来「先吃掉一个请求体再报错」。
+	purpose, ok := agentproto.LookupDockerUploadPurpose(c.Query("kind"))
+	if !ok {
+		app.Error(c, apperror.BadRequest(agentproto.DockerUploadInvalidKindText(c.Query("kind"))))
+		return
+	}
 	contentLen := c.Request.ContentLength
-	// MaxBytesReader：客户端不报 Content-Length（chunked）时，超出 512MB 也会
+	// MaxBytesReader：客户端不报 Content-Length（chunked）时，超出该用途上限也会
 	// 在读到上限的那一点立即以错误收住读 —— 「即拒不等传完」的第二段
-	// （第一段是 service 里 Content-Length>上限的直接 400）。上限与 agent 侧
-	// 扫描、505 发布物档同源：协议 MaxDockerBuildContextBytes。
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body,
-		agentproto.MaxDockerBuildContextBytes)
+	// （第一段是 service 里 Content-Length>上限的直接 400，按同一档比对）。
+	// 上限取的是**这次上传的用途**那一档（协议 LookupDockerUploadPurpose）。
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, purpose.Limit)
 
-	name, err := h.buildCtx.Transfer(c.Request.Context(), id, c.Request.Body, contentLen)
+	name, err := h.buildCtx.Transfer(c.Request.Context(), id, purpose.Kind, c.Request.Body, contentLen)
 	if err != nil {
 		app.Error(c, err)
 		return

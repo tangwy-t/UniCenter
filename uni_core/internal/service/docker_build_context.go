@@ -26,7 +26,8 @@ import (
 //
 //  1. **core 不落盘**：中转是顺路搬运，不是落库 —— 请求体只在内存里驻留
 //     「一个 256KB 分片 + 一块读缓冲」，即读即发即弃。落盘会退化成
-//     「core 先存一份、agent 再收一份」，还多出 core 侧 512MB×N 的残留清理面。
+//     「core 先存一份、agent 再收一份」，还多出 core 侧「上限 ×N」的残留清理面
+//     （载入镜像那一档可有数 GB）。
 //  2. **背压沿栈传导**：分片帧经 Conn.EnqueueBinary **阻塞式**入队 —— 写 WSS
 //     慢时队列满，队列满时 HTTP handler 慢，handler 慢时浏览器 TCP 收窗关闭。
 //     任何一环**丢弃**，字节流就断（agent 哈希终验对不上），所以这条链上
@@ -36,10 +37,16 @@ import (
 //     **不需要**知道结果（v1 无回执：见下方 Transfer 的注释，取舍留在那里）。
 //
 // 安全面：上传通道是新的**输入面**（此前 build context 以「文件已在主机上」的
-// 前提存在），所以区分两道校验的管辖权：上传段只验「这像个 tar.gz」（gzip
-// 魔数）+ 512MB 大小（在上传端点即拒，不等传完）；tar 条目/穿越/Dockerfile
-// 这类**深度校验留给 image:build 执行**时的 scanBuildContext —— 单一校验事实源，
-// 上传段抢着做纵深校验只会把同一份判断拆成两处漂移的复制品。
+// 前提存在），所以区分两道校验的管辖权：上传段只验「这像个 tar」（gzip 魔数或
+// 明文 tar 的 ustar 魔数）+ **该用途的字节上限**（在上传端点即拒，不等传完）；
+// tar 条目/穿越/Dockerfile 这类**深度校验留给 image:build 执行**时的
+// scanBuildContext —— 单一校验事实源，上传段抢着做纵深校验只会把同一份判断
+// 拆成两处漂移的复制品。
+//
+// **字节上限按用途分档（v1.2.7）**：同一条通道载两件量级差一个数量级的产物 ——
+// 构建上下文（几十 MB 级，512MB 档）与载入镜像的导出物（实测 GB 级，8GB 档）。
+// 档位由调用方经 kind 显式给出（缺省 = 小档 build，老客户端行为零变化），
+// 尺只有一个事实源（协议 LookupDockerUploadPurpose）。
 
 // DockerBuildContextChannel 是上传中转对 agent 通道的**全部**要求
 // （由 agenthub.Hub 满足：SendBinaryToDevice / SendToDevice 两个方法）。
@@ -120,36 +127,93 @@ func newUploadSessionID() uint64 {
 		(uploadSessionSeq.Add(1) & uploadSessionSeqMask)
 }
 
-// gzip 魔数：上传段「这像个 tar.gz」的判定就是它（深度校验在 image:build）。
+// ── 早期形态闸（上传段对内容的全部形态要求）──────────────────────────────
+//
+// 判据与常量语义**与 agent 侧同一口径**（agent internal/dockerops/build_ctx_receive.go
+// 的同名常量与 buildCtxForm）：两端对同一次上传的形态判断必须一致，否则 core
+// 收下的字节会在 agent 侧被拒（或反之）—— 分片已经上路，一头一尾两处判断漂移
+// 是最贵的失败形态（生产实测：明文 tar 被 core 的旧 gzip-only 闸挡在门外，
+// 而 agent 侧本就认它）。
+
+// buildCtxGzipMagic 是 gzip 文件头的魔数（两种合法形态之一，偏移 0）。
 var buildCtxGzipMagic = []byte{0x1f, 0x8b}
 
-// uploadMaxBytes 是上传端点的字节闸（协议 MaxDockerBuildContextBytes）。
-// var 而非 const：测试调小它以驱动「流式中超限」而不真传 512MB。
-var uploadMaxBytes = int64(agentproto.MaxDockerBuildContextBytes)
+// buildCtxUstarOffset 是 tar 头里 ustar 魔数的偏移（POSIX 1003.1 与 GNU 两种
+// 变体都以 "ustar" 开头：`ustar\0` 与 `ustar  `）。
+const buildCtxUstarOffset = 257
+
+// buildCtxUstarMagic 是未压缩 tar 的形态指纹。
+const buildCtxUstarMagic = "ustar"
+
+// buildCtxMagicWindow 是形态闸的预读窗口（字节数）：按两种形态里最长的取 ——
+// gzip 只看偏移 0 的两字节，未压缩 tar 要看到偏移 257 的 ustar 魔数（257 + 5）。
+// 窗口只**拷贝**前若干字节做判读，分片本身仍原样全量入文件（校验窗口不截断数据流）。
+const buildCtxMagicWindow = buildCtxUstarOffset + len(buildCtxUstarMagic)
+
+// buildCtxFormText 是形态闸的**结论句**（与 agent 侧逐字对齐）。
+const buildCtxFormText = "内容既不是 tar 归档也不是 gzip 压缩的 tar 归档"
+
+// buildCtxForm 判读形态窗口覆盖的字节是否属于两种合法形态之一，并报告窗口是否
+// 已足够下结论：
+//   - gzip：偏移 0 的 1f 8b（两字节即可定型）；
+//   - 未压缩 tar：偏移 257 的 ustar 魔数（需攒够一整窗）。
+//
+// 「还不知道」（decided=false）与「不是」（ok=false）必须分开：短流在攒够窗口前
+// 被误判成非法，就会把合法的明文 tar 挡在门外。两者都不是 = 早期形态闸拒绝
+// （**深度校验仍在 scanBuildContext**，本条只是「趁早认出不是我们认的形态」）。
+func buildCtxForm(head []byte) (ok, decided bool) {
+	if len(head) >= 2 && head[0] == buildCtxGzipMagic[0] && head[1] == buildCtxGzipMagic[1] {
+		return true, true
+	}
+	if len(head) >= buildCtxMagicWindow {
+		return string(head[buildCtxUstarOffset:buildCtxMagicWindow]) == buildCtxUstarMagic, true
+	}
+	return false, false
+}
+
+// uploadLimitFor 由**用途**给出上传端点的字节闸（协议 DockerUploadPurpose.Limit
+// 的直通：档位值只有协议那一处事实源，这里不写第二遍 switch）。
+//
+// var 而非直接内联调用：测试**整体替换**它来驱动「流式中超限」的账目触线，不必
+// 真搬 GB 级字节（与 agent 侧 maxBuildCtxUploadBytes 同一纪律）。整体替换而不是
+// 「调小某一档」，是为了让测试与协议的用途白名单解耦 —— 协议加一档时，测试不必
+// 跟着改一行。
+var uploadLimitFor = func(p agentproto.DockerUploadPurpose) int64 { return p.Limit }
 
 // uploadChunkBytes 是读块/分片大小（协议 MaxDockerBuildCtxChunkBytes）。
 var uploadChunkBytes = int(agentproto.MaxDockerBuildCtxChunkBytes)
 
 // Transfer 流式中转一次上传：读 body → 分片 → WSS 二进制帧 → 完成控制帧，
-// 返回产物文件名（image:build 的 context 值）。
+// 返回产物文件名（image:build 的 context 值 / image:load 的 filename 值）。
+//
+// kind 是**上传用途**（协议 DockerUploadKind*）：它选的是字节上限那一档
+// （缺省 = 小档 build，见 LookupDockerUploadPurpose）。非法标识在此**读一个字节
+// 之前**就拒 —— 静默取小档会把拼写错误伪装成「小文件能传、大文件被 512MB 打回」。
 //
 // contentLen 是请求的 Content-Length（-1 = 缺席，chunked）：正的超上限值在
-// **读一个字节之前**就拒（512MB 上限「即拒不等传完」的两段之一）；无长度头时
+// **读一个字节之前**就拒（该用途上限「即拒不等传完」的两段之一）；无长度头时
 // 由 MaxBytesReader 在 handler 层收住（第二段），本函数仍保留流式账目兜底。
 //
 // 失败路径统一「收尾句号」：中止控制帧尽力送达（agent 删半成品）+ 带结论句的
 // 错误。浏览器断开（ctx 取消）时中止帧照发 —— 那是一条独立于 HTTP 生命周期的
 // 呼救信号，agent 靠它知道「别等了」。
-func (s *DockerBuildContextService) Transfer(ctx context.Context, deviceID uint64, body io.Reader, contentLen int64) (string, error) {
+func (s *DockerBuildContextService) Transfer(ctx context.Context, deviceID uint64, kind string, body io.Reader, contentLen int64) (string, error) {
+	// ⓪ 用途分档：尺与结论句用语都从协议表取（档位值只有那一处事实源）。
+	purpose, ok := agentproto.LookupDockerUploadPurpose(kind)
+	if !ok {
+		return "", apperror.BadRequest(agentproto.DockerUploadInvalidKindText(kind))
+	}
+	limit := uploadLimitFor(purpose)
 	// ① 离线预检：在吃请求体之前 —— 见 DockerBuildContextChannel 的注释。
 	if s.online != nil {
 		if !s.online(deviceID) {
 			return "", apperror.Unavailable("设备当前离线，无法接收构建上下文")
 		}
 	}
-	// ② 尺寸闸（Content-Length 形态）：即拒不等传完。
-	if contentLen >= 0 && contentLen > uploadMaxBytes {
-		return "", apperror.BadRequest("构建上下文超过 512MB 上限")
+	// ② 尺寸闸（Content-Length 形态）：即拒不等传完。结论句点名**当前用途**
+	// 与**该档的上限**（同一句里两个数都来自协议：不解释上限等于让用户猜）。
+	if contentLen >= 0 && contentLen > limit {
+		return "", apperror.BadRequest(agentproto.DockerUploadOversizeText(purpose))
 	}
 
 	// ③ 会话号与产物名：名字由会话号唯一推导（agent 不接受客户端命名，
@@ -163,28 +227,32 @@ func (s *DockerBuildContextService) Transfer(ctx context.Context, deviceID uint6
 	// 同源只是让日志能按会话号一 grep 到底。
 	sessionStr := strconv.FormatUint(session, 10)
 
-	// ④ 魔数预读：恰 2 字节（gzip magic）。不足 2 字节的 body 不可能是合法
-	// 上下文 —— 在发出**任何**一帧之前拒绝（agent 侧零状态需要清理）。
-	var head [2]byte
-	if _, err := io.ReadFull(body, head[:]); err != nil {
-		switch {
-		case errors.Is(err, io.EOF):
-			return "", apperror.BadRequest("上传内容为空")
-		case errors.Is(err, io.ErrUnexpectedEOF):
-			return "", apperror.BadRequest("内容不是 gzip 压缩的 tar 归档")
-		default:
-			return "", apperror.BadRequest("读取上传内容失败")
-		}
+	// ④ 形态预读：攒够一窗（buildCtxMagicWindow）再判形态 —— gzip 魔数（偏移 0
+	// 的 1f 8b）或未压缩 tar 的 ustar 魔数（偏移 257）之一即通过，两者都不是才
+	// 拒（与 agent 侧 buildCtxForm 同一口径）。预读发生在发出**任何**一帧之前 ——
+	// 拒绝时 agent 侧零状态需要清理，本函数也不留半帧。
+	//
+	// 不足 2 字节的流不可能是任何一种形态（两种合法形态的最短长度都远超它）：
+	// 给「上传内容为空」这条更准确的结论句；其余短于一窗就 EOF 的流按「既不是
+	// tar 也不是 gzip」拒绝（与 agent 侧 Finish 的短流结论同名）。
+	head := make([]byte, buildCtxMagicWindow)
+	n, err := io.ReadFull(body, head)
+	head = head[:n]
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return "", apperror.BadRequest("读取上传内容失败")
 	}
-	if head[0] != buildCtxGzipMagic[0] || head[1] != buildCtxGzipMagic[1] {
-		return "", apperror.BadRequest("内容不是 gzip 压缩的 tar 归档")
+	if n < 2 {
+		return "", apperror.BadRequest("上传内容为空")
+	}
+	if ok, decided := buildCtxForm(head); !decided || !ok {
+		return "", apperror.BadRequest(buildCtxFormText)
 	}
 
 	// ⑤ 分片中转主循环（一帧前瞻：末帧的 FINAL 位要等下一轮读回 EOF 才定）。
 	h := sha256.New()
-	total := int64(2)
-	h.Write(head[:])
-	pending := head[:] // 待发分片；首帧含魔数 2 字节（seq=1）
+	total := int64(len(head)) // 实际预读到的字节数（不是窗口大小）
+	h.Write(head)             // 累计哈希含**全部**预读字节（否则 agent 终验必错）
+	pending := head           // 待发分片；首帧含**全部**预读字节（seq=1）
 	buf := make([]byte, uploadChunkBytes)
 	var seq uint64
 
@@ -231,11 +299,11 @@ func (s *DockerBuildContextService) Transfer(ctx context.Context, deviceID uint6
 			pending = append([]byte{}, buf[:n]...) // 拷贝：buf 下一轮要被覆盖
 			total += int64(n)
 			h.Write(pending)
-			if total > uploadMaxBytes {
+			if total > limit {
 				// 流式账目的兜底（Content-Length 缺席且未走 MaxBytesReader 的
 				// 调用形态）：与 MaxBytesError 同一条收尾。
 				return s.oversize(
-					errors.New("构建上下文流式账目超过上限"), deviceID, session)
+					errors.New("上传产物流式账目超过上限"), deviceID, session, purpose)
 			}
 		}
 		switch {
@@ -272,25 +340,30 @@ func (s *DockerBuildContextService) Transfer(ctx context.Context, deviceID uint6
 			// 中止 + 句号。超上限与普通读失败的分句在 oversize 里做。
 			var maxErr *http.MaxBytesError
 			if errors.As(rerr, &maxErr) {
-				return s.oversize(rerr, deviceID, session)
+				return s.oversize(rerr, deviceID, session, purpose)
 			}
 			return failTransfer(rerr)
 		}
 	}
 }
 
-// oversize 是「超过 512MB」的收尾：中止帧 + 400 句号（尺寸闸的第二段 ——
+// oversize 是「超过该用途上限」的收尾：中止帧 + 400 句号（尺寸闸的第二段 ——
 // 只剩流式中途才发现超限这一种进入路径，第一段在 Content-Length 预检）。
+//
+// purpose 一路传进来（而不是在收尾处重新推一次用途）：超限的**是这次上传**，
+// 结论句必须说清它是哪一档的上限 —— 推第二次就是把「这次上传的用途」变成
+// 一个可以漂移的推断。
 //
 // 为什么 err 也传进来：日志带原始错误（MaxBytesError / 账目触线），结论句
 // 对用户说干净的一句话，两件事各走各的出口。
-func (s *DockerBuildContextService) oversize(err error, deviceID, session uint64) (string, error) {
+func (s *DockerBuildContextService) oversize(err error, deviceID, session uint64, purpose agentproto.DockerUploadPurpose) (string, error) {
 	s.abort(deviceID, session)
 	if s.log != nil {
-		s.log.Warn("构建上下文上传超上限",
-			zap.Uint64("device_id", deviceID), zap.Uint64("session", session), zap.Error(err))
+		s.log.Warn("上传产物超上限",
+			zap.Uint64("device_id", deviceID), zap.Uint64("session", session),
+			zap.String("kind", purpose.Kind), zap.Int64("limit", purpose.Limit), zap.Error(err))
 	}
-	return "", apperror.BadRequest("构建上下文超过 512MB 上限")
+	return "", apperror.BadRequest(agentproto.DockerUploadOversizeText(purpose))
 }
 
 // abort 尽力下发一条中止控制帧。失败**不影响**返回值 —— 它本来就是「收尾

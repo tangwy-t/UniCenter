@@ -134,4 +134,4 @@ require (
 	modernc.org/sqlite v1.23.1 // indirect
 )
 
-require github.com/tangwy-t/UniCenter/uni_protocol v1.2.6
+require github.com/tangwy-t/UniCenter/uni_protocol v1.2.7

@@ -1405,3 +1405,96 @@ func TestDockerEventExitCodeRoundTrip(t *testing.T) {
 		t.Fatalf("退出码往返不符: %v", dec.ExitCode)
 	}
 }
+
+// TestDockerUploadPurposeTiers 钉住**上传产物的用途分档**（v1.2.7）：
+// 两枚上限常量的值与关系、三个查找分支（load / build / 缺省）、以及越界结论句
+// 里的上限数字。分档本身就是这次的交付物，故断言按分支逐个写死而不是互相推。
+func TestDockerUploadPurposeTiers(t *testing.T) {
+	// ① 两枚常量的值：改档是显式的协议变更，值必须逐字钉住
+	//（不是「大约 512MB」—— 两端与它对齐的是**同一个整数**）。
+	if MaxDockerBuildContextBytes != 512<<20 {
+		t.Fatalf("MaxDockerBuildContextBytes = %d, want 512<<20", int64(MaxDockerBuildContextBytes))
+	}
+	if MaxDockerImageLoadBytes != 8<<30 {
+		t.Fatalf("MaxDockerImageLoadBytes = %d, want 8<<30", int64(MaxDockerImageLoadBytes))
+	}
+	// ② 关系：载入镜像的档必须**严格大于**构建上下文的档（否则分档没有意义 ——
+	// 实测镜像导出物 GB 级，构建上下文几十 MB 级，两档不能是同一把尺）。
+	if MaxDockerImageLoadBytes <= MaxDockerBuildContextBytes {
+		t.Fatalf("载入档 %d 必须大于构建档 %d",
+			int64(MaxDockerImageLoadBytes), int64(MaxDockerBuildContextBytes))
+	}
+
+	// ③ 三个查找分支各自的档位 + 缺省取**小档**（老客户端零变化）。
+	for _, tc := range []struct {
+		name  string
+		kind  string
+		limit int64
+		label string
+	}{
+		{"kind=load 走 8GB 档", DockerUploadKindLoad, MaxDockerImageLoadBytes, "载入镜像的导出物"},
+		{"kind=build 走 512MB 档", DockerUploadKindBuild, MaxDockerBuildContextBytes, "构建上下文"},
+		{"kind 缺席走 512MB 档（缺省 = 小档）", "", MaxDockerBuildContextBytes, "构建上下文"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, ok := LookupDockerUploadPurpose(tc.kind)
+			if !ok {
+				t.Fatalf("kind=%q 应合法", tc.kind)
+			}
+			if p.Limit != tc.limit {
+				t.Fatalf("kind=%q 上限 = %d, want %d", tc.kind, p.Limit, tc.limit)
+			}
+			if p.Label != tc.label {
+				t.Fatalf("kind=%q 用途名 = %q, want %q", tc.kind, p.Label, tc.label)
+			}
+		})
+	}
+	if DockerDefaultUploadKind != DockerUploadKindBuild {
+		t.Fatalf("缺省用途 = %q，必须是小档（build）—— 老客户端不带 kind 时行为零变化",
+			DockerDefaultUploadKind)
+	}
+
+	// ④ 未知用途标识**非法**（而不是静默取小档）：拼错的调用方要在第一个字节
+	// 之前就拿到一句说得清的话。
+	for _, bad := range []string{"Build", "BUILD", "image", "load ", "construct", "0"} {
+		if _, ok := LookupDockerUploadPurpose(bad); ok {
+			t.Fatalf("kind=%q 不应合法（大小写敏感的白名单）", bad)
+		}
+		if msg := DockerUploadInvalidKindText(bad); !strings.Contains(msg, bad) ||
+			!strings.Contains(msg, DockerUploadKindBuild) || !strings.Contains(msg, DockerUploadKindLoad) {
+			t.Fatalf("非法 kind 结论句必须点名该值并列出全部合法值: %q", msg)
+		}
+	}
+
+	// ⑤ 越界结论句必须**含当前用途的上限数字**（「别只说参数错误」）。
+	for kind, want := range map[string]string{
+		DockerUploadKindBuild: "512MB",
+		DockerUploadKindLoad:  "8GB",
+	} {
+		p, _ := LookupDockerUploadPurpose(kind)
+		msg := DockerUploadOversizeText(p)
+		if !strings.Contains(msg, want) {
+			t.Fatalf("kind=%q 的越界结论句必须含上限 %s: %q", kind, want, msg)
+		}
+		// 两个档位的结论句必须**不同**（主语不同）：同一句话会让「载入了 3GB
+		// 被 512MB 打回」这类现场无从解释。
+		if strings.Contains(msg, "512MB") == strings.Contains(msg, "8GB") {
+			t.Fatalf("结论句把两档说成了一档: %q", msg)
+		}
+	}
+
+	// ⑥ 枚举与查找同源：表里每条都能被查回来，且 Limit 就是对应常量
+	//（新增用途时漏登记常量或漏挂查找，都在这里红）。
+	if len(dockerUploadPurposes) != 2 {
+		t.Fatalf("用途枚举 = %d 条, want 2（build/load）", len(dockerUploadPurposes))
+	}
+	for _, p := range dockerUploadPurposes {
+		got, ok := LookupDockerUploadPurpose(p.Kind)
+		if !ok || got != p {
+			t.Fatalf("枚举里的 %+v 未被 Lookup 原样查回: %+v ok=%v", p, got, ok)
+		}
+		if p.Label == "" {
+			t.Fatalf("用途 %q 缺用途名（越界结论句的主语）", p.Kind)
+		}
+	}
+}

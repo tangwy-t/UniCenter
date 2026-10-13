@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
@@ -152,6 +153,19 @@ func gzipBody(n int) []byte {
 	return b
 }
 
+// tarBody 造一段「偏移 257 是 ustar 魔数」的伪**明文 tar** 字节（长度 ≥ 一窗）。
+// 与 gzipBody 同一纪律（确定填充 / 逐位可验）。首字节避开 0x1f：本条专测
+// **未压缩 tar** 那条判据，否则偏移 0 的 gzip 魔数会先定型，测不到 ustar 分支。
+func tarBody(n int) []byte {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = byte(i*17 + 5)
+	}
+	b[0] = 0x00 // 确保不落进 gzip 魔数分支（u*17+5 在 i=0 处是 5，显式钉死）
+	copy(b[buildCtxUstarOffset:buildCtxMagicWindow], buildCtxUstarMagic)
+	return b
+}
+
 func wantSHA(t *testing.T, b []byte) string {
 	t.Helper()
 	sum := sha256.Sum256(b)
@@ -170,13 +184,14 @@ func (a *armedReader) Read(p []byte) (int, error) {
 // ── 流式中转与分片计数 ────────────────────────────────────────────────────
 
 func TestTransferStreamsChunksInOrder(t *testing.T) {
-	// 帧结构（对照 Transfer 的一帧前瞻）：头 2 字节经魔数预读后并入 seq=1；
-	// 之后每 256KB 一片；末片 FINAL=1。body = 2 + 3×256KB + 12345。
+	// 帧结构（对照 Transfer 的一帧前瞻）：头一窗（buildCtxMagicWindow 字节）经
+	// 形态预读后并入 seq=1；之后每 256KB 一片；末片 FINAL=1。
+	// body = 2 + 3×256KB + 12345。
 	body := gzipBody(2 + 3*uploadChunkBytes + 12345)
 	ch := &fakeBuildCtxChannel{}
 	svc := newTestBuildCtxService(ch, true)
 
-	name, err := svc.Transfer(context.Background(), 7, bytes.NewReader(body), int64(len(body)))
+	name, err := svc.Transfer(context.Background(), 7, "", bytes.NewReader(body), int64(len(body)))
 	if err != nil {
 		t.Fatalf("Transfer = %v", err)
 	}
@@ -229,26 +244,26 @@ func TestTransferStreamsChunksInOrder(t *testing.T) {
 }
 
 func TestTransferFrameCountAcrossSizes(t *testing.T) {
-	// 帧数数学：body≥2 时 = 1（seq=1 的头帧）+ ceil((len-2)/256KB)，
-	// 2 字节整的边界上末片由「读回 (0, EOF)」补为 FINAL。
+	// 帧数数学：body≥一窗时 = 1（seq=1 的形态预读帧，含整窗）+ ceil((len-窗)/256KB)，
+	// 恰好一窗整的边界上末片由「读回 (0, EOF)」补为 FINAL。
 	cases := []struct {
 		name      string
 		bodyLen   int
 		wantFrame int
 	}{
-		{"仅魔数 2 字节", 2, 1},
-		{"3 字节", 3, 2},
-		{"恰好 1 片", 2 + uploadChunkBytes, 2},
-		{"1 片多 1 字节", 2 + uploadChunkBytes + 1, 3},
-		{"恰好 2 片", 2 + 2*uploadChunkBytes, 3},
-		{"3 片", 2 + 3*uploadChunkBytes, 4},
+		{"恰好一窗", buildCtxMagicWindow, 1},
+		{"一窗多 1 字节", buildCtxMagicWindow + 1, 2},
+		{"恰好 1 片", buildCtxMagicWindow + uploadChunkBytes, 2},
+		{"1 片多 1 字节", buildCtxMagicWindow + uploadChunkBytes + 1, 3},
+		{"恰好 2 片", buildCtxMagicWindow + 2*uploadChunkBytes, 3},
+		{"3 片", buildCtxMagicWindow + 3*uploadChunkBytes, 4},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			body := gzipBody(tc.bodyLen)
 			ch := &fakeBuildCtxChannel{}
 			svc := newTestBuildCtxService(ch, true)
-			if _, err := svc.Transfer(context.Background(), 7, bytes.NewReader(body), int64(len(body))); err != nil {
+			if _, err := svc.Transfer(context.Background(), 7, "", bytes.NewReader(body), int64(len(body))); err != nil {
 				t.Fatal(err)
 			}
 			frames, _ := ch.snapshot()
@@ -274,7 +289,7 @@ func TestTransferWithDefaultSessionGeneratorNeverFails(t *testing.T) {
 	for i := 0; i < 32; i++ {
 		ch := &fakeBuildCtxChannel{}
 		svc := NewDockerBuildContextService(ch, logger.NewNop()) // 默认生成器 = 生产形态
-		name, err := svc.Transfer(context.Background(), 7, bytes.NewReader(body), int64(len(body)))
+		name, err := svc.Transfer(context.Background(), 7, "", bytes.NewReader(body), int64(len(body)))
 		if err != nil {
 			t.Fatalf("第 %d 次上传失败（QA 恒 500 回归）: %v", i+1, err)
 		}
@@ -296,7 +311,7 @@ func TestTransferMaxUint64SessionFullChain(t *testing.T) {
 	svc.sessionGen = func() uint64 { return math.MaxUint64 }
 
 	body := gzipBody(2 + uploadChunkBytes + 77)
-	name, err := svc.Transfer(context.Background(), 7, bytes.NewReader(body), int64(len(body)))
+	name, err := svc.Transfer(context.Background(), 7, "", bytes.NewReader(body), int64(len(body)))
 	if err != nil {
 		t.Fatalf("MaxUint64 会话号上传失败: %v", err)
 	}
@@ -367,7 +382,7 @@ func TestTransferOfflineRejectedBeforeReadingBody(t *testing.T) {
 	ch := &fakeBuildCtxChannel{}
 	svc := newTestBuildCtxService(ch, false) // 预检即离线
 
-	_, err := svc.Transfer(context.Background(), 7, armed, 1024)
+	_, err := svc.Transfer(context.Background(), 7, "", armed, 1024)
 	var ae *apperror.AppError
 	if !errors.As(err, &ae) || ae.HTTPStatus != 503 {
 		t.Fatalf("offline 应 503: %v", err)
@@ -386,7 +401,7 @@ func TestTransferOfflineFirstSendRace(t *testing.T) {
 	svc := newTestBuildCtxService(ch, true)
 
 	body := gzipBody(1024)
-	_, err := svc.Transfer(context.Background(), 7, bytes.NewReader(body), int64(len(body)))
+	_, err := svc.Transfer(context.Background(), 7, "", bytes.NewReader(body), int64(len(body)))
 	var ae *apperror.AppError
 	if !errors.As(err, &ae) || ae.HTTPStatus != 503 {
 		t.Fatalf("首帧离线应 503: %v", err)
@@ -404,7 +419,7 @@ func TestTransferChannelBreakMidStreamAborts(t *testing.T) {
 	ch.armFail(3, errors.New("模拟链路断裂"))
 	svc := newTestBuildCtxService(ch, true)
 
-	_, err := svc.Transfer(context.Background(), 7, bytes.NewReader(body), int64(len(body)))
+	_, err := svc.Transfer(context.Background(), 7, "", bytes.NewReader(body), int64(len(body)))
 	var ae *apperror.AppError
 	if !errors.As(err, &ae) || ae.HTTPStatus != 503 {
 		t.Fatalf("通道断应 503: %v", err)
@@ -433,7 +448,7 @@ func TestTransferContextCancelSendsAbort(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // 首帧发送的阻塞点直接解除（真实语义：EnqueueBinary 返回 ctx.Err()）
-	_, err := svc.Transfer(ctx, 7, bytes.NewReader(body), int64(len(body)))
+	_, err := svc.Transfer(ctx, 7, "", bytes.NewReader(body), int64(len(body)))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("ctx 取消应原样返回 Canceled: %v", err)
 	}
@@ -450,7 +465,7 @@ func TestTransferRejectsBadMagicBeforeAnyFrame(t *testing.T) {
 	ch := &fakeBuildCtxChannel{}
 	svc := newTestBuildCtxService(ch, true)
 
-	_, err := svc.Transfer(context.Background(), 7, bytes.NewReader(raw), int64(len(raw)))
+	_, err := svc.Transfer(context.Background(), 7, "", bytes.NewReader(raw), int64(len(raw)))
 	var ae *apperror.AppError
 	if !errors.As(err, &ae) || ae.Code != apperror.CodeBadRequest {
 		t.Fatalf("魔数不符应 400: %v", err)
@@ -460,6 +475,8 @@ func TestTransferRejectsBadMagicBeforeAnyFrame(t *testing.T) {
 	}
 }
 
+// 小于 2 字节的流不可能是任何一种合法形态（两种形态的最短长度都远超它）：
+// 给「上传内容为空」这条更准确的结论句（形态闸修完后仍要保住它）。
 func TestTransferRejectsEmptyAndTinyBodies(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -471,11 +488,8 @@ func TestTransferRejectsEmptyAndTinyBodies(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ch := &fakeBuildCtxChannel{}
 			svc := newTestBuildCtxService(ch, true)
-			_, err := svc.Transfer(context.Background(), 7, bytes.NewReader(tc.body), int64(len(tc.body)))
-			var ae *apperror.AppError
-			if !errors.As(err, &ae) || ae.Code != apperror.CodeBadRequest {
-				t.Fatalf("应 400: %v", err)
-			}
+			_, err := svc.Transfer(context.Background(), 7, "", bytes.NewReader(tc.body), int64(len(tc.body)))
+			assertBadRequestMsg(t, tc.name, err, "上传内容为空")
 			if frames, msgs := ch.snapshot(); len(frames) != 0 || len(msgs) != 0 {
 				t.Fatalf("不得发出任何帧: frames=%d texts=%d", len(frames), len(msgs))
 			}
@@ -483,20 +497,196 @@ func TestTransferRejectsEmptyAndTinyBodies(t *testing.T) {
 	}
 }
 
-func TestTransferRejectsContentLengthOverLimitImmediately(t *testing.T) {
+// 明文 tar（偏移 257 的 ustar 魔数）必须放行 —— 这正是本次修复的那处形态闸：
+// 旧实现只认偏移 0 的 gzip 魔数，把合法的未压缩 tar 挡在门外（生产实测：同一
+// 文件 gzip 后成功、明文失败）。
+//
+// 断言面专门钉住与预读强耦合的三处账目（它们从「恰好 2 字节」改成「实际预读到
+// 的整窗」，是最容易漏的地方）：
+//   - 首帧（seq=1）载荷 = body 的前**整窗**字节；
+//   - 分片拼接 = 原文（零增删）；
+//   - 完成帧 SizeBytes / SHA256Hex = 全文（少算预读窗口会在这里露馅）。
+func TestTransferAcceptsPlainTar(t *testing.T) {
+	body := tarBody(buildCtxMagicWindow + uploadChunkBytes + 321)
 	ch := &fakeBuildCtxChannel{}
 	svc := newTestBuildCtxService(ch, true)
 
-	old := uploadMaxBytes
-	uploadMaxBytes = 1024
-	t.Cleanup(func() { uploadMaxBytes = old })
+	name, err := svc.Transfer(context.Background(), 7, agentproto.DockerUploadKindLoad,
+		bytes.NewReader(body), int64(len(body)))
+	if err != nil {
+		t.Fatalf("明文 tar 应放行（形态闸修的就是它）: %v", err)
+	}
+	if want := agentproto.DockerBuildCtxTransferName(testSessionID); name != want {
+		t.Fatalf("filename = %q, want %q", name, want)
+	}
+
+	frames, _ := ch.snapshot()
+	if len(frames) == 0 {
+		t.Fatal("未发出任何分片帧")
+	}
+	if frames[0].seq != 1 {
+		t.Fatalf("首帧 seq = %d, want 1", frames[0].seq)
+	}
+	// 三处耦合之一：首帧携带**实际预读到的全部字节**（整窗），不是 gzip 时代的 2 字节。
+	if got := frames[0].payload; !bytes.Equal(got, body[:buildCtxMagicWindow]) {
+		t.Fatalf("首帧载荷 %d 字节（前缀）!= 整窗 %d 字节", len(got), buildCtxMagicWindow)
+	}
+	var joined []byte
+	for _, fr := range frames {
+		joined = append(joined, fr.payload...)
+	}
+	if !bytes.Equal(joined, body) {
+		t.Fatalf("分片拼接 != 请求体（len %d vs %d）", len(joined), len(body))
+	}
+
+	// 三处耦合之二、之三：total 与 sha256 累计都必须含整窗。
+	fin := lastControl(t, ch, agentproto.TypeCoreDockerBuildCtxFinish)
+	var finPayload agentproto.CoreDockerBuildCtxFinish
+	if err := fin.DecodeData(&finPayload); err != nil {
+		t.Fatal(err)
+	}
+	if finPayload.SizeBytes != int64(len(body)) {
+		t.Fatalf("完成帧大小 = %d, want %d（少算预读窗口会在这里露馅）", finPayload.SizeBytes, len(body))
+	}
+	if finPayload.SHA256Hex != wantSHA(t, body) {
+		t.Fatalf("完成帧哈希 = %s, want %s", finPayload.SHA256Hex, wantSHA(t, body))
+	}
+}
+
+// 既非 gzip 魔数（偏移 0）、偏移 257 也非 ustar 的一窗以上流：形态闸拒绝，
+// 且**零帧**（在发出任何一帧之前拒 —— agent 侧零状态需要清理）。
+func TestTransferRejectsNeitherTarNorGzip(t *testing.T) {
+	body := make([]byte, buildCtxMagicWindow+4096) // 全零：偏移 0 与 257 都不命中
+	ch := &fakeBuildCtxChannel{}
+	svc := newTestBuildCtxService(ch, true)
+
+	_, err := svc.Transfer(context.Background(), 7, "", bytes.NewReader(body), int64(len(body)))
+	assertBadRequestMsg(t, "非 tar 非 gzip", err, buildCtxFormText)
+	if frames, msgs := ch.snapshot(); len(frames) != 0 || len(msgs) != 0 {
+		t.Fatalf("形态拒绝不得发出任何帧: frames=%d texts=%d", len(frames), len(msgs))
+	}
+}
+
+// 攒不满一窗就 EOF、又不是 gzip 的流：按「既不是 tar 也不是 gzip」拒绝
+// （与 agent 侧 Finish 的短流结论同名），且不留半帧。
+func TestTransferRejectsShortStreamBeforeWindow(t *testing.T) {
+	body := make([]byte, buildCtxMagicWindow-1) // 差一字节攒不满窗
+	ch := &fakeBuildCtxChannel{}
+	svc := newTestBuildCtxService(ch, true)
+
+	_, err := svc.Transfer(context.Background(), 7, "", bytes.NewReader(body), int64(len(body)))
+	assertBadRequestMsg(t, "短流", err, buildCtxFormText)
+	if frames, msgs := ch.snapshot(); len(frames) != 0 || len(msgs) != 0 {
+		t.Fatalf("短流拒绝不得发出任何帧: frames=%d texts=%d", len(frames), len(msgs))
+	}
+}
+
+// assertBadRequestMsg 在既有 assertBadRequest（400 判定）之上再断言结论句片段 ——
+// 分档的现场可解释性靠的就是结论句里的**用途与上限数字**。
+func assertBadRequestMsg(t *testing.T, what string, err error, wantMsg string) {
+	t.Helper()
+	assertBadRequest(t, what, err)
+	var ae *apperror.AppError
+	if !errors.As(err, &ae) {
+		return // 非 AppError：assertBadRequest 已 Fatal，这里只防 nil 解引用。
+	}
+	if !strings.Contains(ae.Message, wantMsg) {
+		t.Fatalf("%s：结论句 %q 必须含 %q", what, ae.Message, wantMsg)
+	}
+}
+
+// setUploadLimit 把上传端点的**执法阈值**整体替换成固定值：驱动「流式中超限」
+// 的账目触线，而不必真搬 GB 级字节。它**只动执法点**（uploadLimitFor），档位
+// 本身（用途名与声明上限，即结论句的用词）仍来自协议 —— 生产里两者恒等。
+func setUploadLimit(t *testing.T, n int64) {
+	t.Helper()
+	old := uploadLimitFor
+	uploadLimitFor = func(agentproto.DockerUploadPurpose) int64 { return n }
+	t.Cleanup(func() { uploadLimitFor = old })
+}
+
+// TestTransferPurposeTiers 钉住**按用途选档**（v1.2.7）的全部进入分支：
+// kind=load 走 8GB 档、kind=build 与**缺省**走 512MB 档、非法标识（不静默取小档）
+// 400 且点名合法值；越界结论句必须含**当前用途与该档的上限数字**。
+//
+// 断言的载体是 Content-Length 预检那一段（它读不到 body 就下结论 —— 顺带把
+// 「即拒不等传完」一并钉住；真传 GB 级字节的测法在 CI 里不可行）。
+func TestTransferPurposeTiers(t *testing.T) {
+	// ① 载入镜像档：8GB 是它的上限（生产已知最大导出物 2.87GB 有了三倍余量）。
+	t.Run("kind=load 越 8GB → 400（结论句点名用途与上限）", func(t *testing.T) {
+		ch := &fakeBuildCtxChannel{}
+		svc := newTestBuildCtxService(ch, true)
+		armed := &armedReader{}
+		_, err := svc.Transfer(context.Background(), 7, agentproto.DockerUploadKindLoad,
+			armed, agentproto.MaxDockerImageLoadBytes+1)
+		assertBadRequestMsg(t, "load 越 8GB", err, "载入镜像的导出物超过 8GB 上限")
+		if armed.read {
+			t.Fatal("越界必须在读 body 之前拒绝（不等传完）")
+		}
+	})
+
+	// ② **这次分档要解决的那件事**：载入镜像不再继承构建上下文的 512MB ——
+	// 512MB+1 的声明必须一路上到传输段（而不是被拦成拦路虎）。
+	t.Run("kind=load 不继承 512MB 档（512MB+1 放行）", func(t *testing.T) {
+		body := gzipBody(1024)
+		ch := &fakeBuildCtxChannel{}
+		svc := newTestBuildCtxService(ch, true)
+		name, err := svc.Transfer(context.Background(), 7, agentproto.DockerUploadKindLoad,
+			bytes.NewReader(body), agentproto.MaxDockerBuildContextBytes+1)
+		if err != nil {
+			t.Fatalf("载入镜像档下 512MB+1 的声明必须放行（分档要解决的就是它）: %v", err)
+		}
+		if want := agentproto.DockerBuildCtxTransferName(testSessionID); name != want {
+			t.Fatalf("filename = %q, want %q", name, want)
+		}
+	})
+
+	// ③④ 构建档与**缺省**档：都是 512MB（缺省取小档 = 老客户端行为零变化）。
+	for _, tc := range []struct {
+		name string
+		kind string
+	}{
+		{"kind=build 走 512MB 档", agentproto.DockerUploadKindBuild},
+		{"kind 缺席（缺省）走 512MB 档", ""},
+	} {
+		t.Run(tc.name+" → 400", func(t *testing.T) {
+			ch := &fakeBuildCtxChannel{}
+			svc := newTestBuildCtxService(ch, true)
+			armed := &armedReader{}
+			_, err := svc.Transfer(context.Background(), 7, tc.kind,
+				armed, agentproto.MaxDockerBuildContextBytes+1)
+			assertBadRequestMsg(t, "build 档越界", err, "构建上下文超过 512MB 上限")
+			if armed.read {
+				t.Fatal("越界必须在读 body 之前拒绝（不等传完）")
+			}
+		})
+	}
+
+	// ⑤ 非法用途标识：**不静默取小档**（静默会把拼写错误伪装成「小文件能传、
+	// 大文件被 512MB 打回」的费解现场），且不为此吃一个字节的请求体。
+	t.Run("非法 kind → 400 且点名合法值（不读 body）", func(t *testing.T) {
+		ch := &fakeBuildCtxChannel{}
+		svc := newTestBuildCtxService(ch, true)
+		armed := &armedReader{}
+		_, err := svc.Transfer(context.Background(), 7, "image", armed, 1024)
+		assertBadRequestMsg(t, "非法 kind", err, `上传用途 kind="image" 不合法（合法值：build、load）`)
+		if armed.read {
+			t.Fatal("非法用途必须在读 body 之前拒绝")
+		}
+		if frames, msgs := ch.snapshot(); len(frames) != 0 || len(msgs) != 0 {
+			t.Fatalf("非法用途不得发出任何帧: frames=%d texts=%d", len(frames), len(msgs))
+		}
+	})
+}
+
+func TestTransferRejectsContentLengthOverLimitImmediately(t *testing.T) {
+	ch := &fakeBuildCtxChannel{}
+	svc := newTestBuildCtxService(ch, true)
+	setUploadLimit(t, 1024)
 
 	armed := &armedReader{}
-	_, err := svc.Transfer(context.Background(), 7, armed, 2048)
-	var ae *apperror.AppError
-	if !errors.As(err, &ae) || ae.Code != apperror.CodeBadRequest {
-		t.Fatalf("Content-Length 超限应 400 即拒: %v", err)
-	}
+	_, err := svc.Transfer(context.Background(), 7, agentproto.DockerUploadKindBuild, armed, 2048)
+	assertBadRequest(t, "Content-Length 超限", err)
 	if armed.read {
 		t.Fatal("超限必须在读 body 之前拒绝（不等传完）")
 	}
@@ -505,17 +695,15 @@ func TestTransferRejectsContentLengthOverLimitImmediately(t *testing.T) {
 func TestTransferRejectsStreamOverLimit(t *testing.T) {
 	ch := &fakeBuildCtxChannel{}
 	svc := newTestBuildCtxService(ch, true)
-
-	old := uploadMaxBytes
-	uploadMaxBytes = 8
-	t.Cleanup(func() { uploadMaxBytes = old })
+	// setUploadLimit 只动**执法阈值**（驱动触线而不真搬 GB 级字节），不动档位本身
+	// —— 结论句仍按该用途的**声明档**成形（生产里两者恒等：8B 这个数只存在于本条
+	// 用例的账目里）。故这里断言的是「结论句含用途名与该档上限」。
+	setUploadLimit(t, 8)
 
 	body := gzipBody(2 + 1024) // 流式中途触线（无 Content-Length 形态）
-	_, err := svc.Transfer(context.Background(), 7, bytes.NewReader(body), -1)
-	var ae *apperror.AppError
-	if !errors.As(err, &ae) || ae.Code != apperror.CodeBadRequest {
-		t.Fatalf("流式超限应 400: %v", err)
-	}
+	_, err := svc.Transfer(context.Background(), 7, agentproto.DockerUploadKindBuild,
+		bytes.NewReader(body), -1)
+	assertBadRequestMsg(t, "流式超限", err, "构建上下文超过 512MB 上限")
 	_, msgs := ch.snapshot()
 	if len(msgs) == 0 || msgs[len(msgs)-1].Type != agentproto.TypeCoreDockerBuildCtxAbort {
 		t.Fatal("流式超限必须补中止帧（agent 删半成品）")
