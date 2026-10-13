@@ -99,6 +99,9 @@ importers:
       '@iconify-json/boxicons':
         specifier: ^1.2.0
         version: 1.2.0
+      '@iconify-json/carbon':
+        specifier: ^1.2.28
+        version: 1.2.28
       '@iconify-json/catppuccin':
         specifier: ^1.2.17
         version: 1.2.17
@@ -696,6 +699,9 @@ packages:
 
   '@iconify-json/boxicons@1.2.0':
     resolution: {integrity: sha512-yAfCVaiZ5t2bC1xNVEdkWUI94e3u15IrytO2XFh8/7Y45M1i51adQpi42OhH2pUdsYM0/KY4Gklrb+XB+oZS/w==, tarball: https://registry.npmjs.org/@iconify-json/boxicons/-/boxicons-1.2.0.tgz}
+
+  '@iconify-json/carbon@1.2.28':
+    resolution: {integrity: sha512-dog92E0fGszJSrmeikPQmFrd4ptbdapogEhtZ9MCA9KiCNacYb2/nDi0euwsK0kTevsFiTy7Mte6QvRq3LDyHQ==}
 
   '@iconify-json/catppuccin@1.2.17':
     resolution: {integrity: sha512-l1pFOADEUlw+j7V+yfFzBowdE4deeMuI4amqfKaN+7uTI9B0Ho24C86DitQk5zb62NkEM9poOyfuG7WS2bw6jg==}
@@ -3614,6 +3620,10 @@ snapshots:
   '@humanwhocodes/retry@0.4.3': {}
 
   '@iconify-json/boxicons@1.2.0':
+    dependencies:
+      '@iconify/types': 2.0.0
+
+  '@iconify-json/carbon@1.2.28':
     dependencies:
       '@iconify/types': 2.0.0
 

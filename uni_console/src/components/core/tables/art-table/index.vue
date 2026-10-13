@@ -3,7 +3,12 @@
 <!-- 扩展功能：分页组件、渲染自定义列、loading、表格全局边框、斑马纹、表格尺寸、表头背景配置 -->
 <!-- 获取 ref：默认暴露了 elTableRef 外部通过 ref.value.elTableRef 可以调用 el-table 方法 -->
 <template>
-  <div class="art-table" :class="{ 'is-empty': isEmpty }" :style="containerHeight">
+  <div
+    ref="rootRef"
+    class="art-table"
+    :class="{ 'is-empty': isEmpty, 'is-x-overflow': hasXOverflow }"
+    :style="containerHeight"
+  >
     <ElTable ref="elTableRef" v-loading="!!loading" v-bind="mergedTableProps">
       <template v-for="col in renderedColumns" :key="col.prop || col.type">
         <!-- 渲染全局序号列 -->
@@ -98,6 +103,7 @@
   defineOptions({ name: 'ArtTable' })
 
   const elTableRef = ref<InstanceType<typeof ElTable> | null>(null)
+  const rootRef = ref<HTMLElement>()
   const paginationRef = ref<HTMLElement>()
   const tableHeaderRef = ref<HTMLElement>()
   const tableStore = useTableStore()
@@ -236,6 +242,39 @@
 
   const paginationHeight = ref(0)
   const tableHeaderHeight = ref(0)
+
+  /**
+   * 横向溢出标记（窄屏可发现性修复）：列的 minWidth 之和超过视口时表体横向溢出
+   * （1024 宽实测：可滚区 1612 vs 视口 711 —— 700 余 px 的列在视口之外），而
+   * Element Plus 的横向滚动条默认只在**悬停**时才出现（bar 上是内联
+   * `display: none`，实测 0×0），用户根本不知道右边还有列。这里在真的溢出时给
+   * 表根挂上 is-x-overflow，由样式让横向滚动条常显；没有溢出就不挂 —— 普通表
+   * 零回归（jsdom 里 scrollWidth/clientWidth 恒为 0，差值不大于 1，也不挂）。
+   */
+  const hasXOverflow = ref(false)
+
+  /** 一帧后再量：ElTable 的列宽是在渲染后的 layout 阶段写上的。 */
+  function scheduleXOverflowCheck(): void {
+    const run = () => updateXOverflow()
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run)
+    else run()
+  }
+
+  function updateXOverflow(): void {
+    const wrap = rootRef.value?.querySelector<HTMLElement>('.el-scrollbar__wrap')
+    hasXOverflow.value = !!wrap && wrap.scrollWidth - wrap.clientWidth > 1
+  }
+
+  // 表根尺寸变化（断点切换 / 窗口缩放）与列集合、数据变化（列宽重算）都要重判。
+  useResizeObserver(rootRef, () => scheduleXOverflowCheck())
+
+  watch(
+    [renderedColumns, () => props.data],
+    () => {
+      nextTick(() => scheduleXOverflowCheck())
+    },
+    { flush: 'post' }
+  )
 
   // 使用 useResizeObserver 监听分页器高度变化
   useResizeObserver(paginationRef, (entries) => {
@@ -467,4 +506,46 @@
 
 <style lang="scss" scoped>
   @use './style';
+
+  /* ── 分页常驻表底（844×390 分页不可达的根因修复）─────────────────────────
+     此前 `.art-table` 是普通块级流：ElTable 的高度由 JS 按「容器高 − 表头高 −
+     分页高 − 间距」估出来，分页条排在 ElTable 之后、落在 `.art-table` 盒子**外面**
+     （实测 844×390：`.art-table` 高 288，分页条在 484..512，而 `.art-table` 底
+     471）。它之所以还能看见，全靠父级已经留出的那几十 px 余量；一旦估算与实际
+     不符（分页高度首帧为 0、页面 flex 链把卡体压矮），分页条就落进
+     `.el-card__body{overflow:hidden}`（app.scss）的裁剪区 —— 用户滚到底也够不到
+     （实测停在 top=392 > vh=390，「每页条数/前往」一并不可达）。
+     收成 flex 列后：ElTable 拿剩余高度并自滚，分页条 flex:none 常驻表底，
+     两者永远在同一个盒子里，裁剪面再矮也先裁表体、不裁分页。 */
+  .art-table {
+    display: flex;
+    flex-direction: column;
+
+    // `flex: 1 1 auto`（不是 `1 1 0`）：卡片随内容收缩时 `.art-table` 没有确定
+    // 高度（见 app.scss 的 .art-table-card），basis:0 会把表体压成 0；basis:auto
+    // 在那种形态下用内联的 `height: 100%` 兜底（解析为 auto → 内容高），有确定
+    // 高度时再按剩余空间分配并把超出的行收进表体自滚。
+    .el-table {
+      flex: 1 1 auto;
+      min-height: 0;
+    }
+
+    .pagination {
+      flex: none;
+    }
+
+    /* 横向溢出：把 Element Plus 的横向滚动条从「仅悬停可见」改成常显（判据与理由
+       见脚本里的 hasXOverflow）。bar 上的 `display: none` 是 EP 用 v-show 写的
+       内联样式，只有 !important 盖得住；thumb 同步提到悬停档的不透明度，否则
+       0.3 的浅灰在窄屏上仍然读不出来。 */
+    &.is-x-overflow {
+      :deep(.el-scrollbar__bar.is-horizontal) {
+        display: block !important;
+      }
+
+      :deep(.el-scrollbar__thumb) {
+        opacity: var(--el-scrollbar-hover-opacity, 0.5);
+      }
+    }
+  }
 </style>

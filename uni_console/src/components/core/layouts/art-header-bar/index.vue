@@ -103,8 +103,9 @@
                   >点击这里查看<span :style="{ color: systemThemeColor }"> 主题风格 </span>、
                   <span :style="{ color: systemThemeColor }"> 开启顶栏菜单 </span>等更多配置
                 </p>
-                <!-- 首访引导必须可关：否则会长期盖住顶栏工具区与页签。点 × 即收起
-                     （不点设置按钮也能关掉，不必先进面板）。 -->
+                <!-- 引导浮层必须可关且不常驻：它锚在顶栏、不随内容滚动，常驻会把
+                     滚动经过的行内操作钮整块盖住（P1-1）。点 × 即收起（不必先进
+                     设置面板），页面一滚动也会自动收起（见 onAnyScroll）。 -->
                 <ArtIconButton
                   icon="ri:close-line"
                   :style="{ flexShrink: 0, opacity: 0.6, cursor: 'pointer' }"
@@ -211,10 +212,14 @@
 
   onMounted(() => {
     document.addEventListener('click', bodyCloseNotice)
+    // 捕获阶段监听滚动：scroll 不冒泡，只有捕获能收到内层滚动容器
+    // （表格体 / 日志查看器等）的滚动，浮层才不会被"绕过去"。
+    window.addEventListener('scroll', onAnyScroll, true)
   })
 
   onUnmounted(() => {
     document.removeEventListener('click', bodyCloseNotice)
+    window.removeEventListener('scroll', onAnyScroll, true)
     if (strikeTimer) clearTimeout(strikeTimer)
   })
 
@@ -267,6 +272,17 @@
   /** 首访引导的可关闭入口（点浮层里的 ×）：与进入设置面板同一收尾，持久化语义不变。 */
   const dismissSettingGuide = (): void => {
     settingStore.hideSettingGuide()
+  }
+
+  /**
+   * 页面（含内层滚动容器）一滚动，引导浮层即自动收起并持久化。
+   *
+   * 浮层锚在顶栏设置钮上、不随内容滚动，**常驻**时会把滚动经过的行内操作钮
+   * 整块盖住（P1-1：volumes「更多操作」/ images「详情」/ drift「声明目标」等）。
+   * 一旦用户开始翻内容，提示已完成使命 —— 收起后不再复现（偏好落 localStorage）。
+   */
+  const onAnyScroll = (): void => {
+    if (showSettingGuide.value) settingStore.hideSettingGuide()
   }
 
   /**

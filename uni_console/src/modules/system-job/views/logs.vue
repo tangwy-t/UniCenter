@@ -160,6 +160,7 @@
   import ArtSvgIcon from '@/components/core/base/art-svg-icon/index.vue'
   import { fetchJob, fetchJobLogs, deleteJobLogs } from '../api'
   import { useJobTargets } from '../composables/useJobTargets'
+  import { copyText as copyToClipboard } from '@/utils/ui/clipboard'
 
   defineOptions({ name: 'SystemJobLogs' })
 
@@ -281,19 +282,13 @@
   }
 
   async function copyText(text: string) {
-    try {
-      await navigator.clipboard.writeText(text)
-    } catch {
-      const ta = document.createElement('textarea')
-      ta.value = text
-      ta.style.position = 'fixed'
-      ta.style.opacity = '0'
-      document.body.appendChild(ta)
-      ta.select()
-      document.execCommand('copy')
-      document.body.removeChild(ta)
+    // 共享助手：先试 Clipboard API，失败自动回退 execCommand（http 非安全上下文可用）。
+    const ok = await copyToClipboard(text)
+    if (ok) {
+      ElMessage.success('已复制')
+    } else {
+      ElMessage.error('复制失败，请手动选择复制')
     }
-    ElMessage.success('已复制')
   }
 
   /** 详情弹窗 */

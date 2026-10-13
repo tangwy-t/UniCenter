@@ -53,8 +53,18 @@ export const SETTING_DEFAULT_CONFIG = {
   showWorkTab: true,
   /** 是否显示进度条 */
   showNprogress: false,
-  /** 是否显示设置引导 */
-  showSettingGuide: true,
+  /**
+   * 是否显示设置引导
+   *
+   * **默认关**：引导浮层锚在顶栏设置钮上（`position:absolute`、z-index 3005），
+   * 不随内容滚动。默认 true 时它会常驻盖住滚动经过的行内操作钮 —— 实测
+   * volumes 的「更多操作」、images/containers 的「详情」、image-drift 的
+   * 「声明目标」在 49/50 个滚动步长上被 `elementFromPoint` 命中浮层；
+   * 844×390 档滚 ~80px 后表格工具条（搜索/刷新/表格密度/全屏）整块被盖。
+   * 改为按需（true 才显示），且显示期间一旦页面滚动即自动收起并持久化
+   * （见 art-header-bar 的 onAnyScroll）。
+   */
+  showSettingGuide: false,
   /** 是否显示水印 */
   watermarkVisible: false,
   /** 自动锁屏空闲时长（分钟，0 = 不自动锁定，仅手动锁定） */

@@ -178,11 +178,6 @@
   display: flex;
   flex-direction: column;
 
-  // 全屏态 = 「容器就是视口」的单滚动形态：链必须一路收到底，否则卡片按内容
-  // 长高（多行清单把卡片撑到视口之外），底部与表尾永远滚不到（844×390 实测
-  // 8 行时卡片 518px > 视口 390px）。
-  @include art-single-scroll-chain;
-
   // 页根高度口径（fixed 元素的 100% 即视口）与内边距对齐：内容盒 = 视口 - 30。
   // 页内任何消费 --art-full-height 的规则（如页根自身的 .art-full-height 高度）
   // 在全屏态下也拿到同一口径。
@@ -190,6 +185,13 @@
 }
 
 // 容器全高
+//
+// 高度口径见 hooks/core/useLayoutHeight.ts：`--art-full-height` 是「100dvh −
+// 页根上方实测占高 − 呼吸位」，应用头/全局告警条/页签栏都在里面。
+// 这里**不再有 phoneShort 的钉死高度**（旧写法 `calc(100dvh - 48px)`）：它假定
+// 页根上方只有应用头，告警条一出现就把页根下推 80px（844×390 实测页根从 y=48
+// 挪到 y=140，页内 flex 链被压成「缩」而不是「溢」→ 末尾内容卡只剩 22px 空壳）。
+// 档位差异只剩呼吸位那一处（phoneShort 归零），落在 JS 侧，样式侧一视同仁。
 .art-full-height {
   height: var(--art-full-height);
   display: flex;
@@ -198,37 +200,57 @@
   @include respond-at-most('phone') {
     height: auto;
   }
+}
 
-  // 手机横屏紧凑档：页根直接钉到视口底。
-  // 应用头被同档定死在 48px（art-header-bar 的 h-15/leading-15 覆盖）、页签栏
-  // 同档收起，头高是常量，所以这里能直接算出来 —— 也就不再留 useLayoutHeight
-  // 的 15px 呼吸位（390 高的屏幕上那是 4% 的浪费，正好是一行表所需的高度差）。
-  // 只对 ≥phone 宽生效：≤640 宽（手机竖屏）仍走上面的 height:auto 分支 ——
-  // 那一档的页面是自然流（内容多就滚），钉死高度会把它逼进单滚动。
-  @include respond-height-at-most('phoneShort') {
-    @include respond-at-least('phone') {
-      height: calc(100dvh - 48px);
+// 页头块本身很高的页面（实体头 + 摘要行 + 页签栏已经吃掉大半屏）：矮视口下
+// 钉死页根高度会把页内 flex 子项压成「缩」而不是「溢」—— 溢出才会滚，被压扁
+// 的子项（末尾内容卡）只会塌成空壳，而 `overflow-y-auto` 对「缩」无能为力
+// （844×390 实测：页根 342px 内 hero + tab 占 322px，四个 tab 的内容卡剩 20px）。
+// 这类页回落自然流：页根随内容长高，由 #app-main 承担滚动，与
+// views/container-create.vue 在 844×390 下「scrollHeight 1118 / 视口 342 可滚」
+// 的可用形态一致。标记类由页面自己挂（谁页头高谁知道）。
+@include respond-height-at-most('phoneShort') {
+  @include respond-at-least('phone') {
+    .art-full-height.art-full-height--flow {
+      height: auto;
+
+      // 自然流形态下整条单滚动链必须一并撤掉：链上的 `flex: 1 1 0` 只在「父级有
+      // 确定高度」时才成立；自然流里父级是内容高，basis:0 会把卡体/表体直接压成
+      // 0（844×390 实测：卡体塌到 20px 内边距、tab 内容 0 高）。这里的选择器权重
+      // 高于链本身（多一层 .art-full-height--flow），无需依赖源码序。
+      .art-table-card,
+      .art-table-card .el-card__body,
+      .art-table {
+        flex: 0 1 auto;
+        min-height: 0;
+      }
     }
   }
 }
 
-// ---------- 单滚动链：短视口入口（定义见上文「元素全屏」前） ----------
-@include respond-height-at-most('short') {
-  .art-full-height {
-    @include art-single-scroll-chain;
-  }
-}
-
 // 表格卡片
+//
+// 高度语义：**内容不足随内容收缩、超限内滚**（不再无条件撑满整屏）。
+// 旧值 `flex: 1`（= `1 1 0%`）让卡片总是吃掉页根的全部剩余高度：3 行的项目页在
+// 2560×1440 上卡片高达 1309px、表框内空白 1066px（表高 90.9%），看上去像一张空表。
+// 改成 `flex: 0 1 auto` 后基准尺寸就是内容高 —— 行少时卡片贴着内容收（下方留白
+// 回归页面底色），行多时被页根高度截住（min-height: 0 允许收缩），超出部分由卡体
+// 内部的单滚动链收进表体自滚。短视口档（≤640 高）仍由链把卡片拉满（见文末的
+// 「单滚动链」入口 —— 那里权重更高，覆盖这里的 0 1 auto）。
 .art-table-card {
-  flex: 1;
+  flex: 0 1 auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   margin-top: 12px;
   border-radius: calc(var(--custom-radius) / 2 + 2px) !important;
 
+  // 卡体：吃满卡片，并成为「表头 + 表」的分派容器（.art-table 在里面拿高度）。
   .el-card__body {
-    height: 100%;
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-height: 0;
     overflow: hidden;
   }
 
@@ -241,9 +263,50 @@
   }
 }
 
+// 表根在卡体这条链上的高度：`flex: 1 1 auto`（不是 `1 1 0`）—— 卡片随内容收缩时
+// 卡体没有确定高度，basis:0 会让表塌成 0；basis:auto 在那种形态下退回内容高
+// （由内联的 `height: calc(100% - 分页/表头)` 兜底），有确定高度时照常分配。
+// 与 components/core/tables/art-table/index.vue 的「表根是 flex 列、分页 flex:none」
+// 配套：表体拿走剩余高度并自滚，分页常驻表底。
+.art-table-card .art-table {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 .el-card.art-table-card {
   @include respond-height-at-most('phoneShort') {
     --el-card-padding: 10px;
+  }
+}
+
+// ---------- 单滚动链：两个入口（定义见上文「元素全屏」前） ----------
+//
+// 放在卡片/表根的基础规则**之后**：链里 `.art-full-height .art-table-card`
+// 这类选择器要盖住上面的 `flex: 0 1 auto`，靠的是「同权重、源码序在后」。
+// 触发之一：短视口（高度 ≤ HEIGHT_BREAKPOINTS.short，见 breakpoints.ts）。
+@include respond-height-at-most('short') {
+  .art-full-height {
+    @include art-single-scroll-chain;
+  }
+}
+
+// 触发之二：表格全屏态 —— 容器本来就是视口，链一路收到底，否则卡片按内容长高
+// （多行清单把卡片撑到视口之外），底部与表尾永远滚不到（844×390 实测 8 行时
+// 卡片 518px > 视口 390px）。
+.el-full-screen {
+  @include art-single-scroll-chain;
+}
+
+// 手机横屏（≤420 高）：页内 chrome 常常比页根还高 —— 卡外的搜索栏在 844 宽下
+// 展开就是 169px，而扣掉应用头 + 告警条后页根只剩 250px，卡片落到 79px（镜像页
+// 实测：表头 72 + 表 0 + 分页 41，分页条整个落在卡体裁剪面之外，滚到底也够不到）。
+// 给卡片一个「表头 + 一行数据 + 分页条」的最小高度：超出页根的那几十 px 由
+// #app-main 承担滚动（页根 overflow 可见，滚动区自然长出来），于是分页条滚得到、
+// 表体也至少留得下一行可读。
+// 权重与链同为 (0,2,0)，靠源码序在后生效（写在两个链入口之后）。
+@include respond-height-at-most('phoneShort') {
+  .art-full-height .art-table-card {
+    min-height: 200px;
   }
 }
 

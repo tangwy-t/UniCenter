@@ -621,6 +621,7 @@
   import type { SqlHistory, SqlHistoryPoint, SqlQueryEntry, SqlStats } from '../api'
   // sparkPath/SparkResult 与 server.vue 原有实现合并至此(两者在 pad=3 时恒等)
   import { sparkPath } from '../composables/use-spark-series'
+  import { copyText as copyToClipboard } from '@/utils/ui/clipboard'
   // 纯格式化 / 阈值配色工具(原散落在本文件,已抽出并配套单测)
   import {
     OP_COLORS,
@@ -991,24 +992,12 @@
   }
 
   async function copySQL(sql: string) {
-    try {
-      await navigator.clipboard.writeText(sql)
+    // 共享助手：先试 Clipboard API，失败自动回退 execCommand（http 非安全上下文可用）。
+    const ok = await copyToClipboard(sql)
+    if (ok) {
       ElMessage.success('已复制 SQL 到剪贴板')
-    } catch {
-      // 降级：execCommand 方式
-      const ta = document.createElement('textarea')
-      ta.value = sql
-      ta.style.position = 'fixed'
-      ta.style.opacity = '0'
-      document.body.appendChild(ta)
-      ta.select()
-      const ok = document.execCommand('copy')
-      document.body.removeChild(ta)
-      if (ok) {
-        ElMessage.success('已复制 SQL 到剪贴板')
-      } else {
-        ElMessage.error('复制失败，请手动选择复制')
-      }
+    } else {
+      ElMessage.error('复制失败，请手动选择复制')
     }
   }
 

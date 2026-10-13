@@ -17,14 +17,13 @@
   import { ElMessage } from 'element-plus'
   import { useSettingStore } from '@/store/modules/setting'
   import { SETTING_DEFAULT_CONFIG } from '@/config/setting'
-  import { useClipboard } from '@vueuse/core'
+  import { copyText } from '@/utils/ui/clipboard'
   import { MenuThemeEnum } from '@/enums/appEnum'
   import { useTheme } from '@/hooks/core/useTheme'
 
   defineOptions({ name: 'SettingActions' })
 
   const settingStore = useSettingStore()
-  const { copy, copied } = useClipboard()
   const { switchThemeStyles } = useTheme()
 
   /** 枚举映射表 */
@@ -127,13 +126,16 @@
   const handleCopyConfig = async () => {
     try {
       const configText = generateConfigCode()
-      await copy(configText)
+      // 共享助手：http 非安全上下文下 Clipboard API 会失败，助手内部回退 execCommand。
+      const ok = await copyText(configText)
 
-      if (copied.value) {
+      if (ok) {
         ElMessage.success({
           message: '配置已复制到剪贴板,可粘贴到 src/config/setting.ts 文件中',
           duration: 3000
         })
+      } else {
+        ElMessage.error('复制失败,请重试')
       }
     } catch (error) {
       console.error('复制配置失败:', error)
