@@ -174,11 +174,12 @@
       </template>
     </ElCard>
 
-    <!-- 确认弹窗覆盖五种入口：清理悬空（强档逐字 DELETE）、单删（标准档）、打标签
+    <!-- 确认弹窗覆盖四种入口：清理悬空（强档逐字 DELETE）、单删（标准档）、打标签
          （输入档收集新引用）、导出 tar（输入档收集文件名 → alreadyExists 时就地切
-         文件名档的覆盖确认）、载入镜像（输入档收集文件名）。
+         文件名档的覆盖确认）。
          形态、逐字期望值、输入档的校验与提示全部由组件按动作注册表推导；页面只传
-         事实与 options —— 目标主机不在本弹窗里（已由流程第一屏选定）。 -->
+         事实与 options —— 目标主机不在本弹窗里（已由流程第一屏选定）。载入镜像
+         走独立的载入对话框（来源二选一 + 进行中/终态反馈），不在本弹窗内。 -->
     <DockerActionConfirm
       v-model="confirmState.visible"
       :action="confirmState.action"
@@ -203,6 +204,10 @@
     <!-- 构建进度对话框（P2 分发闭环）：「构建镜像…」的命令表单 + 逐行构建播报 + 取消。
          hostId 与重拉口径同拉取对话框（成功后新镜像要进列表）。 -->
     <BuildProgressDialog v-model="buildVisible" :host-id="actionHost" :refresh="refreshSilent" />
+
+    <!-- 载入镜像对话框：来源二选一（主机本地文件 / 从浏览器上传）+ 载入进行中（状态
+         与已用时）+ 终态结论句。hostId 与重拉口径同拉取/构建对话框。 -->
+    <ImageLoadDialog v-model="loadVisible" :host-id="actionHost" :refresh="refreshSilent" />
 
     <!-- 仓库凭据管理对话框（4c）：入口只对 docker:config 渲染（不渲染 ≠ 禁用）。
          凭据是**全局**的（不属于任何一台主机 —— 服务端按仓库地址解析注入），
@@ -281,6 +286,7 @@
   import DockerActionConfirm from '../components/action-confirm.vue'
   import DockerActionMenu from '../components/action-menu.vue'
   import BuildProgressDialog from '../components/build-progress-dialog.vue'
+  import ImageLoadDialog from '../components/image-load-dialog.vue'
   import PullProgressDialog from '../components/pull-progress-dialog.vue'
   import RegistryCredentialsDialog from '../components/registry-credentials-dialog.vue'
   import WorkloadBatchBar from '../components/workload-batch-bar.vue'
@@ -333,6 +339,8 @@
   const pullVisible = ref(false)
   /** 构建进度对话框的开关（P2）：同拉取。 */
   const buildVisible = ref(false)
+  /** 载入镜像对话框的开关：同拉取/构建（来源二选一 + 载入进行中 + 终态）。 */
+  const loadVisible = ref(false)
   /** 仓库凭据对话框的开关（4c）：入口受 canConfig 门控（模板里的 v-if）。 */
   const registryVisible = ref(false)
 
@@ -769,20 +777,15 @@
   }
 
   /**
-   * 载入镜像：第一条是选目标主机（与拉取/构建/清理同套两段式），选定后开确认弹窗的
-   * 输入档收集文件名（「文件须已在 agent 下载目录」的提示在输入档的 hint 里，注册表
-   * 条目给的）；主参数是文件名，无 target。
+   * 载入镜像：第一条是选目标主机（与拉取/构建/清理同套两段式），选定后开**载入
+   * 对话框**——来源二选一（主机本地文件 / 从浏览器上传）+ 载入进行中（状态与已用时）
+   * + 终态结论句。受理/上传/轮询/重拉都收在对话框里，不走页面的 runWrite（与拉取/
+   * 构建同一条分工：页面只出入口，长耗时写操作的生命周期归对话框）。
    */
   function askLoad() {
     withTargetHost('载入镜像：选择目标主机', (hostId) => {
-      cmdHostId.value = hostId
-      confirmState.value = {
-        visible: true,
-        kind: 'load',
-        action: 'image:load',
-        target: '',
-        options: {}
-      }
+      actionHost.value = hostId
+      loadVisible.value = true
     })
   }
 
@@ -806,8 +809,8 @@
 
   interface ConfirmState {
     visible: boolean
-    /** 五种入口的提交分支不同：清理带勾选项、删除带 confirm、打标签/载入带输入值、导出分两段。 */
-    kind: 'prune' | 'remove' | 'save' | 'tag' | 'load'
+    /** 四种入口的提交分支不同：清理带勾选项、删除带 confirm、打标签带输入值、导出分两段。 */
+    kind: 'prune' | 'remove' | 'save' | 'tag'
     action: string
     target: string
     options: Record<string, unknown>
@@ -837,9 +840,6 @@
       } else if (st.kind === 'tag') {
         // 输入档带回的新引用（弹窗已校验镜像引用格式）；src 在打开时定住，target 不发。
         await runWrite('image:tag', undefined, { src: st.options.src, dst: payload.value ?? '' })
-      } else if (st.kind === 'load') {
-        // 同清理：hostId 在主机选择那一屏已钉死。
-        await runWrite('image:load', undefined, { filename: payload.value ?? '' })
       } else if (st.options.overwrite === true) {
         // 导出第二段：覆盖标记 + 文件名逐字确认一起带上，服务端逐字校验后才会覆盖
         //（payload.confirm 就是用户照抄的文件名 —— 弹窗校验已保证与 filename 一致）。

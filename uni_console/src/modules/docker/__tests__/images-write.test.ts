@@ -1,14 +1,16 @@
 // @vitest-environment jsdom
 /**
- * 镜像页三个输入型写动作（打标签 / 导出 tar / 载入镜像）的接线测试 ——
- * prompt 输入形态归一后，它们全部走 DockerActionConfirm 的**输入档**（原自建
- * ElMessageBox.prompt 已删，同页不再有两套输入形态）。这里钉的是：
+ * 镜像页输入型写动作（打标签 / 导出 tar / 载入镜像）的接线测试 ——
+ * 打标签与导出 tar 走 DockerActionConfirm 的**输入档**（原自建
+ * ElMessageBox.prompt 已删）；**载入镜像**改走独立的载入对话框
+ *（image-load-dialog：来源二选一 + 进行中/终态反馈，见 image-load-dialog.test.ts）。
+ * 这里钉的是：
  *
  *   - 弹窗内收集参数：校验挡提交（打标签的非法镜像引用、空文件名都发不出指令），
  *     就地错误句在非空不合法时可见（空串不挨骂）；
  *   - 载荷口径（对 sendDockerCmd 的断言）：
  *     · 打标签 → { src, dst }，**不带 target**（协议必填就是 src/dst）；
- *     · 载入 → { filename }，无 target；
+ *     · 载入 → { filename }，无 target（经独立载入对话框发出）；
  *     · 导出第一段 → { filename } 不带覆盖标记；
  *     · 导出第二段（alreadyExists 两段式原样保留）→ 同一只弹窗**就地**切到逐字档
  *       （输入被清空、须重新照抄文件名），重发 { filename, overwrite: true } +
@@ -387,27 +389,35 @@ describe('打标签：输入档收集新引用（校验挡提交）', () => {
   })
 })
 
-describe('载入镜像：输入档收集文件名（必填，格式不前端拦）', () => {
-  it('空串禁用提交；非空文件名发出 {filename}，无 target、无 confirm', async () => {
+describe('载入镜像：独立载入对话框（来源二选一 + 进行中/终态反馈）', () => {
+  it('点击「载入镜像…」开载入对话框；本地来源填文件名后提交，发出 {filename}，无 target、无 confirm', async () => {
     const w = await mountPage()
     // 载入不需要选中行：文件名是唯一主参数。
     await clickBar(w, '载入镜像…')
 
-    const confirm = confirmOf(w)
-    expect(confirm.props('action')).toBe('image:load')
-    expect(dialogFind(w, '.ac-input__label').text()).toBe('文件名')
-    // 原 prompt 的正文口径搬进 hint：讲清文件须已放在 agent 下载目录。
-    expect(dialogFind(w, '.ac-input__hint').text()).toContain('文件需已放在该主机的 agent 下载目录')
+    const dlg = w.findComponent({ name: 'DockerImageLoadDialog' })
+    expect(dlg.exists(), '载入对话框未挂载').toBe(true)
+    // 等「对话框已打开」这个**事实**（不数 flush 轮数 —— 负载下轮数会漂）。
+    await vi.waitUntil(() => dlg.props('modelValue') === true, { timeout: 5000 })
+    expect(dlg.props('hostId')).toBe('h1')
 
+    // 默认「主机本地文件」来源：输入框与提示都是注册表口径的原文案。
     const input = await dialogInputOf(w, '例如 镜像名.tar')
+    expect(input.exists()).toBe(true)
+    expect(dialogFind(w, '.il-field__hint').text()).toContain('文件需已放在该主机的 agent 下载目录')
+
+    // 空串：主按钮禁用 + **可见**理由（不藏 hover title）。
     expect(isDisabled(submitBtn(w, '载入镜像'))).toBe(true)
-    // 沿用原 prompt 口径：任意非空文件名放行（格式由服务端兜）。
+    expect(dialogFind(w, '.il-field__reason').text()).toBe('请填写文件名')
+
+    // 沿用原口径：任意非空文件名放行（格式由服务端兜）。
     await input.setValue('my backup.tar.gz')
     expect(isDisabled(submitBtn(w, '载入镜像'))).toBe(false)
 
     await submitBtn(w, '载入镜像').trigger('click')
     await flush()
 
+    // 载荷形态与既有 runWrite 口径逐字一致：无 target、无 confirm，主参数是文件名。
     expect(api.sendDockerCmd).toHaveBeenCalledTimes(1)
     expect(api.sendDockerCmd).toHaveBeenCalledWith('h1', {
       action: 'image:load',
@@ -572,28 +582,45 @@ describe('整体动作的两段式（第一步选主机，第二步才是业务�
     api.fetchDockerHosts.mockResolvedValue({ list: [HOSTS[0]!, HOST2] })
   })
 
-  it.each([
-    ['清理悬空镜像…', '清理悬空镜像：选择目标主机', 'image:prune'],
-    ['载入镜像…', '载入镜像：选择目标主机', 'image:load']
-  ])('「%s」：先出现主机选择，选定后才开业务弹窗', async (label, title, action) => {
+  it.each([['清理悬空镜像…', '清理悬空镜像：选择目标主机', 'image:prune']])(
+    '「%s」：先出现主机选择，选定后才开业务弹窗',
+    async (label, title, action) => {
+      const w = await mountPage()
+      const confirm = confirmOf(w)
+
+      await clickBar(w, label)
+      // 第一步：主机选择对话框（业务弹窗还没开 —— 与拉取/构建同一套流程）。
+      expect(hostPickSelect(w).exists(), '第一步应是主机选择').toBe(true)
+      expect(hostPickTitle(w)).toBe(title)
+      expect(confirm.props('modelValue'), '第一步不该同时开着业务弹窗').toBe(false)
+
+      // 选定主机 → 继续 → 第二步：业务弹窗开到注册表里的那条动作上。
+      await w.findComponent({ name: 'ElSelect' }).setValue(HOST2.id)
+      await continueBtn(w).trigger('click')
+      await flush()
+      expect(confirm.props('modelValue'), '选定主机后应开业务弹窗').toBe(true)
+      expect(confirm.props('action')).toBe(action)
+      // 业务弹窗里**不再**有主机选择器（前置已选定）：teleport 到 body 的那只弹窗里
+      // 没有 .host-pick（就地渲染的才是第一屏）。
+      expect(document.body.querySelector('.host-pick'), '业务弹窗里不该再有主机选择器').toBeNull()
+    }
+  )
+
+  it('「载入镜像…」同套两段式：先选主机，选定后开载入对话框（主机钉死在那台）', async () => {
     const w = await mountPage()
-    const confirm = confirmOf(w)
+    const dlg = w.findComponent({ name: 'DockerImageLoadDialog' })
 
-    await clickBar(w, label)
-    // 第一步：主机选择对话框（业务弹窗还没开 —— 与拉取/构建同一套流程）。
+    await clickBar(w, '载入镜像…')
+    // 第一步：主机选择对话框（载入对话框还没开）。
     expect(hostPickSelect(w).exists(), '第一步应是主机选择').toBe(true)
-    expect(hostPickTitle(w)).toBe(title)
-    expect(confirm.props('modelValue'), '第一步不该同时开着业务弹窗').toBe(false)
+    expect(hostPickTitle(w)).toBe('载入镜像：选择目标主机')
+    expect(dlg.props('modelValue'), '第一步不该同时开着载入对话框').toBe(false)
 
-    // 选定主机 → 继续 → 第二步：业务弹窗开到注册表里的那条动作上。
     await w.findComponent({ name: 'ElSelect' }).setValue(HOST2.id)
     await continueBtn(w).trigger('click')
     await flush()
-    expect(confirm.props('modelValue'), '选定主机后应开业务弹窗').toBe(true)
-    expect(confirm.props('action')).toBe(action)
-    // 业务弹窗里**不再**有主机选择器（前置已选定）：teleport 到 body 的那只弹窗里
-    // 没有 .host-pick（就地渲染的才是第一屏）。
-    expect(document.body.querySelector('.host-pick'), '业务弹窗里不该再有主机选择器').toBeNull()
+    expect(dlg.props('modelValue'), '选定主机后应开载入对话框').toBe(true)
+    expect(dlg.props('hostId'), '载入对话框应钉在第一屏选的主机').toBe(HOST2.id)
   })
 
   it('第一屏选定的主机被钉死：清理提交派发到那台（强档逐字 DELETE 形态不变）', async () => {
@@ -618,7 +645,7 @@ describe('整体动作的两段式（第一步选主机，第二步才是业务�
     })
   })
 
-  it('载入镜像：选定主机后弹窗只留业务内容（文件名输入档），提交派发到那台', async () => {
+  it('载入镜像：选定主机后开载入对话框（本地来源填文件名），提交派发到那台', async () => {
     const w = await mountPage()
     await clickBar(w, '载入镜像…')
     await w.findComponent({ name: 'ElSelect' }).setValue(HOST2.id)
@@ -700,13 +727,16 @@ describe('批量栏（多选是有意义的状态：不再「勾多了按钮无�
 })
 
 describe('输入形态归一的漂移守卫（源码扫描）', () => {
-  it('镜像页不再自建 prompt：ElMessageBox / promptText 已删，三动作都接确认弹窗', () => {
+  it('镜像页不再自建 prompt：ElMessageBox / promptText 已删，输入型动作接确认弹窗', () => {
     expect(pageSrc).not.toContain('ElMessageBox')
     expect(pageSrc).not.toContain('promptText')
-    // 三处入口都改接确认弹窗的提交分支（kind 标记进 confirmState）。
-    for (const needle of ["kind: 'tag'", "kind: 'load'", "kind: 'save'"]) {
+    // 打标签/导出两处入口接确认弹窗的提交分支（kind 标记进 confirmState）。
+    for (const needle of ["kind: 'tag'", "kind: 'save'"]) {
       expect(pageSrc, `镜像页缺输入档接线标记 ${needle}`).toContain(needle)
     }
+    // 载入镜像改走**独立**载入对话框（来源二选一 + 进行中/终态），不再是确认弹窗的输入档。
+    expect(pageSrc, '镜像页应接独立载入对话框').toContain('ImageLoadDialog')
+    expect(pageSrc, '载入不再走确认弹窗的输入档').not.toContain("kind: 'load'")
     // 两段式的就地切档：alreadyExists 分支换 confirmState（不关弹窗）。
     expect(pageSrc).toContain('alreadyExists === true')
     expect(pageSrc).toContain('overwrite: true')
