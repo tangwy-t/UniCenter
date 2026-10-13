@@ -24,10 +24,19 @@
 // 首屏既慢又读不出重点）。两个数各自独立成档，是因为它们服务两个不同的读者：
 // 回放的读者是刚打开面板的人，查询的读者是翻历史的人。
 //
+// **留存跨进程存活**（本波·续）：保留窗口是进程态 —— core 一重启活动流的历史就空
+// 了，而重启（发布）恰恰是「想回看刚才那波」最常见的时刻。因此窗口的**副本**另走
+// 一条链落 Redis（history.go：每主机一个 ZSET，双限裁剪与内存侧同源），并在启动
+// 期水合回内存（Hydrate）。它与三条不变式的关系是**单向的**：留存是主链路的观察者
+// （只读内存账目、异步写、失败即降级），主链路（帧投递 / 实时流 / 内存历史 /
+// 内部消费者）一条都不依赖它 —— 换句话说，把 Redis 那一侧整个删掉，行为回到引入
+// 它之前，逐字不变。
+//
 // 三条不变式（测试逐条钉住）：
 //   - **投递绝不阻塞**：帧来自 agent 连接的唯一读循环，堵住它会连累指标/心跳 ——
 //     因此帧路径只在内存里动（JSON 解析 + 保留窗口 + 分发），一切 Redis/网络 IO
-//     都在对账循环的锁外段执行；
+//     都在对账循环的锁外段执行；留存落盘因此走**有界通道 + 后台协程**（投递侧只做
+//     一次非阻塞入队，满则丢副本，见 enqueuePersistLocked）；
 //   - **常驻订阅有寿命**：两类消费者（HTTP 面 + 内部面）全部退出即全量退订；主机
 //     离开可管清单即退订且不留保留窗口（设备删除后回放旧事件会让人误以为它还活着）；
 //   - **失败是单台的**：一台主机的退避/断连不影响别的主机，也绝不升级成对客户端
@@ -46,6 +55,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	goredis "github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/agenthub"
@@ -126,6 +136,9 @@ type Options struct {
 	RetryMax          time.Duration
 	MaxPendingFrames  int
 	ClientQueueDepth  int
+	// PersistQueueDepth 是留存落盘通道的容量（缺省 defaultPersistQueueDepth）。
+	// 只有测试会调小它去钉「溢出丢副本、绝不阻塞」这条路径。
+	PersistQueueDepth int
 	Now               func() time.Time
 	After             func(time.Duration) <-chan time.Time
 }
@@ -157,6 +170,9 @@ func (o Options) withDefaults() Options {
 	}
 	if o.ClientQueueDepth <= 0 {
 		o.ClientQueueDepth = defaultClientQueueDepth
+	}
+	if o.PersistQueueDepth <= 0 {
+		o.PersistQueueDepth = defaultPersistQueueDepth
 	}
 	if o.Now == nil {
 		o.Now = time.Now
@@ -304,6 +320,23 @@ type Manager struct {
 	clients   map[*Client]struct{}
 	residents map[string]ResidentSink
 	wake      chan struct{}
+
+	// ── 留存落盘（WithPersistence 装配后才有值；nil = 整条链不存在）──────────
+	//
+	// persist 与 persistCh 在装配时一次性写入（Run / 帧投递之前），之后只读；
+	// 计数与告警位是原子量（投递侧在 m.mu 下，写盘侧在工作协程里，两边都要动）。
+	persist     *historyStore
+	persistCh   chan persistJob
+	persistDrop atomic.Uint64
+	persistWarn atomic.Bool
+	persistErr  atomic.Bool
+}
+
+// persistJob 是一条待落盘的留存账目（**未序列化**：编码与 Redis 写都在工作协程里，
+// 帧路径只做一次结构体拷贝 + 非阻塞入队）。
+type persistJob struct {
+	deviceID uint64
+	rec      retained
 }
 
 // NewManager 构造管理器（缺省参数见 Options.withDefaults）。
@@ -338,6 +371,27 @@ func (m *Manager) WithIDGen(idGen func() string) *Manager {
 	m.idGen = idGen
 	return m
 }
+
+// WithPersistence 装配 Redis 侧留存（保留窗口的副本，供重启后水合）。
+//
+// 必须在 Run / 任何帧投递之前调用（wireup 在构造处一次性装配）：本方法只建通道与
+// 挂存储，**不做任何 IO**（Redis 可达性根本不在这里判 —— 不可达时投递侧照常入队，
+// 工作协程把写失败降级成日志，见 runPersist）。rdb 为 nil 表示「不装」：整条留存链
+// 消失，行为与引入它之前逐字一致（测试与未配置 Redis 的部署都走这条）。
+func (m *Manager) WithPersistence(rdb goredis.UniversalClient) *Manager {
+	if rdb == nil {
+		return m
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.persist = newHistoryStore(rdb)
+	m.persistCh = make(chan persistJob, m.opts.PersistQueueDepth)
+	return m
+}
+
+// PersistDropped 返回因落盘通道溢出而丢弃的持久化副本条数（日志与测试用）。
+// 它**不含**「未装配留存」的情形 —— 没装就没有可丢的东西。
+func (m *Manager) PersistDropped() uint64 { return m.persistDrop.Load() }
 
 // refSeq 是缺省 ref 生成器的进程内自增序号。
 var refSeq atomic.Uint64
@@ -561,9 +615,11 @@ func (m *Manager) emitLocked(sub *hostSub, f *agentproto.DockerFrame) {
 		// 保留窗口记账（双限裁剪 + 到达序号）与扇出在同一把锁下：查询读到的一定是
 		// 「裁剪过、有序号」的一致快照，不存在「读到半条正在被裁的窗口」的窗口期。
 		m.seq++
-		ring := append(m.rings[sub.deviceID], retained{ev: e, at: m.opts.Now(), seq: m.seq})
-		ring = m.pruneLocked(ring)
-		m.rings[sub.deviceID] = ring
+		r := retained{ev: e, at: m.opts.Now(), seq: m.seq}
+		m.rings[sub.deviceID] = m.pruneLocked(append(m.rings[sub.deviceID], r))
+		// 落盘副本：非阻塞入队（满则丢副本），IO 与序列化都在工作协程里 —— 帧路径
+		// 只多一次结构体拷贝 + 一次 select，见 enqueuePersistLocked 的三条纪律。
+		m.enqueuePersistLocked(sub.deviceID, r)
 		for c := range m.clients {
 			c.pushLocked(e)
 		}
@@ -752,6 +808,209 @@ func matchesKeyword(e Event, kw string) bool {
 		strings.Contains(strings.ToLower(e.Item.Action), kw)
 }
 
+// ── 留存落盘与启动水合（保留窗口的跨进程副本）────────────────────────────
+//
+// 结构与对账循环同形（锁 → IO → 锁）：帧路径在 m.mu 下只做一次**非阻塞入队**，
+// 序列化与 Redis 写在 runPersist 的锁外段；启动水合反过来 —— Redis 读全在锁外，
+// 只在「填内存环」那一小段持锁。
+
+// enqueuePersistLocked 把一条已入账的事件交给落盘通道（调用方必须持 m.mu）。
+//
+// 三条纪律就是本方法的全部意义：
+//   - **绝不阻塞**：通道满则丢。帧路径是 agent 连接的唯一读循环，堵住它会连累
+//     指标/心跳 —— 丢的是**持久化副本**，不是事件本身：内存窗口、实时流、内部
+//     消费者照常（留存是增值面，它的故障不得反噬主链路）；
+//   - **绝不 IO**：这里只有一次非阻塞投递，连序列化都不做（那是工作协程的活）；
+//   - 未装配（persistCh == nil）时整段消失：不引入任何可观测变化。
+//
+// 丢失告警只打**一次**（直到下一次写盘成功才重新武装）：Redis 卡住的窗口里每秒
+// 可能丢上千条，逐条告警只会把真正的故障淹掉 —— 条数以 PersistDropped 计数为准。
+func (m *Manager) enqueuePersistLocked(deviceID uint64, r retained) {
+	if m.persistCh == nil {
+		return
+	}
+	select {
+	case m.persistCh <- persistJob{deviceID: deviceID, rec: r}:
+	default:
+		m.persistDrop.Add(1)
+		if m.log != nil && m.persistWarn.CompareAndSwap(false, true) {
+			m.log.Warn("docker events 留存落盘队列溢出，丢弃持久化副本",
+				zap.Uint64("deviceId", deviceID), zap.Uint64("totalDropped", m.persistDrop.Load()))
+		}
+	}
+}
+
+// runPersist 是留存落盘的唯一工作协程：批量、串行、可失败。
+//
+// 「批量」是必须的（每事件一次 Redis 往返会把一次容器风暴放大成同规模的小包风暴）；
+// 「串行」让同一主机的 ZADD 天然有序；「可失败」指任何错误只 log 并继续 —— Redis
+// 不可用时这里就是一条空转的循环，不产生任何反压（反压早在有界通道处被丢弃挡掉了）。
+func (m *Manager) runPersist(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			// 停机收尾：把已经入队的残余尽力写完。这一批恰好是「重启前最后发生的
+			// 事」—— 丢掉它等于每次发布都在历史上留一个尾巴缺口，而发布重启正是
+			// 留存要服务的场景。用**脱离取消的独立 ctx + 上限**：停机绝不能被一个
+			// 坏 Redis 拖住（不可达时最多等 persistDrainTimeout）。
+			drainCtx, cancel := context.WithTimeout(context.Background(), persistDrainTimeout)
+			m.drainPersist(drainCtx, defaultPersistQueueDepth)
+			cancel()
+			return
+		case job := <-m.persistCh:
+			m.writePersist(ctx, m.collectPersist(job))
+		}
+	}
+}
+
+// collectPersist 收下已在手上的第一条，再把通道里**此刻已有的**全部并进同一批
+// （非阻塞取，取不到就发车）：批量是「顺手捡的」，不为凑数而等 —— 等就等于给
+// 每个事件加一个人造延迟，而这里的目标只是把风暴折成少量往返。
+func (m *Manager) collectPersist(first persistJob) []persistJob {
+	batch := []persistJob{first}
+	for len(batch) < defaultPersistBatch {
+		select {
+		case j := <-m.persistCh:
+			batch = append(batch, j)
+		default:
+			return batch
+		}
+	}
+	return batch
+}
+
+// drainPersist 把队列残余反复取空写掉（停机收尾；测试的确定性落盘入口）。
+//
+// budget 是**条数**上限：停机时 agent 连接可能还在吐帧（生产者未完全停），
+// 无上限的循环就成了「追不上的尾巴」；宁可丢掉尾部，也不让停机无限期推迟。
+func (m *Manager) drainPersist(ctx context.Context, budget int) {
+	for budget > 0 {
+		var batch []persistJob
+		select {
+		case j := <-m.persistCh:
+			batch = m.collectPersist(j)
+		default:
+			return
+		}
+		budget -= len(batch)
+		m.writePersist(ctx, batch)
+	}
+}
+
+// writePersist 把一批记录按主机分组、每主机一次事务写进 Redis（best-effort）。
+//
+// 双限参数与内存窗口**同源**（同一份 m.opts）：两套阈值必然漂移，而「内存里查得到
+// 但重启后就没了」这种不一致最难向用户解释 —— 留存的语义就是「窗口的忠实副本」，
+// 不是第二套口径。cut 减 1 毫秒是为了与 pruneLocked 的 `now.Sub(at) > window`
+// 逐毫秒对齐（含边界会把恰好压线的一条提前摘掉）。
+func (m *Manager) writePersist(ctx context.Context, batch []persistJob) {
+	if len(batch) == 0 || m.persist == nil {
+		return
+	}
+	cut := m.opts.Now().Add(-m.opts.RetainWindow).Add(-time.Millisecond).UnixMilli()
+	ttl := m.opts.RetainWindow + persistTTLMargin
+	groups := make(map[uint64][]goredis.Z, len(batch))
+	for _, j := range batch {
+		member, err := encodeHistoryRecord(j.rec)
+		if err != nil {
+			continue // 编码失败只丢这一条副本（内存窗口与实时流不受影响）
+		}
+		groups[j.deviceID] = append(groups[j.deviceID], goredis.Z{
+			Score:  float64(j.rec.at.UnixMilli()), // unix 毫秒 ≈ 1.7e12，远在 float64 精确域内
+			Member: member,
+		})
+	}
+	for id, zs := range groups {
+		if err := m.persist.append(ctx, id, zs, cut, ttl, m.opts.RetainDepth); err != nil {
+			if m.persistErr.CompareAndSwap(false, true) {
+				m.logWarn("docker events 留存落盘失败（降级：实时流与内存历史照常）",
+					zap.Uint64("deviceId", id), zap.Error(err))
+			}
+			continue
+		}
+		// 写通一次就把两个告警位重新武装：告警是「状态突变」的信号，不是每条一报。
+		m.persistErr.Store(false)
+		m.persistWarn.Store(false)
+	}
+}
+
+// Hydrate 从 Redis 读回各主机**仍在时窗内**的留存记录填进内存保留窗口（wireup
+// 启动期调用一次）。失败一律降级：读不到只记日志，内存窗口照常从零开始跑 ——
+// 重启后历史短暂为空，好过启动失败。
+//
+// 枚举源取 **docker:hosts 集合**（m.hosts.Hosts）而不是 SCAN 键空间，两个理由：
+//   - 事件只可能产生于可管主机，而设备删除时该集合会 SREM（dockerstate.Store.Purge）
+//     —— 拿它当枚举源，被删设备的历史**天然不会在重启后复活**（内存窗口在设备删除
+//     时也清掉，两侧是同一条语义：设备没了，它的活动流历史也就没有意义了）；
+//   - 启动读不必去遍历共享 Redis 的整个键空间（SCAN 的代价随**别人的**键增长）。
+//
+// 水合**不是**「把留存原样搬回内存」：读回的每条都重新过一遍 pruneLocked（同一份
+// 双限），因此「重启后出现超窗/超容量的陈旧条目」在结构上不可能 —— 留存是副本，
+// 内存窗口仍是唯一的口径执行者。
+func (m *Manager) Hydrate(ctx context.Context) {
+	if m.persist == nil {
+		return
+	}
+	ids, err := m.hosts.Hosts(ctx)
+	if err != nil {
+		m.logWarn("docker events 历史水合：枚举主机失败", zap.Error(err))
+		return
+	}
+	// IO 全在锁外：即使此刻 Run 还没起（没人争锁），纪律也不因「当下安全」而放宽
+	// —— 放宽的下一处就是热路径（framing 与历史查询共用这把锁）。
+	loaded := make(map[uint64][]historyEntry, len(ids))
+	for _, id := range ids {
+		entries, err := m.persist.load(ctx, id)
+		if err != nil {
+			// 单台读失败只跳过这一台：水合是启动期的增值动作，一台读不到不该让
+			// 其它主机的历史一起消失。
+			m.logWarn("docker events 历史水合：读留存失败", zap.Uint64("deviceId", id), zap.Error(err))
+			continue
+		}
+		if len(entries) > 0 {
+			loaded[id] = entries
+		}
+	}
+	if len(loaded) == 0 {
+		return
+	}
+	sorted := make([]uint64, 0, len(loaded))
+	for id := range loaded {
+		sorted = append(sorted, id)
+	}
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] }) // 按主机升序：水合结果与回放顺序一样可复现
+
+	m.mu.Lock()
+	total := 0
+	for _, id := range sorted {
+		entries := loaded[id]
+		// 同 t 多条靠到达序决胜（Query 全序的第二键），故先按（接收时刻, 旧到达序）
+		// 还原到达顺序，再统一重编号 —— 旧进程的序号不能当身份（见 historyRecord.seq）。
+		sort.Slice(entries, func(i, j int) bool {
+			if entries[i].atMillis != entries[j].atMillis {
+				return entries[i].atMillis < entries[j].atMillis
+			}
+			return entries[i].rec.Seq < entries[j].rec.Seq
+		})
+		ring := make([]retained, 0, len(entries))
+		for _, en := range entries {
+			m.seq++
+			ring = append(ring, retained{
+				ev:  Event{DeviceID: id, Hostname: en.rec.Hostname, Item: en.rec.Item},
+				at:  time.UnixMilli(en.atMillis),
+				seq: m.seq,
+			})
+		}
+		if ring = m.pruneLocked(ring); len(ring) > 0 {
+			m.rings[id] = ring
+			total += len(ring)
+		}
+	}
+	m.mu.Unlock()
+	m.logInfo("docker events 历史水合完成",
+		zap.Int("hosts", len(loaded)), zap.Int("events", total))
+}
+
 // ── 结果入口（agent_ingest.CompleteDockerCmd 的常驻分支调用）──────────────
 
 // OnEventsResult 认领一条 docker:events 指令的 result。
@@ -800,7 +1059,18 @@ func (m *Manager) OnEventsResult(deviceID uint64, res *agentproto.DockerCmdResul
 
 // Run 是管理器的对账循环（wireup 起 goroutine）：按「下一次该做什么」的最近时刻
 // 唤醒 —— 周期对账、退避到点、结果窗口到期三个节拍合用一个计时器。
+//
+// 装配了留存时，落盘工作协程与它**同寿**（同一 ctx）：wireup 的 stop 只取消 ctx，
+// 两个循环一起收手，收手时工作协程还会把队列残余尽力写完（见 runPersist）。
 func (m *Manager) Run(ctx context.Context) {
+	if m.persistCh != nil {
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			m.runPersist(ctx)
+		}()
+		defer func() { <-done }() // 等收尾写完再让 Run 返回（wireup 的 done 通道即停机屏障）
+	}
 	for {
 		delay := m.runOnce(ctx)
 		select {

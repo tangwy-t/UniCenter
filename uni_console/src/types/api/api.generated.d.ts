@@ -1277,6 +1277,7 @@ declare namespace Api {
       createdAt: number
       status: string
       summary: string
+      options?: string
     }
 
     interface DockerTaskListResp {
@@ -1343,6 +1344,7 @@ declare namespace Api {
 
     interface DockerSearchItem {
       name: string
+      id: string
       hostId: string
       hostname: string
       group?: string

@@ -10,6 +10,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/tangwy-t/UniCenter/uni_core/internal/middleware"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/request"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/response"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/agenthub"
@@ -242,6 +243,10 @@ func (s *DockerCmdService) Send(ctx context.Context, userID, deviceID uint64, re
 	rec := &dockerstate.CmdRecord{
 		Ref: s.idGen(), DeviceID: deviceID, Action: req.Action, Target: opts.Target,
 		UserID: userID, Perm: pol.Perm, Confirm: req.Confirm, CreatedAt: s.now().UnixMilli(),
+		// 参数原文（方案 D）：受理时定稿一份，覆盖 exec 的 argv / build 的参数 /
+		// compose 的 YAML 正文 —— 统一口径，不单给 exec 开口子。下发即定、之后不随
+		// 轮询/结果变化；可见性由记录自己的 Perm 门控制（见 dockerstate.CmdRecord.Options）。
+		Options: encodeCmdOptions(opts),
 	}
 	// 会话制的 sweep 时限是**建立窗口**（见 dockerpolicy.SessionSetupTimeout）：
 	// 会话建立后记录已终结，生命周期交给流通道。
@@ -344,6 +349,9 @@ func (s *DockerCmdService) scanFastPath(ctx context.Context, userID, deviceID ui
 	rec := &dockerstate.CmdRecord{
 		Ref: s.idGen(), DeviceID: deviceID, Action: req.Action, Target: opts.Target,
 		UserID: userID, Perm: pol.Perm, Confirm: req.Confirm, CreatedAt: s.now().UnixMilli(),
+		// 秒回路径与真扫描走**同一个留痕形状**（见本函数头注释）：参数原文照存一份，
+		// 任务中心里两条 image:scan 记录的各项口径逐字一致。
+		Options: encodeCmdOptions(opts),
 	}
 	// Create + 立刻 Complete：Create 先把记录写进任务中心索引与在飞索引（留痕），
 	// Complete 随即终结它并清掉在飞/到期索引 —— 记录只以「已终结」形态存在，
@@ -465,6 +473,30 @@ func (s *DockerCmdService) discard(ctx context.Context, rec *dockerstate.CmdReco
 	if err := s.cmds.Timeout(ctx, rec); err != nil && s.log != nil {
 		s.log.Warn("docker cmd discard failed", zap.String("ref", rec.Ref), zap.Error(err))
 	}
+}
+
+// encodeCmdOptions 把受理时的协议选项折成**参数原文**（JSON 文本），存进指令记录。
+//
+// 三条口径（唯一实现 —— 受理路径（Send）与扫描秒回路径（scanFastPath）共用）：
+//   - **整份一份**：exec 的 argv、build 的参数、compose 的 YAML 正文都在这一份里，
+//     不按 action 挑字段 —— 按 action 挑字段会让「某种动作的参数压根没留」成为静默
+//     漏洞，而方案 D 的取向正是「统一口径」；
+//   - **上限 16 KiB，超限截断并显式标注**（尾标 "...(truncated)"，与审计同款文案）：
+//     半截 JSON 不是合法 JSON —— 与其让读者把半截当完整，不如给它一个显式信号；
+//   - **绝不写日志**：原文可能带凭据（仓库密码是另一个局部变量、不进 options，
+//     但 compose 正文/argv 里可能有任何东西）。
+//
+// 编码失败返回空串（协议选项含不可 JSON 化字段，实际不可达）：留空好过留半截；
+// 参数原文是观察面，缺它不影响指令主链。
+func encodeCmdOptions(opts *agentproto.DockerCmdOptions) string {
+	if opts == nil {
+		return ""
+	}
+	raw, err := json.Marshal(opts)
+	if err != nil {
+		return ""
+	}
+	return middleware.TruncateString(string(raw), dockerstate.CmdOptionsMaxBytes)
 }
 
 // toProtocolOptions 把 HTTP 请求的 options 折成协议载荷。

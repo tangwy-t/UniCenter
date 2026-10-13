@@ -30,6 +30,16 @@ func (d statsHistoryDeviceReader) FindByID(_ context.Context, id uint64) (*entit
 	return nil, repository.ErrNotFound
 }
 
+func (d statsHistoryDeviceReader) FindByIDs(_ context.Context, ids []uint64) ([]entity.Device, error) {
+	out := make([]entity.Device, 0, len(ids))
+	for _, id := range ids {
+		if dev, ok := d.devs[id]; ok {
+			out = append(out, *dev)
+		}
+	}
+	return out, nil
+}
+
 // newStatsHistorySvc 构造带留存读面的 DockerService 与写入口（同一 miniredis）。
 func newStatsHistorySvc(t *testing.T) (*DockerService, *dockerstate.StatsHistoryStore, *dockerstate.Store, goredis.UniversalClient) {
 	t.Helper()

@@ -7,9 +7,11 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/request"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/response"
@@ -30,11 +32,22 @@ import (
 
 // DockerDeviceReader 是读面需要的设备字段（由 repository.DeviceRepo 满足）。
 //
-// 只声明 FindByID：主机数是个位数（每台机器一个 agent），逐台查库足够，
-// 不值得为一个「批量查 2 行」的优化去动仓储接口 —— 那会把本域的窄接口变成仓储的
-// 新方法，让两个包互相牵制。
+// 只声明 FindByID：**按 id 找一台**（State / stats-history 的存在性检查）。
+// 主机枚举需要的是另一个能力面（见 DockerHostDeviceReader）—— 按 id 集合批量取。
+// 合成一个接口会让任务面/审计面（它们只需要按 id 找一台）被迫依赖批量方法。
 type DockerDeviceReader interface {
 	FindByID(ctx context.Context, id uint64) (*entity.Device, error)
+}
+
+// DockerHostDeviceReader 是**主机枚举**（hostRecords）需要的设备能力面：单台 + 批量。
+//
+// 批量那一枚是主机规模的 N+1 闸：枚举一百台可管主机时，逐台 FindByID 就是 100 条
+// SELECT、逐台 store.Get 就是 100 次 Redis 往返 —— 全在同一个请求里。枚举因此只允许
+// 两次批量读（MGet + FindByIDs），调用次数与主机数**无关**（守卫测试断言只调用一次）。
+type DockerHostDeviceReader interface {
+	DockerDeviceReader
+	// FindByIDs 一次取回这批设备的行（一条 id IN (...)）；缺席 = 设备已删。
+	FindByIDs(ctx context.Context, ids []uint64) ([]entity.Device, error)
 }
 
 // DockerStatsHistoryReader 是容器 stats 留存的读取与清理能力面（由
@@ -71,7 +84,7 @@ type DockerHostDiskReader interface {
 // DockerService 是 docker 域的读面。
 type DockerService struct {
 	store   *dockerstate.Store
-	devices DockerDeviceReader
+	devices DockerHostDeviceReader
 	cfg     AgentConfigGetter
 	log     logger.LoggerInterface
 	// stats 是容器 stats 留存的读面（P2）。nil = 未装配：stats-history 端点给出
@@ -92,12 +105,48 @@ type DockerService struct {
 	// now 可替换：陈旧度与年龄都是「相对现在」的结论，测试要一个确定的现在
 	//（否则断言会随执行时刻漂移，跨秒边界上还会随机红）。
 	now func() time.Time
+
+	// ── 总览短缓存（见 Overview）─────────────────────────────────────
+	// overviewCacheTTL 是生效的 TTL（<=0 = 整个短缓存关闭，逐次重算）；overviewEntry
+	// 是唯一一份「全舰队总览」，overviewGroup 合并 TTL 到期瞬间的并发击穿。
+	// 锁只保护 entry 的读写（一次字段读，不含任何 I/O），聚合在锁外跑。
+	overviewCacheTTL time.Duration
+	overviewMu       sync.Mutex
+	overviewEntry    *dockerOverviewCacheEntry
+	overviewGroup    singleflight.Group
 }
 
+// dockerOverviewCacheEntry 是短缓存里的一格：响应 + 算出来的时刻（取自 s.now）。
+type dockerOverviewCacheEntry struct {
+	resp *response.DockerOverviewResp
+	at   time.Time
+}
+
+// dockerOverviewCacheTTLDefault 是总览短缓存的默认 TTL。
+//
+// 2 秒：够把「同一刻涌进来的并发刷新」并成一次聚合（前端 10 秒自动刷新，多客户端
+// 同刻刷新是常态），又短到不会让读者看到过期事实 —— 陈旧结论本身按 90 秒量级的阈值
+// 判定，2 秒的偏差改变不了任何一台主机的结论。**不得长于数秒**：把 TTL 拉到刷新间隔
+// 之上，「自动刷新」就变成了看见同一份数据的错觉。
+const dockerOverviewCacheTTLDefault = 2 * time.Second
+
+// dockerOverviewCacheKey 是短缓存的 singleflight 去重键。整舰队只有这一份总览
+//（该端点本就是 docker:list 的全局读，响应不含任何 per-user 维度），故是一枚常量。
+const dockerOverviewCacheKey = "docker:overview"
+
 // NewDockerService 构造读面。
-func NewDockerService(store *dockerstate.Store, devices DockerDeviceReader,
+func NewDockerService(store *dockerstate.Store, devices DockerHostDeviceReader,
 	cfg AgentConfigGetter, log logger.LoggerInterface) *DockerService {
-	return &DockerService{store: store, devices: devices, cfg: cfg, log: log, now: time.Now}
+	return &DockerService{store: store, devices: devices, cfg: cfg, log: log, now: time.Now,
+		overviewCacheTTL: dockerOverviewCacheTTLDefault}
+}
+
+// WithOverviewCache 覆盖总览短缓存的 TTL（<=0 = 关闭：与引入短缓存之前逐字一致地
+// 逐次重算）。存在的理由有二：**回退**（总览一旦因为缓存给出反直觉的结果，关掉即可）
+// 与**测试**（TTL 与 s.now 都可控，验过期不必 sleep）。装配期调用一次。
+func (s *DockerService) WithOverviewCache(ttl time.Duration) *DockerService {
+	s.overviewCacheTTL = ttl
+	return s
 }
 
 // WithStatsHistory 注入 stats 留存读面（P2）。装配在 wireup 一处完成。
@@ -193,42 +242,65 @@ func (s *DockerService) Hosts(ctx context.Context) (*response.DockerHostListResp
 // 唯一留给调用方裁决的是**快照读失败**（rec.readErr）：清单页的取舍是「少一行」
 // （读失败在 Hosts 里 warn 后跳过），总览页的取舍是「行还在、error 如实」——
 // 两者都要真的读过才知道该选哪边。
+//
+// **两次批量读，与主机数无关**（100 台规模下的硬约束）：可管主机集合 → 快照（一次
+// pipeline，MGet）→ 设备行（一条 id IN (...)，FindByIDs）。此前这里是逐台
+// `store.Get` + `devices.FindByID`：一百台 = 100 次 Redis GET + 100 条 SELECT，全在
+// 同一个请求里 —— 而总览页被每 10 秒轮询一次。守卫测试钉住「批量各调用一次、逐台
+// 调用为零」（1 台与 100 台两种规模都要成立）。
 func (s *DockerService) hostRecords(ctx context.Context) ([]hostRecord, error) {
 	ids, err := s.store.Hosts(ctx)
 	if err != nil {
 		return nil, apperror.Internal("读取主机清单失败", err)
 	}
+	// 批量一：快照（一次 pipeline）。读失败的那几台缺席于 map、但要落在失败名单里
+	// —— 「读不到」与「从未上报」是两句不同的话（见 dockerstate.MGetError）。
+	envs, mgetErr := s.store.MGet(ctx, ids)
+	failed := mgetFailures(mgetErr, ids)
+	// 批量二：设备行（一条 id IN (...)）。
+	devs, devErr := s.devices.FindByIDs(ctx, ids)
+	var devByID map[uint64]*entity.Device
+	if devErr != nil {
+		// 读库失败（DB 抖动/超时）：**原地跳过**这一批。把瞬时故障当成「设备已删」
+		// 去清理，会一次抹掉全部主机的快照键，页面从此空白到下一次上报。
+		//（逐台版是「这台跳过」，批量版是「这批跳过」—— 同一句话、同一后果：
+		// 不编造主机行、也不清理。）
+		if s.log != nil {
+			s.log.Warn("docker host device lookup failed",
+				zap.Int("hosts", len(ids)), zap.Error(devErr))
+		}
+	} else {
+		devByID = make(map[uint64]*entity.Device, len(devs))
+		for i := range devs {
+			devByID[devs[i].ID] = &devs[i]
+		}
+	}
 	out := make([]hostRecord, 0, len(ids))
 	for _, id := range ids {
 		rec := hostRecord{id: id}
-		env, err := s.store.Get(ctx, id)
-		if err != nil {
+		if rerr, ok := failed[id]; ok {
 			// 快照读失败**不是**「设备已删」：设备行照常查（否则总览页连主机名
 			// 都给不出），呈现或不呈现由调用方裁决。
-			rec.readErr = err
+			rec.readErr = rerr
 		} else {
-			rec.env = env
+			// 缺席 = 从未上报（集合里有它、快照键却被删/没写过），是正常态：
+			// env 为 nil 且 readErr 为 nil。
+			rec.env = envs[id]
 		}
-		dev, err := s.devices.FindByID(ctx, id)
-		if err != nil || dev == nil {
-			switch {
-			case err != nil && !errors.Is(err, repository.ErrNotFound):
-				// 读库失败（DB 抖动/超时）：**原地跳过**。把瞬时故障当成「设备已删」
-				// 去清理，会一次抹掉全部主机的快照键，页面从此空白到下一次上报。
-				if s.log != nil {
-					s.log.Warn("docker host device lookup failed", zap.Uint64("deviceId", id), zap.Error(err))
-				}
-			default:
-				// 设备确已删除（仓储的未命中哨兵，或返回了空设备）而集合里还留着它：
-				// 顺手清理（自愈），否则每次列表都要跳过这一行，且键永久泄漏。
-				// 快照键与 stats 留存一起清（与 PurgeDevice 同一条清理纪律）。
-				if perr := s.store.Purge(ctx, id); perr != nil && s.log != nil {
-					s.log.Warn("docker host purge failed", zap.Uint64("deviceId", id), zap.Error(perr))
-				}
-				if s.stats != nil {
-					if perr := s.stats.Purge(ctx, id); perr != nil && s.log != nil {
-						s.log.Warn("docker stats history purge failed", zap.Uint64("deviceId", id), zap.Error(perr))
-					}
+		if devErr != nil {
+			continue // 整批设备行读失败：不编造行（与逐台版的「这台跳过」同一后果）
+		}
+		dev, ok := devByID[id]
+		if !ok || dev == nil {
+			// 设备确已删除（仓储未命中，或返回了空设备）而集合里还留着它：
+			// 顺手清理（自愈），否则每次列表都要跳过这一行，且键永久泄漏。
+			// 快照键与 stats 留存一起清（与 PurgeDevice 同一条清理纪律）。
+			if perr := s.store.Purge(ctx, id); perr != nil && s.log != nil {
+				s.log.Warn("docker host purge failed", zap.Uint64("deviceId", id), zap.Error(perr))
+			}
+			if s.stats != nil {
+				if perr := s.stats.Purge(ctx, id); perr != nil && s.log != nil {
+					s.log.Warn("docker stats history purge failed", zap.Uint64("deviceId", id), zap.Error(perr))
 				}
 			}
 			continue
@@ -237,6 +309,26 @@ func (s *DockerService) hostRecords(ctx context.Context) ([]hostRecord, error) {
 		out = append(out, rec)
 	}
 	return out, nil
+}
+
+// mgetFailures 把批量读的错误折成「哪台读失败 + 各自的原因」（nil = 全读到了）。
+//
+// 非 *dockerstate.MGetError 的意外错误（理论上不该出现）按「整批都读失败」处理：
+// 与逐台 Get 的「每台都读失败」等价 —— 读面宁可把结论说成「读不到」，也不把整批打成
+// 500（本读面的底线是 agent/Redis 抖动时页面照样打得开）。
+func mgetFailures(err error, ids []uint64) map[uint64]error {
+	if err == nil {
+		return nil
+	}
+	var mge *dockerstate.MGetError
+	if errors.As(err, &mge) {
+		return mge.Failed
+	}
+	out := make(map[uint64]error, len(ids))
+	for _, id := range ids {
+		out[id] = err
+	}
+	return out
 }
 
 // hostRecord 是枚举一台主机的中间事实（快照信封 + 设备行 + 读结论）。
@@ -459,6 +551,27 @@ const dockerOverviewAnomalyCap = 50
 
 // Overview 返回控制塔总览：跨主机的航队 KPI、主机清单与异常容器清单。
 //
+// 三层：
+//
+//	A. 短缓存 + singleflight（本方法，见下）—— 只为**削峰**，不改答案；
+//	B. computeOverview —— 聚合本身（取数 = hostRecords 的两次批量读）；
+//	C. 响应装配 —— 字段与语义在这里，与引入缓存之前逐字一致。
+//
+// **为什么总览要短缓存**：它是被前端每 10 秒自动刷新的端点（views/overview.vue），
+// N 个打开的页面 = N/10 次/秒的全量聚合。TTL 内合并成一次，TTL 到期瞬间由
+// singleflight 合并并发击穿（N 个同时到期的请求只算一次）。键只有一枚（全舰队总览）
+// —— 这个端点本就是 docker:list 的全局读，响应不含任何 per-user 维度，按用户分键
+// 只会得到 N 份一模一样的聚合。TTL 只有数秒（不为提速体感，只为削峰；不得长于前端
+// 的刷新间隔，否则「自动刷新」就成了看见同一份数据的错觉）。
+//
+// 缓存**不主动失效**（设备删除 / 快照上报都不清它）：TTL 只有数秒，一次变更的可见
+// 延迟不参与任何裁决；主动失效会把「一处写入」变成遍布各处的缓存状态机，而它要挡的
+// 只是同一刻的重复聚合。错误也**不入缓存**：下一次请求立刻重试，不把一次抖动钉成几秒
+// 的故障。
+//
+// 返回的响应是**共享只读**的（TTL 内的多次调用拿到同一份对象）—— 调用方不得改写它
+//（生产调用方只有 handler，它只做序列化）。
+//
 // 三条与 Hosts/State 不同的取舍（每一条都是「为什么」级的决策）：
 //
 //  1. 部分聚合优于整体失败：单台快照读失败只记 warn 并**继续**，那台主机仍列进
@@ -471,6 +584,64 @@ const dockerOverviewAnomalyCap = 50
 //     （含 running/stopped 的数学恒等式 Total=Running+Stopped），清单负责给
 //     运维一个按主机排好的「去哪儿看」入口。
 func (s *DockerService) Overview(ctx context.Context) (*response.DockerOverviewResp, error) {
+	if s.overviewCacheTTL <= 0 {
+		// 关闭（WithOverviewCache(<=0)）：与引入短缓存之前逐字一致地逐次重算。
+		// 连 singleflight 也一起去掉 —— 缓存关掉还把并发合并留着，会让「关闭」的
+		// 语义变得半开半闭（同一个请求序列时而一次、时而多次）。
+		return s.computeOverview(ctx)
+	}
+	if resp, ok := s.overviewFromCache(); ok {
+		return resp, nil
+	}
+	v, err, _ := s.overviewGroup.Do(dockerOverviewCacheKey, func() (any, error) {
+		// 双重检查：等在这枚 singleflight 上的并发者，可能在前一个领头算完并回填
+		// 缓存后才被唤醒 —— 那就直接命中，不再白算一趟全量聚合。
+		if resp, ok := s.overviewFromCache(); ok {
+			return resp, nil
+		}
+		// 聚合用的是**领头那个请求的 ctx**（与 middleware/permission.go、
+		// metricshistory/window.go 的既有 singleflight 用法同参）：代价是领头客户端
+		// 断开会让跟随者一起拿到取消错误。本聚合只有两次批量读（毫秒级），这个窗口
+		// 很小；换成 WithoutCancel 则会在领头断开后继续占着连接把活干完 —— 对一次
+		// 「随时可以重来」的读来说，前者更划算。
+		resp, err := s.computeOverview(ctx)
+		if err != nil {
+			return nil, err // 错误不入缓存（下一次请求立刻重试）
+		}
+		s.overviewToCache(resp)
+		return resp, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return v.(*response.DockerOverviewResp), nil
+}
+
+// overviewFromCache 读短缓存：TTL 内命中即回吐（共享只读对象），过期/空缓存返回 false。
+//
+// 时刻取自 s.now()（与陈旧度同一枚可替换时钟）：测试据此把时钟往前拨就能验过期，
+// 不必 sleep —— sleep 会让「几秒 TTL」在 -race 全量跑时变成随机的红。
+// 锁只保护这一格字段的读（无 I/O），聚合在锁外跑。
+func (s *DockerService) overviewFromCache() (*response.DockerOverviewResp, bool) {
+	s.overviewMu.Lock()
+	defer s.overviewMu.Unlock()
+	e := s.overviewEntry
+	if e == nil || s.now().Sub(e.at) >= s.overviewCacheTTL {
+		return nil, false
+	}
+	return e.resp, true
+}
+
+// overviewToCache 回填短缓存（只由 singleflight 的领头调用）。
+func (s *DockerService) overviewToCache(resp *response.DockerOverviewResp) {
+	s.overviewMu.Lock()
+	defer s.overviewMu.Unlock()
+	s.overviewEntry = &dockerOverviewCacheEntry{resp: resp, at: s.now()}
+}
+
+// computeOverview 是总览的聚合本身（无缓存、无 singleflight）：取数 + 装配，
+// 每次调用都是一趟完整重算。缓存/合并只在 Overview 那一层（见那里的注释）。
+func (s *DockerService) computeOverview(ctx context.Context) (*response.DockerOverviewResp, error) {
 	records, err := s.hostRecords(ctx)
 	if err != nil {
 		return nil, err
@@ -1448,37 +1619,40 @@ func (s *DockerService) Search(ctx context.Context, keyword string, limit int) (
 		}
 		host := searchHostRef{hostID: rec.id, hostname: rec.dev.Hostname, group: rec.dev.GroupName}
 		st := rec.env.State
-		// 容器：名称**或**镜像名（与 Workloads 同一句）。hint 给镜像名。
+		// 容器：名称**或**镜像名（与 Workloads 同一句）。id 给容器 ID（详情路由
+		// `/docker/containers/:id` 吃它），hint 给镜像名。
 		for _, c := range st.Containers {
 			if strings.Contains(strings.ToLower(c.Name), kw) || strings.Contains(strings.ToLower(c.Image), kw) {
-				containers = append(containers, host.searchItem(c.Name, c.Image))
+				containers = append(containers, host.searchItem(c.Name, c.ID, c.Image))
 			}
 		}
 		// 镜像：全部 repoTag join(" ") 后匹配（与 Images 同一句）。展示名取首个 repoTag
-		//（悬空无标签回落 ID，见 imageResourceName），hint 给镜像 ID（次要身份线索，
-		// 不与展示名重复）。
+		//（悬空无标签回落 ID，见 imageResourceName），id 给镜像 ID（详情路由
+		// `/docker/image-detail/:id` 吃它），hint 也给镜像 ID（次要身份线索，
+		// 不与展示名重复；悬空时展示名与 id 同值，是该镜像的真实身份）。
 		for _, i := range st.Images {
 			if !strings.Contains(strings.ToLower(strings.Join(i.RepoTags, " ")), kw) {
 				continue
 			}
-			images = append(images, host.searchItem(imageResourceName(i), i.ID))
+			images = append(images, host.searchItem(imageResourceName(i), i.ID, i.ID))
 		}
-		// 卷：名称子串，hint 给驱动。
+		// 卷：名称子串，id 给卷名（列表页吃 `?keyword=`，卷名即其稳定标识），hint 给驱动。
 		for _, v := range st.Volumes {
 			if strings.Contains(strings.ToLower(v.Name), kw) {
-				volumes = append(volumes, host.searchItem(v.Name, v.Driver))
+				volumes = append(volumes, host.searchItem(v.Name, v.Name, v.Driver))
 			}
 		}
-		// 网络：名称子串，hint 给驱动。
+		// 网络：名称子串，id 给网络名（列表页吃 `?keyword=`），hint 给驱动。
 		for _, n := range st.Networks {
 			if strings.Contains(strings.ToLower(n.Name), kw) {
-				networks = append(networks, host.searchItem(n.Name, n.Driver))
+				networks = append(networks, host.searchItem(n.Name, n.Name, n.Driver))
 			}
 		}
-		// 项目：名称子串，hint 给服务数（项目**声明**的网元数，见 DockerProjectItem.Services）。
+		// 项目：名称子串，id 给项目名（工作台路由 `/docker/projects/:name` 吃它），
+		// hint 给服务数（项目**声明**的网元数，见 DockerProjectItem.Services）。
 		for _, p := range st.Projects {
 			if strings.Contains(strings.ToLower(p.Name), kw) {
-				projects = append(projects, host.searchItem(p.Name, strconv.Itoa(p.Services)))
+				projects = append(projects, host.searchItem(p.Name, p.Name, strconv.Itoa(p.Services)))
 			}
 		}
 	}
@@ -1502,11 +1676,12 @@ type searchHostRef struct {
 	group    string
 }
 
-// searchItem 造一条命中条目（归属三列 + 展示名 + 次要线索）。Group 空时 omitempty 让
-// 字段缺席（未分组主机）——与其余读面同一形态。
-func (h searchHostRef) searchItem(name, hint string) response.DockerSearchItem {
+// searchItem 造一条命中条目（归属三列 + 展示名 + 下钻标识 + 次要线索）。id 是详情
+// 面能直接吃下的参数（各类型口径见 Search 的映射注释）；Group 空时 omitempty 让字段
+// 缺席（未分组主机）——与其余读面同一形态。
+func (h searchHostRef) searchItem(name, id, hint string) response.DockerSearchItem {
 	return response.DockerSearchItem{
-		Name: name, HostID: h.hostID, Hostname: h.hostname, Group: h.group, Hint: hint,
+		Name: name, ID: id, HostID: h.hostID, Hostname: h.hostname, Group: h.group, Hint: hint,
 	}
 }
 

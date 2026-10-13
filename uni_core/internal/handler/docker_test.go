@@ -121,6 +121,16 @@ func (d dockerDeviceReader) FindByID(_ context.Context, id uint64) (*entity.Devi
 	return nil, repository.ErrNotFound
 }
 
+func (d dockerDeviceReader) FindByIDs(_ context.Context, ids []uint64) ([]entity.Device, error) {
+	out := make([]entity.Device, 0, len(ids))
+	for _, id := range ids {
+		if dev, ok := d.devs[id]; ok {
+			out = append(out, *dev)
+		}
+	}
+	return out, nil
+}
+
 // dockerCfg 是 service.AgentConfigGetter 的替身：未配置时回落缺省。
 type dockerCfg struct{}
 

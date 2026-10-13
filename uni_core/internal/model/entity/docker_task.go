@@ -39,6 +39,20 @@ type DockerTaskHistory struct {
 	Target string `gorm:"column:target;type:text;not null" json:"target"`
 	// UserID 是发起人（读面联查用户名；用户已删时降级为空名，条目不消失）。
 	UserID uint64 `gorm:"column:user_id;not null" json:"userId,string"`
+	// Perm 是**受理时校验的权限码**（与 CmdRecord.Perm 同源）。它的唯一用途是给
+	// Options 当权限门：读面仅当调用者持有 admin 或本列的值时才把参数原文带进响应
+	//（见 service.taskOptionsVisible）。受理时的事实 → Upsert 的 DoUpdates 不含它
+	//（与 ref/device_id/action/target/user_id/accepted_at 同一句纪律）。
+	//
+	// 列可空（无 not null）：与 summary 同款，且满足迁移框架的兼容要求
+	//（新列必须给默认值或允许 NULL，旧二进制 INSERT 才不会失败）。
+	Perm string `gorm:"column:perm;size:64" json:"perm,omitempty"`
+	// Options 是受理时下发的动作参数原文（整份 DockerCmdOptions 的 JSON 文本；
+	// 受理处定稿，超限已按 dockerstate.CmdOptionsMaxBytes 截断并带尾标）。
+	//
+	// 体积不是问题：单条上限 16 KiB 由写入侧保证（与 target/summary 的 text 列同
+	// 形态，只是上限不同）；历史表一行一份，不放大。读取侧要过权限门（见 Perm 列）。
+	Options string `gorm:"column:options;type:text" json:"options,omitempty"`
 	// Status 是终态照实投影：succeeded / failed / timeout（本表不存 pending —— 见
 	// 「只记终态」）。取消没有独立状态码，由 summary 那句话承载（与实时面同款）。
 	Status string `gorm:"column:status;size:16;not null" json:"status"`

@@ -2,6 +2,9 @@ package dockerstate
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -118,5 +121,161 @@ func TestStaleUsesServerClock(t *testing.T) {
 	}
 	if stale, _ := Stale(nil, now, 30); stale {
 		t.Fatal("没有快照不是「陈旧」，是「从未上报」——两者在页面上是不同的话")
+	}
+}
+
+// ── 批量读（MGet）：主机枚举的 N+1 闸 ──────────────────────────────────
+
+// countingRedis 是 UniversalClient 的计数包装：只覆盖被观察的两条路径
+// （逐条 Get 与批量 Pipeline），其余原样转发给真客户端。
+// 「批量读 = 一次 pipeline、零次逐条 Get」这条纪律就钉在这两枚计数上。
+type countingRedis struct {
+	goredis.UniversalClient
+	gets      int
+	pipelines int
+}
+
+func (c *countingRedis) Get(ctx context.Context, key string) *goredis.StringCmd {
+	c.gets++
+	return c.UniversalClient.Get(ctx, key)
+}
+
+func (c *countingRedis) Pipeline() goredis.Pipeliner {
+	c.pipelines++
+	return c.UniversalClient.Pipeline()
+}
+
+// TestMGetReadsWholeBatchInOnePipeline 批量读的一条硬性质：N 台主机只发**一次**
+// pipeline、**零次**逐条 Get —— 逐台 Get 正是这次要消灭的 N+1（100 台 = 100 次往返）。
+// 同时钉住结果与逐台 Get 逐字等价（读到的照给、没上报的缺席）。
+func TestMGetReadsWholeBatchInOnePipeline(t *testing.T) {
+	mr := miniredis.RunT(t)
+	counter := &countingRedis{UniversalClient: goredis.NewClient(&goredis.Options{Addr: mr.Addr()})}
+	s := NewStore(counter)
+	ctx := context.Background()
+	now := time.Unix(1790000000, 0)
+	for _, id := range []uint64{7, 8, 9} {
+		if err := s.Save(ctx, id, sampleState(), now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 计数从「读之前」开始：Save 走的是 TxPipeline（与读路径不是同一条），不该混进来。
+	getsBefore, pipesBefore := counter.gets, counter.pipelines
+
+	// 99 从未上报：与 7/8/9 一起请求，它必须缺席且**不是**错误。
+	envs, err := s.MGet(ctx, []uint64{7, 8, 9, 99})
+	if err != nil {
+		t.Fatalf("从未上报不得算失败: %v", err)
+	}
+	if len(envs) != 3 {
+		t.Fatalf("应读到 3 台（99 从未上报，缺席）: %+v", envs)
+	}
+	if got := counter.gets - getsBefore; got != 0 {
+		t.Fatalf("批量读不得走逐条 Get（N+1）：过路 %d 次", got)
+	}
+	if got := counter.pipelines - pipesBefore; got != 1 {
+		t.Fatalf("N 台必须只用一次 pipeline，实际 %d 次", got)
+	}
+	for _, id := range []uint64{7, 8, 9} {
+		if envs[id] == nil || envs[id].ReceivedAt != now.UnixMilli() {
+			t.Fatalf("设备 %d 的信封不符: %+v", id, envs[id])
+		}
+		// 与逐台 Get 同一份结果（批量只是把往返合一，不换口径）。
+		single, err := s.Get(ctx, id)
+		if err != nil || single == nil || !reflect.DeepEqual(*single, *envs[id]) {
+			t.Fatalf("设备 %d 的批量结果与逐台 Get 不一致: %+v / %+v", id, envs[id], single)
+		}
+	}
+
+	// 空 ids：不发空 pipeline（一次纯浪费的往返），返回空 map。
+	before := counter.pipelines
+	if envs, err := s.MGet(ctx, nil); err != nil || len(envs) != 0 {
+		t.Fatalf("空 ids 应返回空 map 且无错: %+v %v", envs, err)
+	}
+	if counter.pipelines != before {
+		t.Fatal("空 ids 不该发 pipeline")
+	}
+}
+
+// TestMGetOneBadKeyDoesNotPoisonBatch 一批里坏一台：成功的那几台照常返回，
+// 坏的那台**缺席于 map 但在失败名单里** ——「读不到」与「从未上报」是两句不同的话，
+// 合成一句会让坏掉的主机被降级成「零容器零镜像的正常主机」。
+func TestMGetOneBadKeyDoesNotPoisonBatch(t *testing.T) {
+	s, mr := newTestStore(t)
+	ctx := context.Background()
+	now := time.Unix(1790000000, 0)
+	for _, id := range []uint64{7, 9} {
+		if err := s.Save(ctx, id, sampleState(), now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 主机 8 的键值损坏（键在、值读不出来）：Get 会返回 error 而不是 (nil, nil)。
+	mr.Set(StateKey(8), "{not json")
+
+	envs, err := s.MGet(ctx, []uint64{7, 8, 9, 99})
+	if err == nil {
+		t.Fatal("有一台读不到就必须如实报出（否则它会被当成「从未上报」）")
+	}
+	var mge *MGetError
+	if !errors.As(err, &mge) {
+		t.Fatalf("失败名单必须是 *MGetError: %T %v", err, err)
+	}
+	if len(mge.Failed) != 1 || mge.Failed[8] == nil {
+		t.Fatalf("失败名单应恰含设备 8: %+v", mge.Failed)
+	}
+	if _, ok := envs[8]; ok {
+		t.Fatal("读失败的那台必须缺席于结果 map")
+	}
+	if len(envs) != 2 || envs[7] == nil || envs[9] == nil {
+		t.Fatalf("一批里坏一台不得拖垮另外两台: %+v", envs)
+	}
+	if _, ok := mge.Failed[99]; ok {
+		t.Fatal("从未上报不是失败（缺席即可）")
+	}
+	// 逐台 Get 对同一台给出的是同一句话（读失败 → error）：批量没有换口径。
+	if _, err := s.Get(ctx, 8); err == nil {
+		t.Fatal("逐台 Get 对坏键也报错 —— 批量必须与它同参")
+	}
+	// 原因可穿透（Unwrap 摊平逐台错误）：调用方要能把反序列化错误记进日志。
+	var syntaxErr *json.SyntaxError
+	if !errors.As(err, &syntaxErr) {
+		t.Fatalf("失败原因应能穿透到反序列化错误: %v", err)
+	}
+}
+
+// TestMGetWholeBatchFailureAttributesEveryHost 整批不可执行（Redis 不可达）：
+// **每一台**都落进失败名单 —— 与逐台 Get 的「每台都读失败」逐字等价。
+// 少了这条，Redis 全不可达会被伪装成「全部从未上报」（页面从此显示一片零计数）。
+func TestMGetWholeBatchFailureAttributesEveryHost(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := mr.Addr()
+	mr.Close()
+	// MaxRetries=-1：不重试（重试会把这条用例拖成秒级）；DialTimeout 短，快速失败。
+	rdb := goredis.NewClient(&goredis.Options{Addr: addr, MaxRetries: -1, DialTimeout: 50 * time.Millisecond})
+	t.Cleanup(func() { _ = rdb.Close() })
+	s := NewStore(rdb)
+
+	ids := []uint64{7, 8, 9}
+	envs, err := s.MGet(context.Background(), ids)
+	if err == nil {
+		t.Fatal("Redis 不可达必须报错（否则整批会被当成「从未上报」）")
+	}
+	var mge *MGetError
+	if !errors.As(err, &mge) {
+		t.Fatalf("必须是 *MGetError: %T %v", err, err)
+	}
+	if len(mge.Failed) != len(ids) {
+		t.Fatalf("整批不可执行时每台都该在失败名单里: %+v", mge.Failed)
+	}
+	for _, id := range ids {
+		if mge.Failed[id] == nil {
+			t.Fatalf("设备 %d 未落进失败名单: %+v", id, mge.Failed)
+		}
+	}
+	if len(envs) != 0 {
+		t.Fatalf("失败时不该凭空造出信封: %+v", envs)
 	}
 }

@@ -100,7 +100,7 @@ func TestTasksHistorySurvivesRedisExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp, err := svc.Tasks(ctx, &request.DockerTasksQuery{})
+	resp, err := svc.Tasks(ctx, &request.DockerTasksQuery{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +154,7 @@ func TestTasksMergeDedupeLiveWins(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp, err := svc.Tasks(ctx, &request.DockerTasksQuery{})
+	resp, err := svc.Tasks(ctx, &request.DockerTasksQuery{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +214,7 @@ func TestTasksMergedPagination(t *testing.T) {
 	}
 
 	// 第 1 页（默认 10 条）：最新的 10 条 = 2400..1500。
-	p1, err := svc.Tasks(ctx, &request.DockerTasksQuery{})
+	p1, err := svc.Tasks(ctx, &request.DockerTasksQuery{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +226,7 @@ func TestTasksMergedPagination(t *testing.T) {
 	}
 
 	// 第 2 页：1400..500（页偏移 10 起）。
-	p2, err := svc.Tasks(ctx, &request.DockerTasksQuery{PageRequest: pageReq(2, 10)})
+	p2, err := svc.Tasks(ctx, &request.DockerTasksQuery{PageRequest: pageReq(2, 10)}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,7 +238,7 @@ func TestTasksMergedPagination(t *testing.T) {
 	}
 
 	// 第 3 页：剩下的 5 条。
-	p3, err := svc.Tasks(ctx, &request.DockerTasksQuery{PageRequest: pageReq(3, 10)})
+	p3, err := svc.Tasks(ctx, &request.DockerTasksQuery{PageRequest: pageReq(3, 10)}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +247,7 @@ func TestTasksMergedPagination(t *testing.T) {
 	}
 
 	// 越界页：空 items、Total 不变（前端据 Total 把页码拉回第一页）。
-	p4, err := svc.Tasks(ctx, &request.DockerTasksQuery{PageRequest: pageReq(9, 10)})
+	p4, err := svc.Tasks(ctx, &request.DockerTasksQuery{PageRequest: pageReq(9, 10)}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +256,7 @@ func TestTasksMergedPagination(t *testing.T) {
 	}
 
 	// 页大小上限兜底（HTTP 绑定已封顶；服务侧再夹一次，防直调放大取数上界）。
-	big, err := svc.Tasks(ctx, &request.DockerTasksQuery{PageRequest: pageReq(1, 100000)})
+	big, err := svc.Tasks(ctx, &request.DockerTasksQuery{PageRequest: pageReq(1, 100000)}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +288,7 @@ func TestTasksHistoryFiltersUnion(t *testing.T) {
 	}
 
 	// pending：只有实时在途那一条；历史面不参与（合计也只有 1）。
-	got, err := svc.Tasks(ctx, &request.DockerTasksQuery{Status: "pending"})
+	got, err := svc.Tasks(ctx, &request.DockerTasksQuery{Status: "pending"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,7 +297,7 @@ func TestTasksHistoryFiltersUnion(t *testing.T) {
 	}
 
 	// done：实时终态（d1）+ 历史（h1 + d1 的重叠去重）= 2。
-	got, err = svc.Tasks(ctx, &request.DockerTasksQuery{Status: "done"})
+	got, err = svc.Tasks(ctx, &request.DockerTasksQuery{Status: "done"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -309,7 +309,7 @@ func TestTasksHistoryFiltersUnion(t *testing.T) {
 	}
 
 	// all：三者都在（p1 在途 + d1 + h1）。
-	got, err = svc.Tasks(ctx, &request.DockerTasksQuery{})
+	got, err = svc.Tasks(ctx, &request.DockerTasksQuery{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

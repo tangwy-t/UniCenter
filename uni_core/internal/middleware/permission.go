@@ -58,18 +58,44 @@ func (g *PermissionGuard) Permission(requiredPerm string) gin.HandlerFunc {
 		g.logger.Debug("permission check", zap.Uint64("userId", uid), zap.String("requiredPerm", requiredPerm))
 
 		// admin role bypass
-		if slices.Contains(perms, "admin") {
+		if HasPerm(perms, requiredPerm) {
 			c.Next()
 			return
 		}
 
-		if !slices.Contains(perms, requiredPerm) {
-			app.Error(c, apperror.Forbidden("无操作权限"))
-			c.Abort()
-			return
-		}
-		c.Next()
+		app.Error(c, apperror.Forbidden("无操作权限"))
+		c.Abort()
 	}
+}
+
+// HasPerm 报告权限集是否满足 required 码：admin 是通配（与 Permission/Ensure **同一
+// 句语义**，抽出来只是让「admin 通配 + 逐码比对」这条判定只有一处实现）。
+func HasPerm(perms []string, required string) bool {
+	return slices.Contains(perms, "admin") || slices.Contains(perms, required)
+}
+
+// CallerPerms 返回调用者的权限集：只读帮助函数，**不改任何既有判定行为**。
+//
+// 存在的理由：docker 指令面的权限**按任务自身的权限码变化**，任务列表要为每一条
+// 条目判定「调用者是否有资格看它的参数原文」—— 这需要一个「读」的口，而 loadUserPerms
+// 是私有的（两条既有入口 Permission/Ensure 都只有「拒/放」两种产出）。本方法复用**同一份**
+// 加载逻辑（权限缓存 → singleflight 回源），语义与它们同源：同一个调用者，同一个权限集。
+//
+// 一轮请求只加载一次：结果缓存在 gin context（同一 handler 内多次调用不重复打 permStore）。
+// 错误语义与两条既有入口逐字一致（claims 缺失 → 401、类型不符/回源失败 → 500），
+// 调用方原样折成响应，不得另造话术。
+func (g *PermissionGuard) CallerPerms(c *gin.Context) ([]string, error) {
+	if cached, ok := c.Get(CtxCallerPerms); ok {
+		if perms, ok := cached.([]string); ok {
+			return perms, nil
+		}
+	}
+	_, perms, err := g.loadUserPerms(c)
+	if err != nil {
+		return nil, err
+	}
+	c.Set(CtxCallerPerms, perms)
+	return perms, nil
 }
 
 // Ensure 在处理器内做一次权限校验，通过返回 true；不通过时**已写好响应**（403）并返回 false。
@@ -89,7 +115,7 @@ func (g *PermissionGuard) Ensure(c *gin.Context, requiredPerm string) bool {
 		app.Error(c, err)
 		return false
 	}
-	if slices.Contains(perms, "admin") || slices.Contains(perms, requiredPerm) {
+	if HasPerm(perms, requiredPerm) {
 		return true
 	}
 	app.Error(c, apperror.Forbidden("无操作权限"))

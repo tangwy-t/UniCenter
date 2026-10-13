@@ -18,7 +18,8 @@ import (
 	agentproto "github.com/tangwy-t/UniCenter/uni_protocol"
 )
 
-// fakeDeviceReader 是 DockerDeviceReader 的替身：按 id 给预置设备，或统一返回一个错误。
+// fakeDeviceReader 是 DockerHostDeviceReader 的替身：按 id 给预置设备，或统一返回一个错误。
+// 批量那一枚按同一张表装配（批量语义的守卫在 docker_overview_batch_test.go 的计数替身上）。
 type fakeDeviceReader struct {
 	devs map[uint64]*entity.Device
 	err  error
@@ -32,6 +33,19 @@ func (f fakeDeviceReader) FindByID(ctx context.Context, id uint64) (*entity.Devi
 		return d, nil
 	}
 	return nil, errors.New("not found")
+}
+
+func (f fakeDeviceReader) FindByIDs(_ context.Context, ids []uint64) ([]entity.Device, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	out := make([]entity.Device, 0, len(ids))
+	for _, id := range ids {
+		if d, ok := f.devs[id]; ok {
+			out = append(out, *d)
+		}
+	}
+	return out, nil
 }
 
 func TestDockerServiceHostList(t *testing.T) {
@@ -336,8 +350,13 @@ func TestDockerServiceHostListPurgePolicy(t *testing.T) {
 }
 
 // notFoundReader 模拟「设备已删除」：仓储的未命中哨兵（与其它错误必须区别对待）。
+// 批量读把「设备已删」表达为**不出现在结果里**（真仓储是一条 id IN (...) 的缺席）。
 type notFoundReader struct{}
 
 func (notFoundReader) FindByID(context.Context, uint64) (*entity.Device, error) {
 	return nil, repository.ErrNotFound
+}
+
+func (notFoundReader) FindByIDs(context.Context, []uint64) ([]entity.Device, error) {
+	return nil, nil
 }

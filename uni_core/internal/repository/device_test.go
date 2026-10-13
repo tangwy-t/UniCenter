@@ -714,3 +714,49 @@ func TestDeviceUpdateGroupTagsIdempotentReplayIsNotNotFound(t *testing.T) {
 		t.Fatalf("重放后值不得变动: group=%q tags=%q", d.GroupName, d.Tags)
 	}
 }
+
+// TestDeviceFindByIDsBatch 钉住批量取设备的三条契约（docker 主机枚举一次查一百台的底层）：
+//   - 一条 id IN (...) 取回命中的行（不再逐台 FindByID）；
+//   - **雪花 id 原样**：主键是 19 位（超过 float64 能精确表达的 2^53），中途转一次
+//     float 就会取到另一台设备的行 —— 相邻 id 各拿自己那行才算过；
+//   - 软删的设备不返回（缺席 = 那台设备不在了，调用方据此自愈清理）。
+func TestDeviceFindByIDsBatch(t *testing.T) {
+	db := newDeviceTestDB(t)
+	repo := NewDeviceRepository(db)
+	ctx := context.Background()
+	seen := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+
+	// 相邻的雪花 id：差 1 的兄弟 id 是「经 float 会撞车」的最小可观测形态。
+	const bigID, siblingID = uint64(1234567890123456789), uint64(1234567890123456788)
+	seedDevice(t, db, bigID, "i-big", "t-big", "uni-big", &seen)
+	seedDevice(t, db, siblingID, "i-sib", "t-sib", "uni-sib", &seen)
+	seedDevice(t, db, 7, "i-7", "t-7", "uni-7", &seen)
+	// 已软删：批量读不得返回它（未命中 = 设备不在了）。
+	seedDevice(t, db, 8, "i-8", "t-8", "uni-8", &seen)
+	if err := db.Delete(&entity.Device{}, 8).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := repo.FindByIDs(ctx, []uint64{bigID, siblingID, 7, 8, 999})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[uint64]string{}
+	for _, d := range got {
+		byID[d.ID] = d.Hostname
+	}
+	if len(got) != 3 {
+		t.Fatalf("应恰取回 3 台（软删的 8 与不存在的 999 缺席）: %+v", got)
+	}
+	if byID[bigID] != "uni-big" || byID[siblingID] != "uni-sib" || byID[7] != "uni-7" {
+		t.Fatalf("相邻雪花 id 必须各取回自己那行（id 不得经 float）: %+v", byID)
+	}
+	if _, ok := byID[8]; ok {
+		t.Fatalf("软删设备不得返回（缺席 = 已删，调用方据此自愈）: %+v", byID)
+	}
+
+	// 空/ nil：不发查询、无错（调用方（主机枚举）在集合为空时直接过）。
+	if list, err := repo.FindByIDs(ctx, nil); err != nil || list != nil {
+		t.Fatalf("空 ids 应返回 (nil, nil): %+v %v", list, err)
+	}
+}

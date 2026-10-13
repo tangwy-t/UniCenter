@@ -76,13 +76,21 @@ func (r *DockerTaskHistoryRecorder) Record(ctx context.Context, rec *dockerstate
 		// 行 ID 走全库同一条雪花回调（零值即生成）；CreatedBy/UpdatedBy 不在这里写
 		// —— 审计字段由 GORM 回调从登录态补（agent 通道无登录态，留空是如实的，
 		// 发起人在 UserID 列上）。
-		Ref:        rec.Ref,
-		DeviceID:   rec.DeviceID,
-		Action:     rec.Action,
-		Target:     middleware.TruncateString(rec.Target, dockerTaskTextMax),
-		UserID:     rec.UserID,
-		Status:     rec.Status,
-		Summary:    middleware.TruncateString(terminalSummary(rec), dockerTaskTextMax),
+		Ref:      rec.Ref,
+		DeviceID: rec.DeviceID,
+		Action:   rec.Action,
+		Target:   middleware.TruncateString(rec.Target, dockerTaskTextMax),
+		UserID:   rec.UserID,
+		// Perm 是参数原文的权限门（读面按它逐条判定 Options 带不带）：受理时的事实，
+		// 与 target/user_id 同族 —— Upsert 的 DoUpdates 不含它，后续重放改不动它。
+		Perm:   rec.Perm,
+		Status: rec.Status,
+		// Summary 直接取终态结论句（写入时定稿，读面不再重算）。
+		Summary: middleware.TruncateString(terminalSummary(rec), dockerTaskTextMax),
+		// Options 是受理时定稿的参数原文：**已在受理处按 dockerstate.CmdOptionsMaxBytes
+		// 截断并标注**，这里不再截断 —— 二次截断会切掉那个标记本身，把「已截断」这个
+		// 事实抹掉（截断只有一处口径，在参数产生的地方）。
+		Options:    rec.Options,
 		AcceptedAt: rec.CreatedAt,
 		FinishedAt: rec.FinishedAt,
 	}

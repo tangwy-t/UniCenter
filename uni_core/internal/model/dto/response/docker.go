@@ -693,6 +693,15 @@ type DockerTaskItem struct {
 	// Summary 是终态结论句原文（pending 时为空；成功兜底「执行成功」——与审计
 	// 入账的结论句同一句话，见 service/docker_audit.go 的 terminalSummary）。
 	Summary string `json:"summary"`
+	// Options 是**受理时**下发的动作参数原文（整份 DockerCmdOptions 的 JSON 文本，
+	// 受理处一次性定稿）。三条口径：
+	//   - **受这笔任务自身权限码的门控制**：仅当调用者持有 admin 或该任务的 Perm
+	//     时才带上；否则**字段缺席**（不是空串、不是掩码 —— 缺席即「你没有看它的资格」，
+	//     与全站「不渲染 ≠ 禁用」口径一致）；
+	//   - **超限已截断**：原文超过 dockerstate.CmdOptionsMaxBytes 时尾部带
+	//     "...(truncated)" 标记（半截 JSON 不是合法 JSON），读者据标记判「不完整」；
+	//   - **绝不进日志**：原文可能带凭据，服务端任何日志路径都不落它。
+	Options string `json:"options,omitempty"`
 }
 
 // DockerTaskListResp 是任务中心的一页（实时 ∪ 历史合并后按受理时刻降序）。
@@ -865,6 +874,13 @@ type DockerSearchItem struct {
 	// Name 是该资源的展示名（容器名 / 镜像的首个 repoTag（悬空回落 ID）/ 卷名 /
 	// 网络名 / 项目名）。
 	Name string `json:"name"`
+	// ID 是**下钻标识**：前端拿它落到该条目的详情面（不是展示名 —— 展示名会
+	// 变，且镜像的展示名是 tag 而非身份）。取值以既有详情页路由的参数口径为准：
+	// 容器=容器 ID（`/docker/containers/:id`）、镜像=镜像 ID/摘要（
+	// `/docker/image-detail/:id`，前端 encode 后作路由参数）、卷/网络=名称
+	//（列表页吃 `?keyword=`，名称即它的稳定标识）、项目=项目名
+	//（`/docker/projects/:name`）。恒非空（每类资源都以它标识自身）。
+	ID string `json:"id"`
 	// HostID / Hostname 是归属主机（与其余跨主机读面同源、同 string 编码纪律）。
 	HostID   uint64 `json:"hostId,string"`
 	Hostname string `json:"hostname"`

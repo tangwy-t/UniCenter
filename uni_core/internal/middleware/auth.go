@@ -21,6 +21,10 @@ const (
 	// CtxClaims 是 gin 侧身份的单一来源:旧的 CtxUserID/CtxScopes 拆散存储
 	// 迫使 scope_resolver 用两个散值重建影子 Claims,字段级漂移无法在编译期防范。
 	CtxClaims = "claims"
+	// CtxCallerPerms 是本轮请求**已加载的调用者权限集**（由 PermissionGuard.CallerPerms
+	// 写入：同一 handler 里多次读取不重复打 permStore）。它不是身份的第二来源 ——
+	// 身份仍是 CtxClaims，这里只是把「同一份加载结果」摊在请求上供多处读取。
+	CtxCallerPerms = "callerPerms"
 )
 
 // Auth returns a middleware that validates a Bearer JWT token from the

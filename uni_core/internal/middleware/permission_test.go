@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"net/http/httptest"
+	"slices"
 	"testing"
 	"time"
 
@@ -189,6 +190,74 @@ func TestPermissionGuard_SingleflightNotSharedAcrossScopes(t *testing.T) {
 	if <-customDone {
 		t.Error("ScopeCustom 不应通过 —— 复用了 ScopeAll 的回源结果(singleflight key 缺 scope 维度)")
 	}
+}
+
+// TestPermissionGuardCallerPerms 钉住只读口 CallerPerms 的三条契约：与两条既有入口
+// 同源（同一个调用者拿到同一个权限集）、**一轮请求只加载一次**（gin context memo）、
+// 缺登录态时与它们同款的错误（不另造话术）。
+func TestPermissionGuardCallerPerms(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	authSvc := &countingAuthSvc{perms: []string{"docker:manage"}}
+	guard := NewPermissionGuard(authSvc, stubPermStore{}, stubCfgGateway{}, logger.NewNop())
+
+	mkCtx := func(withClaims bool) *gin.Context {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		if withClaims {
+			c.Set(CtxClaims, &jwt.Claims{UserID: 1})
+		}
+		c.Request = httptest.NewRequest("GET", "/", nil)
+		return c
+	}
+
+	c := mkCtx(true)
+	got, err := guard.CallerPerms(c)
+	if err != nil {
+		t.Fatalf("应加载成功: %v", err)
+	}
+	if !slices.Equal(got, []string{"docker:manage"}) {
+		t.Fatalf("权限集必须与回源结果逐字一致: %v", got)
+	}
+	// 第二次调用命中 memo：不再回源（一轮请求只加载一次）。
+	if _, err := guard.CallerPerms(c); err != nil {
+		t.Fatalf("第二次调用应命中缓存: %v", err)
+	}
+	if authSvc.calls != 1 {
+		t.Fatalf("一轮请求只应加载一次权限集, got %d 次回源", authSvc.calls)
+	}
+
+	// 缺登录态：与 Permission/Ensure 同源的 401（不是悄悄给一个空权限集 ——
+	// 「没登录」与「登录了但没权限」必须分得开）。
+	if _, err := guard.CallerPerms(mkCtx(false)); err == nil {
+		t.Fatal("缺 claims 必须报错（401 语义），不得静默返回空权限集")
+	}
+}
+
+// TestHasPermAdminWildcard 钉住判定唯一实现：admin 通配 + 逐码比对，与
+// Permission/Ensure 同源（两条入口现在都调它）。
+func TestHasPermAdminWildcard(t *testing.T) {
+	if !HasPerm([]string{"admin"}, "docker:exec") {
+		t.Error("admin 必须通配")
+	}
+	if !HasPerm([]string{"docker:exec", "docker:list"}, "docker:exec") {
+		t.Error("逐码命中必须通过")
+	}
+	if HasPerm([]string{"docker:list"}, "docker:exec") {
+		t.Error("不持码必须拒绝")
+	}
+	if HasPerm(nil, "") {
+		t.Error("空权限集不得命中空码（门缺省即关闭）")
+	}
+}
+
+// countingAuthSvc 统计回源次数（验证 CallerPerms 的 memo 语义）。
+type countingAuthSvc struct {
+	perms []string
+	calls int
+}
+
+func (s *countingAuthSvc) GetUserPermissions(context.Context, uint64) ([]string, error) {
+	s.calls++
+	return s.perms, nil
 }
 
 // blockingScopeAuthSvc 回源结果由 ctx 的 role 维度决定,并在返回前阻塞,

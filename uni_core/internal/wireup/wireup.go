@@ -462,6 +462,11 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 	// ref 与用户指令共用同一生成器（service.NewRequestID）：docker:cmd:<ref> 是同一
 	// 个键空间，两个计数器会重开撞号窗口。hostname 解析包装 deviceRepo.FindByID
 	//（读不到降级为空名，不毁掉订阅 —— 设备已删由 docker:hosts 集合清理兜底收敛）。
+	//
+	// WithPersistence：保留窗口的**副本**另走一条链落 Redis（每主机一个 ZSET，双限
+	// 与内存侧同源），Hydrate 在启动期把它读回内存 —— core 重启（=发布）后活动流的
+	// 历史页立刻还有数据。写入不落热路径（帧投递侧只做非阻塞入队，满则丢副本），
+	// Redis 不可用时实时流与内存历史照常。装配点与用法见 dockerevents/history.go。
 	dockerEventsMgr := dockerevents.NewManager(dockerevents.Options{}, agentHub,
 		dockerCmdStore, dockerStore,
 		func(ctx context.Context, deviceID uint64) string {
@@ -474,7 +479,13 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 			_, ok := agentHub.Get(deviceID)
 			return ok
 		}).
-		WithIDGen(service.NewRequestID)
+		WithIDGen(service.NewRequestID).
+		WithPersistence(redis)
+	// 启动即水合（同步一次读，锁外）：必须在 Run 之前 —— 对账循环一起来就会开始
+	// 订阅并记新事件，水合晚一步会与「新事件已经进窗口」混在一起（虽然靠 seq 重编号
+	// 也不会错，但让「历史在前、实时在后」在时间线上天然有序更省解释）。失败只记
+	// 日志（Redis 抖动不阻断启动），枚举源是 docker:hosts。
+	dockerEventsMgr.Hydrate(context.Background())
 	// 结果出口装回入站面（agent_ingest 的 docker:events 分支把 result 交还给管理器认领）。
 	agentIngestSvc.WithDockerEvents(dockerEventsMgr)
 
@@ -767,6 +778,9 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 	// 与 cmd sweep 同一形状（worker 自己的 goroutine + stop 通道 + 有界收尾）：
 	// 管理器的 Run 内部用「下一次该做什么」的最近时刻自定时（周期对账、退避到点、
 	// 结果窗口到期三个节拍合用一个计时器），stop 只是取消 ctx —— 循环立即收手。
+	// 装配了留存时，Run 还会等落盘协程把队列残余写完再返回（给出「重启前最后一批
+	// 事件已经落 Redis」的保证，上限 persistDrainTimeout）：done 通道因此不只是
+	// 「循环停了」，也是「尾巴写完了」。
 	dockerEventsStop := make(chan struct{})
 	dockerEventsDone := make(chan struct{})
 	go func() {

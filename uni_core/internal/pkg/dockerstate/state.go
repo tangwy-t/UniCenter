@@ -8,6 +8,9 @@ package dockerstate
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"slices"
 	"strconv"
 	"time"
 
@@ -94,6 +97,106 @@ func (s *Store) Get(ctx context.Context, deviceID uint64) (*Envelope, error) {
 		return nil, err
 	}
 	return &env, nil
+}
+
+// MGetError 是批量读的**失败名单**（设备 id → 那台读不到的原因）。
+//
+// 为什么把「失败的是谁」当成一等返回值：批量读把 N 次调用收成一次往返之后，
+// 「这台读不到」与「这台从未上报」在结果 map 上都是缺席 —— 而这两句话在页面上是两个
+// 不同结论（「读取资源快照失败」 vs 「尚未上报」）。少了这份名单，100 台里坏掉的那一台
+// 会被静默降级成「零容器零镜像的正常主机」，正是本模块一直在挡的那种失败形态。
+type MGetError struct {
+	Failed map[uint64]error
+}
+
+// Error 只说「几台、头一台是谁」：把全部 id 拼进文案，在 Redis 整体不可达时会变成一条
+// 100 个数字的长串（排障的人不会读它）；逐台的原因由调用方按台取用（Unwrap 给的是同一批）。
+func (e *MGetError) Error() string {
+	ids := e.sortedIDs()
+	if len(ids) == 0 {
+		return "批量读取快照失败"
+	}
+	return fmt.Sprintf("批量读取快照失败: %d 台(首个 deviceId=%d)", len(ids), ids[0])
+}
+
+// Unwrap 摊平逐台原因（Go 1.20+ 的多错误解包）：errors.Is/As 能穿透到原始错误
+// （连接错误、反序列化错误），打印出来也不丢原因。
+//
+// 顺序是确定的（device id 升序）——否则「首条原因」会随 map 迭代次序抖动。
+func (e *MGetError) Unwrap() []error {
+	ids := e.sortedIDs()
+	out := make([]error, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, e.Failed[id])
+	}
+	return out
+}
+
+// sortedIDs 返回失败设备的 id 升序（报错文案与解包顺序都要确定）。
+func (e *MGetError) sortedIDs() []uint64 {
+	ids := make([]uint64, 0, len(e.Failed))
+	for id := range e.Failed {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	return ids
+}
+
+// MGet 批量读快照：一次 pipeline 把「N 台 = N 次往返」压成一次往返（主机枚举的 N+1 闸）。
+//
+// 逐台结论与逐台调用 Get **一一对应**，只是并成了一批：
+//   - 读到了 → map[id] = 信封；
+//   - 键不存在（从未上报）→ id 既不在 map、也不在失败名单里：不是错误
+//     （与 Get 的 (nil, nil) 是同一句话）；
+//   - 读失败（键值损坏 / 该条命令报错；整批不可执行时每台都是读失败）→ id 缺席于 map，
+//     但**在失败名单里**（返回的 *MGetError）。成功的那 99 台照常返回 —— 一批里坏一台
+//     不该让另外 99 台看不见，而「坏的是谁」必须说得出（见 MGetError）。
+//
+// 为什么是 pipeline 而不是 Redis 的 MGET：MGET 是一条命令、一个（整体的）错误，
+// 拿不到「哪一台读不出来」；pipeline 逐条给结果与错误，与上面那三种逐台结论一一对应。
+func (s *Store) MGet(ctx context.Context, ids []uint64) (map[uint64]*Envelope, error) {
+	out := make(map[uint64]*Envelope, len(ids))
+	if len(ids) == 0 {
+		return out, nil // 无键可读：不发一条空 pipeline（一次纯浪费的往返）
+	}
+	cmds := make([]*goredis.StringCmd, len(ids))
+	pipe := s.rdb.Pipeline()
+	for i, id := range ids {
+		cmds[i] = pipe.Get(ctx, StateKey(id))
+	}
+	// Exec 的返回值**不看**：它给的是「第一条错误」，而键不存在（最常见的一种）也是错误
+	// （redis.Nil）。逐条裁决由各 cmd 自己给出 —— 整批不可执行时（连接断开 / ctx 取消）
+	// 连接错误会被逐条设到每个 cmd 上，于是每台都如实落进失败名单。
+	_, _ = pipe.Exec(ctx)
+
+	var failed map[uint64]error
+	fail := func(id uint64, err error) {
+		if failed == nil {
+			failed = make(map[uint64]error, len(ids))
+		}
+		failed[id] = err
+	}
+	for i, id := range ids {
+		b, err := cmds[i].Bytes()
+		if err != nil {
+			if errors.Is(err, goredis.Nil) {
+				continue // 从未上报：既不是数据、也不是错误
+			}
+			fail(id, err)
+			continue
+		}
+		var env Envelope
+		if err := json.Unmarshal(b, &env); err != nil {
+			// 键在、值读不出来：与 Get 同一句话（读失败），不是「从未上报」。
+			fail(id, err)
+			continue
+		}
+		out[id] = &env
+	}
+	if failed != nil {
+		return out, &MGetError{Failed: failed}
+	}
+	return out, nil
 }
 
 // Hosts 返回全部上报过快照的设备 id（升序）。

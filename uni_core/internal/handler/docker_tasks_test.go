@@ -75,6 +75,9 @@ func TestTasksHandlerEnvelope(t *testing.T) {
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/docker/tasks", nil)
+	// 登录态（真实请求里由 auth 中间件写入）：handler 现在要取调用者权限集
+	//（任务面的参数原文按条目的权限码逐条判定），缺它即 401。
+	c.Set(middleware.CtxClaims, testClaims(1))
 	env.handler.Tasks(c)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (%s)", w.Code, w.Body.String())
@@ -110,6 +113,7 @@ func TestTasksHandlerPaging(t *testing.T) {
 		w := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(w)
 		c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/docker/tasks"+query, nil)
+		c.Set(middleware.CtxClaims, testClaims(1))
 		env.handler.Tasks(c)
 		return w.Code, w.Body.String()
 	}
@@ -156,12 +160,56 @@ func TestTasksHandlerBadQuery(t *testing.T) {
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/docker/tasks?status=finished", nil)
+	c.Set(middleware.CtxClaims, testClaims(1))
 	env.handler.Tasks(c)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("非法 status 必须 400, got %d", w.Code)
 	}
 	if !strings.Contains(w.Body.String(), "status 仅支持 pending 或 done") {
 		t.Fatalf("必须给结论句: %s", w.Body.String())
+	}
+}
+
+// TestTasksHandlerOptionsGate 钉住端到端接线（方案 D）：handler 经
+// middleware.PermissionGuard.CallerPerms 取一次调用者权限集 → 任务面逐条判定 →
+// 响应里 options 在场或**缺席**（不持码时逐字不泄漏）。
+func TestTasksHandlerOptionsGate(t *testing.T) {
+	const secret = "HANDLER-SECRET-DO-NOT-LEAK-7"
+	call := func(callerPerms []string) string {
+		env := tasksTestEnv(t, callerPerms)
+		rec := &dockerstate.CmdRecord{Ref: "r1", DeviceID: 7, UserID: 1,
+			Action: agentproto.DockerActionComposeUp, Target: "web",
+			Perm: permission.PermDockerManage, Options: `{"target":"web","content":"` + secret + `"}`,
+			CreatedAt: time.Now().UnixMilli()}
+		if err := env.cmds.Create(context.Background(), rec, 30*time.Second); err != nil {
+			t.Fatal(err)
+		}
+		if err := env.cmds.Complete(context.Background(), rec, &agentproto.DockerCmdResult{Ref: "r1", OK: true}); err != nil {
+			t.Fatal(err)
+		}
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/docker/tasks", nil)
+		c.Set(middleware.CtxClaims, testClaims(1))
+		env.handler.Tasks(c)
+		if w.Code != http.StatusOK {
+			t.Fatalf("任务列表必须 200, got %d (%s)", w.Code, w.Body.String())
+		}
+		return w.Body.String()
+	}
+
+	if body := call([]string{permission.PermDockerManage}); !strings.Contains(body, secret) {
+		t.Fatalf("持码调用者必须拿到参数原文: %s", body)
+	}
+	if body := call([]string{"admin"}); !strings.Contains(body, secret) {
+		t.Fatalf("admin 必须通配拿到参数原文: %s", body)
+	}
+	body := call([]string{permission.PermDockerList})
+	if strings.Contains(body, secret) {
+		t.Fatalf("不持码时响应体不得出现参数原文: %s", body)
+	}
+	if strings.Contains(body, `"options"`) {
+		t.Fatalf("不持码时字段必须缺席（不是空串/掩码）: %s", body)
 	}
 }
 

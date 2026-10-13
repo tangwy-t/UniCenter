@@ -93,8 +93,13 @@ func TestDockerSearchCrossTypeAndCaseInsensitive(t *testing.T) {
 	}
 }
 
-// TestDockerSearchHintsAndAttribution 逐类型断言条目形状：归属三列（hostId/hostname/group）
-// 与每类各自的 hint（容器=镜像名、镜像=镜像 ID、卷/网络=驱动、项目=服务数）。
+// TestDockerSearchHintsAndAttribution 逐类型断言条目形状：下钻标识 id、归属三列
+// （hostId/hostname/group）与每类各自的 hint（容器=镜像名、镜像=镜像 ID、
+// 卷/网络=驱动、项目=服务数）。
+//
+// id 的取值口径以**既有详情页路由能吃下的参数**为准（前端下钻靠它）：容器=容器 ID
+// （`/docker/containers/:id`）、镜像=镜像 ID/摘要（`/docker/image-detail/:id`）、
+// 卷/网络=名称（列表页吃 `?keyword=`）、项目=项目名（`/docker/projects/:name`）。
 func TestDockerSearchHintsAndAttribution(t *testing.T) {
 	f := newResFixture(t)
 	f.saveState(t, 7, &agentproto.DockerState{
@@ -109,7 +114,7 @@ func TestDockerSearchHintsAndAttribution(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 主机 7 的平台级分组 = prod（见 newDockerOverviewSvc 夹具）——归属三列带出。
-	check := func(kind, wantName, wantHint string) {
+	check := func(kind, wantName, wantID, wantHint string) {
 		t.Helper()
 		g := searchGroup(t, resp, kind)
 		if g.Total != 1 || len(g.Items) != 1 {
@@ -119,15 +124,18 @@ func TestDockerSearchHintsAndAttribution(t *testing.T) {
 		if it.Name != wantName || it.Hint != wantHint {
 			t.Fatalf("%s 条目 name/hint 不符: got %q/%q want %q/%q", kind, it.Name, it.Hint, wantName, wantHint)
 		}
+		if it.ID != wantID {
+			t.Fatalf("%s 条目 id 不符（下钻标识）: got %q want %q", kind, it.ID, wantID)
+		}
 		if it.HostID != 7 || it.Hostname != "uni-105" || it.Group != "prod" {
 			t.Fatalf("%s 条目归属三列不符: %+v", kind, it)
 		}
 	}
-	check("containers", "app", "app:1.0")    // hint = 镜像名
-	check("images", "app:1.0", "sha256:abc") // name = 首个 tag, hint = 镜像 ID
-	check("volumes", "app-vol", "local")     // hint = 驱动
-	check("networks", "app-net", "bridge")   // hint = 驱动
-	check("projects", "app-stack", "3")      // hint = 服务数
+	check("containers", "app", "c1", "app:1.0")            // id = 容器 ID, hint = 镜像名
+	check("images", "app:1.0", "sha256:abc", "sha256:abc") // id = hint = 镜像 ID, name = 首个 tag
+	check("volumes", "app-vol", "app-vol", "local")        // id = 卷名, hint = 驱动
+	check("networks", "app-net", "app-net", "bridge")      // id = 网络名, hint = 驱动
+	check("projects", "app-stack", "app-stack", "3")       // id = 项目名, hint = 服务数
 }
 
 // TestDockerSearchGroupLimitAndTruncated 每组限量与 truncated：

@@ -42,6 +42,16 @@ const (
 	// 键名落在 spec §4.3.2 的清单之外，与 CmdDeadlineKey 一样要写清理由；运维排障
 	// 时按 CmdKeyPrefix 族定位。
 	RecentCmdKey = "docker:cmd:recent"
+	// CmdOptionsMaxBytes 是 CmdRecord.Options 的单条上限（16 KiB，字节）。
+	//
+	// 为什么定上限：`docker:cmd` 的 argv 有协议上限（32 项 × 256B ≈ 8 KiB），
+	// 但 compose 的 YAML 正文（Options.Content）没有 —— 一份大 YAML 能让单条记录
+	// 涨到任意大，而它还要进 Redis 记录、落历史表的 text 列。16 KiB 是「够装下
+	// 任何单个动作的参数」与「单条记录体积有界」之间的落点。
+	//
+	// 超限时**截断并显式标注**（尾标，见 middleware.TruncateString）：半截 JSON 不是
+	// 合法 JSON，读侧据尾标判「不完整」——「不要把半截当完整」比「永远不解开」更可取。
+	CmdOptionsMaxBytes = 16 * 1024
 	// RecentCmdKeep 是最近索引的容量上限（保留最新的 N 条，超出者随每次 Create 裁剪）。
 	//
 	// 取 300 而不是端点的 N=100：终态记录 TTL 仅 10 分钟（pending 兜底 2 小时），
@@ -62,6 +72,19 @@ type CmdRecord struct {
 	// Perm 是受理时校验的权限码：轮询时按它再校验一次（同码同人才能看结果）。
 	Perm   string `json:"perm"`
 	Status string `json:"status"`
+	// Options 是**受理时**下发的动作参数原文（整份 DockerCmdOptions 的 JSON 文本，
+	// 在受理处一次性定稿，不随轮询/结果变化）。
+	//
+	// 统一口径：exec 的 argv、build 的参数、compose 的 YAML 正文都在这一份里，
+	// 不单给 exec 开口子。**受任务自身 Perm 门控制**：读面仅当调用者持有 admin 或
+	// 本记录的 Perm 时才把它带进响应（见 service 侧的 taskOptionsVisible）。
+	//
+	// 体积有上限（CmdOptionsMaxBytes），超限时尾部带 "...(truncated)" 标记 ——
+	// 读者据标记识别「这不是完整原文」，不要把半截当完整。
+	//
+	// **绝不进日志**：参数原文可能带凭据（仓库密码只在受理瞬间另行注入、不进本字段，
+	// 但 compose 正文/argv 里可能有任何东西）。
+	Options string `json:"options,omitempty"`
 	// Confirm 是受理时的确认值（审计与排障用；不随轮询响应回显）。
 	Confirm    string `json:"confirm,omitempty"`
 	CreatedAt  int64  `json:"created_at"`

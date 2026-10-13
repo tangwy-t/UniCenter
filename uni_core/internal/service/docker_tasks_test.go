@@ -102,7 +102,7 @@ func TestTasksCrossHostOrderAndPaging(t *testing.T) {
 	seedTask(t, cs, taskRec("r3", 7, 1, agentproto.DockerActionComposeUp, "web", 3000), true, "")
 	seedTask(t, cs, taskRec("r4", 9, 2, agentproto.DockerActionImageRemove, "alpine", 3000), false, "被保护，拒绝删除")
 
-	resp, err := svc.Tasks(context.Background(), &request.DockerTasksQuery{})
+	resp, err := svc.Tasks(context.Background(), &request.DockerTasksQuery{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func TestTasksCrossHostOrderAndPaging(t *testing.T) {
 	for i := 0; i < 120; i++ {
 		seedTask(t, cs, taskRec(fmt.Sprintf("cap%03d", i), 7, 1, agentproto.DockerActionImagePull, "x", int64(5000+i)), true, "")
 	}
-	resp, err = svc.Tasks(context.Background(), &request.DockerTasksQuery{})
+	resp, err = svc.Tasks(context.Background(), &request.DockerTasksQuery{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +143,7 @@ func TestTasksCrossHostOrderAndPaging(t *testing.T) {
 			resp.Items[0].CreatedAt, resp.Items[9].CreatedAt)
 	}
 	// 页大小 100（绑定层上限）：第 1 页 100 条、第 2 页 24 条，尾巴上仍是最旧的 r1。
-	big, err := svc.Tasks(context.Background(), &request.DockerTasksQuery{PageRequest: pageReq(1, 100)})
+	big, err := svc.Tasks(context.Background(), &request.DockerTasksQuery{PageRequest: pageReq(1, 100)}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func TestTasksCrossHostOrderAndPaging(t *testing.T) {
 		t.Fatalf("页大小 100 的第 1 页: items=%d total=%d head=%d",
 			len(big.Items), big.Total, big.Items[0].CreatedAt)
 	}
-	tail, err := svc.Tasks(context.Background(), &request.DockerTasksQuery{PageRequest: pageReq(2, 100)})
+	tail, err := svc.Tasks(context.Background(), &request.DockerTasksQuery{PageRequest: pageReq(2, 100)}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +190,7 @@ func TestTasksFilters(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			resp, err := svc.Tasks(context.Background(), &tc.q)
+			resp, err := svc.Tasks(context.Background(), &tc.q, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -207,7 +207,7 @@ func TestTasksFilters(t *testing.T) {
 
 	// pending 条目的结论句为空、终态投影照实；取消语义由 failed + 结论句承载
 	// （a2 在 9 号机 —— 必须跨主机查 action 才拿得到它）。
-	resp, _ := svc.Tasks(context.Background(), &request.DockerTasksQuery{Action: agentproto.DockerActionImagePull})
+	resp, _ := svc.Tasks(context.Background(), &request.DockerTasksQuery{Action: agentproto.DockerActionImagePull}, nil)
 	if resp.Items[0].Ref != "a4" || resp.Items[0].Summary != "" || resp.Items[0].Status != "pending" {
 		t.Fatalf("pending 条目: status=pending、summary 空, got %+v", resp.Items[0])
 	}
@@ -221,14 +221,14 @@ func TestTasksInvalidFilters(t *testing.T) {
 	svc, _, _, _ := newTaskSvc(t, taskDeviceLookup{}, taskUserLookup{})
 	ctx := context.Background()
 
-	if _, err := svc.Tasks(ctx, &request.DockerTasksQuery{Status: "finished"}); err == nil {
+	if _, err := svc.Tasks(ctx, &request.DockerTasksQuery{Status: "finished"}, nil); err == nil {
 		t.Fatal("status=finished 必须 400（silent filter 会让用户以为筛了没生效）")
 	}
-	if _, err := svc.Tasks(ctx, &request.DockerTasksQuery{Action: "not:an:action"}); err == nil {
+	if _, err := svc.Tasks(ctx, &request.DockerTasksQuery{Action: "not:an:action"}, nil); err == nil {
 		t.Fatal("未登记 action 必须 400（动作码唯一事实源是策略表）")
 	}
 	// docker:events 不在策略表（也不是用户任务），过滤它同样 400
-	if _, err := svc.Tasks(ctx, &request.DockerTasksQuery{Action: agentproto.DockerActionEvents}); err == nil {
+	if _, err := svc.Tasks(ctx, &request.DockerTasksQuery{Action: agentproto.DockerActionEvents}, nil); err == nil {
 		t.Fatal("docker:events 不在策略表，必须 400")
 	}
 }
@@ -250,7 +250,7 @@ func TestTasksSkipsSystemAndExpired(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp, err := svc.Tasks(ctx, &request.DockerTasksQuery{})
+	resp, err := svc.Tasks(ctx, &request.DockerTasksQuery{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,7 +273,7 @@ func TestTasksLookupDegrade(t *testing.T) {
 		taskUserLookup{err: repository.ErrNotFound})
 	seedTask(t, cs, taskRec("d1", 7, 1, agentproto.DockerActionImagePull, "alpine", 1000), true, "")
 
-	resp, err := svc.Tasks(context.Background(), &request.DockerTasksQuery{})
+	resp, err := svc.Tasks(context.Background(), &request.DockerTasksQuery{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,17 +298,17 @@ func TestTasksTimeoutStatusReported(t *testing.T) {
 	if err := cs.Timeout(context.Background(), rec); err != nil {
 		t.Fatal(err)
 	}
-	resp, err := svc.Tasks(context.Background(), &request.DockerTasksQuery{})
+	resp, err := svc.Tasks(context.Background(), &request.DockerTasksQuery{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(resp.Items) != 1 || resp.Items[0].Status != dockerstate.StatusTimeout || resp.Items[0].Summary != "指令超时未完成" {
 		t.Fatalf("timeout 必须照实（done 过滤会命中它）: got %+v", resp.Items)
 	}
-	if got, _ := svc.Tasks(context.Background(), &request.DockerTasksQuery{Status: "pending"}); len(got.Items) != 0 {
+	if got, _ := svc.Tasks(context.Background(), &request.DockerTasksQuery{Status: "pending"}, nil); len(got.Items) != 0 {
 		t.Fatalf("timeout 是终态：pending 过滤不得命中, got %+v", got.Items)
 	}
-	if got, _ := svc.Tasks(context.Background(), &request.DockerTasksQuery{Status: "done"}); len(got.Items) != 1 {
+	if got, _ := svc.Tasks(context.Background(), &request.DockerTasksQuery{Status: "done"}, nil); len(got.Items) != 1 {
 		t.Fatalf("timeout 是终态：done 过滤必须命中, got %+v", got.Items)
 	}
 }
@@ -387,7 +387,7 @@ func TestTasksHidesReadOnlyActions(t *testing.T) {
 		created++
 	}
 
-	resp, err := svc.Tasks(context.Background(), &request.DockerTasksQuery{})
+	resp, err := svc.Tasks(context.Background(), &request.DockerTasksQuery{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +402,7 @@ func TestTasksHidesReadOnlyActions(t *testing.T) {
 	}
 	// action 过滤对读面同样收口：显式查只读动作得空列表，而不是把它漏出来。
 	for _, a := range readOnly {
-		got, err := svc.Tasks(context.Background(), &request.DockerTasksQuery{Action: a})
+		got, err := svc.Tasks(context.Background(), &request.DockerTasksQuery{Action: a}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

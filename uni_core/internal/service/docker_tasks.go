@@ -8,6 +8,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/tangwy-t/UniCenter/uni_core/internal/middleware"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/request"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/response"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/entity"
@@ -135,7 +136,13 @@ type taskRow struct {
 //     两边不会出现「实时看不见、历史翻出来」的分裂；
 //   - 记录已过期（TTL 到）→ 跳过并顺手剔除报名（索引是加速器，判定以记录为准）；
 //   - 单条读失败（键损坏/Redis 抖动）→ 告警并跳过：少一行好过整页 500。
-func (s *DockerTaskService) Tasks(ctx context.Context, q *request.DockerTasksQuery) (*response.DockerTaskListResp, error) {
+//
+// callerPerms 是**调用者的权限集**（由 handler 经 middleware.PermissionGuard.CallerPerms
+// 取一次后透传）：它只作用于一件事 —— 决定每条条目的 Options（参数原文）**带不带**。
+// 逐条目比对（一笔任务的 Perm 门就是它受理时的权限码），故同一页里可能出现「有的条目
+// 带原文、有的不带」：那是如实的，不是 bug。传 nil/空集 = 没有任何原文可见性（安全默认：
+// 门缺省即关闭）。
+func (s *DockerTaskService) Tasks(ctx context.Context, q *request.DockerTasksQuery, callerPerms []string) (*response.DockerTaskListResp, error) {
 	if q == nil {
 		q = &request.DockerTasksQuery{}
 	}
@@ -155,7 +162,7 @@ func (s *DockerTaskService) Tasks(ctx context.Context, q *request.DockerTasksQue
 	}
 	offset := (page - 1) * pageSize
 
-	live, err := s.collectLive(ctx, q)
+	live, err := s.collectLive(ctx, q, callerPerms)
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +187,7 @@ func (s *DockerTaskService) Tasks(ctx context.Context, q *request.DockerTasksQue
 			return nil, apperror.Internal("读取任务历史失败", err)
 		}
 		total = int64(len(live)) + histTotal - overlap
-		rows = append(live, historyRows(hist, liveRefs)...)
+		rows = append(live, historyRows(hist, liveRefs, callerPerms)...)
 	}
 
 	// 排序在切片**之前**（实时 ∪ 历史是一个序列，分段各排会得到假的「前页」）。
@@ -214,7 +221,7 @@ func (s *DockerTaskService) Tasks(ctx context.Context, q *request.DockerTasksQue
 //
 // 窗口本身是枚举上界（RecentCmdKeep 条最新受理）：实时面的存在形态就是一个
 // 有界窗口，它的边界不构成「列表不完整」的承诺 —— 终态条目在历史面兜底。
-func (s *DockerTaskService) collectLive(ctx context.Context, q *request.DockerTasksQuery) ([]taskRow, error) {
+func (s *DockerTaskService) collectLive(ctx context.Context, q *request.DockerTasksQuery, callerPerms []string) ([]taskRow, error) {
 	refs, err := s.cmds.RecentRefs(ctx, dockerstate.RecentCmdKeep)
 	if err != nil {
 		return nil, apperror.Internal("读取任务列表失败", err)
@@ -263,6 +270,10 @@ func (s *DockerTaskService) collectLive(ctx context.Context, q *request.DockerTa
 				CreatedAt: rec.CreatedAt,
 				Status:    rec.Status,
 				Summary:   terminalSummary(rec),
+				// 参数原文：只有持 admin 或本记录的 Perm 的调用者才拿得到（否则
+				// 字段缺席）。门的钥匙是**受理时校验过的那个权限码**（rec.Perm）——
+				// 「能看谁下了什么操作」与「能下同一条操作」同一把尺子。
+				Options: optionsOrEmpty(callerPerms, rec.Perm, rec.Options),
 			},
 			hostID: rec.DeviceID,
 			userID: rec.UserID,
@@ -273,7 +284,7 @@ func (s *DockerTaskService) collectLive(ctx context.Context, q *request.DockerTa
 
 // historyRows 把历史行折成合并序列的行（跳过与实时面重叠的 ref —— **实时胜**：
 // 活的记录可能刚被迟到的事实覆盖过，历史行最多与它等价，绝不更可信）。
-func historyRows(rows []entity.DockerTaskHistory, liveRefs []string) []taskRow {
+func historyRows(rows []entity.DockerTaskHistory, liveRefs, callerPerms []string) []taskRow {
 	out := make([]taskRow, 0, len(rows))
 	for i := range rows {
 		row := &rows[i]
@@ -289,12 +300,37 @@ func historyRows(rows []entity.DockerTaskHistory, liveRefs []string) []taskRow {
 				CreatedAt: row.AcceptedAt,
 				Status:    row.Status,
 				Summary:   row.Summary,
+				// 与实时行**同一把钥匙、同一句判定**：历史行存了自己的 perm 列
+				//（受理时的权限码），门在这里与实时面逐字同源 —— 两边对「谁看得见
+				// 参数原文」不可能给出不同答案（与合并读面「两边说同一句话」同一纪律）。
+				Options: optionsOrEmpty(callerPerms, row.Perm, row.Options),
 			},
 			hostID: row.DeviceID,
 			userID: row.UserID,
 		})
 	}
 	return out
+}
+
+// taskOptionsVisible 判定调用者是否有资格看一笔任务的参数原文。
+//
+// 权限门 = **这笔任务自己的权限码**（受理时校验过的那个码）：能下达同一条操作的人，
+// 才看得到这条操作下发了什么参数。admin 通配（与 middleware 的 Permission/Ensure
+// 同源语义，判定只有一处实现：middleware.HasPerm）。
+//
+// 空权限码（历史遗留行/未设 Perm 的记录）**不匹配任何调用者**（含 admin 之外的普通
+// 调用者）—— 除了 admin 通配，未知的门就是关着的：这比「门不知道就敞开」安全。
+func taskOptionsVisible(callerPerms []string, taskPerm string) bool {
+	return middleware.HasPerm(callerPerms, taskPerm)
+}
+
+// optionsOrEmpty 是参数原文的唯一出口：有资格则给原文，无资格则给空串
+// （DTO 侧 omitempty → 字段**缺席**，不是空串 —— 缺席即「你没有看它的资格」）。
+func optionsOrEmpty(callerPerms []string, taskPerm, options string) string {
+	if options != "" && taskOptionsVisible(callerPerms, taskPerm) {
+		return options
+	}
+	return ""
 }
 
 // dockerTaskReadOnly 判定一条动作是否属于「读面」：任务列表对 inspect 档收口。

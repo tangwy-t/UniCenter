@@ -41,6 +41,11 @@ func newDockerOverviewSvc(t *testing.T, store *dockerstate.Store, now time.Time)
 			"sys.docker.snapshotInterval": "30",
 			"sys.agent.offlineThreshold":  "90"}}, nil)
 	svc.now = func() time.Time { return now }
+	// 本夹具的用例会「改状态 → 再调一次 Overview」并据此断言重算（例如磁盘求和补一台主机）：
+	// 总览的进程内短缓存会把第二次调用变成缓存命中。缓存语义（TTL / singleflight /
+	// 与逐次重算逐字段等价）由 docker_overview_cache_test.go 专门验，这里关掉它只为
+	// 让「聚合口径」的断言不掺缓存这个变量。
+	svc.WithOverviewCache(0)
 	return svc
 }
 

@@ -30,11 +30,15 @@ import (
 
 // PermChecker 是处理器内做一次权限校验的能力面（由 middleware.PermissionGuard 实现）。
 //
-// 声明成接口而直接持有 *middleware.PermissionGuard：handler 只用到 Ensure 这一个方法，
+// 声明成接口而直接持有 *middleware.PermissionGuard：handler 只用到这两个方法，
 // 窄接口让测试能用「按权限列表判定」的替身构造出一条**不依赖 session store / 配置 /
 // singleflight** 的判定路径（那些依赖与「403 还是 202」这个结论无关）。
+//
+// CallerPerms 是「读」的口（任务面用它逐条判定参数原文可见性），Ensure 是「判」的口
+// （指令面按 action 校验）。两者与路由级 Permission 同源：同一套缓存/回源/admin 通配语义。
 type PermChecker interface {
 	Ensure(c *gin.Context, requiredPerm string) bool
+	CallerPerms(c *gin.Context) ([]string, error)
 }
 
 // DockerHandler 是 Docker 管理的 HTTP 入口。
@@ -491,7 +495,7 @@ func (h *DockerHandler) StatsHistory(c *gin.Context) {
 // 实际结局结算（完成即成功，迟到的 cancel 是 no-op），本端点只如实投影结果。
 //
 // @Summary      任务列表
-// @Description  任务中心的一页：实时（CmdStore，含在途）+ 历史（持久层）按 ref 合并去重（实时胜）、受理时刻降序；hostId 限定单主机、status 过滤 pending/done、action 过滤动作码；page/pageSize 分页（缺省 1/10，页大小上限 100），total 为合并列表全量；条目含 ref/主机/动作/目标/发起人用户名/受理时刻/终态（pending/succeeded/failed/timeout）/终态结论句；进度族任务（image:pull/build/push）前端凭 action 复用 /cmds/:ref/pull|build|push 打开进度流（观看）；取消走 POST /cmds/:ref/cancel
+// @Description  任务中心的一页：实时（CmdStore，含在途）+ 历史（持久层）按 ref 合并去重（实时胜）、受理时刻降序；hostId 限定单主机、status 过滤 pending/done、action 过滤动作码；page/pageSize 分页（缺省 1/10，页大小上限 100），total 为合并列表全量；条目含 ref/主机/动作/目标/发起人用户名/受理时刻/终态（pending/succeeded/failed/timeout）/终态结论句/options（受理时的动作参数原文，仅当调用者持 admin 或该任务自身的权限码时出现——否则字段缺席，超 16 KiB 已截断并带尾标）；进度族任务（image:pull/build/push）前端凭 action 复用 /cmds/:ref/pull|build|push 打开进度流（观看）；取消走 POST /cmds/:ref/cancel
 // @Tags         Docker 管理
 // @Produce      json
 // @Param        hostId    query  uint64  false  "限定单主机(缺省=跨主机)"
@@ -517,7 +521,16 @@ func (h *DockerHandler) Tasks(c *gin.Context) {
 		app.Error(c, apperror.BadRequest("请求参数不合法"))
 		return
 	}
-	resp, err := h.tasks.Tasks(c.Request.Context(), &q)
+	// 调用者权限集：本条路由的静态 perm（docker:list）之外，任务面还要**逐条**判定
+	// 每条条目的参数原文带不带（门的钥匙是那笔任务自己的权限码）。这里的失败与会话
+	// 不可判定同义（路由级 Permission 已先跑过一遍，正常情况下不会走到），原样折成
+	// 响应，不在这里另造话术。
+	perms, err := h.guard.CallerPerms(c)
+	if err != nil {
+		app.Error(c, err)
+		return
+	}
+	resp, err := h.tasks.Tasks(c.Request.Context(), &q, perms)
 	if err != nil {
 		app.Error(c, err)
 		return
