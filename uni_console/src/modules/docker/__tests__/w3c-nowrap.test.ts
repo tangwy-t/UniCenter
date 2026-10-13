@@ -28,7 +28,7 @@ import {
 
 const DOCKER = join(process.cwd(), 'src/modules/docker')
 const FILES = [
-  'components/workload-table.vue',
+  'components/workload-columns.ts',
   'views/images.vue',
   'views/volumes.vue',
   'views/networks.vue',
@@ -206,16 +206,16 @@ describe('Wave 3c 单行不变量：每个数据列都带 showOverflowTooltip（
   })
 })
 
-describe('Wave 3c 纪律注释与实现相符（workload-table.vue）', () => {
+describe('Wave 3c 纪律注释与实现相符（workload-columns.ts：列集合的家）', () => {
   it('「行内容一律单行」这条纪律注释仍在，且指向本守卫', () => {
-    const src = readFileSync(join(DOCKER, 'components/workload-table.vue'), 'utf8')
+    const src = readFileSync(join(DOCKER, 'components/workload-columns.ts'), 'utf8')
     expect(src).toContain('行内容一律**单行**')
     expect(src).toContain('showOverflowTooltip')
     expect(src).toContain('w3c-nowrap.test.ts')
   })
 
   it('镜像/端口列的中段省略同时挂 title 全文（可见那截以外的信息不丢）', () => {
-    const src = readFileSync(join(DOCKER, 'components/workload-table.vue'), 'utf8')
+    const src = readFileSync(join(DOCKER, 'components/workload-columns.ts'), 'utf8')
     // 两列都写成 h('…', { … title: full }, midEllipsis(full, …)) —— 全文由 title 承载。
     expect((src.match(/title: full/g) ?? []).length).toBeGreaterThanOrEqual(2)
   })

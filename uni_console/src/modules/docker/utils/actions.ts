@@ -351,11 +351,13 @@ export const DOCKER_ACTION_REGISTRY: readonly DockerActionEntry[] = [
     needsTarget: true,
     confirm: 'confirm',
     guarded: true,
-    conclusion: '卷里的数据会一并丢失，此操作不可恢复。'
+    conclusion: '数据卷里的数据会一并丢失，此操作不可恢复。'
   },
   {
     action: 'volume:prune',
-    label: '清理未使用卷',
+    // 术语统一：资源名一律用侧栏的「数据卷」（不写「卷」）—— 工具条/确认弹窗/菜单
+    // 用的是这条 label，术语漂移由页面与注册表一起改。
+    label: '清理未使用数据卷',
     icon: 'ri:brush-line',
     perm: PermDockerDelete,
     danger: 'destructive',

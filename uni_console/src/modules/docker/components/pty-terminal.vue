@@ -345,12 +345,23 @@
 
   .pty-terminal {
     position: relative;
-    border-radius: 6px;
+    // 吃满宿主（容器详情页 tab 面板）的剩余高度：终端是「占满一屏的交互面」，
+    // 固定 420px 在 2560 高的大屏上只占面板的一半多（实测面板 515 里空 38%）。
+    // 父级没有确定高度时（自然流页面 / 窄屏）flex 不参与分配，退回下面的
+    // height 兜底口径 —— 两种形态都不用额外开关。
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-height: 0;
     overflow: hidden;
+    border-radius: 6px;
 
     &__screen {
       box-sizing: border-box;
+      // flex:1 吃剩余高度；height 是「父级没有确定高度」时的兜底高度。
+      flex: 1 1 auto;
       height: 420px;
+      min-height: 0;
       padding: 8px;
       background: #101418;
     }

@@ -23,41 +23,41 @@
         <template #left>
           <div class="toolbar-left">
             <!-- 常驻动作（权限门控：不渲染 ≠ 禁用）。**主机来源分两类**（跨主机表
-                 没有「当前主机」）：无行目标的整体动作（拉取/构建/载入/清理）面向
-                 **主机筛选选定的那台**（没选且全场只有一台可管主机时就是它；否则
-                 禁用，禁用理由写进 title —— 不设常驻提示句）。仓库凭据（4c）与镜像
-                 写动作不同档（docker:config），不被 manage/delete 顺带挡掉。
-                 **统一中性色**（Wave 3a 去彩虹）：此前一次用满 5 种色相（theme/
-                 secondary/info/danger/warning），色相是装饰而非信息 —— 统一主色档，
+                 没有「当前主机」）：无行目标的整体动作（拉取/构建/载入/清理）一律
+                 **两段式** —— 第一屏选目标主机（主机筛选选定或全场只有一台时略过），
+                 选定后才是业务弹窗（确认档 / 进度对话框）。按钮不因「没先选主机」变灰：
+                 前置条件在流程第一屏回答。仓库凭据（4c）与镜像写动作不同档
+                 （docker:config），不被 manage/delete 顺带挡掉。
+                 **统一中性色**（Wave 3a 去彩虹）：色相是装饰而非信息 —— 统一主色档，
                  破坏性动作的危险语汇由确认弹窗承载（弹窗里仍是 danger 档）。 -->
             <ArtButtonTable
               v-if="canManage"
               type="add"
-              :disabled="hostActionDisabled"
+              :disabled="busy"
               :title="hostActionTitle('拉取镜像…')"
               @click="askPull"
             />
             <ArtButtonTable
               v-if="canManage"
               icon="ri:hammer-line"
-              iconClass="bg-theme/12 text-theme"
-              :disabled="hostActionDisabled"
+              :iconClass="hostIconClass"
+              :disabled="busy"
               :title="hostActionTitle('构建镜像…')"
               @click="askBuild"
             />
             <ArtButtonTable
               v-if="canManage"
               icon="ri:file-upload-line"
-              iconClass="bg-theme/12 text-theme"
-              :disabled="hostActionDisabled"
+              :iconClass="hostIconClass"
+              :disabled="busy"
               :title="hostActionTitle('载入镜像…')"
               @click="askLoad"
             />
             <ArtButtonTable
               v-if="canDelete"
               icon="ri:brush-line"
-              iconClass="bg-theme/12 text-theme"
-              :disabled="hostActionDisabled"
+              :iconClass="hostIconClass"
+              :disabled="busy"
               :title="hostActionTitle('清理悬空镜像…')"
               @click="openPrune"
             />
@@ -81,24 +81,26 @@
               @click="goDrift"
             />
 
-            <!-- 选中态动作：打标签/导出 tar 一次只作用于选中的那一行，恰选中一行时
-                 出现（未选中时无从指定目标，不占版面）；指令在途时禁用。 -->
-            <template v-if="canManage && singleSelected">
-              <ArtButtonTable
-                icon="ri:price-tag-3-line"
-                iconClass="bg-theme/12 text-theme"
-                :disabled="busy"
-                :title="selectedActionTitle('打标签…')"
-                @click="onTagSelected"
-              />
-              <ArtButtonTable
-                icon="ri:file-download-line"
-                iconClass="bg-theme/12 text-theme"
-                :disabled="busy"
-                :title="selectedActionTitle('导出 tar…')"
-                @click="onSaveSelected"
-              />
-            </template>
+            <!-- 选中态动作（打标签 / 导出 tar 一次只作用于**一行**）：恒在版面上，
+                 恰好选中一行且指令空闲时可点；其余时候变灰并说明理由 —— 不再
+                 「勾多了按钮无提示消失」（多选的语义由表下的批量栏承载：勾中即出现，
+                 给出批量删除 / 批量导出 tar）。 -->
+            <ArtButtonTable
+              v-if="canManage"
+              icon="ri:price-tag-3-line"
+              :iconClass="selectedIconClass"
+              :disabled="busy || !singleSelected"
+              :title="selectedActionTitle('打标签…')"
+              @click="onTagSelected"
+            />
+            <ArtButtonTable
+              v-if="canManage"
+              icon="ri:file-download-line"
+              :iconClass="selectedIconClass"
+              :disabled="busy || !singleSelected"
+              :title="selectedActionTitle('导出 tar…')"
+              @click="onSaveSelected"
+            />
 
             <!-- 硬数据文本：计数（total = 过滤后全量，翻页由分页器表达 —— 不再有
                  「列表显示前 N 条」那半句）+ 可见行合计容量 + 可回收（后端的主机级
@@ -156,6 +158,19 @@
           <ElButton size="small" @click="onReset">清除筛选</ElButton>
         </ElEmpty>
         <ElEmpty v-else class="docker-empty" description="还没有镜像" />
+
+        <!-- 批量栏（资源无关组件：本页给的是镜像动作集与行投影）——勾中即出现，
+             承载批量删除（逐字 DELETE 档，与容器页同强度）与批量导出 tar（逐行按
+             镜像引用命名）。吸底贴表卡底缘不与分页器相叠（错位量由栏自量）。 -->
+        <WorkloadBatchBar
+          v-if="showTable"
+          noun="镜像"
+          :selected="batchRows"
+          :actions="IMAGE_BATCH_ACTIONS"
+          :busy="busy"
+          :refresh="refreshSilent"
+          @busy-change="batchBusy = $event"
+        />
       </template>
     </ElCard>
 
@@ -163,7 +178,7 @@
          （输入档收集新引用）、导出 tar（输入档收集文件名 → alreadyExists 时就地切
          文件名档的覆盖确认）、载入镜像（输入档收集文件名）。
          形态、逐字期望值、输入档的校验与提示全部由组件按动作注册表推导；页面只传
-         事实与 options。清理的补充输入（是否连带清理未使用镜像）由本页作为插槽内容给出。 -->
+         事实与 options —— 目标主机不在本弹窗里（已由流程第一屏选定）。 -->
     <DockerActionConfirm
       v-model="confirmState.visible"
       :action="confirmState.action"
@@ -173,23 +188,52 @@
       :loading="confirmLoading"
       @confirm="onConfirmSubmit"
     >
+      <!-- 清理的补充输入（是否连带清理未使用镜像）由本页作为插槽内容给出。
+           目标主机不在这里：四条整体动作（拉取/构建/载入/清理）同一套两段式，
+           主机在**流程第一屏**（主机选择对话框）选定，弹窗只留业务内容。 -->
       <ElCheckbox v-if="confirmState.kind === 'prune'" v-model="pruneIncludeAll" class="prune-all">
         同时清理未被任何容器使用的镜像
       </ElCheckbox>
     </DockerActionConfirm>
 
     <!-- 拉取进度对话框（4b）：「拉取镜像…」的入口开逐层实时进度。
-         hostId 在受理时钉死（targetHostId = 发起时锁定的一台），成功关闭后重拉本页清单。 -->
-    <PullProgressDialog v-model="pullVisible" :host-id="targetHostId" :refresh="refreshSilent" />
+         hostId 在受理时钉死（actionHost = 发起时锁定的那台），成功关闭后重拉本页清单。 -->
+    <PullProgressDialog v-model="pullVisible" :host-id="actionHost" :refresh="refreshSilent" />
 
     <!-- 构建进度对话框（P2 分发闭环）：「构建镜像…」的命令表单 + 逐行构建播报 + 取消。
          hostId 与重拉口径同拉取对话框（成功后新镜像要进列表）。 -->
-    <BuildProgressDialog v-model="buildVisible" :host-id="targetHostId" :refresh="refreshSilent" />
+    <BuildProgressDialog v-model="buildVisible" :host-id="actionHost" :refresh="refreshSilent" />
 
     <!-- 仓库凭据管理对话框（4c）：入口只对 docker:config 渲染（不渲染 ≠ 禁用）。
          凭据是**全局**的（不属于任何一台主机 —— 服务端按仓库地址解析注入），
          与主机筛选无关。 -->
     <RegistryCredentialsDialog v-model="registryVisible" />
+
+    <!-- 四条整体动作（拉取/构建/载入/清理悬空）的**目标主机选择**：动作流程的第一屏
+         —— 只在「没有已确定的主机」（没筛选且可管主机不止一台）时出现，其余情况
+         按钮直达业务弹窗（进度对话框 / 确认档），路径短。 -->
+    <ElDialog
+      v-model="hostPick.visible"
+      :title="hostPick.title"
+      width="420px"
+      :close-on-click-modal="false"
+    >
+      <div class="host-pick">
+        <div class="host-pick__label">目标主机</div>
+        <ElSelect
+          v-model="hostPick.hostId"
+          class="host-pick__select"
+          filterable
+          placeholder="选择主机"
+        >
+          <ElOption v-for="h in hostOptions" :key="h.value" :label="h.label" :value="h.value" />
+        </ElSelect>
+      </div>
+      <template #footer>
+        <ElButton @click="hostPick.visible = false">取消</ElButton>
+        <ElButton type="primary" :disabled="!hostPick.hostId" @click="onHostPicked">继续</ElButton>
+      </template>
+    </ElDialog>
   </div>
 </template>
 
@@ -201,15 +245,25 @@
    * 跨主机的表没法在单主机快照上筛。主机维度是**筛选下拉**的一项；行归属由主机列
    * 给出。`?host=` 深链作主机筛选初始值（单向：用户改筛选不回写 query）。
    *
-   * 写操作按**行主机/筛选主机**派发：行目标动作的指令通道 hostId 绑定该行
+   * 写操作按**行主机/选定主机**派发：行目标动作的指令通道 hostId 绑定该行
    * （useDockerCmds 给了 hostId 就不碰 provide 上下文）；无行目标的整体动作
-   * 面向主机筛选选定的那台（没选且只有一台可管主机时就是它，否则禁用 + title 里
-   * 的禁用理由）。下钻语义保持：详情仍是单主机窗口 —— `/docker/image-detail/:id?host=`
-   * 的 host 取**行主机**。
+   * （拉取/构建/载入/清理）一律**两段式**：先选目标主机（主机筛选已选定或全场
+   * 只有一台时略过），选定后才是业务弹窗（进度对话框 / 确认档）—— 按钮不再因为
+   * 「没先选主机」而点不动。下钻语义保持：详情仍是单主机窗口
+   * —— `/docker/image-detail/:id?host=` 的 host 取**行主机**。
    */
   import { computed, h, reactive, ref, watch } from 'vue'
   import { useRoute, useRouter } from 'vue-router'
-  import { ElButton, ElCard, ElCheckbox, ElEmpty, ElMessage } from 'element-plus'
+  import {
+    ElButton,
+    ElCard,
+    ElCheckbox,
+    ElDialog,
+    ElEmpty,
+    ElMessage,
+    ElOption,
+    ElSelect
+  } from 'element-plus'
   import { formatByUnit } from '@/modules/device/utils/display'
   import { useAuth } from '@/hooks/core/useAuth'
   import { useTableColumns } from '@/hooks/core/useTableColumns'
@@ -229,6 +283,8 @@
   import BuildProgressDialog from '../components/build-progress-dialog.vue'
   import PullProgressDialog from '../components/pull-progress-dialog.vue'
   import RegistryCredentialsDialog from '../components/registry-credentials-dialog.vue'
+  import WorkloadBatchBar from '../components/workload-batch-bar.vue'
+  import { IMAGE_BATCH_ACTIONS, type BatchRow } from '../components/batch-actions'
   import {
     fetchDockerImages,
     sendDockerCmd,
@@ -260,21 +316,63 @@
   const router = useRouter()
   const { hasAuth } = useAuth()
 
-  const showSearchBar = ref(false)
+  // 筛选面板**默认展开**：主机（整体动作的前置条件）与关键词都要看得见，
+  // 收在面板里等于把前置条件藏起来（P1-5 的同一口径）。
+  const showSearchBar = ref(true)
   const searchForm = ref<{
     keyword?: string
     danglingOnly?: boolean
     unusedOnly?: boolean
     host?: string
   }>({})
-  /** 当前勾选的行：工具条「打标签 / 导出 tar」一次只作用于选中的那一行。 */
+  /** 当前勾选的行：工具条「打标签 / 导出 tar」一次只作用于其中一行；批量动作用批量栏。 */
   const selected = ref<DockerImageListItem[]>([])
-  /** 拉取进度对话框的开关（4b）：hostId 取发起时的 targetHostId（受理时钉死）。 */
+  /** 批量在途（批量栏 emit 上报）：行菜单据此禁用，防与批量并发提交同一目标。 */
+  const batchBusy = ref(false)
+  /** 拉取进度对话框的开关（4b）：hostId 取发起时的 actionHost（受理时钉死）。 */
   const pullVisible = ref(false)
   /** 构建进度对话框的开关（P2）：同拉取。 */
   const buildVisible = ref(false)
   /** 仓库凭据对话框的开关（4c）：入口受 canConfig 门控（模板里的 v-if）。 */
   const registryVisible = ref(false)
+
+  /**
+   * 拉取/构建发起时锁定的主机（受理后不再随筛选/弹窗变化）：一次指令只属于那台机器。
+   * 这两条动作的进度对话框按 prop 收 hostId，故单立一个 ref 供其读取（prune/load
+   * 走确认弹窗，主机在入口写进指令通道的 cmdHostId）。
+   */
+  const actionHost = ref('')
+
+  /** 整体动作的目标主机选择对话框（四条整体动作共用的流程第一屏）。 */
+  const hostPick = ref<{
+    visible: boolean
+    title: string
+    hostId: string
+    next: ((hostId: string) => void) | null
+  }>({ visible: false, title: '', hostId: '', next: null })
+  function openHostPick(title: string, next: (hostId: string) => void) {
+    hostPick.value = { visible: true, title, hostId: targetHostId.value, next }
+  }
+  function onHostPicked() {
+    const { hostId, next } = hostPick.value
+    hostPick.value = { ...hostPick.value, visible: false, next: null }
+    if (hostId && next) next(hostId)
+  }
+
+  /**
+   * 批量栏的行投影：镜像条目没有 `name`（名字要从 repoTags 推），且「使用中」只挡
+   * 删除（导出照常）—— 两条资源侧的事实都在这里投影，批量栏本身不认识镜像。
+   */
+  const batchRows = computed<BatchRow[]>(() =>
+    selected.value.map((row) => ({
+      hostId: row.hostId,
+      hostname: row.hostname,
+      name: actionRef(row),
+      protected: false,
+      blocked: (action) =>
+        action === 'image:remove' && row.inUse ? '镜像正被容器使用，需先删除相关容器' : null
+    }))
+  )
 
   const canManage = computed(() => hasAuth(PermDockerManage))
   const canDelete = computed(() => hasAuth(PermDockerDelete))
@@ -398,24 +496,29 @@
   /** 有命中行就渲染表格；纯加载中也用表格的 loading 遮罩，空态只在加载结束后判断。 */
   const showTable = computed(() => listLoading.value || rows.value.length > 0)
 
-  // `?host=` 深链（总览磁盘面板的既有链路）：query 里的主机作为**主机筛选初始值**
-  // —— 单向（用户改筛选不回写 query，host 是筛选状态而不是页面状态）。watch 同时
-  // 兜住 worktab 缓存实例的「带 host 返回」场景（镜像详情返回链路会回到带 host 的
-  // 本页，缓存实例经它跟上新 host）。
+  // `?host=&keyword=` 深链（总览磁盘面板 + 全局检索下钻的既有链路）：query 里的主机
+  // 与关键词作为**筛选初始值** —— 单向（用户改筛选不回写 query，两者从此是筛选状态
+  // 而不是页面状态）。watch 同时兜住 worktab 缓存实例的「带 host 返回」场景（镜像
+  // 详情返回链路会回到带 host 的本页，缓存实例经它跟上新 host）。
+  let deepLinkInited = false
   watch(
-    () => route.query.host,
-    (raw, old) => {
-      const id = raw ? String(raw) : ''
+    [() => route.query.host, () => route.query.keyword],
+    ([rawHost, rawKeyword]) => {
+      const id = rawHost ? String(rawHost) : ''
+      const keyword = rawKeyword ? String(rawKeyword) : undefined
       const had = searchForm.value.host ?? ''
+      const hadKeyword = searchForm.value.keyword ?? ''
       searchForm.value.host = id
-      // ?host 深链进入时自动展开搜索栏：从总览磁盘面板下钻进来的人看到的是一张被
-      // 过滤的表，筛选线索必须在明处。immediate 首跑（old 为 undefined）也走这句。
-      if (id) showSearchBar.value = true
+      searchForm.value.keyword = keyword
+      // 深链进入时自动展开搜索栏：从总览磁盘面板/检索结果下钻进来的人看到的是一张
+      // 被过滤的表，筛选线索必须在明处。immediate 首跑也走这句。
+      if (id || keyword) showSearchBar.value = true
       // 筛选变化（含深链首拉）回第一页。
       pagination.current = 1
-      // immediate 首跑（old 为 undefined）必拉一次；此后仅 query 真的变化时重拉 ——
-      // 没 host 深链时 id 与 had 都是 ''，靠 old 区分「首次进入」与「同值重复」。
-      if (id !== had || old === undefined) void load()
+      // 首跑（deepLinkInited=false）必拉一次；此后仅 query 真的变化时重拉 ——
+      // 没深链时两值都是空，靠它区分「首次进入」与「同值重复」。
+      if (id !== had || keyword !== hadKeyword || !deepLinkInited) void load()
+      deepLinkInited = true
     },
     { immediate: true }
   )
@@ -493,39 +596,46 @@
   // ── 主机来源（跨主机表的写操作按发起时锁定的主机派发）───────────────
 
   /**
-   * 无行目标的整体动作（清理/拉取/构建/载入）面向哪台主机：主机筛选选定的那台；
-   * 没选且全场只有一台可管主机时就是它（不让人先做无意义的单选）；否则留空 ——
-   * 按钮禁用，禁用理由写进 title（悬浮说明），页面不设常驻提示句。
+   * 整体动作（清理/拉取/构建/载入）的**已定主机**：主机筛选选定的那台；没选且全场
+   * 只有一台可管主机时就是它（不让人先做无意义的单选）；否则留空 —— 留空**不禁用
+   * 按钮**，动作照常发起，只是流程第一屏是主机选择（withTargetHost）。
    */
   const targetHostId = computed(() => {
     if (searchForm.value.host) return searchForm.value.host
     return hosts.value.length === 1 ? hosts.value[0]!.id : ''
   })
 
-  /** 整体动作的禁用门槛：指令在途，或没选定主机。 */
-  const hostActionDisabled = computed(() => busy.value || !targetHostId.value)
+  /** 主机尚未确定时的整钮弱化（动作仍可点：点了先选主机 —— 不是死控件）。 */
+  const hostIconClass = computed(() =>
+    targetHostId.value ? 'bg-theme/12 text-theme' : 'bg-theme/12 text-theme opacity-45'
+  )
+
+  /** 选中态动作的图标：未恰好选中一行时弱化（同样的「可点点看」纪律）。 */
+  const selectedIconClass = computed(() =>
+    singleSelected.value ? 'bg-theme/12 text-theme' : 'bg-theme/12 text-theme opacity-45'
+  )
 
   /** 指令在途的禁用理由（title 后缀）。 */
   const BUSY_REASON = '指令在途，暂不可用'
-  /** 整体动作缺主机的禁用理由（title 后缀）。 */
-  const NO_HOST_REASON = '需先在「主机」筛选中选定一台主机'
 
-  /** 整体动作的 title：禁用理由随禁用状态写进悬浮说明。 */
+  /** 整体动作的 title：只说动作名（主机缺失由流程第一屏回答，不写解释句）。 */
   function hostActionTitle(label: string): string {
     if (busy.value) return `${label}（${BUSY_REASON}）`
-    if (!targetHostId.value) return `${label}（${NO_HOST_REASON}）`
     return label
   }
 
-  /** 选中态动作（打标签/导出 tar）的 title：出现条件已是「恰选中一行」，只在指令在途时禁用。 */
+  /** 选中态动作（打标签/导出 tar）的 title：一次只作用于一行，故说明何时可点。 */
   function selectedActionTitle(label: string): string {
-    return busy.value ? `${label}（${BUSY_REASON}）` : label
+    if (busy.value) return `${label}（${BUSY_REASON}）`
+    if (!singleSelected.value) return `${label}（一次作用于 1 行；多行请用批量栏）`
+    return label
   }
 
   /**
-   * 指令通道的主机来源：行目标动作在**入口处锁定到该行的 hostId**（useDockerCmds
-   * 在 run 入口求值，换 ref 即切主机）；同表不同机的行各发各的主机，不再有
-   * 「页面当前主机」的概念。一次操作属于发起时锁定的那台主机。
+   * 指令通道的主机来源：行目标动作在**入口处锁定到该行的 hostId**，无行目标的整体
+   * 动作（清理/载入）在流程第一屏选定后同样在入口写死（useDockerCmds 在 run 入口
+   * 求值，换 ref 即切主机）；同表不同机的行各发各的主机，不再有「页面当前主机」的
+   * 概念。一次操作属于发起时锁定的那台主机。
    */
   const cmdHostId = ref('')
   const { run, pendingId, busy } = useDockerCmds({
@@ -575,31 +685,54 @@
 
   // ── 工具条动作 ──
 
-  /** 清理悬空镜像：强档（组件按注册表给逐字 DELETE 形态），勾选项决定是否连带清理未使用镜像。 */
+  /** 清理悬空镜像：第一条是选目标主机（与拉取/构建同套两段式），选定后开强档确认
+      弹窗（组件按注册表给逐字 DELETE 形态），勾选项决定是否连带清理未使用镜像。 */
   function openPrune() {
-    // 整体动作：主机在发起时锁定为筛选选定的那台（受理后不再随筛选变化）。
-    cmdHostId.value = targetHostId.value
-    pruneIncludeAll.value = false
-    confirmState.value = {
-      visible: true,
-      kind: 'prune',
-      action: 'image:prune',
-      target: '',
-      options: {}
+    withTargetHost('清理悬空镜像：选择目标主机', (hostId) => {
+      cmdHostId.value = hostId
+      pruneIncludeAll.value = false
+      confirmState.value = {
+        visible: true,
+        kind: 'prune',
+        action: 'image:prune',
+        target: '',
+        options: {}
+      }
+    })
+  }
+
+  /**
+   * 无行目标动作的**两段式入口**（四条整体动作共用）：已定主机（主机筛选 / 唯一
+   * 主机）时流程第一屏略过，直达业务弹窗；否则先开主机选择的那一屏，选定后走 next
+   * （业务弹窗）。选择只发生在缺主机时，不缺就是一步到位。
+   */
+  function withTargetHost(title: string, next: (hostId: string) => void) {
+    if (busy.value) return
+    if (targetHostId.value) {
+      next(targetHostId.value)
+      return
     }
+    openHostPick(title, next)
   }
 
-  /** 拉取镜像（4b）：入口开进度对话框 —— 逐层实时进度 + 取消，受理/轮询/重拉都
-      收在对话框里，不走页面的 runWrite。 */
+  /** 拉取镜像（4b）：先定目标主机（已定则直达），再开进度对话框 —— 逐层实时进度 +
+      取消，受理/轮询/重拉都收在对话框里，不走页面的 runWrite。 */
   function askPull() {
-    pullVisible.value = true
+    withTargetHost('拉取镜像：选择目标主机', (hostId) => {
+      actionHost.value = hostId
+      pullVisible.value = true
+    })
   }
 
-  /** 构建镜像（P2 分发闭环）：入口开构建对话框 —— 表单（tag/上下文/Dockerfile/
-      参数）+ 逐行播报 + 取消，受理/轮询/重拉都收在对话框里，不走页面的 runWrite
-     （与拉取同一条分工：页面只出入口，长耗时写操作的生命周期归对话框）。 */
+  /** 构建镜像（P2 分发闭环）：先定目标主机（已定则直达），再开构建对话框 —— 表单
+      （tag/上下文/Dockerfile/参数）+ 逐行播报 + 取消，受理/轮询/重拉都收在对话框里，
+      不走页面的 runWrite（与拉取同一条分工：页面只出入口，长耗时写操作的生命周期归
+      对话框）。 */
   function askBuild() {
-    buildVisible.value = true
+    withTargetHost('构建镜像：选择目标主机', (hostId) => {
+      actionHost.value = hostId
+      buildVisible.value = true
+    })
   }
 
   /**
@@ -636,18 +769,21 @@
   }
 
   /**
-   * 载入镜像：确认弹窗的输入档收集文件名（「文件须已在 agent 下载目录」的提示
-   * 在输入档的 hint 里，注册表条目给的）；主参数是文件名，无 target。
+   * 载入镜像：第一条是选目标主机（与拉取/构建/清理同套两段式），选定后开确认弹窗的
+   * 输入档收集文件名（「文件须已在 agent 下载目录」的提示在输入档的 hint 里，注册表
+   * 条目给的）；主参数是文件名，无 target。
    */
   function askLoad() {
-    cmdHostId.value = targetHostId.value
-    confirmState.value = {
-      visible: true,
-      kind: 'load',
-      action: 'image:load',
-      target: '',
-      options: {}
-    }
+    withTargetHost('载入镜像：选择目标主机', (hostId) => {
+      cmdHostId.value = hostId
+      confirmState.value = {
+        visible: true,
+        kind: 'load',
+        action: 'image:load',
+        target: '',
+        options: {}
+      }
+    })
   }
 
   /** 删除镜像：标准档确认；使用中的镜像不发指令（服务端也会拒绝），只给结论。 */
@@ -693,6 +829,7 @@
     confirmLoading.value = true
     try {
       if (st.kind === 'prune') {
+        // 目标主机已在流程第一屏写进指令通道（cmdHostId），这里只补动作参数。
         const options: Record<string, unknown> = pruneIncludeAll.value ? { all: true } : {}
         await runWrite('image:prune', undefined, options, payload.confirm)
       } else if (st.kind === 'remove') {
@@ -701,6 +838,7 @@
         // 输入档带回的新引用（弹窗已校验镜像引用格式）；src 在打开时定住，target 不发。
         await runWrite('image:tag', undefined, { src: st.options.src, dst: payload.value ?? '' })
       } else if (st.kind === 'load') {
+        // 同清理：hostId 在主机选择那一屏已钉死。
         await runWrite('image:load', undefined, { filename: payload.value ?? '' })
       } else if (st.options.overwrite === true) {
         // 导出第二段：覆盖标记 + 文件名逐字确认一起带上，服务端逐字校验后才会覆盖
@@ -839,6 +977,10 @@
     void router.push({ path: '/docker/image-drift' })
   }
 
+  // ── 批量栏吸底 × 分页器 ──────────────────────────────────────────
+  // 吸底块与分页器的错位量由**批量栏自己量**（只有栏知道自己在哪个滚动容器里，
+  // 口径见 batch-actions 的 measureBatchOffset）—— 页面不再参与定位。
+
   // ── 表格列 ──
 
   // 列设置经 useTableColumns（对齐系统管理，列弹层可用）：工厂只在 setup 求值一次
@@ -851,8 +993,8 @@
     // 精确时刻在详情页）。数据列一律 minWidth，固定宽度只留给 selection/index/操作
     // 这类结构性列，见 responsive-columns.ts 的约定。
     return [
-      // 勾选列只在有管理权限时出现：只有工具条的打标签/导出 tar 用得上它。
-      ...(canManage.value ? [{ type: 'selection' as const, width: 46 }] : []),
+      // 勾选列在有写权限时出现：工具条的打标签/导出 tar（单行）与批量栏（多行）都用它。
+      ...(canManage.value || canDelete.value ? [{ type: 'selection' as const, width: 46 }] : []),
       { type: 'index' as const, width: 60, label: '序号', hideBelow: 'tablet' },
       {
         prop: 'repoTags',
@@ -936,7 +1078,8 @@
                 extraItems: menu.extraItems,
                 target: actionRef(row),
                 pendingId: pendingId.value,
-                disabled: busy.value,
+                // 指令在途或批量在途都禁用行菜单：防与批量并发提交同一目标。
+                disabled: busy.value || batchBusy.value,
                 onSelect: (item: { action: string; target: string }) => onRowMenu(row, item)
               })
             )
@@ -955,6 +1098,20 @@
   // （与项目/容器/卷/网络页同一全局类 docker-host + t.pill 制）。
   :global(.docker-host) {
     @include t.pill;
+  }
+
+  // 目标主机选择（四条整体动作共用的流程第一屏，挂在页面自己的对话框里）。
+  // **挂在顶层**：对话框内容可能被 teleport 到 body，嵌在 .docker-images-page 下的
+  // 规则会因祖先不在而失配（scoped 只剩末尾那截属性选择器）。
+  .host-pick {
+    &__label {
+      margin-bottom: 6px;
+      font-size: 13px;
+    }
+
+    &__select {
+      width: 100%;
+    }
   }
 
   .docker-images-page {

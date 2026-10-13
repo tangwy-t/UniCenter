@@ -20,8 +20,10 @@
  *
  * 拆分切片：原「镜像 tab」升格为独立整页 views/images.vue —— 动作入口是
  * 工具条 ArtButtonTable 图标钮（title 即悬浮说明、禁用理由也写在 title）：
- * 「拉取/载入」恒在（canManage）且缺选定主机时禁用；「打标签/导出 tar」恰选中一行
- * 时出现、指令在途时禁用。本文件的点击/断言口径随之改为按 title 找工具条按钮。
+ * 「拉取/构建/载入/清理」四条整体动作恒在（权限门控）且不因缺主机禁用 —— 一律
+ * **两段式**（第一步选目标主机，第二步才是业务弹窗；主机筛选已选定或全场只有一台
+ * 时第一步略过）；「打标签/导出 tar」恰选中一行时出现、指令在途时禁用。本文件的
+ * 点击/断言口径随之改为按 title 找工具条按钮。
  *
  * 确认弹窗（action-confirm）现走 append-to-body：DOM 挂到 document.body，弹窗内查询
  * 经 dialogFind/dialogButtons 双处命中（props 仍从组件实例读）。表格行勾选走真 ElTable
@@ -72,6 +74,14 @@ const HOSTS: DockerHostItem[] = [
   }
 ]
 
+/** 第二台可管主机（两段式用例：可管主机不止一台且没筛选时，流程第一屏才出现）。 */
+const HOST2: DockerHostItem = {
+  ...HOSTS[0]!,
+  id: 'h2',
+  hostname: 'wmind',
+  primaryIp: '192.168.12.106'
+}
+
 /** 跨主机镜像条目（行带归属两列 —— 写操作按行主机派发）。 */
 const IMAGE: DockerImageListItem = {
   id: 'sha256:aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff66667777888899990000',
@@ -85,6 +95,17 @@ const IMAGE: DockerImageListItem = {
 
 /** 聚合端点（GET /docker/images）的响应形态：total 全量 + items。 */
 const IMAGES = { items: [IMAGE], total: 1 }
+
+/** 第二行镜像（批量用例：勾 2 行以上时批量栏出现并给出批量动作）。 */
+const IMAGE2: DockerImageListItem = {
+  id: 'sha256:bbbb1111cccc2222dddd3333eeee4444ffff5555666677778888999900001111',
+  repoTags: ['nginx:1.27'],
+  sizeMb: 187.4,
+  inUse: true,
+  dangling: false,
+  hostId: 'h1',
+  hostname: 'bogon'
+}
 
 /** Art* 全局组件替身（真组件靠 unplugin 注册，测试环境里没有；保住 slot ——
  *  `left` 槽承载工具条动作钮，必须渲染出来）。 */
@@ -201,6 +222,16 @@ async function selectFirstImage(w: VueWrapper) {
   await flush()
 }
 
+/** 勾选多行（批量栏用例：≥1 行即出现，多选时给批量动作）。 */
+async function selectImages(w: VueWrapper, rows: unknown[]) {
+  const table = w.findComponent(ElTable)
+  const vm = table.vm as unknown as {
+    toggleRowSelection: (row: unknown, selected?: boolean) => void
+  }
+  for (const row of rows) vm.toggleRowSelection(row, true)
+  await flush()
+}
+
 /** 工具条图标钮（按 title 前缀找 —— 禁用时 title 带禁用理由后缀）。
  *  替身渲染真按钮并复刻真组件的活性判据：disabled 时元素自身即禁用（click 吞掉）。
  *  点击若「按钮明明可点却什么都没发生」，成因见 src/test/setup.ts 的事件时间戳守卫豁免。 */
@@ -210,6 +241,19 @@ async function clickBar(w: VueWrapper, title: string) {
   expect((btn!.element as HTMLButtonElement).disabled, `「${title}」不该被禁用`).toBe(false)
   await btn!.trigger('click')
   await flush()
+}
+
+/** 主机选择对话框（两段式的第一屏）：页面自己的 ElDialog，**就地渲染**（不 teleport），
+ *  故它在 wrapper 里而不在 document.body 里 —— 这条差别正是「业务弹窗里没有主机选择器」
+ *  那条断言的判据。 */
+const hostPickSelect = (w: VueWrapper) => w.find('.host-pick__select')
+const hostPickTitle = (w: VueWrapper) => w.find('.el-dialog__title').text()
+
+/** 主机选择对话框的「继续」（按文字找：它就地渲染，不进 dialogButtons 的 body 范围）。 */
+function continueBtn(w: VueWrapper) {
+  const btn = w.findAll('button').find((b) => (b.text() ?? '').trim() === '继续')
+  expect(btn, '主机选择对话框里应有「继续」').toBeTruthy()
+  return btn!
 }
 
 /** 确认弹窗（真组件）—— props 查询（modelValue/action）走它：append-to-body 只把 DOM
@@ -474,19 +518,23 @@ describe('导出 tar：alreadyExists 两段式（同一只弹窗内切档）', (
 })
 
 describe('工具条按钮的活性与出现条件（新形态）', () => {
-  it('没有可管主机：整体动作全渲染但禁用，禁用理由写进 title（不设常驻提示句）', async () => {
+  it('没有可管主机：整体动作照旧全渲染且**可点**（第一步是选主机），工具条不再挂「未选定主机」', async () => {
     api.fetchDockerHosts.mockResolvedValue({ list: [] })
     api.fetchDockerImages.mockResolvedValue({ items: [], total: 0 })
     const w = await mountPage()
 
     for (const label of ['拉取镜像…', '构建镜像…', '载入镜像…', '清理悬空镜像…']) {
       const btn = w.findAll('button').find((b) => (b.attributes('title') ?? '').startsWith(label))
-      expect(btn, `工具条缺「${label}」（有权限就该渲染，禁用 ≠ 不渲染）`).toBeTruthy()
-      expect((btn!.element as HTMLButtonElement).disabled, `「${label}」应禁用`).toBe(true)
-      expect(btn!.attributes('title'), `「${label}」的禁用理由应进 title`).toContain(
-        '需先在「主机」筛选中选定一台主机'
+      expect(btn, `工具条缺「${label}」（有权限就该渲染）`).toBeTruthy()
+      // 前置条件不再靠禁用表达：空主机时按钮仍可点（点了先选主机）。
+      expect((btn!.element as HTMLButtonElement).disabled, `「${label}」不该因缺主机禁用`).toBe(
+        false
       )
+      // title 只说动作名：缺主机由**流程第一屏**（主机选择对话框）回答 —— 页面零解释句。
+      expect(btn!.attributes('title'), `「${label}」的 title 应只是动作名`).toBe(label)
     }
+    // 那行前置提示已撤（两段式之后它无话可说）：工具条只放硬数据。
+    expect(w.text(), '工具条不该再有「未选定主机」').not.toContain('未选定主机')
     // 仓库凭据是**全局**面（不属于任何一台主机）：与主机筛选无关，可点。
     const reg = w
       .findAll('button')
@@ -495,21 +543,159 @@ describe('工具条按钮的活性与出现条件（新形态）', () => {
     expect((reg!.element as HTMLButtonElement).disabled).toBe(false)
   })
 
-  it('打标签/导出 tar 恰选中一行才出现（未选中前不占版面），出现即可点', async () => {
+  it('打标签/导出 tar 恒在工具条：未选中时禁用并写明理由，恰选中一行即可点', async () => {
     const w = await mountPage()
     const findBtn = (label: string) =>
       w.findAll('button').find((b) => (b.attributes('title') ?? '').startsWith(label))
 
-    expect(findBtn('打标签…'), '未选中任何行时不该出现').toBeUndefined()
-    expect(findBtn('导出 tar…'), '未选中任何行时不该出现').toBeUndefined()
+    // 不再「未选中就不出现 / 勾多了无提示消失」：恒在版面上，靠禁用态 + title 说话。
+    for (const label of ['打标签…', '导出 tar…']) {
+      const btn = findBtn(label)
+      expect(btn, `「${label}」应恒在版面上`).toBeTruthy()
+      expect((btn!.element as HTMLButtonElement).disabled).toBe(true)
+      expect(btn!.attributes('title'), `「${label}」应写明可点条件`).toContain('一次作用于 1 行')
+    }
 
     await selectFirstImage(w)
     const tag = findBtn('打标签…')
     const save = findBtn('导出 tar…')
-    expect(tag, '恰选中一行后应出现').toBeTruthy()
-    expect(save, '恰选中一行后应出现').toBeTruthy()
+    expect(tag, '恰选中一行后可点').toBeTruthy()
+    expect(save, '恰选中一行后可点').toBeTruthy()
     expect((tag!.element as HTMLButtonElement).disabled).toBe(false)
     expect((save!.element as HTMLButtonElement).disabled).toBe(false)
+  })
+})
+
+describe('整体动作的两段式（第一步选主机，第二步才是业务弹窗）', () => {
+  // 可管主机不止一台且没筛选 → 主机没落定：四条整体动作都要先过主机选择那一屏。
+  beforeEach(() => {
+    api.fetchDockerHosts.mockResolvedValue({ list: [HOSTS[0]!, HOST2] })
+  })
+
+  it.each([
+    ['清理悬空镜像…', '清理悬空镜像：选择目标主机', 'image:prune'],
+    ['载入镜像…', '载入镜像：选择目标主机', 'image:load']
+  ])('「%s」：先出现主机选择，选定后才开业务弹窗', async (label, title, action) => {
+    const w = await mountPage()
+    const confirm = confirmOf(w)
+
+    await clickBar(w, label)
+    // 第一步：主机选择对话框（业务弹窗还没开 —— 与拉取/构建同一套流程）。
+    expect(hostPickSelect(w).exists(), '第一步应是主机选择').toBe(true)
+    expect(hostPickTitle(w)).toBe(title)
+    expect(confirm.props('modelValue'), '第一步不该同时开着业务弹窗').toBe(false)
+
+    // 选定主机 → 继续 → 第二步：业务弹窗开到注册表里的那条动作上。
+    await w.findComponent({ name: 'ElSelect' }).setValue(HOST2.id)
+    await continueBtn(w).trigger('click')
+    await flush()
+    expect(confirm.props('modelValue'), '选定主机后应开业务弹窗').toBe(true)
+    expect(confirm.props('action')).toBe(action)
+    // 业务弹窗里**不再**有主机选择器（前置已选定）：teleport 到 body 的那只弹窗里
+    // 没有 .host-pick（就地渲染的才是第一屏）。
+    expect(document.body.querySelector('.host-pick'), '业务弹窗里不该再有主机选择器').toBeNull()
+  })
+
+  it('第一屏选定的主机被钉死：清理提交派发到那台（强档逐字 DELETE 形态不变）', async () => {
+    const w = await mountPage()
+    await clickBar(w, '清理悬空镜像…')
+    await w.findComponent({ name: 'ElSelect' }).setValue(HOST2.id)
+    await continueBtn(w).trigger('click')
+    await flush()
+
+    // 强档形态逐字照抄 DELETE：确认档与单机路径同一形态。
+    await vi.waitUntil(() => dialogFind(w, '.ac-input__label').exists(), { timeout: 5000 })
+    expect(dialogFind(w, '.ac-input__label').text()).toBe('输入 DELETE 以确认')
+    await (await dialogInputOf(w, 'DELETE')).setValue('DELETE')
+    await submitBtn(w, '清理').trigger('click')
+    await flush()
+
+    expect(api.sendDockerCmd).toHaveBeenCalledTimes(1)
+    expect(api.sendDockerCmd.mock.calls[0]![0], '指令应派发到第一屏选的那台主机').toBe(HOST2.id)
+    expect(api.sendDockerCmd.mock.calls[0]![1]).toMatchObject({
+      action: 'image:prune',
+      confirm: 'DELETE'
+    })
+  })
+
+  it('载入镜像：选定主机后弹窗只留业务内容（文件名输入档），提交派发到那台', async () => {
+    const w = await mountPage()
+    await clickBar(w, '载入镜像…')
+    await w.findComponent({ name: 'ElSelect' }).setValue(HOST2.id)
+    await continueBtn(w).trigger('click')
+    await flush()
+
+    await (await dialogInputOf(w, '例如 镜像名.tar')).setValue('backup.tar')
+    await submitBtn(w, '载入镜像').trigger('click')
+    await flush()
+
+    expect(api.sendDockerCmd).toHaveBeenCalledTimes(1)
+    expect(api.sendDockerCmd.mock.calls[0]![0]).toBe(HOST2.id)
+    expect(api.sendDockerCmd.mock.calls[0]![1]).toMatchObject({
+      action: 'image:load',
+      options: { filename: 'backup.tar' }
+    })
+  })
+
+  it('已定主机（主机筛选选定的那台）时第一步略过：按钮直达业务弹窗', async () => {
+    const w = await mountPage()
+    // 筛选栏给主机（ArtSearchBar 替身：v-model 经 update:modelValue）。
+    w.findComponent({ name: 'ArtSearchBar' }).vm.$emit('update:modelValue', { host: 'h2' })
+    await flush()
+
+    await clickBar(w, '清理悬空镜像…')
+    expect(hostPickSelect(w).exists(), '已定主机不该再问一次').toBe(false)
+    expect(confirmOf(w).props('modelValue')).toBe(true)
+  })
+})
+
+describe('批量栏（多选是有意义的状态：不再「勾多了按钮无提示消失」）', () => {
+  /** 批量动作钮（栏内的 ElButton，按文字找 —— 带 `…` 的是「点了先弹窗」）。 */
+  const batchBtn = (w: VueWrapper, text: string) =>
+    w.findAll('.wkl-batch button').find((b) => (b.text() ?? '').trim() === text)
+
+  it('勾 1 行 / 勾 2 行都出现批量栏，含「删除…」（逐字 DELETE 档）与「导出…」', async () => {
+    api.fetchDockerImages.mockResolvedValue({ items: [IMAGE, IMAGE2], total: 2 })
+    const w = await mountPage()
+    expect(w.find('.wkl-batch').exists(), '未选中时批量栏不出现').toBe(false)
+
+    await selectImages(w, [IMAGE])
+    expect(w.find('.wkl-batch').exists(), '勾 1 行即出现').toBe(true)
+
+    await selectImages(w, [IMAGE2])
+    expect(w.find('.wkl-batch').text()).toContain('已选 2 项')
+    expect(batchBtn(w, '删除…'), '多选时批量删除应可用').toBeTruthy()
+    expect(batchBtn(w, '导出…'), '多选时批量导出应可用').toBeTruthy()
+
+    // 批量删除是**逐字 DELETE 档**（比单条更强，与容器页同强度）。
+    await batchBtn(w, '删除…')!.trigger('click')
+    await flush()
+    await vi.waitUntil(() => w.find('.wkl-batch-del__input input').exists(), { timeout: 5000 })
+    expect(w.find('.wkl-batch-del__input input').exists()).toBe(true)
+  })
+
+  it('批量导出：弹窗收文件名前缀，逐行按镜像引用命名（不同引用不互相覆盖）', async () => {
+    api.fetchDockerImages.mockResolvedValue({ items: [IMAGE, IMAGE2], total: 2 })
+    const w = await mountPage()
+    await selectImages(w, [IMAGE, IMAGE2])
+
+    await batchBtn(w, '导出…')!.trigger('click')
+    await flush()
+    await vi.waitUntil(() => w.find('.wkl-batch-del__input input').exists(), { timeout: 5000 })
+    await w.find('.wkl-batch-del__input input').setValue('backup-')
+
+    const confirm = w.findAll('button').find((b) => (b.text() ?? '').trim() === '导出')
+    confirm!.element.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await vi.waitUntil(() => api.sendDockerCmd.mock.calls.length === 2, { timeout: 5000 })
+
+    // 两行各发一条 image:save：文件名 = 前缀 + 镜像引用（`/` `:` 换 `_`）+ .tar。
+    const bodies = api.sendDockerCmd.mock.calls.map(
+      (c) => c[1] as { action: string; target: string; options?: { filename?: string } }
+    )
+    expect(bodies.map((b) => b.action)).toEqual(['image:save', 'image:save'])
+    expect(bodies.map((b) => b.target)).toEqual(['mysql:8.0', 'nginx:1.27'])
+    expect(bodies[0]!.options?.filename).toBe('backup-mysql_8.0.tar')
+    expect(bodies[1]!.options?.filename).toBe('backup-nginx_1.27.tar')
   })
 })
 

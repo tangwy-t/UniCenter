@@ -223,7 +223,9 @@
 
   // ── 筛选（ArtSearchBar 统一形态；三项全部作为 query 发给端点，服务端过滤）──
 
-  const showSearchBar = ref(false)
+  // 筛选面板**默认展开**：主机（跨主机表的筛选源）与关键词都要看得见（P1-5 口径，
+  // 与镜像/卷/网络/容器四页一致）。
+  const showSearchBar = ref(true)
   const searchForm = ref<{ keyword?: string; state?: 'running' | 'stopped'; host?: string }>({})
 
   // 主机选项按分组渲染（ArtSearchBar 追加式分组能力：option 带 group 即分组）。

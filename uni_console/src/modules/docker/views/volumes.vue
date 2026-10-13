@@ -21,16 +21,16 @@
       >
         <template #left>
           <div class="toolbar-left">
-            <!-- 常驻动作（权限门控：不渲染 ≠ 禁用）：清理未使用卷是强档（弹窗里逐字
-                 输入 DELETE，由组件的确认档推导）；该动作没有 options 变体，弹窗里
-                 不放任何勾选项。跨主机表没有「当前主机」：整体动作面向**主机筛选
-                 选定的那台**（没选且全场只有一台可管主机时就是它；否则禁用，禁用
-                 理由写进 title —— 不设常驻提示句）。 -->
+            <!-- 常驻动作（权限门控：不渲染 ≠ 禁用）：清理未使用卷是**两段式** —— 第一条选
+                 目标主机（主机筛选选定或全场只有一台时略过），选定后才是业务弹窗；强档
+                 （弹窗里逐字输入 DELETE，由组件的确认档推导）。该动作没有 options 变体，
+                 弹窗里不放任何勾选项。按钮不因「没先选主机」变灰：前置条件在流程第一屏
+                 回答。 -->
             <ArtButtonTable
               v-if="canDelete"
               icon="ri:brush-line"
-              iconClass="bg-theme/12 text-theme"
-              :disabled="hostActionDisabled"
+              :iconClass="hostIconClass"
+              :disabled="busy"
               :title="pruneTitle"
               @click="openPrune"
             />
@@ -79,6 +79,7 @@
           @pagination:size-change="handleSizeChange"
           @pagination:current-change="handleCurrentChange"
           @sort-change="handleSortChange"
+          @selection-change="onSelectionChange"
         />
         <ElEmpty
           v-else-if="pageState === 'empty'"
@@ -89,12 +90,26 @@
           <ElButton size="small" @click="onReset">清除筛选</ElButton>
         </ElEmpty>
         <ElEmpty v-else class="docker-empty" description="还没有数据卷" />
+
+        <!-- 批量栏（资源无关组件：本页给的是卷动作集与行投影）——勾中即出现，
+             承载批量删除（逐字 DELETE 档；受保护卷无强制权限时计入失败并给出结论）。
+             吸底贴表卡底缘不与分页器相叠（错位量由栏自量）。 -->
+        <WorkloadBatchBar
+          v-if="showTable"
+          noun="数据卷"
+          :selected="batchRows"
+          :actions="VOLUME_BATCH_ACTIONS"
+          :busy="busy"
+          :refresh="refreshSilent"
+          @busy-change="batchBusy = $event"
+        />
       </template>
     </ElCard>
 
     <!-- 确认弹窗覆盖两个入口：单卷删除（标准档）与清理未使用卷（强档逐字 DELETE）。
          形态、逐字期望值与保护提示全部由组件按动作注册表推导；页面只传事实。
-         受保护卷的「强制操作」开关也由组件按 docker:exec 权限判定后渲染。 -->
+         受保护卷的「强制操作」开关也由组件按 docker:exec 权限判定后渲染。
+         目标主机不在本弹窗里：清理走两段式，主机在**流程第一屏**（主机选择对话框）选定。 -->
     <DockerActionConfirm
       v-model="confirmState.visible"
       :action="confirmState.action"
@@ -104,6 +119,32 @@
       :loading="confirmLoading"
       @confirm="onConfirmSubmit"
     />
+
+    <!-- 清理未使用卷的**目标主机选择**：动作流程的第一屏 —— 只在「没有已确定的
+         主机」（没筛选且可管主机不止一台）时出现，其余情况按钮直达确认档（路径短）。
+         与镜像页四条整体动作同一套口径。 -->
+    <ElDialog
+      v-model="hostPick.visible"
+      :title="hostPick.title"
+      width="420px"
+      :close-on-click-modal="false"
+    >
+      <div class="host-pick">
+        <div class="host-pick__label">目标主机</div>
+        <ElSelect
+          v-model="hostPick.hostId"
+          class="host-pick__select"
+          filterable
+          placeholder="选择主机"
+        >
+          <ElOption v-for="h in hostOptions" :key="h.value" :label="h.label" :value="h.value" />
+        </ElSelect>
+      </div>
+      <template #footer>
+        <ElButton @click="hostPick.visible = false">取消</ElButton>
+        <ElButton type="primary" :disabled="!hostPick.hostId" @click="onHostPicked">继续</ElButton>
+      </template>
+    </ElDialog>
   </div>
 </template>
 
@@ -116,13 +157,13 @@
    * 不回写 query）。
    *
    * 删除按**行主机**派发（指令通道 hostId 绑定该行）；清理未使用卷（无行目标）
-   * 面向主机筛选选定的那台（没选且只有一台可管主机时就是它，否则禁用 + title 里
-   * 的禁用理由）。一次操作属于发起时锁定的那台主机 —— 没有「切了主机要清什么」
+   * 走**两段式**：先选目标主机（主机筛选已选定或全场只有一台时略过），选定后才是
+   * 强档确认弹窗。一次操作属于发起时锁定的那台主机 —— 没有「切了主机要清什么」
    * 的重置纪律。
    */
   import { computed, h, reactive, ref, watch } from 'vue'
   import { useRoute } from 'vue-router'
-  import { ElButton, ElCard, ElEmpty, ElMessage } from 'element-plus'
+  import { ElButton, ElCard, ElDialog, ElEmpty, ElMessage, ElOption, ElSelect } from 'element-plus'
   import { useAuth } from '@/hooks/core/useAuth'
   import { useTableColumns } from '@/hooks/core/useTableColumns'
   import { PermDockerDelete, PermDockerExec } from '@/enums/permission'
@@ -134,6 +175,8 @@
   import ArtTableHeader from '@/components/core/tables/art-table-header/index.vue'
   import DockerActionConfirm from '../components/action-confirm.vue'
   import DockerActionMenu from '../components/action-menu.vue'
+  import WorkloadBatchBar from '../components/workload-batch-bar.vue'
+  import { VOLUME_BATCH_ACTIONS, type BatchRow } from '../components/batch-actions'
   import { fetchDockerVolumes, type DockerVolumeListItem } from '../api'
   import { runErrorMessage, useDockerCmds } from '../composables/useDockerCmds'
   import { useHostList, useResourceList } from '../composables/useResourceList'
@@ -146,8 +189,30 @@
   const route = useRoute()
   const { hasAuth } = useAuth()
 
-  const showSearchBar = ref(false)
+  // 筛选面板**默认展开**：主机（清理动作的前置条件）与关键词都要看得见（P1-5 口径）。
+  const showSearchBar = ref(true)
   const searchForm = ref<{ keyword?: string; unusedOnly?: boolean; host?: string }>({})
+  /** 当前勾选的行（批量栏的输入；行内删除不受它影响）。 */
+  const selected = ref<DockerVolumeListItem[]>([])
+  /** 批量在途（批量栏 emit 上报）：行菜单据此禁用，防与批量并发提交同一目标。 */
+  const batchBusy = ref(false)
+
+  /**
+   * 批量栏的行投影：卷条目自带 name/protected —— 直接投影，资源侧事实不进批量栏。
+   * 受保护卷的处置走保护档（无 docker:exec 时计入失败并给结论句）。
+   */
+  const batchRows = computed<BatchRow[]>(() =>
+    selected.value.map((row) => ({
+      hostId: row.hostId,
+      hostname: row.hostname,
+      name: row.name,
+      protected: row.protected === true
+    }))
+  )
+
+  function onSelectionChange(rowsSel: DockerVolumeListItem[]) {
+    selected.value = rowsSel
+  }
 
   const canDelete = computed(() => hasAuth(PermDockerDelete))
   const canExec = computed(() => hasAuth(PermDockerExec))
@@ -247,20 +312,26 @@
   /** 有命中行就渲染表格；纯加载中也用表格的 loading 遮罩，空态只在加载结束后判断。 */
   const showTable = computed(() => listLoading.value || rows.value.length > 0)
 
-  // `?host=` 深链：query 里的主机作为**主机筛选初始值** —— 单向（用户改筛选不回写
-  // query）。watch 同时兜住 worktab 缓存实例的「带 host 返回」场景。
+  // `?host=&keyword=` 深链：query 里的主机与关键词作为**筛选初始值** —— 单向（用户改
+  // 筛选不回写 query）。watch 同时兜住 worktab 缓存实例的「带 host 返回」场景；
+  // ?keyword= 是**全局检索下钻**的出口（检索命中卷后跳本页并带上卷名）。
+  let deepLinkInited = false
   watch(
-    () => route.query.host,
-    (raw, old) => {
-      const id = raw ? String(raw) : ''
+    [() => route.query.host, () => route.query.keyword],
+    ([rawHost, rawKeyword]) => {
+      const id = rawHost ? String(rawHost) : ''
+      const keyword = rawKeyword ? String(rawKeyword) : undefined
       const had = searchForm.value.host ?? ''
+      const hadKeyword = searchForm.value.keyword ?? ''
       searchForm.value.host = id
-      // ?host 深链进入时自动展开搜索栏：从总览下钻进来的人看到的是一张被过滤的表，
-      // 筛选线索必须在明处。immediate 首跑（old 为 undefined）也走这句。
-      if (id) showSearchBar.value = true
+      searchForm.value.keyword = keyword
+      // 深链进入时自动展开搜索栏：从总览下钻进来的人看到的是一张被过滤的表，
+      // 筛选线索必须在明处。immediate 首跑也走这句。
+      if (id || keyword) showSearchBar.value = true
       // 筛选变化（含深链首拉）回第一页。
       pagination.current = 1
-      if (id !== had || old === undefined) void load()
+      if (id !== had || keyword !== hadKeyword || !deepLinkInited) void load()
+      deepLinkInited = true
     },
     { immediate: true }
   )
@@ -353,24 +424,53 @@
   // ── 主机来源（跨主机表的写操作按发起时锁定的主机派发）───────────────
 
   /**
-   * 无行目标的整体动作（清理未使用卷）面向哪台主机：主机筛选选定的那台；
-   * 没选且全场只有一台可管主机时就是它；否则留空 —— 按钮禁用，禁用理由写进
-   * title（悬浮说明），页面不设常驻提示句。行内删除不吃它（行自带 hostId）。
+   * 清理未使用卷的**已定主机**：主机筛选选定的那台；没选且全场只有一台可管主机时
+   * 就是它；否则留空 —— 留空**不禁用按钮**，动作照常发起，只是流程第一屏是主机选择
+   * （withTargetHost）。行内删除不吃它（行自带 hostId）。
    */
   const targetHostId = computed(() => {
     if (searchForm.value.host) return searchForm.value.host
     return hosts.value.length === 1 ? hosts.value[0]!.id : ''
   })
 
-  /** 清理未使用卷的禁用门槛：指令在途，或没选定主机。 */
-  const hostActionDisabled = computed(() => busy.value || !targetHostId.value)
+  /** 主机尚未确定时的整钮弱化（动作仍可点：点了先选主机 —— 不是死控件）。 */
+  const hostIconClass = computed(() =>
+    targetHostId.value ? 'bg-theme/12 text-theme' : 'bg-theme/12 text-theme opacity-45'
+  )
 
-  /** 清理未使用卷的 title：禁用理由随禁用状态写进悬浮说明。 */
-  const pruneTitle = computed(() => {
-    if (busy.value) return '清理未使用卷…（指令在途，暂不可用）'
-    if (!targetHostId.value) return '清理未使用卷…（需先在「主机」筛选中选定一台主机）'
-    return '清理未使用卷…'
-  })
+  /** 清理未使用数据卷的 title：只说动作名（主机缺失由流程第一屏回答，不写解释句）。 */
+  const pruneTitle = computed(() =>
+    busy.value ? '清理未使用数据卷…（指令在途，暂不可用）' : '清理未使用数据卷…'
+  )
+
+  /** 清理未使用卷的目标主机选择对话框（动作流程的第一屏）。 */
+  const hostPick = ref<{
+    visible: boolean
+    title: string
+    hostId: string
+    next: ((hostId: string) => void) | null
+  }>({ visible: false, title: '', hostId: '', next: null })
+  function openHostPick(title: string, next: (hostId: string) => void) {
+    hostPick.value = { visible: true, title, hostId: targetHostId.value, next }
+  }
+  function onHostPicked() {
+    const { hostId, next } = hostPick.value
+    hostPick.value = { ...hostPick.value, visible: false, next: null }
+    if (hostId && next) next(hostId)
+  }
+
+  /**
+   * 无行目标动作的**两段式入口**（与镜像页四条整体动作同一套口径）：已定主机（主机
+   * 筛选 / 唯一主机）时流程第一屏略过，直达确认弹窗；否则先开主机选择的那一屏。
+   */
+  function withTargetHost(title: string, next: (hostId: string) => void) {
+    if (busy.value) return
+    if (targetHostId.value) {
+      next(targetHostId.value)
+      return
+    }
+    openHostPick(title, next)
+  }
 
   /** 指令通道的主机来源：行目标动作在**入口处锁定到该行的 hostId**（一次操作属于发起时锁定的那台主机）。 */
   const cmdHostId = ref('')
@@ -412,17 +512,20 @@
     }
   }
 
-  /** 清理未使用卷：强档（组件按注册表给逐字 DELETE 形态），没有 options 变体。 */
+  /** 清理未使用卷：第一条是选目标主机，选定后开强档确认弹窗（组件按注册表给逐字
+      DELETE 形态）；没有 options 变体。 */
   function openPrune() {
-    // 整体动作：主机在发起时锁定为筛选选定的那台（受理后不再随筛选变化）。
-    cmdHostId.value = targetHostId.value
-    confirmState.value = {
-      visible: true,
-      kind: 'prune',
-      action: 'volume:prune',
-      target: '',
-      protected: false
-    }
+    withTargetHost('清理未使用数据卷：选择目标主机', (hostId) => {
+      // 主机在流程第一屏写进指令通道（cmdHostId）：受理后不再随筛选变化。
+      cmdHostId.value = hostId
+      confirmState.value = {
+        visible: true,
+        kind: 'prune',
+        action: 'volume:prune',
+        target: '',
+        protected: false
+      }
+    })
   }
 
   /** 确认弹窗提交：force 只在「强制操作」开关出现且被勾选时为 true。 */
@@ -446,6 +549,10 @@
     }
   }
 
+  // ── 批量栏吸底 × 分页器 ──────────────────────────────────────────
+  // 吸底块与分页器的错位量由**批量栏自己量**（只有栏知道自己在哪个滚动容器里，
+  // 口径见 batch-actions 的 measureBatchOffset）—— 页面不再参与定位。
+
   // ── 表格列 ──
 
   // 列设置经 useTableColumns（对齐系统管理，列弹层可用）：工厂只在 setup 求值一次
@@ -457,6 +564,8 @@
     // 卷的状态与回收决策依据；驱动与大小是摘要元数据（合计在工具条），桌面（>=1024）
     // 才展示。数据列一律 minWidth，固定宽度只留给 index/操作这类结构性列。
     return [
+      // 勾选列只在有删除权限时出现：批量删除是它唯一的用途（无权限的人勾它只会困惑）。
+      ...(canDelete.value ? [{ type: 'selection' as const, width: 46 }] : []),
       { type: 'index' as const, width: 60, label: '序号', hideBelow: 'tablet' },
       {
         prop: 'name',
@@ -538,7 +647,8 @@
                   target: row.name,
                   protected: row.protected === true,
                   pendingId: pendingId.value,
-                  disabled: busy.value,
+                  // 指令在途或批量在途都禁用行菜单：防与批量并发提交同一目标。
+                  disabled: busy.value || batchBusy.value,
                   onSelect: (item: { action: string }) => onRowMenu(row, item)
                 })
             }
@@ -555,6 +665,20 @@
   // （与项目/容器/镜像/网络页同一全局类 docker-host + t.pill 制）。
   :global(.docker-host) {
     @include t.pill;
+  }
+
+  // 目标主机选择（清理未使用卷的流程第一屏，挂在页面自己的对话框里）。
+  // **挂在顶层**：对话框内容可能被 teleport 到 body，嵌在 .docker-volumes-page 下的
+  // 规则会因祖先不在而失配（scoped 只剩末尾那截属性选择器）。
+  .host-pick {
+    &__label {
+      margin-bottom: 6px;
+      font-size: 13px;
+    }
+
+    &__select {
+      width: 100%;
+    }
   }
 
   .docker-volumes-page {

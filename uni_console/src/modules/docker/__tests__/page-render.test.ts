@@ -321,7 +321,7 @@ describe('页面渲染冒烟（挂载即验证，白屏类故障的守卫）', (
     expect(w.find('.toolbar-left').exists()).toBe(true)
     expect(w.text()).toContain('共 1 个数据卷')
     const titles = w.findAllComponents({ name: 'ArtButtonTable' }).map((b) => b.attributes('title'))
-    expect(titles).toContain('清理未使用卷…')
+    expect(titles).toContain('清理未使用数据卷…')
   })
 
   it('网络页（拆分切片）：挂载成功并渲染出计数（网络没有整体动作）', async () => {
@@ -516,10 +516,10 @@ describe('W1 列表页筛选可见性（深链展开 + 激活态接线）', () =
   })
 
   it.each(PAGES)(
-    '%s页：不带 host 进入时搜索栏保持收起（不被无谓放大）',
+    '%s页：不带 host 进入时搜索栏也**默认展开**（主机/关键词是前置条件，摆在明处）',
     async (_name, component) => {
       const w = await mountPage(component, {})
-      expect(w.find('[data-stub="ArtSearchBar"]').isVisible()).toBe(false)
+      expect(w.find('[data-stub="ArtSearchBar"]').isVisible()).toBe(true)
     }
   )
 

@@ -16,6 +16,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent, h, nextTick, ref, KeepAlive, type Component } from 'vue'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 
 const api = vi.hoisted(() => ({
   fetchDockerEventHistory: vi.fn(),
@@ -213,12 +215,35 @@ async function clickRefresh(w: VueWrapper) {
   await flush()
 }
 
-/** 点一档类型筛选（ElRadioButton 真件：置 radio 并触发 change）。 */
-async function clickType(w: VueWrapper, label: string) {
-  const btn = w.findAll('.el-radio-button').find((b) => b.text() === label)
-  expect(btn, `类型筛选「${label}」应存在`).toBeTruthy()
-  await btn!.find('input').setValue()
+/** 在过滤面板（ArtSearchBar）里改一项筛选：直接驱动面板的 v-model。
+ *  面板 → 表单的控件接线是 ArtSearchBar 自己的事（各列表页共用同一份），本页的
+ *  回归面是「过滤变化 → 服务端参数 + 时间轴重建」，故从面板的模型口进入。
+ *  关键词另有一条**走真控件**的用例（打字即生效，见「过滤」组）。 */
+async function setFilter(w: VueWrapper, patch: Record<string, unknown>) {
+  const bar = w.findComponent({ name: 'ArtSearchBar' })
+  expect(bar.exists(), '页内应有 ArtSearchBar（过滤面板）').toBe(true)
+  bar.vm.$emit('update:modelValue', { ...(bar.props('modelValue') as object), ...patch })
   await flush()
+}
+
+/** 关键字输入（走真 ElInput：打字 → 面板 → 页面过滤，输入即生效）。 */
+async function typeKeyword(w: VueWrapper, text: string) {
+  const input = w.find('.art-search-bar input')
+  expect(input.exists(), '过滤面板应有关键词输入框').toBe(true)
+  await input.setValue(text)
+  await flush()
+}
+
+/** 点一档类型筛选（面板的类型下拉）。 */
+async function clickType(w: VueWrapper, label: string) {
+  const TYPES: Record<string, string> = {
+    容器: 'container',
+    镜像: 'image',
+    卷: 'volume',
+    网络: 'network'
+  }
+  expect(TYPES[label], `类型筛选「${label}」应是四档之一`).toBeTruthy()
+  await setFilter(w, { type: TYPES[label] })
 }
 
 describe('事件流详版页：加载序与列的事实', () => {
@@ -245,6 +270,72 @@ describe('事件流详版页：加载序与列的事实', () => {
     expect(w.find('.ev-host').text()).toBe('bogon')
     // 非 die 事件（无退出码）：显示「—」而不是猜一个 0。
     expect(w.find('.ev-exit').text()).toBe('—')
+  })
+
+  it('列集合与行结构：六列固定，每行六格一一对应（表头与单元格同序）', async () => {
+    api.fetchDockerEventHistory.mockResolvedValue(
+      historyResp([historyItem({ t: BASE_SEC * 1000 - 120_000, action: 'die', exitCode: 137 })])
+    )
+    const w = await mountEvents()
+
+    const heads = w
+      .findAll('.el-table__header th')
+      .map((th) => th.text().trim())
+      .filter((t) => t !== '')
+    expect(heads).toEqual(['时刻', '类型', '动作', '对象', '主机', '退出码'])
+
+    const cells = w.find('.el-table__body tbody tr').findAll('td')
+    expect(cells, '每行六格（列集合与行结构一致）').toHaveLength(6)
+    // 时刻：绝对 + 相对两行同格（同一 t 的两种读法）。
+    expect(cells[0]!.find('.ev-time__abs').exists()).toBe(true)
+    expect(cells[0]!.find('.ev-time__rel').exists()).toBe(true)
+    // 类型：图标 + 中文名（色不单独表意）。
+    expect(cells[1]!.find('.ev-type').exists()).toBe(true)
+    // 动作：中文结论（.ev-action）与原始码（.ev-raw）是**两个**元素（主辅分家）。
+    expect(cells[2]!.find('.ev-action').text()).toBe('退出')
+    expect(cells[2]!.find('.ev-raw').text()).toBe('die')
+    expect(cells[2]!.find('.ev-act').attributes('title')).toBe('退出 · die')
+    // 对象：短显 + 悬停看全（title 是完整引用）。
+    expect(cells[3]!.find('.ev-actor').attributes('title')).toContain('uni-center-core')
+    // 主机：模块统一的主机胶囊（docker-host）。
+    expect(cells[4]!.find('.docker-host').exists()).toBe(true)
+    expect(cells[4]!.find('.ev-host').text()).toBe('bogon')
+    // 退出码：原始事实直显（exit 137），≠0 红染。
+    expect(cells[5]!.find('.ev-exit').text()).toBe('exit 137')
+    expect(cells[5]!.find('.ev-exit').classes()).toContain('is-danger')
+  })
+
+  it('工具行：连接态给点 + 文字（颜色不单独表意）；暂停事实在工具行且可点即恢复', async () => {
+    api.fetchDockerEventHistory.mockResolvedValue(historyResp([historyItem()]))
+    const w = await mountEvents()
+
+    // 实时：点 + 「实时」文字同列（点只是形，结论在文字里）。
+    const status = w.find('.ev-status')
+    expect(status.text()).toBe('实时')
+    expect(status.find('.ev-status__dot').exists()).toBe(true)
+    expect(status.classes()).toContain('is-live')
+
+    // 暂停：事实一条在工具行（不是跨列横幅），文字是结论；点它即恢复。
+    await w
+      .findAll('button')
+      .find((b) => b.text() === '暂停')!
+      .trigger('click')
+    await flush()
+    const chip = w.find('.ev-paused')
+    expect(chip.exists()).toBe(true)
+    expect(chip.text()).toBe('已暂停')
+    await chip.trigger('click')
+    await flush()
+    expect(w.find('.ev-paused').exists()).toBe(false)
+  })
+
+  it('工具条搜索钮与过滤面板接线：has-active-filter 随筛选变化', async () => {
+    api.fetchDockerEventHistory.mockResolvedValue(historyResp([]))
+    const w = await mountEvents()
+    const header = () => w.findComponent({ name: 'ArtTableHeader' }).attributes('has-active-filter')
+    expect(header()).toBe('false')
+    await clickType(w, '镜像')
+    expect(header()).toBe('true')
   })
 
   it('对象列缩短而非截断：actor_name 本身就是完整 sha256（71 字符）时取 12 位短 id', async () => {
@@ -379,13 +470,79 @@ describe('事件流详版页：过滤（服务端 + 实时行客户端半边）'
     expect(w.findAll('.ev-raw').map((n) => n.text())).toEqual(['push', 'pull'])
   })
 
-  it('空态话术：无筛选说「窗口内没有事件」，有筛选说「没有匹配的事件」', async () => {
+  it('空态两态可辨：流已连接但窗口无事件 vs 筛选没命中（两种事实，结论句不同）', async () => {
     api.fetchDockerEventHistory.mockResolvedValue(historyResp([]))
     const w = await mountEvents()
-    expect(w.find('.el-empty__description').text()).toBe('窗口内没有事件')
+    // 实时流已连上（openDockerEventsStream 已解析）：报「已连接、等待事件」这一
+    // 件事实；此时没有筛选可清，不给「清除筛选」。
+    expect(w.find('.ev-empty__fact').text()).toBe('实时流已连接 · 等待事件')
+    expect(w.findAll('button').find((b) => b.text() === '清除筛选')).toBeUndefined()
 
+    // 筛了没命中：结论句换成筛选的事实，并给「清除筛选」的出口。
     await clickType(w, '容器')
-    expect(w.find('.el-empty__description').text()).toBe('没有匹配的事件')
+    expect(w.find('.ev-empty__fact').text()).toBe('没有匹配的事件')
+    const clear = w.findAll('button').find((b) => b.text() === '清除筛选')
+    expect(clear, '筛选没命中应给「清除筛选」').toBeTruthy()
+
+    // 清除筛选 = 清空三项 + 重拉（回到「窗口内没有事件」那一态）。
+    api.fetchDockerEventHistory.mockClear()
+    await clear!.trigger('click')
+    await flush()
+    expect(api.fetchDockerEventHistory).toHaveBeenLastCalledWith({})
+    expect(w.find('.ev-empty__fact').text()).toBe('实时流已连接 · 等待事件')
+  })
+
+  it('空态：流不在线（停机）时不冒充「已连接」—— 只报窗口这一件事实', async () => {
+    api.fetchDockerEventHistory.mockResolvedValue(historyResp([]))
+    api.openDockerEventsStream.mockImplementationOnce(() =>
+      Promise.resolve(makeFakeStream({ ok: false, status: 401 }).response)
+    )
+    const w = await mountEvents()
+    expect(w.find('.ev-empty__fact').text()).toBe('窗口内没有事件')
+  })
+
+  it('过滤面板：三项维度与选项不变（关键词 / 类型四档 / 主机），全部服务端过滤', async () => {
+    const w = await mountEvents()
+    const bar = w.findComponent({ name: 'ArtSearchBar' })
+    const items = bar.props('items') as Array<Record<string, any>>
+    expect(items.map((i) => i.key)).toEqual(['keyword', 'type', 'host'])
+    expect(items[0].placeholder).toBe('对象 / 动作')
+    expect(items[1].options.map((o: any) => o.value)).toEqual([
+      'container',
+      'image',
+      'volume',
+      'network'
+    ])
+    expect(items[1].placeholder).toBe('全部类型')
+    expect(items[2].placeholder).toBe('全部主机')
+    // 主机多了要能敲名字找（与容器/镜像/卷/网络/项目页同款）。
+    expect(items[2].filterable).toBe(true)
+  })
+
+  it('关键词：打字即生效（不点「查询」也重拉），且只在关键词真变了时才打端点', async () => {
+    api.fetchDockerEventHistory.mockResolvedValue(historyResp([]))
+    const w = await mountEvents()
+    api.fetchDockerEventHistory.mockClear()
+
+    await typeKeyword(w, 'web')
+    expect(api.fetchDockerEventHistory).toHaveBeenLastCalledWith({ keyword: 'web' })
+
+    // 只多敲一个空白：去空白后的过滤没变（仍是 web）→ 不重复打端点。
+    api.fetchDockerEventHistory.mockClear()
+    await typeKeyword(w, 'web ')
+    expect(api.fetchDockerEventHistory).not.toHaveBeenCalled()
+  })
+
+  it('主机筛选：透传 hostId（全部主机 = 空 → 不发该参数）', async () => {
+    api.fetchDockerEventHistory.mockResolvedValue(historyResp([]))
+    const w = await mountEvents()
+    api.fetchDockerEventHistory.mockClear()
+
+    await setFilter(w, { host: 'h2' })
+    expect(api.fetchDockerEventHistory).toHaveBeenLastCalledWith({ hostId: 'h2' })
+
+    await setFilter(w, { host: '' })
+    expect(api.fetchDockerEventHistory).toHaveBeenLastCalledWith({})
   })
 })
 
@@ -563,5 +720,111 @@ describe('事件流详版页：keep-alive 生命周期', () => {
     expect(api.openDockerEventsStream).toHaveBeenCalledTimes(2)
     expect(api.fetchDockerEventHistory.mock.calls.length).toBeGreaterThanOrEqual(2)
     expect(wrapper.text()).toContain('实时')
+  })
+})
+
+// ───────────────────────────────────────────────────────────────────────────
+// 表体高度口径：**不得来自写死常数**（旧病：`calc(var(--art-full-height) - 256px)`
+// 猜上方 chrome，猜错时表体比内容矮、卡片下方却还空着一块 —— 空白与滚动条并存，
+// 低视口下还切行）；装得下时**不得产生内滚容器**，只是「由真实剩余高度约束」。
+//
+// 为什么一半是源码断言：jsdom 没有布局引擎（getBoundingClientRect 恒 0、
+// scrollHeight 恒 0），「表体可视高 = 内容高」这类不变量在单测里测不到（会绿得
+// 毫无意义）。真值验证走 playwright 探针（.tmp-ux-20261010/fix-events-height/：
+// 1920×1080 / 820 / 760 三档改前改后量测 + 真滚轮）。这里钉住的是**让探针变绿的
+// 结构**，以及一个 jsdom 里确实可断言的 DOM 事实（EP 只在拿到 max-height 属主时
+// 才往表根写内联 max-height —— 没有内联值 = 高度不来自常数）。
+// ───────────────────────────────────────────────────────────────────────────
+
+/** 事件流页 SFC 源码（含 `<style scoped>`）。取法随 w1-list-ux.test.ts（process.cwd()
+ *  即 uni_console：测试按 `pnpm --dir uni_console test` 跑）。 */
+const EVENTS_SRC = readFileSync(
+  resolve(process.cwd(), 'src/modules/docker/views/events.vue'),
+  'utf8'
+)
+
+/** 去掉注释（模板 HTML 注释 / 块注释 / 行注释）：论证里引用旧写法（如 `-256px`
+ *  的推导、被删的 max-height 口径）不该被当成真实代码。**块注释必须在行过滤之前
+ *  整块去掉** —— 先按行丢 `/*` 开头那行的话，多行块注释的正则就少了起点，注释体
+ *  会留在「代码」里（旧写法被误判成真实声明）。 */
+function stripComments(source: string): string {
+  return source
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n')
+    .filter((line) => {
+      const t = line.trim()
+      return !t.startsWith('//') && !t.startsWith('*')
+    })
+    .join('\n')
+}
+
+/** 取一段 SCSS 块（从 `from` 起、花括号配平到结束）。 */
+function block(source: string, from: string): string {
+  const start = source.indexOf(from)
+  expect(start, `未找到块：${from}`).toBeGreaterThanOrEqual(0)
+  let depth = 0
+  for (let i = start; i < source.length; i++) {
+    if (source[i] === '{') depth++
+    else if (source[i] === '}') {
+      depth--
+      if (depth === 0) return source.slice(start, i + 1)
+    }
+  }
+  throw new Error(`块未闭合：${from}`)
+}
+
+const EVENTS_CODE = stripComments(EVENTS_SRC)
+
+describe('事件流详版页：表体高度口径（不猜 chrome 高度）', () => {
+  it('表体高度不来自写死常数：没有 max-height 声明、没有 max-height 属性、没有减去常数的 calc', () => {
+    expect(
+      EVENTS_CODE,
+      '本页不再用「max-height 上限」定表体高度（任何 max-height 声明都请改走 .ev-table 的 flex 链）'
+    ).not.toMatch(/max-height/)
+    expect(EVENTS_CODE, 'ElTable 不得再收 max-height 属性').not.toMatch(/:max-height=/)
+    expect(
+      EVENTS_CODE,
+      '不得再用 `var(--art-full-height) - <常数>` 猜上方 chrome（猜错就是空白 + 滚动条并存）'
+    ).not.toMatch(/var\(--art-full-height\)\s*-/)
+    expect(EVENTS_CODE, '旧的 max(240px, …) 下限常数不得复活').not.toMatch(/max\(\s*240px/)
+  })
+
+  it('表根接回 flex 链：flex 1 1 auto + min-height 0（由真实剩余高度约束，能缩才能让内滚有出路）', () => {
+    const rule = block(EVENTS_CODE, '.ev-table {')
+    expect(rule, '表根必须是 flex 项').toMatch(/flex:\s*1 1 auto/)
+    expect(
+      rule,
+      'basis 取 auto（不是 0）：卡随内容收缩时卡体没有确定高度，basis:0 会把表塌成 0'
+    ).not.toMatch(/flex:\s*1 1 0/)
+    expect(rule, 'min-height: 0 才允许被页根截住时收缩').toMatch(/min-height:\s*0/)
+  })
+
+  it('工具行 / 静默失败标注 / 游标条 flex: none：让位的只能是表体一节（结论行常驻卡内）', () => {
+    expect(block(EVENTS_CODE, ':deep(#art-table-header) {')).toMatch(/flex:\s*none/)
+    expect(block(EVENTS_CODE, '.ev-refresh-error {')).toMatch(/flex:\s*none/)
+    const more = block(EVENTS_CODE, '.ev-more {')
+    expect(more).toMatch(/flex:\s*none/)
+  })
+
+  it('DOM：表是卡体的直接子项（flex 链成立的结构前提），且 EP 没拿到内联 max-height', async () => {
+    api.fetchDockerEventHistory.mockResolvedValue(historyResp([historyItem()]))
+    const w = await mountEvents()
+
+    const table = w.find('.el-card__body > .el-table')
+    expect(table.exists(), '表必须是卡体的直接子项（中间夹一层，剩余高度就传不下来）').toBe(true)
+    expect(table.classes(), '表根带 ev-table：flex 规则落点').toContain('ev-table')
+    // EP 只在 maxHeight 属性在场时把 max-height 写进表根的内联样式 —— 空值即「高度不来自常数」。
+    const el = table.element as HTMLElement
+    expect(el.style.maxHeight, '表根不得有内联 max-height').toBe('')
+    expect(el.style.height, '表根不得有内联 height（高度由 flex 链给）').toBe('')
+
+    // 卡体三节同序：工具行 → 表 → 游标条（账目句/加载更早在表之后，常驻卡底）。
+    const body = w.find('.el-card__body')
+    const kids = Array.from(body.element.children)
+    const tableIdx = kids.findIndex((c) => c.classList.contains('ev-table'))
+    const moreIdx = kids.findIndex((c) => c.classList.contains('ev-more'))
+    expect(tableIdx, '表在卡体内').toBeGreaterThanOrEqual(0)
+    expect(moreIdx, '游标条在卡体内、且排在表之后').toBeGreaterThan(tableIdx)
   })
 })

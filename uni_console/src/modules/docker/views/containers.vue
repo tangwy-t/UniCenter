@@ -1,6 +1,6 @@
 <template>
   <!-- 单根（single-root 守卫在库：布局的 Transition 只支持单根，双根切页白屏）。 -->
-  <div ref="pageRoot" class="docker-containers-page art-full-height">
+  <div class="docker-containers-page art-full-height">
     <ArtSearchBar
       v-show="showSearchBar"
       v-model="searchForm"
@@ -14,14 +14,13 @@
            本页清单一起重拉（reloadAll = loadHosts + load；主机可能刚入库，
            旧资源页 hero 的刷新即此语义）。:loading 语义不变：重拉走非静默档，
            表头转圈照旧。 -->
-      <!-- :layout 显式去掉 columns 段（组件默认含）：本页列集合在子组件
-           WorkloadTable 里，工具条拿不到列 —— 保留列设置钮只会开出空弹层
-           （死控件）；其余段与组件默认一致。 -->
+      <!-- columns 段（列设置）恢复：列集合由页面持有（useTableColumns + 共享工厂
+           workload-columns.ts），工具条与表格用同一份列定义 —— 弹层可勾选可拖序。 -->
       <ArtTableHeader
+        v-model:columns="columnChecks"
         v-model:showSearchBar="showSearchBar"
         :loading="loading"
         :has-active-filter="hasFilter"
-        layout="search,refresh,size,fullscreen,settings"
         @refresh="reloadAll"
       >
         <template #left>
@@ -44,7 +43,7 @@
                  过期数字，进行中的数量进任务页里看（与总览 hero 同一口径）。 -->
             <ArtButtonTable
               v-if="canList"
-              icon="ri:task-line"
+              icon="carbon:ibm-event-automation"
               iconClass="bg-theme/12 text-theme"
               title="任务中心"
               @click="goTasks"
@@ -93,6 +92,7 @@
       <template v-else>
         <WorkloadTable
           :rows="rows"
+          :columns="columns"
           :loading="loading"
           :has-filter="hasFilter"
           :pending-id="pendingId"
@@ -107,15 +107,17 @@
           @reset-filter="onReset"
         />
 
-        <!-- 批量栏（含批量删除确认弹窗与逐行派发循环）在子组件。**留表下、不进工具条**：
-             页面级常驻动作（创建/任务中心/自动刷新）进工具条；批量栏承载选中态的批量
-             动作、逐行波次与进度，是列表的选中态控制台 —— 随勾选出现、贴在被它控制的
-             行下面（与波次反馈的阅读位置也一致）。 -->
+        <!-- 批量栏（含批量确认弹窗与逐行派发循环）在子组件：栏本身**资源无关**
+             （动作集与行投影由本页给），容器页给的是启停/重启/删除四项。**留表下、
+             不进工具条**：页面级常驻动作（创建/任务中心/自动刷新）进工具条；批量栏
+             承载选中态的批量动作、逐行波次与进度，是列表的选中态控制台 —— 随勾选
+             出现、贴在被它控制的行下面（与波次反馈的阅读位置也一致）。 -->
         <WorkloadBatchBar
+          noun="容器"
           :selected="selected"
+          :actions="CONTAINER_BATCH_ACTIONS"
           :busy="busy"
           :refresh="refreshSilent"
-          :bottom-offset="batchBottomOffset"
           @busy-change="batchBusy = $event"
         />
       </template>
@@ -154,17 +156,21 @@
    * 交给表体自身（WorkloadTable 的 ArtTable :loading），首拉失败走紧凑失败态
    * （ElEmpty + 重试），刷新失败保留旧数据并在工具条标注「刷新失败，正在显示上次结果」。
    */
-  import { computed, nextTick, reactive, ref, watch } from 'vue'
+  import { computed, reactive, ref, watch } from 'vue'
   import { useRoute, useRouter } from 'vue-router'
   import { ElButton, ElCard, ElEmpty, ElMessage } from 'element-plus'
   import ArtButtonTable from '@/components/core/forms/art-button-table/index.vue'
   import ArtSearchBar from '@/components/core/forms/art-search-bar/index.vue'
   import ArtTableHeader from '@/components/core/tables/art-table-header/index.vue'
   import { useAuth } from '@/hooks/core/useAuth'
-  import { PermDockerList, PermDockerManage } from '@/enums/permission'
+  import { useTableColumns } from '@/hooks/core/useTableColumns'
+  import { PermDockerList, PermDockerDelete, PermDockerExec, PermDockerManage } from '@/enums/permission'
+  import type { ColumnOption } from '@/types/component'
   import DockerActionConfirm from '../components/action-confirm.vue'
   import WorkloadBatchBar from '../components/workload-batch-bar.vue'
   import WorkloadTable from '../components/workload-table.vue'
+  import { CONTAINER_BATCH_ACTIONS } from '../components/batch-actions'
+  import { applyColumnChecks, workloadColumns } from '../components/workload-columns'
   import type { DockerWorkloadItem } from '../api'
   import { runErrorMessage, useDockerCmds } from '../composables/useDockerCmds'
   import { useWorkloadList } from '../composables/useWorkloadList'
@@ -176,7 +182,9 @@
   const route = useRoute()
 
   // ── 筛选（ArtSearchBar；三项全部作为 query 发给端点，服务端过滤）──
-  const showSearchBar = ref(false)
+  // 面板**默认展开**：主机（筛选源）与关键词是这一页的前置条件，收在面板里等于把
+  // 前置条件藏起来（P1-5 的同一口径）；深链进入也照旧自动展开。
+  const showSearchBar = ref(true)
   const searchForm = ref<{ keyword?: string; state?: string; host?: string }>({})
 
   // 数据与四态收口在 composable（拉取/seq 守卫/截断结论/10s 自动刷新含失活停表）：
@@ -257,18 +265,9 @@
         unavailableHosts.value.map((h) => `${h.hostname || h.hostId}（${h.reason}）`).join('、')
   )
 
-  // ── 批量栏吸底 × 分页器（Wave 2）──────────────────────────────────
-  // 分页器渲染在表内底部、批量栏（sticky bottom:0）之前 —— 不处理则吸底块会盖住
-  // 分页器。把吸底块的 sticky bottom 抬到分页器上缘（= 分页器高度 + 间距，间距照
-  // ArtTable 的 PAGINATION_SPACING=6），二者不叠。数据/加载变化后重测（分页器随
-  // 数据出现/消失、随断点换行改变高度）；jsdom 里 offsetHeight=0 → 退回 bottom:0。
-  const pageRoot = ref<HTMLElement>()
-  const batchBottomOffset = ref(0)
-  function measureBatchOffset() {
-    const el = pageRoot.value?.querySelector('.pagination') as HTMLElement | null
-    batchBottomOffset.value = el ? el.offsetHeight + 6 : 0
-  }
-  watch([rows, loading, pagination], () => nextTick(measureBatchOffset), { flush: 'post' })
+  // ── 批量栏吸底 × 分页器 ──────────────────────────────────────────
+  // 吸底块与分页器的错位量由**批量栏自己量**（只有栏知道自己在哪个滚动容器里，
+  // 口径见 batch-actions 的 measureBatchOffset）—— 页面不再参与定位。
 
   const hasFilter = computed(
     () =>
@@ -330,30 +329,40 @@
     void load()
   }
 
-  // `/docker/containers?host=&state=` 深链兼容：query 里的主机/状态作为**筛选初始值**
-  // —— 单向（用户改筛选不回写 query，host/state 从此是筛选状态而不是页面状态）。
-  // ?host 是总览主机卡片的既有链路（8a 起不再与 ?id 结伴，详情已是独立页）；
-  // ?state=stopped 是总览异常清单的出口（Wave 3b 把出口指向这里，此前无代码消费、
-  // 是死链 —— 本波接线）。两条一起 watch：合并成一次首拉，避免两个 immediate watch
-  // 在挂载时各拉一次。
+  // `/docker/containers?host=&state=&keyword=` 深链兼容：query 里的主机/状态/关键词
+  // 作为**筛选初始值** —— 单向（用户改筛选不回写 query，三者从此是筛选状态而不是
+  // 页面状态）。?host 是总览主机卡片的既有链路（8a 起不再与 ?id 结伴，详情已是独立
+  // 页）；?state=stopped 是总览异常清单的出口（Wave 3b 把出口指向这里）；?keyword=
+  // 是**全局检索下钻**的出口（检索命中容器后跳本页并带上名字）。三条一起 watch：
+  // 合并成一次首拉，避免多个 immediate watch 在挂载时各拉一次。
   let filterInited = false
   watch(
-    [() => route.query.host, () => route.query.state],
-    ([rawHost, rawState]) => {
+    [() => route.query.host, () => route.query.state, () => route.query.keyword],
+    ([rawHost, rawState, rawKeyword]) => {
       const host = rawHost ? String(rawHost) : ''
-      // state 只在 query 有值时写入（空串下发给端点无意义；undefined = 不过滤）。
+      // state/keyword 只在 query 有值时写入（空串下发给端点无意义；undefined = 不过滤）。
       const state = rawState ? String(rawState) : undefined
+      const keyword = rawKeyword ? String(rawKeyword) : undefined
       const hadHost = searchForm.value.host ?? ''
       const hadState = searchForm.value.state ?? ''
+      const hadKeyword = searchForm.value.keyword ?? ''
       searchForm.value.host = host
       searchForm.value.state = state
-      // 深链进入时自动展开搜索栏：从总览下钻进来的人看到的是一张被过滤的表，
+      searchForm.value.keyword = keyword
+      // 深链进入时自动展开搜索栏：从总览/检索下钻进来的人看到的是一张被过滤的表，
       // 筛选线索必须在明处（面板不展开则看不出为什么少了）。
-      if (host || state) showSearchBar.value = true
+      if (host || state || keyword) showSearchBar.value = true
       // 筛选变化（含深链首拉）回第一页。
       pagination.current = 1
       // 首跑（filterInited=false）必拉一次；此后仅 query 真的变化时重拉。
-      if (host !== hadHost || state !== hadState || !filterInited) void load()
+      if (
+        host !== hadHost ||
+        state !== hadState ||
+        keyword !== hadKeyword ||
+        !filterInited
+      ) {
+        void load()
+      }
       filterInited = true
     },
     { immediate: true }
@@ -493,6 +502,36 @@
   function goTasks() {
     void router.push({ path: '/docker/tasks' })
   }
+
+  // ── 表格列（列设置：工具条弹层与表格同一份列定义）─────────────────
+  // 列集合在 components/workload-columns.ts（纯工厂，权限在会话内不变化，故
+  // canWrite 这类在 setup 现取）；行内菜单的禁用态来自 pendingId/batchBusy ——
+  // 这两个信号在下面的 computed 里读一次，工厂随之**每次新建列对象**（formatter
+  // 换身份）→ ElTable 重渲单元格，禁用态即时跟上（与列集合下沉前同一手法）。
+  const canDelete = computed(() => hasAuth(PermDockerDelete))
+  const canWrite = computed(() => canManage.value || canDelete.value)
+  const canExecCol = computed(() => hasAuth(PermDockerExec))
+
+  function buildColumns(): ColumnOption<DockerWorkloadItem>[] {
+    return workloadColumns({
+      canWrite: canWrite.value,
+      canManage: canManage.value,
+      canDelete: canDelete.value,
+      canExec: canExecCol.value,
+      hasAuth,
+      pendingId: () => pendingId.value,
+      batchBusy: () => batchBusy.value,
+      onOpenDetail: (row) => openDetail(row),
+      onMenuSelect: (payload) => onMenuSelect(payload)
+    })
+  }
+
+  const { columnChecks } = useTableColumns<DockerWorkloadItem>(() => buildColumns())
+  const columns = computed(() => {
+    void pendingId.value
+    void batchBusy.value
+    return applyColumnChecks(buildColumns(), columnChecks.value)
+  })
 </script>
 
 <style lang="scss" scoped>

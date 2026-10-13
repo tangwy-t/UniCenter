@@ -1,7 +1,7 @@
 <template>
   <!-- 单根（single-root 守卫在库：布局的 Transition 只支持单根，双根切页白屏）。 -->
   <div class="docker-overview art-full-height overflow-y-auto">
-    <div class="docker-overview__inner p-4 pb-8 md:p-5">
+    <div class="docker-overview__inner">
       <!-- ============ 页头：图标 + 标题 + 舰队摘要 + 自动刷新（对齐 sv-hero / do-hero）============ -->
       <div class="dov-hero mb-4 flex flex-wrap items-center gap-3">
         <div class="dov-hero__icon flex-cc">
@@ -34,7 +34,7 @@
                徽标：计数要为它单独拉列表且必是过期数字，进行中的数量进任务页里看。 -->
           <ArtButtonTable
             v-if="canList"
-            icon="ri:task-line"
+            icon="carbon:ibm-event-automation"
             iconClass="bg-theme/12 text-theme"
             title="任务中心"
             @click="goTasks"
@@ -103,18 +103,12 @@
           <OverviewKpiTile v-for="t in kpis" :key="t.key" :tile="t" @select="onKpiClick" />
         </div>
 
-        <!-- ============ 主机卡片网格（控制塔的就绪板） ============ -->
-        <section id="dov-hosts" class="dov-section">
-          <div class="dov-section__head">
-            <span class="dov-section__title">主机</span>
-            <span class="dov-section__sub"> 共 {{ hosts.length }} 台 </span>
-          </div>
-          <div
-            class="dov-hosts grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4"
-          >
-            <OverviewHostCard v-for="h in hosts" :key="h.id" :host="h" @open="goHostContainers" />
-          </div>
-        </section>
+        <!-- ============ 主机就绪板（控制塔的就绪板；100 台规模见子组件） ============ -->
+        <!-- 分组 / 筛选 / 组内排序 / 折叠与它自己的工具条都收在子组件里：那些是**用户
+             状态**（筛选条件、排序键、哪些组被折叠），必须与 10 秒自动刷新的数据
+             生命周期解耦 —— 状态自持在子组件内，刷新换的是 hosts prop，用户的选择
+             一个都不会被打回默认。 -->
+        <OverviewHostBoard :hosts="hosts" @open="goHostContainers" />
 
         <!-- ============ 磁盘占用（6a 磁盘治理：花在哪 + 怎么安全收回） ============ -->
         <!-- 放在主机板之后、异常清单之前：自上而下是「账目 → 就绪板 → 磁盘账 → 要闻」，
@@ -179,7 +173,7 @@
   import OverviewAnomalyTable from '../components/overview-anomaly-table.vue'
   import OverviewDiskPanel from '../components/overview-disk-panel.vue'
   import OverviewEventsFeed from '../components/overview-events-feed.vue'
-  import OverviewHostCard from '../components/overview-host-card.vue'
+  import OverviewHostBoard from '../components/overview-host-board.vue'
   import OverviewKpiTile from '../components/overview-kpi-tile.vue'
   import { fetchDockerOverview, type DockerHostItem } from '../api'
   import {
@@ -383,7 +377,11 @@
   @include t.rise-keyframes;
   @include t.pulse-keyframes;
 
-  /* ---------- 骨架：对齐 server.vue 的 .server-page__inner 分栏与留白 ---------- */
+  /* ---------- 骨架：分栏（无内边距，与列表页同一左右口径） ---------- */
+  // 内边距一律不在这里加：`.layout-content` 已把内容框内缩 20px（width: calc(100% - 40px)
+  // + margin:auto），各列表页卡片就落在这条线上（距 main 边 21px）。本页根此前**另加**
+  // p-4/pb-8/md:p-5（20px），左边缘落到 40px —— 总览↔列表切换时内容边缘跳 19px。去掉
+  // 附加内边距，左右边缘与列表页对齐（P9-1）。
   .docker-overview__inner {
     display: flex;
     flex-direction: column;

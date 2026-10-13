@@ -1,6 +1,9 @@
 <template>
   <!-- 单根（single-root 守卫在库：布局的 Transition 只支持单根，双根切页白屏）。 -->
-  <div class="container-detail art-full-height overflow-y-auto">
+  <!-- art-full-height--flow：页头块（实体头 + 摘要行 + 页签栏）本身就高，矮视口
+       （phoneShort）下钉死页根高度会把末尾内容卡压成空壳（844×390 实测卡体 20px），
+       该档回落自然流（见 app.scss 的 .art-full-height--flow）。 -->
+  <div class="container-detail art-full-height art-full-height--flow overflow-y-auto">
     <div class="container-detail__inner p-4 pb-8 md:p-5">
       <!-- ============ 实体头：返回 + 名称 + 状态 + 行操作（与设备详情同一骨架）============ -->
       <div class="cd-hero">
@@ -161,7 +164,7 @@
           </ElTabPane>
 
           <!-- 终端是三期能力：仅具备执行权限时渲染（不渲染 ≠ 禁用，spec §11.0）。 -->
-          <ElTabPane v-if="canExec" label="终端" name="pty">
+          <ElTabPane v-if="canExec" label="终端" name="pty" class="cd-pane--pty">
             <!-- 首次切到本 Tab 才建立会话（v-if 挂 activeTab）：进详情页不会顺手起 shell；
                  切走/离开页面即卸载 → 组件在卸载时发 cancel 并释放会话。 -->
             <PtyTerminal
@@ -997,6 +1000,24 @@
   }
 
   // 实体头（与设备详情的 hero 同一骨架：左身份、右动作）。
+  // 页内层收成 flex 列：内容卡因此拿得到**页根剩余高度**（页根是确定高度的 flex
+  // 列），终端面板的 flex:1 才有可分配的空间 —— 固定 420px 在 2560×1440 上只占
+  // 卡内 37%，下方一片空白（P1 实测）。概览/日志/环境的长内容由 tab 内容区自滚
+  // 承载（见下面的高度链），页根不再需要靠自身滚动兜底。
+  // 页根走自然流时（art-full-height--flow）整条链由 app.scss 里权重更高的规则
+  // 改回 0 1 auto —— 自然流里没有确定高度，basis:auto 才不会塌。
+  .container-detail__inner {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .container-detail .art-table-card {
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+
   .cd-hero {
     display: flex;
     flex-wrap: wrap;
@@ -1097,6 +1118,44 @@
     :deep(.el-tabs__header) {
       margin-bottom: 16px;
     }
+  }
+
+  /* ── tab 面板的高度链（终端「吃满剩余高度」的载体）───────────────────────
+     卡体 → tabs → tabs 内容 → 面板一路 flex 列：终端面板因此拿得到确定高度，
+     `flex:1` 才有可分配的空间（此前卡体是块级流，面板只能吃自己写死的 420px，
+     2560 高的大屏上面板 515px 里空 38%）。
+     一律用 `flex: 1 1 auto`（不是 `1 1 0`）：页根走自然流时（844×390 的
+     art-full-height--flow、以及手机竖屏）父级没有确定高度，basis:0 会让这一路
+     塌成 0 高；basis:auto 在那种形态下退回内容高，两种形态同一份规则。 */
+  :deep(.el-card__body) {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  :deep(.el-tabs) {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  // 内容区自滚：概览/环境这类长面板仍然整块可达（此前靠页根 overflow-y-auto
+  // 滚，现在改由面板自己滚 —— 与「单滚动链」同一取向）。
+  :deep(.el-tabs__content) {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-height: 0;
+    overflow: auto;
+  }
+
+  // 只有终端面板参与「吃满剩余高度」；其余面板仍是按内容高的块（零回归面）。
+  :deep(.cd-pane--pty) {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-height: 0;
   }
 
   .cd-block {

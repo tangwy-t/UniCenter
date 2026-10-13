@@ -3,8 +3,8 @@
   <div class="docker-tasks art-full-height">
     <ElCard class="art-table-card" shadow="never">
       <!-- :layout 显式去掉 columns 段（组件默认含）：本页不是 ArtTable（任务清单
-           是自绘行表），工具条没有列集合 —— 保留列设置钮只会开出空弹层（死控件）；
-           其余段与组件默认一致。 -->
+           是自绘 <table> 行表），工具条没有列集合 —— 保留列设置钮只会开出空弹层
+           （死控件）；其余段与组件默认一致。 -->
       <ArtTableHeader
         :loading="loading"
         layout="search,refresh,size,fullscreen,settings"
@@ -44,83 +44,141 @@
       <!-- ── 空态（「没有任务」与「筛完了没有」分开说，两种事实不是一句话） ── -->
       <ElEmpty v-else-if="state === 'empty'" class="docker-empty" :description="emptyText" />
 
-      <!-- ── 正常态：轮询失败标注 + 任务行列表 + 分页 ── -->
+      <!-- ── 正常态：轮询失败标注 + 任务表 + 分页 ── -->
       <template v-else>
         <!-- 静默刷新失败：保留最后已知列表并说出口（与列表页「上次数据仍在」同一口径）。 -->
         <p v-if="refreshError" class="tk-refresh-error">刷新失败，正在显示上次结果</p>
-        <ul class="tk-list">
-          <li v-for="item in items" :key="item.ref" class="tk-item">
-            <!-- 状态点：pending = 旋转动画（在执行）；succeeded = 绿；failed/timeout = 红；
-                 未知终态照实给中性点 + 原文 —— 服务端加了新状态时页面不冒充它认识。 -->
-            <span
-              class="tk-item__dot"
-              :class="{ 'is-pending': isPending(item.status) }"
-              :style="
-                isPending(item.status)
-                  ? undefined
-                  : { color: statusDotColor(taskStatusTone(item.status)) }
-              "
+        <!-- ── 任务表（列式）：与模块其余列表页同一张**表语言** —— 可见表头、单行
+             行高、行分隔线与悬停、主机胶囊、等宽目标、时间列右对齐。改造前是自绘
+             两行块（动作+目标一行、元信息一行），目标短时中间一大片空白、时间被
+             margin-left:auto 推到极右，没有列对齐，1920 下就是一条没排版的清单。
+             表头**吸顶**（.tk-list 自滚，见样式注释）：翻页/滚动时「这列是什么」
+             始终在屏上。
+             为什么不是 ArtTable（ElTable）：本表每行都要能带一条**跨列铺满**的展开区
+             （进度流 / 终态结论句），而展开区是「这一行的第二块」而不是一个单元格；
+             原生 <table> 的 <tbody> 行分组 + colspan 正好表达它。ElTable 的展开列是
+             **每行都画开关**的行首列，与「没有可看的事实就不给开关」直接相左
+             （events 页的自建 ElTable 先例同理：那页也不需要行级展开）。 -->
+        <div class="tk-list">
+          <table class="tk-table">
+            <thead>
+              <tr class="tk-head">
+                <th class="tk-col--status" scope="col">状态</th>
+                <th class="tk-col--action" scope="col">动作</th>
+                <th class="tk-col--target" scope="col">目标</th>
+                <th class="tk-col--host" scope="col">主机</th>
+                <th class="tk-col--user" scope="col">发起人</th>
+                <th class="tk-col--time is-num" scope="col">时间</th>
+                <th class="tk-col--toggle" scope="col"><span class="tk-sr">展开</span></th>
+              </tr>
+            </thead>
+            <tbody
+              v-for="item in items"
+              :key="item.ref"
+              class="tk-item"
+              :class="{ 'is-open': isExpanded(item.ref) }"
             >
-              <ArtSvgIcon v-if="isPending(item.status)" icon="ri:loader-4-line" class="tk-spin" />
-            </span>
-            <div class="tk-item__main">
-              <div class="tk-item__line">
+              <tr class="tk-item__line">
+                <!-- 状态：圆点 + 状态词**同列**（颜色永不单独传达 —— 文字本身就是结论）。
+                     pending 的原点换旋转图标（8px 圆点放不下「在执行」的表意）；
+                     未知终态照实给中性点 + 原文 —— 服务端加了新状态时页面不冒充它认识。 -->
+                <td class="tk-col--status tk-item__status">
+                  <span class="tk-status">
+                    <span
+                      class="tk-item__dot"
+                      :class="{ 'is-pending': isPending(item.status) }"
+                      :style="
+                        isPending(item.status)
+                          ? undefined
+                          : { color: statusDotColor(taskStatusTone(item.status)) }
+                      "
+                    >
+                      <ArtSvgIcon
+                        v-if="isPending(item.status)"
+                        icon="ri:loader-4-line"
+                        class="tk-spin"
+                      />
+                    </span>
+                    <span
+                      class="tk-status__text"
+                      :style="{ color: statusTextColor(taskStatusTone(item.status)) }"
+                      >{{ taskStatusText(item.status) }}</span
+                    >
+                  </span>
+                </td>
                 <!-- 动作：注册表 label（页面只说人话）；查不到的（终端/配置编辑类，
                      本就不在二期写注册表里）原样等宽显示 —— 等宽本身就是「这是原始码」的提示。 -->
-                <span class="tk-item__action" :class="{ 'is-raw': !isKnownAction(item) }">
+                <td
+                  class="tk-col--action tk-item__action"
+                  :class="{ 'is-raw': !isKnownAction(item) }"
+                  :title="actionLabel(item)"
+                >
                   {{ actionLabel(item) }}
-                </span>
-                <span class="tk-item__target" :title="item.target">{{
-                  targetText(item.target)
-                }}</span>
-                <!-- 展开开关：「收起 ≠ 取消」（任务照常跑）的语义收在 title 上，
-                     不占行内正文（展开区的可见文案只留事实）。 -->
-                <button
-                  v-if="isExpandable(item) || isExpanded(item.ref)"
-                  type="button"
-                  class="tk-item__toggle"
-                  :title="isExpanded(item.ref) ? '收起（不取消任务）' : '展开'"
-                  @click="toggleExpand(item)"
-                >
-                  <ArtSvgIcon
-                    :icon="isExpanded(item.ref) ? 'ri:arrow-up-s-line' : 'ri:arrow-down-s-line'"
-                  />
-                </button>
-              </div>
-              <!-- 元信息行：状态词 + 归属主机（设备已删时回退 hostId）+ 发起人 + 相对时间。 -->
-              <div class="tk-item__meta">
-                <span
-                  class="tk-item__status"
-                  :style="{ color: statusTextColor(taskStatusTone(item.status)) }"
-                >
-                  {{ taskStatusText(item.status) }}
-                </span>
-                <span class="tk-item__host">@ {{ item.hostname || item.hostId }}</span>
-                <span class="tk-item__user">{{ item.username || '—' }}</span>
-                <!-- 相对时间：createdAt 是毫秒，除千的浮点秒交给 eventRelativeTime 整段取整
-                    （QA 路 1 B1 的浮点文案修复在函数内，惠及全部调用方）。 -->
-                <span class="tk-item__time">{{
+                </td>
+                <!-- 目标：等宽 + 截断（悬停看全名 —— 完整引用是排障钥匙，不给截断丢掉）。 -->
+                <td class="tk-col--target tk-item__target" :title="item.target">
+                  {{ targetText(item.target) }}
+                </td>
+                <!-- 主机：胶囊（主机是事实上的分组键，与容器/镜像/卷/网络/项目页同款）。
+                     设备已删时回退 hostId；hostId 全值挂 title（排障引用）。 -->
+                <td class="tk-col--host tk-item__host" :title="`主机 ${item.hostId}`">
+                  <span class="docker-host">{{ item.hostname || item.hostId }}</span>
+                </td>
+                <td class="tk-col--user tk-item__user">{{ item.username || '—' }}</td>
+                <!-- 时间：相对时间右对齐 + 等宽数字（受理时刻是次要事实，靠**列位置**
+                     与数字对齐承载，不再用 margin-left:auto 单飞）。
+                     createdAt 是毫秒，除千的浮点秒交给 eventRelativeTime 整段取整
+                     （QA 路 1 B1 的浮点文案修复在函数内，惠及全部调用方）。 -->
+                <td class="tk-col--time is-num tk-item__time">{{
                   eventRelativeTime(item.createdAt / 1000, nowSec)
-                }}</span>
-              </div>
-              <!-- 展开区：进行中的进度族任务（pull/build/push）接实时进度流 ——
-                   收起/离开页面只是停止观看（断流不发 cancel），**再次展开即重接**
-                   （进度可续）；取消是展开区里的另一个动作（见子组件）。
-                   终态行给结论句原文（失败/超时的排障线索；成功收尾时同样留在原地）。 -->
-              <div v-if="isExpanded(item.ref)" class="tk-item__detail">
-                <TaskProgress
-                  v-if="item.status === 'pending' && isProgressAction(item)"
-                  :key="item.ref"
-                  :host-id="item.hostId"
-                  :cmd-ref="item.ref"
-                  :action="item.action"
-                  :can-cancel="canCancel(item)"
-                />
-                <p v-else-if="item.summary" class="tk-item__summary">{{ item.summary }}</p>
-              </div>
-            </div>
-          </li>
-        </ul>
+                }}</td>
+                <td class="tk-col--toggle">
+                  <!-- 展开开关：「收起 ≠ 取消」（任务照常跑）的语义收在 title 上，
+                       不占行内正文（展开区的可见文案只留事实）。 -->
+                  <button
+                    v-if="isExpandable(item) || isExpanded(item.ref)"
+                    type="button"
+                    class="tk-item__toggle"
+                    :title="isExpanded(item.ref) ? '收起（不取消任务）' : '展开'"
+                    @click="toggleExpand(item)"
+                  >
+                    <ArtSvgIcon
+                      :icon="isExpanded(item.ref) ? 'ri:arrow-up-s-line' : 'ri:arrow-down-s-line'"
+                    />
+                  </button>
+                </td>
+              </tr>
+              <!-- 展开区：**整行**（跨列铺满）的第二块，不是某一列的单元格。
+                   进行中的进度族任务（pull/build/push）接实时进度流 —— 收起/离开页面只是
+                   停止观看（断流不发 cancel），**再次展开即重接**（进度可续）；取消是
+                   展开区里的另一个动作（见子组件）。终态行给结论句原文（失败/超时的排障
+                   线索；成功收尾时同样留在原地）。**参数块**（TaskOptions）是追加的一块：
+                   有 options（受理时下发的动作参数原文）就渲染，与进度流 / 结论句并存，
+                   不改动它们任何一条既有行为。 -->
+              <tr v-if="isExpanded(item.ref)" class="tk-item__detail">
+                <td class="tk-col--detail" colspan="7">
+                  <TaskProgress
+                    v-if="item.status === 'pending' && isProgressAction(item)"
+                    :key="item.ref"
+                    :host-id="item.hostId"
+                    :cmd-ref="item.ref"
+                    :action="item.action"
+                    :can-cancel="canCancel(item)"
+                  />
+                  <p v-else-if="item.summary" class="tk-item__summary">{{ item.summary }}</p>
+                  <!-- 参数块（本波追加）：受理时下发的动作参数原文 —— 有 options 才渲染
+                       （字段缺席 = 没有看这笔任务参数的资格，缺席即不渲染任何东西，
+                       与全站「不渲染 ≠ 禁用」一致，也不写「无权限」这类解释句）。 -->
+                  <TaskOptions
+                    v-if="hasOptions(item)"
+                    :options="item.options ?? ''"
+                    :action="item.action"
+                  />
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
         <!-- 分页（8d）：条数与页码都来自服务端（合并列表的真实全量 + 本页页码），
              页面只显示这两个硬事实；无行可翻（共 0 条）时整条不出。 -->
         <div v-if="total > 0" class="tk-page">
@@ -150,6 +208,14 @@
    * 系统管理的列表形态）；页头（hero：图标+标题+副标题+刷新钮）整块删除 —— 刷新
    * 由 ArtTableHeader 的内置钮承担，机制说明句（节拍/跨主机定位）按零解释文案纪律
    * 一并删除（条数事实在分页条「第 x 页 / 共 N 条」里）。
+   *
+   * 列表形态（本波美化）：**列式表**（原生 <table>：吸顶表头 + 单行行高 + 展开区
+   * 跨列铺满），与模块其余列表页同一张表语言 —— 改造前是自绘两行块（动作+目标一行、
+   * 元信息一行），目标短时中间一大片空白、时间被 margin-left:auto 推到极右，没有
+   * 列对齐。为什么不上 ArtTable/ElTable：本表每行要能带一条跨列铺满的展开区，而
+   * ElTable 的展开列是**每行都画开关**的行首列（与「没有可看的事实就不给开关」
+   * 相左），且展开区是「这一行的第二块」而不是一个单元格 —— 原生表的 <tbody> 行分组
+   * + colspan 正好表达它。
    *
    * 数据是**一份**（GET /docker/tasks：实时 ∪ 历史合并、受理时刻降序、跨主机、
    * 服务端分页），不与任何单主机页面状态耦合 —— 这也是入口虽然长在总览 hero 与容器页
@@ -198,6 +264,7 @@
   import { PermDockerManage } from '@/enums/permission'
   import { fetchDockerTasks, type DockerTaskItem } from '../api'
   import TaskProgress from '../components/task-progress.vue'
+  import TaskOptions from '../components/task-options.vue'
   import { lookupDockerAction } from '../utils/actions'
   import { eventRelativeTime } from '../utils/events'
   import { statusDotColor, statusTextColor, taskStatusText, taskStatusTone } from '../utils/status'
@@ -219,7 +286,9 @@
   const total = ref(0)
   /** 页码与页大小（服务端分页：切页/切大小即重拉，前端不本地切）。 */
   const page = ref(1)
-  const pageSize = ref(10)
+  // 默认 20：与各列表页的 50 档同向（10 一屏在 1440 高的大屏上只铺半屏就翻页，
+  // 而任务中心的阅读形态是「扫一眼最近发生了什么」）。可选档仍含 10/20/50/100。
+  const pageSize = ref(20)
   const loading = ref(false)
   /** 首拉失败（还没有任何行可给）：错误态 + 重试。 */
   const firstError = ref(false)
@@ -411,11 +480,25 @@
   }
 
   /**
-   * 可展开的两类行：
+   * 是否有动作参数原文可看：**字段缺席 = 没有看这笔任务参数的资格**（服务端按任务
+   * 自身权限码门控，缺席不是空串、不是掩码）——「缺席」与「空串」都不渲染（与全站
+   * 「不渲染 ≠ 禁用」一致）。
+   */
+  function hasOptions(item: DockerTaskItem): boolean {
+    return typeof item.options === 'string' && item.options !== ''
+  }
+
+  /**
+   * 可展开的行：
+   *   - **有动作参数原文**（options 存在）就展开 —— 这覆盖了「终态 exec 但 summary
+   *     为空」这类行（没有参数块时它们既无进度流也无结论句，会点不动）；
    *   - 进行中的**进度族**任务（pull/build/push —— 与 core 的 progressSessionOf
    *     同源的三族）接实时进度流；凭 action 判定（后端 6b 契约：action 就是
    *     「可流/可取消」的依据，不需要额外的 streamable 字段）；
-   *   - 失败/超时且有结论句（排障线索原文）。
+   *   - 有结论句的行（**任何终态**：failed/timeout 的排障线索，以及 succeeded
+   *     的收尾结论原文 —— 服务端对成功任务同样给 summary，如「执行成功」「拉取
+   *     完成：xxx」。修前只认失败/超时两态，成功态的任务看上去既不可展开也无
+   *     详情入口，用户点不动就以为「没有输出」（P1 实测评审）。
    * 已展开的行即使转入终态也保留展开态（收尾结论就地接上，用户不用再点一次），
    * 收起按钮随之常驻。
    */
@@ -426,8 +509,11 @@
   }
 
   function isExpandable(item: DockerTaskItem): boolean {
+    if (hasOptions(item)) return true
     if (item.status === 'pending' && isProgressAction(item)) return true
-    return (item.status === 'failed' || item.status === 'timeout') && item.summary !== ''
+    // 终态：有结论句就展开（不限失败/超时 —— 成功同样有收尾结论）。
+    if (item.status === 'pending') return false
+    return item.summary !== ''
   }
 
   // ── 取消入口的可见性（展开区里的「取消」按钮）──────────────────────────
@@ -468,10 +554,18 @@
   /* 页面骨架（hero/三态/动效降级）曾复用列表页范式样式；列表页纯化后已无 hero
      与 wkl 卡外观，本页只留自己的列表样式。 */
   @use './overview-tokens' as t;
+  // 列让位的阈值与模块列的 hideBelow 同源（断点单源在 @styles/core/breakpoints.scss）。
+  @use '@styles/core/breakpoints.scss' as bp;
 
   // 「重试」等默认档按钮的主色文字对比度 AA：病灶与处方见 overview-tokens
   // 的 primary-text-aa（终审 QA D2·浅色实测 3.68:1）。
   @include t.primary-text-aa;
+
+  // 主机 chip（胶囊）：主机是事实上的分组键（与容器/镜像/卷/网络/项目页同一全局类
+  // docker-host + t.pill 制 —— 表体由 ElTable/原生表各自渲染，类挂全局）。
+  :global(.docker-host) {
+    @include t.pill;
+  }
 
   /* 工具条左组：返回钮 + 状态过滤一行排开（对齐系统管理的 toolbar-left）。 */
   .toolbar-left {
@@ -488,6 +582,18 @@
     --el-text-color-secondary: var(--el-text-color-regular);
   }
 
+  /* 卡体收成 flex 列（矮视口修复要常驻，不能只在 short 档生效）：本页的单滚动链
+     在 1280×800 这类「不矮但不算高」的档位上落不到（short 只到 640 高），卡体退回
+     块级流 → 行区 + 分页总高超过卡体，仍被 overflow:hidden 裁掉分页（实测 1280×800
+     卡体 667 / 内容 723，分页 bottom 835 > vh 800）。这里把卡体自己钉成 flex 列，
+     行区与分页的分配在**任何视口高度**下都成立（正是 ArtTable 内那条链的同形）。 */
+  :deep(.el-card__body) {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+  }
+
   /* 首拉骨架：等价最小 loading（无卡外观），只给一层留白。 */
   .tk-loading {
     padding: 32px 16px;
@@ -499,7 +605,9 @@
   }
 
   // 静默刷新失败标注：琥珀即「需要注意」（与模块内陈旧/离线标注同一套颜色语言）。
+  // flex:none —— 卡内固定块，不参与行区（.tk-list）的高度分配。
   .tk-refresh-error {
+    flex: none;
     margin: 8px 0;
     // 文字对比度 AA（收尾批）：原 el-color-warning（白底 1.85）改走 token，
     // 数字见 @styles/core/aa-text.scss。
@@ -508,16 +616,284 @@
     line-height: 1.6;
   }
 
-  // 任务行列表：行间以分隔线分组（分页在卡片尾部，见 .tk-page —— 一页就是「最近
-  // pageSize 条」这一屏，翻页由服务端完成）。
+  // 任务表所在的行区（分页在卡片尾部，见 .tk-page —— 一页就是「最近 pageSize 条」
+  // 这一屏，翻页由服务端完成）。行区自己也是**表体的滚动容器**：表头吸顶靠它。
+  //
+  // **自持滚动（P0 修复，结构不动）**：本表的滚动目标就是这里，不是 .art-table，
+  // 全局单滚动链（app.scss 的 art-single-scroll-chain）里那条 `.art-table{flex:1 1 0}`
+  // 落不到它身上 —— 卡片体只裁不滚（.el-card__body{overflow:hidden}），矮视口下滚到底
+  // 分页条仍在视口下方（844/1024/1366/1280 实测 bottom 742~835 > vh 390~800，
+  // 末 2~3 条任务被裁且翻不了页）。这里把行区自己收成滚动目标：吃满卡内
+  // 剩余高度（flex: 1 1 auto —— 不能写 basis:0：卡片随内容收缩时卡体没有确定
+  // 高度，basis:0 会把行区直接压成 0）并自滚，分页条 flex:none 常驻卡底，
+  // 与 ArtTable 的「表体自滚 + 分页钉底」同一口径（见
+  // components/core/tables/art-table/index.vue 的同款修复）。
   .tk-list {
+    flex: 1 1 auto;
+    min-height: 0;
     margin: 0;
     padding: 0;
+    overflow: auto;
     list-style: none;
+  }
+
+  // 表体：列式（可见表头 + 单行行高 + 展开区跨列）。表语言**沿用模块其余列表页的
+  // 观感**（ArtTable/ElTable 实测口径：表头 14px/600/regular 色、单元格 14px、
+  // 行高 49、分隔线与悬停都走 EP token），不新造配色。
+  .tk-table {
+    width: 100%;
+    // 窄屏下限：低于它表体横向滚动（与 ArtTable 列 minWidth 溢出同款降级）。
+    // 四档验收视口（844~1920）都在下限之上 —— 不出现横向滚动。
+    min-width: 520px;
+    // 固定布局：列宽由**表头一行**声明（同一个 class 也挂在每个单元格上），
+    // 每一行因此落在同一组列线上 —— 这正是改造前缺的那件事。
+    table-layout: fixed;
+    // separate + 0 间距：sticky 表头的底边不被边框折叠吃掉（collapse 下 sticky
+    // 行的边框会随滚动消失），分隔线改由每个单元格自己持有。
+    border-collapse: separate;
+    border-spacing: 0;
+    color: var(--el-text-color-regular);
+    font-size: 14px;
+  }
+
+  // 列宽：**百分比**（不是某个列吃满剩余宽度）—— 与模块表格「数据列按 minWidth
+  // 比例分摊剩余宽度」同一观感。改造后的第一次实测暴露了反面：只让「目标」吃剩余
+  // 宽度时，1920 下它一个人吞掉 1100px，空白从行中间挪到了列中间（同一处丑）。
+  // 比例按「这一列最窄要多少」定（状态 11 / 动作 18 / 目标 25 / 主机 14 /
+  // 发起人 12 / 时间 14 / 展开 6 = 100）：窄视口按比例缩，宽视口按比例摊。
+  // 状态列的下限是硬线（圆点 + 两字状态词 + 内边距，844 实测 10% 会把「失败」截成
+  // 「失…」——状态词是这条列表的结论，不许截），所以它拿到比其余列高一档的份额。
+  .tk-col--status {
+    width: 11%;
+  }
+
+  .tk-col--action {
+    width: 18%;
+  }
+
+  .tk-col--target {
+    width: 25%;
+  }
+
+  .tk-col--host {
+    width: 14%;
+  }
+
+  .tk-col--user {
+    width: 12%;
+  }
+
+  .tk-col--time {
+    width: 14%;
+
+    // 时间列右对齐 + 等宽数字：一列数字按位对齐才读得一列（模块 .is-num 同款）。
+    &.is-num {
+      font-variant-numeric: tabular-nums;
+      text-align: right;
+    }
+  }
+
+  // 展开列：开关靠右（与表右缘留 12px 一致的呼吸位；左右内边距的让位见 .tk-item__line
+  // 里的同名覆盖 —— 它要盖过单元格的公共内边距，只能写在同一个选择器层级里）。
+  .tk-col--toggle {
+    width: 6%;
+    text-align: right;
+  }
+
+  // 表头：吸顶（.tk-list 自滚 → 翻页/滚动时「这列是什么」始终在屏上），底色与
+  // 字重照模块表头（次要一档的实心底，不是自创色）。
+  .tk-head th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    height: 40px;
+    padding: 0 12px;
+    background: var(--el-fill-color-lighter);
+    box-shadow: inset 0 -1px 0 var(--el-border-color-lighter);
+    color: var(--el-text-color-regular);
+    font-size: 14px;
+    font-weight: 600;
+    text-align: left;
+    white-space: nowrap;
+  }
+
+  // 列随视口收窄让位（阈值与模块列的 hideBelow 同源：发起人 < 1024、主机 < 768）。
+  // 隐藏的是**整列**（表头与每个单元格同 class）：table-layout: fixed 下这一列连
+  // 宽度一起消失，腾出的宽度归目标列。
+  @include bp.respond-below('desktop') {
+    .tk-col--user {
+      display: none;
+    }
+  }
+
+  @include bp.respond-below('tablet') {
+    .tk-col--host {
+      display: none;
+    }
+  }
+
+  // 只在读屏里存在的列名（展开列的头格没有可见文字，不能没有名字）。
+  .tk-sr {
+    position: absolute;
+    overflow: hidden;
+    width: 1px;
+    height: 1px;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  // 数据行：单行行高（改造前是两行块）+ 行分隔线 + 悬停整行高亮（表格语言）。
+  // 单元格 nowrap + 截断：一行永远是一行，「目标」全值在 title 里。
+  .tk-item__line {
+    td {
+      height: 49px;
+      padding: 0 12px;
+      overflow: hidden;
+      border-bottom: 1px solid var(--el-border-color-lighter);
+      text-overflow: ellipsis;
+      vertical-align: middle;
+      white-space: nowrap;
+    }
+
+    &:hover td {
+      background: var(--el-fill-color-light);
+    }
+
+    // 两处列级内边距让位（必须写在 `.tk-item__line td` 同一层级才盖得住它的
+    // 公共内边距）：
+    //   - 展开列：24px 的开关放不进「窄列 + 两侧 12px」的内容盒，越界会在格子右缘
+    //     多出一个省略号（实测 844：列宽 36 + 两侧内边距 24 → 内容盒 12 < 24）；
+    //   - 状态列：点 + 两字状态词不需要右侧呼吸位（下一列自带左内边距）—— 这是
+    //     844 档「失败」不被截成「失…」的那几 px。
+    .tk-col--toggle {
+      padding-left: 0;
+    }
+
+    .tk-item__status {
+      padding-right: 0;
+    }
+  }
+
+  // 展开中的行：整行压一档底色（与它下面那条同色的展开区连成一片）—— 同时展开
+  // 好几条时「哪一行开着」一眼可辨；悬停仍给一档更亮的反馈（选择器权重更高，
+  // 盖得住上面那条常驻底色）。
+  .tk-item.is-open {
+    .tk-item__line td {
+      background: var(--el-fill-color-lighter);
+    }
+
+    .tk-item__line:hover td {
+      background: var(--el-fill-color-light);
+    }
+  }
+
+  // 展开区：整行（跨列铺满）的第二块，底色压一档与上面的行分开 —— 它是「这一行的
+  // 详情」，不是列表里新的一行。
+  .tk-col--detail {
+    padding: 12px;
+    border-bottom: 1px solid var(--el-border-color-lighter);
+    background: var(--el-fill-color-lighter);
+    white-space: normal;
+  }
+
+  // 状态列：圆点 + 状态词同列同排（颜色永不单独传达 —— 文字本身就是结论）。
+  .tk-status {
+    display: inline-flex;
+    max-width: 100%;
+    align-items: center;
+    gap: 6px;
+
+    &__text {
+      // min-width:0 —— flex 项的自动最小尺寸是内容宽，不给它让位的话状态词会
+      // 顶着裁剪线而不是走自己的省略号。
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  }
+
+  // 状态点：pending 是旋转图标，其余是 8px 圆点。圆点色不写死 —— 走内联的
+  // statusDotColor(tone)（与状态文字同源一档），伪元素只画形（background:currentColor）。
+  // 盒子 14px：装得下 14px 的旋转图标，又不吃掉状态词的宽度（状态列是本表的硬线）。
+  .tk-item__dot {
+    display: inline-flex;
+    flex: none;
+    width: 14px;
+    height: 14px;
+    align-items: center;
+    justify-content: center;
+
+    &::after {
+      display: block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      content: '';
+      background: currentColor;
+    }
+
+    // pending 用旋转图标（8px 圆点放不下动画的表意），不画圆点。
+    &.is-pending::after {
+      display: none;
+    }
+  }
+
+  // 动作列：注册表查不到的 action 原样等宽显示（等宽即「这是原始码」的提示）。
+  .tk-item__action {
+    color: var(--el-text-color-primary);
+
+    &.is-raw {
+      font-family: var(
+        --el-font-family-mono,
+        ui-monospace,
+        'SFMono-Regular',
+        Consolas,
+        monospace
+      );
+    }
+  }
+
+  // 目标列：等宽 + 截断（悬停看全名 —— 完整引用是排障钥匙，不给截断丢掉）。
+  .tk-item__target {
+    font-family: var(--art-font-family-mono);
+  }
+
+  // 发起人列：设备/账号已删时是「—」（不可考不是空）。
+  .tk-item__user {
+    color: var(--el-text-color-secondary);
+  }
+
+  // 展开开关：与行同高的小热区（图标按钮），可展开/已展开才出现。
+  .tk-item__toggle {
+    display: inline-flex;
+    width: 24px;
+    height: 24px;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: none;
+    background: none;
+    color: var(--el-text-color-secondary);
+    cursor: pointer;
+
+    &:hover {
+      color: var(--el-color-primary);
+    }
+  }
+
+  // 终态结论句：展开区的非流形态（失败/超时的排障线索；收尾的拉取也落在这里）。
+  .tk-item__summary {
+    margin: 0;
+    color: var(--el-text-color-regular);
+    font-size: 12px;
+    line-height: 1.6;
+    word-break: break-all;
   }
 
   // 分页条（8d）：左侧一个硬事实（第 X 页 / 共 N 条），右侧分页控件 —— 同一个 total。
   .tk-page {
+    flex: none;
     display: flex;
     flex-wrap: wrap;
     gap: 10px;
@@ -525,146 +901,11 @@
     justify-content: space-between;
     padding-top: 10px;
     border-top: 1px solid var(--el-border-color-lighter);
+    background: var(--default-box-color);
 
     &__hint {
       color: var(--el-text-color-regular);
       font-size: 12px;
-    }
-  }
-
-  .tk-item {
-    display: flex;
-    gap: 10px;
-    padding: 10px 0;
-
-    & + & {
-      border-top: 1px solid var(--el-border-color-lighter);
-    }
-
-    // 状态点：pending 是旋转图标，其余是 8px 圆点。圆点色不写死 —— 走内联的
-    // statusDotColor(tone)（与状态文字同源一档），伪元素只画形（background:currentColor）。
-    &__dot {
-      display: flex;
-      flex: none;
-      width: 16px;
-      height: 16px;
-      align-items: center;
-      justify-content: center;
-      margin-top: 2px;
-
-      &::after {
-        display: block;
-        width: 8px;
-        height: 8px;
-        border-radius: 50%;
-        content: '';
-        background: currentColor;
-      }
-
-      // pending 用旋转图标（8px 圆点放不下动画的表意），不画圆点。
-      &.is-pending::after {
-        display: none;
-      }
-    }
-
-    &__main {
-      flex: 1;
-      min-width: 0;
-    }
-
-    &__line {
-      display: flex;
-      gap: 10px;
-      align-items: center;
-    }
-
-    &__action {
-      flex: none;
-      color: var(--el-text-color-primary);
-      font-size: 13px;
-
-      // 注册表查不到的 action：原样等宽显示（等宽即「这是原始码」的提示）。
-      &.is-raw {
-        font-family: var(
-          --el-font-family-mono,
-          ui-monospace,
-          'SFMono-Regular',
-          Consolas,
-          monospace
-        );
-        word-break: break-all;
-      }
-    }
-
-    // 目标：等宽 + 截断（悬停看全名 —— 完整引用是排障钥匙，不给截断丢掉）。
-    &__target {
-      flex: 1;
-      min-width: 0;
-      overflow: hidden;
-      color: var(--el-text-color-regular);
-      font-size: 13px;
-      font-family: var(--art-font-family-mono);
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
-    // 展开开关：与行同高的小热区（图标按钮），可展开/已展开才出现。
-    &__toggle {
-      display: flex;
-      flex: none;
-      width: 24px;
-      height: 24px;
-      align-items: center;
-      justify-content: center;
-      padding: 0;
-      border: none;
-      background: none;
-      color: var(--el-text-color-secondary);
-      cursor: pointer;
-
-      &:hover {
-        color: var(--el-color-primary);
-      }
-    }
-
-    // 元信息行：状态词带语义色（与状态点同色系），其余次要色。
-    &__meta {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      margin-top: 2px;
-      font-size: 12px;
-      line-height: 1.6;
-    }
-
-    // 状态文字色由内联的 statusTextColor(tone) 给（AA token）；此处不持有色值，
-    // 「颜色永不单独传达」—— 文字本身就是结论。
-    &__status {
-      font-size: 12px;
-    }
-
-    &__host,
-    &__user {
-      color: var(--el-text-color-secondary);
-    }
-
-    // 相对时间：右对齐到行尾（受理时刻是次要事实，不与目标抢视觉）。
-    // 对比度 AA（终审 QA D2·浅色实测 2.3:1）：placeholder 档（#a8abb2）对白底只有
-    // 2.3:1，低于 AA 4.5:1 —— 升到 regular 档（#606266 于白底 ≈6.1:1；暗色主题的
-    // regular 同样只升不降，与 overview-events-feed 的口径句同款处置）。「次要」
-    // 的表意由位置（行尾右对齐）承载，不再用低对比色承载。只换色值，形态不动。
-    &__time {
-      margin-left: auto;
-      color: var(--el-text-color-regular);
-    }
-
-    // 终态结论句：展开区的非流形态（失败/超时的排障线索；收尾的拉取也落在这里）。
-    &__summary {
-      margin: 6px 0 0;
-      color: var(--el-text-color-regular);
-      font-size: 12px;
-      line-height: 1.6;
-      word-break: break-all;
     }
   }
 

@@ -53,12 +53,15 @@ function sourceOf(page: (typeof PAGES)[number]): string {
 }
 
 /**
- * ArtSearchBar 豁免：这两页的筛选不是统一搜索面板，而是工具条/卡内的就地形态。
+ * ArtSearchBar 豁免：这一页的筛选不是统一搜索面板，而是工具条内的就地形态。
  * 理由写死在此，不许无声增删。
+ *
+ * events.vue 的原豁免（「过滤条在卡内自建行」）已随「事件流页优化」作废：过滤条
+ * 换成卡外 ArtSearchBar（关键词 / 类型 / 主机三项，服务端过滤口径不变），回到
+ * 本守卫的默认形态 —— 豁免表自检会逼着这一条同时删掉。
  */
 const SEARCH_BAR_EXEMPT: Record<string, string> = {
-  'tasks.vue': '筛选是工具条内 ElRadioGroup（状态三档，服务端过滤），整页形态无搜索面板',
-  'events.vue': '过滤条在卡内自建行（主机/类型/关键字，服务端过滤），非 ArtSearchBar 面板'
+  'tasks.vue': '筛选是工具条内 ElRadioGroup（状态三档，服务端过滤），整页形态无搜索面板'
 }
 
 /**

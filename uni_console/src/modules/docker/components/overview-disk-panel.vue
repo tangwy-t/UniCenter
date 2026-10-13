@@ -2,7 +2,7 @@
   <!-- 单根（single-root 守卫在库：布局的 Transition 只支持单根）。整卡不是按钮：
        每行有自己的两个清理入口按钮，整卡再变成一个大热区会让行内按钮点不准。 -->
   <div class="dov-card dov-disk">
-    <div v-for="row in rows" :key="row.host.id" class="dov-disk__row">
+    <div v-for="row in shownRows" :key="row.host.id" class="dov-disk__row">
       <div class="dov-disk__head">
         <!-- 在线点与主机卡同款：绿=在线；灰=离线（磁盘账是最后已知事实，照常展示） -->
         <span
@@ -19,10 +19,7 @@
            **缺省即缺省**：无整机指标时不回落成 0%、也不拿 docker 占用冒充水位，只显示
            「—」（填充严重度 = diskUsageTone 按真实 diskUsedPercent 分档；轨道同 ramp
            更浅一档，同 meter 纪律）。 -->
-      <div
-        class="dov-disk__water"
-        :class="row.water.available ? `is-${row.water.tone}` : 'is-na'"
-      >
+      <div class="dov-disk__water" :class="row.water.available ? `is-${row.water.tone}` : 'is-na'">
         <span class="dov-disk__water-label">整机</span>
         <span
           v-if="row.water.available"
@@ -77,13 +74,24 @@
           <button
             type="button"
             class="dov-disk__go"
-            :title="`去 ${hostLabel(row.host)} 的卷列表执行清理（匿名未用卷）`"
+            :title="`去 ${hostLabel(row.host)} 的数据卷列表执行清理（匿名未用数据卷）`"
             @click="emit('openVolumes', row.host)"
           >
-            卷清理…
+            数据卷清理…
           </button>
         </span>
       </div>
+    </div>
+
+    <!-- 折叠/展开（100 台规模）：默认只摆值得先看的 N 行（取行口径见 diskVisibleRows
+         —— 前 N 行 + 全部水位告警行），其余用「展开全部 N 行」一键摊开。行数不超过
+         N 时整块不渲染（2 台生产环境与改造前逐字一致）。展开态把所有行原序摆出，
+         每台的事实一条不少（这是**折叠**，不是截断）。 -->
+    <div v-if="rows.length > DISK_TOP_N" class="dov-disk__more">
+      <button v-if="!expanded" type="button" class="dov-disk__go" @click="expanded = true">
+        展开全部 {{ rows.length }} 行
+      </button>
+      <button v-else type="button" class="dov-disk__go" @click="expanded = false">收起</button>
     </div>
   </div>
 </template>
@@ -101,15 +109,21 @@
    * 清理确认档流** —— 本面板只给入口与结论，不在总览页另做一套清理面板（清理的强
    * 确认/保护/权限链路在列表页已经完整，复制一份只会多一处口径分叉的机会）。
    *
+   * 100 台规模（本波）：行数多于 DISK_TOP_N 时默认只摆「前 N 行 + 全部水位告警行」
+   *（取行口径见 overview-board.ts 的 diskVisibleRows），其余由「展开全部 N 行」摊开 ——
+   * 折叠的是**呈现**不是事实，展开态每台一行、三条占比一条不少。行数 ≤ N（2 台生产
+   * 环境）时整块入口不渲染，行为与改造前逐字一致。
+   *
    * 纯展示件：行模型由 utils/overview 的 diskRowModels 算好（口径可测），点击只
    * emit，导航（带 ?host= 的 router.push）在页面层收口 —— 与主机卡片的分工同款。
    */
-  import { computed } from 'vue'
+  import { computed, ref } from 'vue'
   import { useAuth } from '@/hooks/core/useAuth'
   import { PermDockerDelete } from '@/enums/permission'
   import type { DockerHostItem } from '../api'
   import { hostLabel } from '../utils/host'
   import { diskRowModels, type DiskRowModel } from '../utils/overview'
+  import { DISK_TOP_N, diskVisibleRows } from './overview-board'
 
   defineOptions({ name: 'DockerOverviewDiskPanel' })
 
@@ -121,6 +135,17 @@
 
   /** 行序按值得注意程度排序（占用大者在前、无 df 者殿后），口径在 diskRowModels。 */
   const rows = computed<DiskRowModel[]>(() => diskRowModels(props.hosts))
+
+  /**
+   * 100 台规模下的折叠态：默认只摆 diskVisibleRows 选出的那些行（前 N 行 + 全部水位
+   * 告警行），「展开全部」摊开剩余行。展开是**用户状态**（本组件的 ref）—— 10 秒自动
+   * 刷新换的是 hosts prop，已经展开的面板不会自己收回去，也不会自己弹开。
+   * 行数 ≤ N 时取的是全量、且不渲染任何展开入口（2 台环境与改造前逐字一致）。
+   */
+  const expanded = ref(false)
+  const shownRows = computed<DiskRowModel[]>(() =>
+    expanded.value ? rows.value : diskVisibleRows(rows.value)
+  )
 
   // 清理入口的权限门（与镜像/卷列表页工具条的清理按钮同档 docker:delete）：无权限
   // 不渲染 ——「不渲染 ≠ 禁用」（分期控件矩阵纪律，与同页 hero 任务中心入口同一口径）。
@@ -342,6 +367,16 @@
     outline: 2px solid var(--el-color-primary);
     outline-offset: 2px;
     border-radius: 3px;
+  }
+
+  /* ---------- 折叠/展开入口（100 台规模） ---------- */
+  /* 与行内的清理入口同为文字按钮；摆在卡片最下方、整行居中 —— 它是这块面板的
+     「还有多少行没摆出来」的出口，与逐行的动作按钮在位置上分开。 */
+  .dov-disk__more {
+    display: flex;
+    justify-content: center;
+    padding: 10px 0 12px;
+    border-top: 1px solid var(--default-border);
   }
 
   /* 状态圆点（主机卡片同款，scoped 限制下各自声明） */

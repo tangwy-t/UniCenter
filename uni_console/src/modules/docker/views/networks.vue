@@ -57,6 +57,7 @@
           @pagination:size-change="handleSizeChange"
           @pagination:current-change="handleCurrentChange"
           @sort-change="handleSortChange"
+          @selection-change="onSelectionChange"
         />
         <ElEmpty
           v-else-if="pageState === 'empty'"
@@ -67,6 +68,18 @@
           <ElButton size="small" @click="onReset">清除筛选</ElButton>
         </ElEmpty>
         <ElEmpty v-else class="docker-empty" description="还没有网络" />
+
+        <!-- 批量栏（资源无关组件：本页给的是网络动作集与行投影）——勾中即出现，
+             承载批量删除（逐字 DELETE 档）。吸底贴表卡底缘不与分页器相叠（错位量由栏自量）。 -->
+        <WorkloadBatchBar
+          v-if="showTable"
+          noun="网络"
+          :selected="batchRows"
+          :actions="NETWORK_BATCH_ACTIONS"
+          :busy="busy"
+          :refresh="refreshSilent"
+          @busy-change="batchBusy = $event"
+        />
       </template>
     </ElCard>
 
@@ -105,6 +118,8 @@
   import ArtTableHeader from '@/components/core/tables/art-table-header/index.vue'
   import DockerActionConfirm from '../components/action-confirm.vue'
   import DockerActionMenu from '../components/action-menu.vue'
+  import WorkloadBatchBar from '../components/workload-batch-bar.vue'
+  import { NETWORK_BATCH_ACTIONS, type BatchRow } from '../components/batch-actions'
   import { fetchDockerNetworks, type DockerNetworkListItem } from '../api'
   import { runErrorMessage, useDockerCmds } from '../composables/useDockerCmds'
   import { useHostList, useResourceList } from '../composables/useResourceList'
@@ -115,8 +130,26 @@
   const route = useRoute()
   const { hasAuth } = useAuth()
 
-  const showSearchBar = ref(false)
+  // 筛选面板**默认展开**：主机（跨主机表的筛选源）与关键词都要看得见（P1-5 口径）。
+  const showSearchBar = ref(true)
   const searchForm = ref<{ keyword?: string; internalOnly?: boolean; host?: string }>({})
+  /** 当前勾选的行（批量栏的输入；行内删除不受它影响）。 */
+  const selected = ref<DockerNetworkListItem[]>([])
+  /** 批量在途（批量栏 emit 上报）：行菜单据此禁用，防与批量并发提交同一目标。 */
+  const batchBusy = ref(false)
+
+  /** 批量栏的行投影：网络条目自带 name（网络没有保护粒度，protected 恒 false）。 */
+  const batchRows = computed<BatchRow[]>(() =>
+    selected.value.map((row) => ({
+      hostId: row.hostId,
+      hostname: row.hostname,
+      name: row.name
+    }))
+  )
+
+  function onSelectionChange(rowsSel: DockerNetworkListItem[]) {
+    selected.value = rowsSel
+  }
 
   const canDelete = computed(() => hasAuth(PermDockerDelete))
 
@@ -220,20 +253,26 @@
   /** 有命中行就渲染表格；纯加载中也用表格的 loading 遮罩，空态只在加载结束后判断。 */
   const showTable = computed(() => listLoading.value || rows.value.length > 0)
 
-  // `?host=` 深链：query 里的主机作为**主机筛选初始值** —— 单向（用户改筛选不回写
-  // query）。watch 同时兜住 worktab 缓存实例的「带 host 返回」场景。
+  // `?host=&keyword=` 深链：query 里的主机与关键词作为**筛选初始值** —— 单向（用户改
+  // 筛选不回写 query）。watch 同时兜住 worktab 缓存实例的「带 host 返回」场景；
+  // ?keyword= 是**全局检索下钻**的出口（检索命中网络后跳本页并带上网络名）。
+  let deepLinkInited = false
   watch(
-    () => route.query.host,
-    (raw, old) => {
-      const id = raw ? String(raw) : ''
+    [() => route.query.host, () => route.query.keyword],
+    ([rawHost, rawKeyword]) => {
+      const id = rawHost ? String(rawHost) : ''
+      const keyword = rawKeyword ? String(rawKeyword) : undefined
       const had = searchForm.value.host ?? ''
+      const hadKeyword = searchForm.value.keyword ?? ''
       searchForm.value.host = id
-      // ?host 深链进入时自动展开搜索栏：从总览下钻进来的人看到的是一张被过滤的表，
-      // 筛选线索必须在明处。immediate 首跑（old 为 undefined）也走这句。
-      if (id) showSearchBar.value = true
+      searchForm.value.keyword = keyword
+      // 深链进入时自动展开搜索栏：从总览/检索结果下钻进来的人看到的是一张被过滤的
+      // 表，筛选线索必须在明处。immediate 首跑也走这句。
+      if (id || keyword) showSearchBar.value = true
       // 筛选变化（含深链首拉）回第一页：翻到第 3 页再改筛选会落到空页。
       pagination.current = 1
-      if (id !== had || old === undefined) void load()
+      if (id !== had || keyword !== hadKeyword || !deepLinkInited) void load()
+      deepLinkInited = true
     },
     { immediate: true }
   )
@@ -333,6 +372,10 @@
     }
   }
 
+  // ── 批量栏吸底 × 分页器 ──────────────────────────────────────────
+  // 吸底块与分页器的错位量由**批量栏自己量**（只有栏知道自己在哪个滚动容器里，
+  // 口径见 batch-actions 的 measureBatchOffset）—— 页面不再参与定位。
+
   // ── 表格列 ──
 
   // 列设置经 useTableColumns（对齐系统管理，列弹层可用）：工厂只在 setup 求值一次
@@ -344,6 +387,8 @@
     // 主机（跨主机表的行归属）、驱动与作用域（排查上下文）；容器数是计数元数据，
     // 桌面（>=1024）才展示。数据列一律 minWidth，固定宽度只留给 index/操作这类结构性列。
     return [
+      // 勾选列只在有删除权限时出现：批量删除是它唯一的用途（无权限的人勾它只会困惑）。
+      ...(canDelete.value ? [{ type: 'selection' as const, width: 46 }] : []),
       { type: 'index' as const, width: 60, label: '序号', hideBelow: 'tablet' },
       {
         prop: 'name',
@@ -420,7 +465,8 @@
                   actions: ['network:remove'],
                   target: row.name,
                   pendingId: pendingId.value,
-                  disabled: busy.value,
+                  // 指令在途或批量在途都禁用行菜单：防与批量并发提交同一目标。
+                  disabled: busy.value || batchBusy.value,
                   onSelect: (item: { action: string }) => onRowMenu(row, item)
                 })
             }

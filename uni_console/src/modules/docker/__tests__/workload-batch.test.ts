@@ -114,11 +114,33 @@ async function mountBar(selected: DockerWorkloadItem[]) {
   return w
 }
 
-async function clickStart(w: VueWrapper) {
-  const btn = Array.from(w.findAll('button')).find((b) => (b.text() ?? '').trim() === '启动')
-  expect(btn, '「启动」按钮应已渲染（canManage 门控在替身里全开）').toBeTruthy()
+/**
+ * 点批量动作钮并过掉确认档：**本波起启停/重启也走一次确认弹窗**（列出目标 + 主机），
+ * 删除家族则是逐字 DELETE 档（另一条路径，见下面的用例）。动作钮带 `…`（点了先弹窗），
+ * 弹窗里的主按钮就是动作名本身（`启动…` vs `启动` 由此区分）。
+ */
+async function runBatchAction(w: VueWrapper, label: string) {
+  const btn = Array.from(w.findAll('button')).find((b) => (b.text() ?? '').trim() === `${label}…`)
+  expect(btn, `「${label}…」按钮应已渲染（canManage 门控在替身里全开）`).toBeTruthy()
   btn!.element.dispatchEvent(new MouseEvent('click', { bubbles: true }))
   await flush()
+
+  // 弹窗内容是一串异步（开窗 + 过渡），等主按钮真的出现（不数轮数）。
+  const confirmText = `${label}`
+  await vi.waitUntil(
+    () =>
+      Array.from(w.findAll('button')).some((b) => (b.text() ?? '').trim() === confirmText),
+    { timeout: 5000 }
+  )
+  const confirm = Array.from(w.findAll('button')).find(
+    (b) => (b.text() ?? '').trim() === confirmText
+  )
+  confirm!.element.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+  await flush()
+}
+
+async function clickStart(w: VueWrapper) {
+  await runBatchAction(w, '启动')
 }
 
 /* ── 纯函数：分波与波级结论 ───────────────────────────────── */

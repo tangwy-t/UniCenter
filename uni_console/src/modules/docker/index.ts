@@ -140,7 +140,7 @@ const plugin: PluginManifest = {
       path: '/docker/tasks',
       name: 'DockerTasks',
       component: () => import('./views/tasks.vue'),
-      meta: { title: '任务中心', icon: 'ri:task-line', isHide: true, authMark: PermDockerList }
+      meta: { title: '任务中心', icon: 'carbon:ibm-event-automation', isHide: true, authMark: PermDockerList }
     },
     {
       // 事件流详版页（本波）：活动流面板的整页形态 —— 历史查询（游标分页、服务端

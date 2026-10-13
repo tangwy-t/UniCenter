@@ -488,7 +488,7 @@ export function diskRowModel(host: DockerHostItem): DiskRowModel {
     parts.push(`悬空镜像 ${d.danglingImages} 个 · ${formatCapacityMb(d.imagesDanglingMb)}`)
   }
   if (d.unusedVolumes > 0) {
-    parts.push(`未用卷 ${d.unusedVolumes} 个`)
+    parts.push(`未用数据卷 ${d.unusedVolumes} 个`)
   }
   return {
     host,

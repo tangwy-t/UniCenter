@@ -305,9 +305,9 @@ describe('分类控件矩阵：action 字面量全在白名单内', () => {
     expect(tabSrc).toContain('BuildProgressDialog')
     expect(tabSrc).toContain('构建镜像…')
     expect(tabSrc).toMatch(/v-if="canManage"/)
-    // 对话框的主机是**受理时锁定的那台**（targetHostId）：跨主机表没有「当前主机」，
-    // 一场构建属于发起它的机器，不随列表筛选漂移。
-    expect(tabSrc).toContain(':host-id="targetHostId"')
+    // 对话框的主机是**受理时锁定的那台**（actionHost：动作弹窗/主机选择确定后钉死）：
+    // 跨主机表没有「当前主机」，一场构建属于发起它的机器，不随列表筛选漂移。
+    expect(tabSrc).toContain(':host-id="actionHost"')
     // 详情页层：头部「推送到仓库…」同一权限档，预填 actionTarget（仓库标签优先）、
     // 镜像清单来自本页快照（选择项数据源已在手，不另拉）；**不传 refresh** ——
     // 推送不改本地任何事实（推的是副本），重拉无物可读（与拉取/构建的口径差）。

@@ -1,5 +1,5 @@
 <template>
-  <!-- 单根包装（single-root 守卫扫全模块 .vue）：批量栏与删除确认弹窗是兄弟节点。 -->
+  <!-- 单根包装（single-root 守卫扫全模块 .vue）：批量栏与确认弹窗是兄弟节点。 -->
   <div class="wkl-batch-root">
     <!-- 吸底批量区（spec §11.1）：勾选栏 + 波次反馈收在同一块里，选中/批量期间贴在
          表卡可视区底缘（sticky）—— 行数多时原「留在文档流尾部」的入口会被挤到可视
@@ -10,39 +10,24 @@
          （未传 / 无分页器）时退回 CSS 的 bottom: 0，行为与 W1 完全一致。 -->
     <div
       v-if="selected.length || waveCurrent || waveNotes.length"
+      ref="barEl"
       class="wkl-batch"
-      :style="bottomOffset > 0 ? { bottom: bottomOffset + 'px' } : undefined"
+      :style="offsetPx > 0 ? { bottom: offsetPx + 'px' } : undefined"
     >
       <template v-if="selected.length">
         <span class="wkl-batch__count">已选 {{ selected.length }} 项</span>
+        <!-- 动作钮从注册表取（标签/危险度/权限码随动作码而来）：`…` 表示点了要先过
+             一道确认弹窗（本波起启停重启也要确认，故一律带 `…`）。 -->
         <ElButton
-          v-if="canManage"
+          v-for="btn in buttons"
+          :key="btn.action"
           size="small"
+          :type="btn.danger ? 'danger' : undefined"
+          :plain="btn.danger"
           :disabled="disabled"
-          @click="run('container:start')"
+          @click="openDialog(btn.spec)"
         >
-          启动
-        </ElButton>
-        <ElButton v-if="canManage" size="small" :disabled="disabled" @click="run('container:stop')">
-          停止
-        </ElButton>
-        <ElButton
-          v-if="canManage"
-          size="small"
-          :disabled="disabled"
-          @click="run('container:restart')"
-        >
-          重启
-        </ElButton>
-        <ElButton
-          v-if="canDelete"
-          size="small"
-          type="danger"
-          plain
-          :disabled="disabled"
-          @click="openRemove"
-        >
-          删除…
+          {{ btn.label }}
         </ElButton>
       </template>
 
@@ -66,15 +51,25 @@
       </div>
     </div>
 
-    <!-- 批量删除：后端单条删除是标准档，但一次动多个目标，前端自加一道 DELETE 摩擦
-         （计划 D2 / spec §11.6 —— 纯前端确认，不往协议加字段）。
-         未复用 DockerActionConfirm：它的形态由动作注册表推导（container:remove 是标准档），
-         表达不了「同一条动作在批量场景要更强确认」（缺口与建议见 2B 执行报告）。 -->
-    <ElDialog v-model="remove.visible" title="删除确认" width="460px" :close-on-click-modal="false">
+    <!-- 批量动作的确认弹窗（**一只弹窗三档形态**，按注册表的危险度与动作描述推导）：
+           - word 档（删除家族，danger/destructive）：列出目标 + 主机，逐字输入 DELETE
+             —— 后端单条删除是标准档，但一次动多个目标，前端自加一道 DELETE 摩擦
+             （计划 D2 / spec §11.6，纯前端确认，不往协议加字段）；
+           - input 档（动作要一个参数，如导出 tar 的文件名前缀）：列出目标 + 参数输入；
+           - plain 档（启停重启等常规动作）：列出目标 + 主机，一次确认即可
+             —— 批量是「一次动 N 个」的决定，值得先看清动的是谁。
+           受保护目标：有 docker:exec 权限时给「强制操作」开关（与单条流的
+           action-confirm 同一档），勾选后才给受保护行带 force。 -->
+    <ElDialog
+      v-model="dialog.visible"
+      :title="dialogTitle"
+      width="460px"
+      :close-on-click-modal="false"
+    >
       <div class="wkl-batch-del">
-        <div class="wkl-batch-del__line">将删除以下 {{ remove.rows.length }} 个容器：</div>
+        <div class="wkl-batch-del__line">{{ dialogLine }}</div>
         <ul class="wkl-batch-del__list">
-          <li v-for="row in remove.rows" :key="`${row.hostId}:${row.id}`">
+          <li v-for="row in dialog.rows" :key="`${row.hostId}:${row.name}`">
             <span>{{ row.name }}</span>
             <span class="wkl-batch-del__host">@ {{ row.hostname }}</span>
             <!-- 受保护行标锁（锁图标 + 受保护）：不用 🔒 emoji —— 无 emoji 字体的
@@ -85,18 +80,37 @@
             </span>
           </li>
         </ul>
-        <div class="wkl-batch-del__line">此操作不可恢复。输入 DELETE 以确认：</div>
-        <ElInput
-          v-model="remove.input"
-          class="wkl-batch-del__input"
-          placeholder="DELETE"
-          @keyup.enter="confirmRemove"
-        />
+
+        <!-- input 档：先收集参数（如文件名前缀），提示讲清命名规则与产物落点。 -->
+        <template v-if="dialog.kind === 'input'">
+          <div class="wkl-batch-del__label">{{ dialog.inputLabel }}</div>
+          <ElInput
+            v-model="dialog.input"
+            class="wkl-batch-del__input"
+            :placeholder="dialog.inputPlaceholder"
+            @keyup.enter="confirmDialog"
+          />
+          <div v-if="dialog.inputHint" class="wkl-batch-del__hint">{{ dialog.inputHint }}</div>
+        </template>
+
+        <ElCheckbox v-if="showForce" v-model="dialog.force" class="wkl-batch-del__force">
+          强制操作
+        </ElCheckbox>
+
+        <template v-if="dialog.kind === 'word'">
+          <div class="wkl-batch-del__line">此操作不可恢复。输入 DELETE 以确认：</div>
+          <ElInput
+            v-model="dialog.input"
+            class="wkl-batch-del__input"
+            placeholder="DELETE"
+            @keyup.enter="confirmDialog"
+          />
+        </template>
       </div>
       <template #footer>
-        <ElButton @click="remove.visible = false">取消</ElButton>
-        <ElButton type="danger" :disabled="remove.input !== 'DELETE'" @click="confirmRemove">
-          删除
+        <ElButton @click="dialog.visible = false">取消</ElButton>
+        <ElButton :type="dialog.danger ? 'danger' : 'primary'" :disabled="!canConfirm" @click="confirmDialog">
+          {{ dialog.confirmText }}
         </ElButton>
       </template>
     </ElDialog>
@@ -105,7 +119,15 @@
 
 <script setup lang="ts">
   /**
-   * 跨主机统一表的批量栏（从 containers.vue 下沉）：按钮 + 批量删除确认 + 逐行派发。
+   * 跨主机统一表的批量栏（**资源无关**：容器/镜像/数据卷/网络四页共用）。
+   *
+   * 与容器页最早那版（写死 container:start/stop/restart/remove 四个钮）的差别：
+   *   - 动作集由页面经 `actions` 传入（BatchActionSpec，动作码取 utils/actions 注册表），
+   *     按钮标签/危险度/权限门控全部从注册表推导 —— 栏不知道自己动的是哪种资源；
+   *   - 选中行由页面**投影**成 BatchRow（名字/主机/受保护/页面侧不发送原因），
+   *     条目类型（四个不同 DTO）不进本组件；
+   *   - 确认档按动作推导：删除家族走逐字 DELETE（比单条更强，与容器页同强度），
+   *     其余动作走一次普通确认（列出目标 + 主机）；需要参数的动作用 input 档收集。
    *
    * 与旧单主机页的唯一语义差别：**跨主机批量 = 逐行按行主机派发**。旧页守卫
    * 「主机一换剩余不发」的前提（页面有单一当前主机）在统一表里不存在了 ——
@@ -117,9 +139,9 @@
    * 波内逐行照旧串行、失败收集照旧跨全批累计批末汇总（语义边界见 utils/batch.ts
    * 的文件头，分组与结论句的纯逻辑也在那里）。
    */
-  import { computed, ref } from 'vue'
-  import { ElButton, ElDialog, ElInput, ElMessage } from 'element-plus'
-  import { PermDockerDelete, PermDockerExec, PermDockerManage } from '@/enums/permission'
+  import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+  import { ElButton, ElCheckbox, ElDialog, ElInput, ElMessage } from 'element-plus'
+  import { PermDockerExec } from '@/enums/permission'
   import { useAuth } from '@/hooks/core/useAuth'
   import ArtSvgIcon from '@/components/core/base/art-svg-icon/index.vue'
   import type { DockerWorkloadItem } from '../api'
@@ -130,25 +152,36 @@
     type BatchFailure,
     type BatchWave
   } from '../utils/batch'
-  import { protectedGate } from '../utils/actions'
+  import { lookupDockerAction, protectedGate } from '../utils/actions'
+  import {
+    CONTAINER_BATCH_ACTIONS,
+    measureBatchOffset,
+    stickyScrollContainer,
+    type BatchActionSpec,
+    type BatchRow
+  } from './batch-actions'
 
   defineOptions({ name: 'DockerWorkloadBatchBar' })
 
   const props = withDefaults(
     defineProps<{
-      /** 当前勾选的行（页面持有，表格 selection-change 冒泡上来）。 */
-      selected: DockerWorkloadItem[]
+      /** 当前勾选的行（页面持有并投影，表格 selection-change 冒泡上来）。 */
+      selected: BatchRow[]
+      /** 资源名词（容器/镜像/数据卷/网络）：确认弹窗里指代选中集的词。 */
+      noun?: string
+      /** 批量动作集（动作码取 utils/actions 注册表）；缺省 = 容器页动作集。 */
+      actions?: BatchActionSpec[]
       /** 外部在途（页面单行指令通道的 busy）：批量与单行不并发提交。 */
       busy?: boolean
       /** 成功后的列表重拉（useDockerCmds 的 refresh）。 */
       refresh?: () => void | Promise<void>
-      /**
-       * 吸底块从表卡底缘上抬的像素（Wave 2：分页器高度 + 间距）——留出分页器高度，
-       * 二者不重叠。缺省 0 = 退回 CSS 的 bottom: 0（无分页器时与 W1 一致）。
-       */
-      bottomOffset?: number
     }>(),
-    { selected: () => [], busy: false, refresh: undefined, bottomOffset: 0 }
+    {
+      noun: '容器',
+      actions: () => CONTAINER_BATCH_ACTIONS,
+      busy: false,
+      refresh: undefined
+    }
   )
 
   const emit = defineEmits<{
@@ -157,9 +190,24 @@
   }>()
 
   const { hasAuth } = useAuth()
-  const canManage = computed(() => hasAuth(PermDockerManage))
-  const canDelete = computed(() => hasAuth(PermDockerDelete))
   const canExec = computed(() => hasAuth(PermDockerExec))
+
+  /** 栏上的动作钮：标签/危险度/权限全从注册表推导；未登记的动作不生成按钮。 */
+  const buttons = computed(() =>
+    props.actions
+      .map((spec) => {
+        const entry = lookupDockerAction(spec.action)
+        if (!entry) return null
+        return {
+          spec,
+          action: spec.action,
+          label: `${entry.label}…`,
+          danger: entry.danger !== 'normal',
+          perm: entry.perm
+        }
+      })
+      .filter((b): b is NonNullable<typeof b> => b !== null && hasAuth(b.perm))
+  )
 
   /**
    * 逐行派发的主机来源：循环里每次 run 之前置为该行的 hostId。useDockerCmds 在
@@ -174,25 +222,112 @@
   const batchRunning = ref(false)
   const disabled = computed(() => batchRunning.value || selfBusy.value || props.busy)
 
-  const remove = ref<{ visible: boolean; input: string; rows: DockerWorkloadItem[] }>({
-    visible: false,
-    input: '',
-    rows: []
+  // ── 确认弹窗（三档形态共用一个状态）──────────────────────────────
+  type DialogKind = 'word' | 'input' | 'plain'
+
+  interface DialogState {
+    visible: boolean
+    kind: DialogKind
+    danger: boolean
+    confirmText: string
+    inputLabel: string
+    inputPlaceholder: string
+    inputHint: string
+    inputRequired: boolean
+    /** 逐字档的期望值（删除家族恒为 DELETE）；其它档为空串。 */
+    word: string
+    input: string
+    force: boolean
+    rows: BatchRow[]
+    spec: BatchActionSpec | null
+  }
+
+  function emptyDialog(): DialogState {
+    return {
+      visible: false,
+      kind: 'plain',
+      danger: false,
+      confirmText: '',
+      inputLabel: '',
+      inputPlaceholder: '',
+      inputHint: '',
+      inputRequired: false,
+      word: '',
+      input: '',
+      force: false,
+      rows: [],
+      spec: null
+    }
+  }
+
+  const dialog = ref<DialogState>(emptyDialog())
+
+  /**
+   * 开确认弹窗：形态按「注册表的危险度 → 动作是否要参数」两问推导。
+   * 删除家族（danger/destructive）恒走逐字 DELETE —— 批量动多个目标比单条更该摩擦。
+   */
+  function openDialog(spec: BatchActionSpec) {
+    const entry = lookupDockerAction(spec.action)
+    if (!entry || props.selected.length === 0) return
+    const word = entry.danger !== 'normal'
+    const kind: DialogKind = word ? 'word' : spec.input ? 'input' : 'plain'
+    dialog.value = {
+      ...emptyDialog(),
+      visible: true,
+      kind,
+      danger: entry.danger !== 'normal',
+      confirmText: entry.label,
+      inputLabel: spec.input?.label ?? '',
+      inputPlaceholder: spec.input?.placeholder ?? '',
+      inputHint: spec.input?.hint ?? '',
+      inputRequired: spec.input?.required ?? false,
+      word: word ? 'DELETE' : '',
+      rows: [...props.selected],
+      spec
+    }
+  }
+
+  /** 弹窗标题：删除家族固定「删除确认」，其余按动作名。 */
+  const dialogTitle = computed(() =>
+    dialog.value.kind === 'word' ? '删除确认' : `${dialog.value.confirmText}确认`
+  )
+
+  /** 弹窗正文首句：动的是谁（删除家族照旧用「将删除」的既有措辞）。 */
+  const dialogLine = computed(() => {
+    const n = dialog.value.rows.length
+    return dialog.value.kind === 'word'
+      ? `将删除以下 ${n} 个${props.noun}：`
+      : `将对以下 ${n} 个${props.noun}执行「${dialog.value.confirmText}」：`
   })
 
-  function openRemove() {
-    remove.value = { visible: true, input: '', rows: [...props.selected] }
-  }
+  /** 「强制操作」开关：选中集里有受保护目标、该动作吃保护档、且本账号有 docker:exec。 */
+  const showForce = computed(() => {
+    const entry = dialog.value.spec ? lookupDockerAction(dialog.value.spec.action) : undefined
+    return (
+      canExec.value &&
+      entry?.guarded === true &&
+      dialog.value.rows.some((r) => r.protected === true)
+    )
+  })
 
-  function confirmRemove() {
-    if (remove.value.input !== 'DELETE') return
-    const rows = remove.value.rows
-    remove.value = { visible: false, input: '', rows: [] }
-    void dispatch('container:remove', rows)
-  }
+  /** 提交门槛：逐字档必须一字不差；input 档照必填判定；plain 档恒可提交。 */
+  const canConfirm = computed(() => {
+    const d = dialog.value
+    if (d.kind === 'word') return d.input === d.word
+    if (d.kind === 'input') return !d.inputRequired || d.input.trim() !== ''
+    return true
+  })
 
-  function run(action: 'container:start' | 'container:stop' | 'container:restart') {
-    void dispatch(action, [...props.selected])
+  function confirmDialog() {
+    if (!canConfirm.value) return
+    const d = dialog.value
+    const spec = d.spec
+    if (!spec) return
+    const rows = d.rows
+    const input = d.input.trim()
+    const force = d.force
+    dialog.value = emptyDialog()
+    void dispatch(spec, rows, input, force)
   }
 
   /** 一条波级反馈（text = 结论句；failed = 该波有无失败，行级配色用）。 */
@@ -205,6 +340,46 @@
   const waveCurrent = ref<{ host: string; done: number; total: number } | null>(null)
   /** 已完成波的结论行（批末不清空 —— 总结论 toast 转瞬即逝，行内账目留到下一轮）。 */
   const waveNotes = ref<WaveNote[]>([])
+
+  // ── 吸底块 × 分页器：错位量栏自己量 ────────────────────────────────
+  /**
+   * 吸底块的 sticky bottom 要抬多少才不盖住分页器：分页器的位置是唯一事实来源，
+   * 而错位量取决于**吸底块自己的滚动容器**（sticky 的约束矩形）—— 只有栏知道自己在
+   * 哪个容器里，故自量（页面不再传；口径见 batch-actions 的 measureBatchOffset）。
+   *
+   * 三个时机各量一次：栏出现（勾选/波次，栏的进出会让列表让位）/ 勾选集变化（栏内
+   * 波次行的高度不同）/ 容器尺寸变化（断点与卡体高度）。量不出布局（jsdom）→ 0，
+   * 退回 CSS 的 bottom: 0（无分页器时与 W1 完全一致）。
+   */
+  const barEl = ref<HTMLElement>()
+  const offsetPx = ref(0)
+  let offsetObserver: ResizeObserver | null = null
+
+  function measure() {
+    offsetPx.value = measureBatchOffset(stickyScrollContainer(barEl.value))
+  }
+
+  onMounted(() => {
+    measure()
+    const sc = stickyScrollContainer(barEl.value)
+    if (sc && typeof ResizeObserver !== 'undefined') {
+      offsetObserver = new ResizeObserver(() => measure())
+      offsetObserver.observe(sc)
+    }
+    window.addEventListener('resize', measure)
+  })
+
+  onBeforeUnmount(() => {
+    offsetObserver?.disconnect()
+    offsetObserver = null
+    window.removeEventListener('resize', measure)
+  })
+
+  watch(
+    [() => props.selected.length, () => waveCurrent.value, () => waveNotes.value.length],
+    () => nextTick(measure),
+    { flush: 'post' }
+  )
 
   /**
    * 批量 = 循环发指令（后端没有批量动作，照计划 D2 前端循环），6d 起按主机分波推进：
@@ -219,15 +394,21 @@
    * 固定行键 'batch'：批量期间 pendingId 不属于任何一行，界面用 batchRunning
    * 禁用整条栏防重复提交。
    *
-   * 受保护的目标批量不发送：批量没有「强制操作」开关可勾，发出去必被拒 ——
-   * 直接按保护档的结论句计入失败，不浪费一条指令，也让原因可读（波级计数里
-   * 它们算「未成功」）。
+   * 受保护的目标批量默认不发（批量没有为每一行单独勾「强制」的输入面）：直接按
+   * 保护档的结论句计入失败，不浪费一条指令，也让原因可读。**勾了弹窗里的「强制
+   * 操作」且本账号有 docker:exec 时**，受保护行带 force=true 发出（与单条流同一
+   * 档）；页面侧标了 blocked 的行（如使用中的镜像）恒不发，原因句照给。
    */
-  async function dispatch(action: string, rows: DockerWorkloadItem[]) {
+  async function dispatch(
+    spec: BatchActionSpec,
+    rows: BatchRow[],
+    input: string,
+    force: boolean
+  ) {
     if (batchRunning.value || rows.length === 0) return
     // 复制一份：批量期间表格的勾选可能随重拉变化（行对象被换掉即清空），正在执行的
     // 这一批不能跟着变。分波对副本做（分组是执行口径，不是勾选口径）。
-    const waves = groupBatchWaves([...rows])
+    const waves = groupBatchWaves([...rows] as unknown as DockerWorkloadItem[])
     batchRunning.value = true
     emit('busy-change', true)
     waveNotes.value = []
@@ -236,7 +417,7 @@
     const failures: BatchFailure[] = []
     try {
       for (const wave of waves) {
-        done += await runWave(wave, action, failures)
+        done += await runWave(wave, spec, input, force, failures)
       }
     } finally {
       batchRunning.value = false
@@ -250,18 +431,19 @@
 
   /**
    * 推进一波：波内逐行派发（串行、单条失败不中断），行毕更新节奏行，波毕落一条
-   * 波级结论。返回该波成功行数（受保护未发送与失败行不算 —— 批末汇总另有明细）。
+   * 波级结论。返回该波成功行数（未发送与失败行不算 —— 批末汇总另有明细）。
    * hostId 在每行派发前置为该行的 hostId（波内同值，但保持逐行赋值的既有形态 ——
    * useDockerCmds 在 run 入口处求值，这一步是它切换主机的唯一钩子）。
    *
    * 波级结论点名到目标：成功的行名与失败的（行名 + 结论句）在这里就地收集 ——
-   * 结论句的拼装是 utils/batch 的纯函数（那里的注释有「为什么点名」），本函数
-   * 只负责把「哪行成了、哪行败了、为什么」如实递过去。失败同时并入跨全批的
-   * failures（批末汇总仍只报前三条原因，克制口径不变）。
+   * 结论句的拼装是 utils/batch 的纯函数，本函数只负责把「哪行成了、哪行败了、
+   * 为什么」如实递过去。失败同时并入跨全批的 failures（批末汇总仍只报前三条原因）。
    */
   async function runWave(
     wave: BatchWave,
-    action: string,
+    spec: BatchActionSpec,
+    input: string,
+    force: boolean,
     failures: BatchFailure[]
   ): Promise<number> {
     const host = wave.hostname !== '' ? wave.hostname : wave.hostId
@@ -269,13 +451,21 @@
     const okNames: string[] = []
     const waveFails: BatchFailure[] = []
     let walked = 0
-    for (const row of wave.rows) {
+    for (const item of wave.rows) {
+      // 分波按主机的纯函数只读 hostId/hostname，行对象原样是页面给的投影。
+      const row = item as unknown as BatchRow
       rowHostId.value = row.hostId
       const gate = protectedGate({ protected: row.protected }, canExec.value)
-      if (gate.protected) {
+      const forceAllowed = force && canExec.value
+      const blockedMsg = row.blocked?.(spec.action) ?? null
+      if (blockedMsg) {
+        waveFails.push({ name: row.name, message: blockedMsg })
+      } else if (gate.protected && !forceAllowed) {
         waveFails.push({ name: row.name, message: gate.conclusion })
       } else {
-        const res = await runCmd({ action, target: row.name, key: 'batch' })
+        const options: Record<string, unknown> = { ...(spec.options?.(row, input) ?? {}) }
+        if (gate.protected && forceAllowed) options.force = true
+        const res = await runCmd({ action: spec.action, target: row.name, options, key: 'batch' })
         if (res.ok) okNames.push(row.name)
         else waveFails.push({ name: row.name, message: runErrorMessage(res, '操作未完成') })
       }
@@ -361,7 +551,7 @@
     }
   }
 
-  // 批量删除弹窗：目标清单一屏看完（多了内部滚动），用户才知道这一下动的是哪些。
+  // 确认弹窗：目标清单一屏看完（多了内部滚动），用户才知道这一下动的是哪些。
   // 跨主机表的同名行用 host 键区分（:key 也带上了），清单里给出归属主句。
   .wkl-batch-del {
     &__line {
@@ -392,6 +582,24 @@
 
     &__input {
       margin-top: 8px;
+    }
+
+    // 输入档（如导出 tar 的前缀）：标签 + 输入 + 提示，形制与单条确认弹窗的
+    // 输入档同款（一条可见标签，不靠 placeholder 独撑）。
+    &__label {
+      margin: 8px 0 6px;
+      font-size: 13px;
+    }
+
+    &__hint {
+      margin-top: 6px;
+      color: var(--el-text-color-secondary);
+      font-size: 12px;
+      line-height: 1.6;
+    }
+
+    &__force {
+      margin-top: 10px;
     }
   }
 </style>

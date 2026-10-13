@@ -10,6 +10,8 @@
  *      （interval 泄漏会让切走后的页面每 10s 打一次全量聚合，必须钉住）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { defineComponent, h, nextTick } from 'vue'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia } from 'pinia'
@@ -62,6 +64,22 @@ import {
   overviewSubtitle
 } from '../utils/overview'
 import type { OverviewKpiTile as KpiTile } from '../utils/overview'
+import {
+  buildHostGroups,
+  diskVisibleRows,
+  filterHosts,
+  GROUP_COLLAPSE_AT,
+  groupCollapsedByDefault,
+  hostFilterActive,
+  hostGroupKey,
+  hostIsAbnormal,
+  hostIsOffline,
+  hostMatches,
+  HOST_GROUP_UNNAMED,
+  HOST_SORTS,
+  sortHosts,
+  type HostFilter
+} from '../components/overview-board'
 import type { DockerHostItem, DockerOverviewResp } from '../api'
 
 /* ── 夹具 ─────────────────────────────────────────────── */
@@ -435,7 +453,7 @@ describe('总览纯函数（口径错了只表现为页面说错话，必须钉�
       // 整机水位缺省（makeHost 未给 diskUsedPercent）→ available=false。
       expect(row.bars.every((b) => !('tone' in b))).toBe(true)
       expect(row.water.available).toBe(false)
-      expect(row.reclaimText).toBe('悬空镜像 2 个 · 367.3 MB · 未用卷 1 个')
+      expect(row.reclaimText).toBe('悬空镜像 2 个 · 367.3 MB · 未用数据卷 1 个')
     })
 
     it('数据条不随比例着色（Wave 3b 代理着色废除）：单一类目主导也只给构成比例', () => {
@@ -473,7 +491,7 @@ describe('总览纯函数（口径错了只表现为页面说错话，必须钉�
       expect(row.totalText).toBe('1.5 GB')
     })
 
-    it('未用卷计数单独成段（悬空为零时不拖出「悬空镜像 0 个」的噪音）', () => {
+    it('未用数据卷计数单独成段（悬空为零时不拖出「悬空镜像 0 个」的噪音）', () => {
       const row = diskRowModel(
         makeHost({
           disk: {
@@ -486,7 +504,7 @@ describe('总览纯函数（口径错了只表现为页面说错话，必须钉�
           }
         })
       )
-      expect(row.reclaimText).toBe('未用卷 3 个')
+      expect(row.reclaimText).toBe('未用数据卷 3 个')
     })
 
     it('无 df 数据的主机行：available=false、无条形无数值（「数据不可用」不是零账目）', () => {
@@ -578,7 +596,9 @@ describe('总览纯函数（口径错了只表现为页面说错话，必须钉�
       expect(diskWaterModel(makeHost({ diskUsedPercent: 85, diskTotalGb: 100 })).tone).toBe(
         'warning'
       )
-      expect(diskWaterModel(makeHost({ diskUsedPercent: 95, diskTotalGb: 100 })).tone).toBe('danger')
+      expect(diskWaterModel(makeHost({ diskUsedPercent: 95, diskTotalGb: 100 })).tone).toBe(
+        'danger'
+      )
     })
 
     it('无分母（只有 diskUsedPercent）：只报已用百分比，不编总量', () => {
@@ -830,8 +850,8 @@ describe('渲染冒烟：挂载成功 + KPI 数值来自 mock fleet', () => {
     expect(h1.find('.dov-disk__water.is-na').exists()).toBe(true)
     expect(h1.find('.dov-disk__water-none').text()).toBe('未上报')
     expect(h1.find('.dov-disk__water-value').text()).toBe('—')
-    expect(h1.find('.dov-disk__reclaim').text()).toBe('悬空镜像 2 个 · 367.3 MB · 未用卷 1 个')
-    expect(h1.findAll('.dov-disk__go').map((b) => b.text())).toEqual(['镜像清理…', '卷清理…'])
+    expect(h1.find('.dov-disk__reclaim').text()).toBe('悬空镜像 2 个 · 367.3 MB · 未用数据卷 1 个')
+    expect(h1.findAll('.dov-disk__go').map((b) => b.text())).toEqual(['镜像清理…', '数据卷清理…'])
 
     // 无 df 的行（部分失败主机）：行级结论而不是零值条形，入口照常在。
     const h2 = rows.find((r) => r.text().includes('node-2'))!
@@ -967,7 +987,7 @@ describe('下钻（控制塔的本职：把人交棒给列表页 / 详情页）'
     // 拆分切片：磁盘面板下钻到独立镜像页（host 进 query 作该页主机筛选初始值）。
     expect(router.currentRoute.value.fullPath).toBe('/docker/images?host=h1')
 
-    const goVolumes = h1Row.findAll('.dov-disk__go').find((b) => b.text() === '卷清理…')!
+    const goVolumes = h1Row.findAll('.dov-disk__go').find((b) => b.text() === '数据卷清理…')!
     await goVolumes.trigger('click')
     await waitFullPath(router, '/docker/volumes?host=h1')
     expect(router.currentRoute.value.fullPath).toBe('/docker/volumes?host=h1')
@@ -1014,6 +1034,40 @@ describe('下钻（控制塔的本职：把人交棒给列表页 / 详情页）'
     expect(router.currentRoute.value.path).toBe('/docker/containers/c1')
     expect(router.currentRoute.value.query.host).toBe('h1')
     expect(router.currentRoute.value.query.id).toBeUndefined()
+  })
+})
+
+describe('布局口径：主机区铺满 + gutter 与列表页一致', () => {
+  // 主机区（含卡片栅格 CSS）已随 100 台规模改造收进子组件 overview-host-board.vue：
+  // 源码级锚跟着它走（本用例守的仍是同一件事 —— 2 台不退化回「只占左半屏」）。
+  const boardSrc = readFileSync(
+    join(process.cwd(), 'src/modules/docker/components/overview-host-board.vue'),
+    'utf8'
+  )
+  const src = readFileSync(join(process.cwd(), 'src/modules/docker/views/overview.vue'), 'utf8')
+
+  it('主机区列数随主机数收敛：auto-fit + minmax，不再按断点钉 4 列（2 台不再只占左半屏）', async () => {
+    // 修复前：`grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4` —— 2 台主机在
+    // 2xl 下固定占 2/4 列 = 左半屏（2560 实测 49.5%，右侧空 1143px）。
+    // 修法：auto-fit + minmax(...) —— 空轨道塌缩、剩余轨道等分，2 台即铺满整行。
+    expect(boardSrc).toContain('repeat(auto-fit, minmax(min(100%, 360px), 1fr))')
+    // 固定断点列数不得回归（否则又退化回「2 台只占左半屏」）。
+    expect(boardSrc).not.toContain('2xl:grid-cols-4')
+    expect(boardSrc).not.toMatch(/sm:grid-cols-2 lg:grid-cols-3/)
+    expect(src).not.toContain('2xl:grid-cols-4')
+
+    // DOM 面：栅格仍在、卡片数与 hosts 一致（夹具 3 台同在「未分组」一组、远在折叠
+    // 阈值内 → 默认展开，卡片一张不少）。
+    const { w } = await mountOverview()
+    expect(w.find('.dov-hosts').exists()).toBe(true)
+    expect(w.findAll('.dov-host')).toHaveLength(3)
+  })
+
+  it('页根不加附加内边距：与 .layout-content（已内缩 20px）同一左右口径（总览↔列表不跳 19px）', () => {
+    // 修复前：`docker-overview__inner p-4 pb-8 md:p-5` —— 在 .layout-content 已内缩 20px
+    // 之上**另加** 20px，左边缘落到 40px（列表页卡片 21px），切页内容边缘跳 19px。
+    expect(src).toContain('class="docker-overview__inner"')
+    expect(src).not.toContain('docker-overview__inner p-4')
   })
 })
 
@@ -1072,5 +1126,523 @@ describe('自动刷新：启停与离开清理（泄漏 = 每 10s 一次全量�
     mounted.splice(mounted.indexOf(w), 1) // 本用例自己卸载，afterEach 不再重复卸
     vi.advanceTimersByTime(60_000)
     expect(api.fetchDockerOverview).toHaveBeenCalledTimes(1)
+  })
+
+  /**
+   * 100 台规模最易踩的坑：静默重拉把 host 列表整个换掉时，**用户的筛选/排序/折叠
+   * 状态**（它们与数据生命周期无关）不得被打回默认 —— 盯控制塔的人正是「开着自动
+   * 刷新」的那批用户，每 10 秒被重置一次筛选等于这个功能不可用。
+   * 状态自持在子组件里（overview-host-board.vue 的 ref + overrides），本用例把它钉住。
+   */
+  it('自动刷新不重置筛选与折叠状态（状态自持在就绪板子组件里，与数据解耦）', async () => {
+    api.fetchDockerOverview.mockResolvedValue(makeScaleOverview())
+    const { w } = await mountOverview()
+    api.fetchDockerOverview.mockClear()
+
+    // ① 筛到「只看有异常」；② 搜索定位到 prod 组里的 node-011（异常主机）。
+    await findChip(w, '只看有异常').trigger('click')
+    await flush()
+    await w.find('.dov-tools__search input').setValue('node-011')
+    await flush()
+
+    // ③ 折叠：筛后只剩 1 台（≤ 阈值）默认展开；点一下组头**手动折叠** ——
+    //    这一步得到的状态与默认值相反，只要刷新把状态打回默认，下面的断言就会翻。
+    const head = w.findAll('.dov-group__head')[0]!
+    expect(head.attributes('aria-expanded')).toBe('true')
+    await head.trigger('click')
+    await flush()
+    expect(head.attributes('aria-expanded')).toBe('false')
+
+    // 开自动刷新，推进一个周期（静默重拉，hosts prop 整个换新）。
+    useTimerFakes()
+    await findToggle(w).trigger('click')
+    vi.advanceTimersByTime(10_000)
+    // 假化计时器下不能用 flush()（它靠 setTimeout(0)，永远不会到点）—— 用微任务轮次铺平。
+    await nextTick()
+    await nextTick()
+    expect(api.fetchDockerOverview).toHaveBeenCalledTimes(1)
+
+    // 三项用户状态全部原样：筛选开关仍选中、搜索词还在、折叠态与刷新前一致。
+    expect(findChip(w, '只看有异常').classes()).toContain('is-on')
+    expect((w.find('.dov-tools__search input').element as HTMLInputElement).value).toBe('node-011')
+    expect(w.findAll('.dov-group__head')[0]!.attributes('aria-expanded')).toBe('false')
+  })
+})
+
+/* ── 100 台规模：分组 / 筛选 / 排序 / 折叠（就绪板的口径） ───────────── */
+
+/**
+ * 100 台规模的桩：两个命名分组（prod 40 / stage 30）+ 未分组 30，含离线与异常，
+ * 水位各异。刻意用 ASCII 组名/主机名，让排序断言不依赖 ICU 的中文排序表。
+ *
+ * 确定性账（各断言依赖它）：
+ *   · 离线（idx % 7 === 0）：14 台；prod 5 / stage 5 / 未分组 4
+ *   · 异常（idx % 11 === 0）：9 台；prod 3 / stage 3 / 未分组 3
+ *   · 77 号既离线又异常（两个筛选项正交的边界样本）
+ */
+function makeScaleHosts(): DockerHostItem[] {
+  const out: DockerHostItem[] = []
+  for (let idx = 1; idx <= 100; idx += 1) {
+    const group = idx <= 40 ? 'prod' : idx <= 70 ? 'stage' : ''
+    out.push(
+      makeHost({
+        id: `h${idx}`,
+        hostname: `node-${String(idx).padStart(3, '0')}`,
+        primaryIp: `10.0.0.${idx}`,
+        group,
+        online: idx % 7 !== 0,
+        dockerOk: idx % 11 !== 0,
+        containers: idx,
+        images: idx * 2,
+        // 水位 = idx % 78（0..77，**不含 80/90 的告警档**）：折叠态就是干净的前 10 行，
+        // 「告警行不被 N 藏掉」由下面那条专门的用例（自造一台 97% 的机器）来钉。
+        diskUsedPercent: idx % 78,
+        diskTotalGb: 400,
+        disk: {
+          imagesMb: idx * 100,
+          volumesMb: idx * 10,
+          buildCacheMb: idx,
+          imagesDanglingMb: idx,
+          danglingImages: idx % 3,
+          unusedVolumes: idx % 2
+        }
+      })
+    )
+  }
+  return out
+}
+
+function makeScaleOverview(): DockerOverviewResp {
+  return makeOverview({
+    hosts: makeScaleHosts(),
+    fleet: { ...makeOverview().fleet, hosts: { total: 100, dockerOk: 91 } }
+  })
+}
+
+/** 工具条上的胶囊按钮（筛选开关与排序键同款按钮，按面上的字找）。 */
+const findChip = (w: VueWrapper, label: string) =>
+  w.findAll('button.dov-chip').find((b) => b.text() === label)!
+
+describe('主机就绪板纯函数（口径错了只表现为「把人藏起来 / 排错位置」）', () => {
+  const online = () => makeHost()
+  const offline = () => makeHost({ id: 'off', hostname: 'node-off', online: false })
+  const bad = () => makeHost({ id: 'bad', hostname: 'node-bad', dockerOk: false })
+
+  it('两条主机级事实正交：离线 ≠ 异常，异常 = Docker 结论 danger（error 或 dockerOk=false）', () => {
+    expect(hostIsOffline(online())).toBe(false)
+    expect(hostIsAbnormal(online())).toBe(false)
+    // 离线的机器若最后一次上报时 Docker 是好的 —— 它是「离线」而不是「异常」。
+    expect(hostIsOffline(offline())).toBe(true)
+    expect(hostIsAbnormal(offline())).toBe(false)
+    // 异常的两条来源：结论句 error（服务端算好的原因）与裸的 dockerOk=false。
+    expect(hostIsAbnormal(bad())).toBe(true)
+    expect(hostIsAbnormal(makeHost({ error: '读取资源快照失败' }))).toBe(true)
+    // 两者可以同时成立（77 号样本）。
+    expect(hostIsAbnormal(makeHost({ online: false, dockerOk: false }))).toBe(true)
+  })
+
+  it('hostGroupKey：group 去空白即组键，空/缺省/全空白都是未分组（空串组键）', () => {
+    expect(hostGroupKey(makeHost({ group: ' prod ' }))).toBe('prod')
+    expect(hostGroupKey(makeHost({ group: '' }))).toBe('')
+    expect(hostGroupKey(makeHost({ group: '   ' }))).toBe('')
+    expect(hostGroupKey(makeHost())).toBe('')
+    expect(HOST_GROUP_UNNAMED).toBe('未分组')
+  })
+
+  describe('筛选：只看离线 / 只看有异常 / 按名或 IP 搜索', () => {
+    const filter = (over: Partial<HostFilter> = {}): HostFilter => ({
+      query: '',
+      onlyOffline: false,
+      onlyAbnormal: false,
+      ...over
+    })
+    const hosts = [makeHost(), offline(), bad()]
+
+    it('未筛选不动集合、也不算「筛选中」（副标题保持分母口径）', () => {
+      expect(filterHosts(hosts, filter())).toHaveLength(3)
+      expect(hostFilterActive(filter())).toBe(false)
+      // 全空白搜索不算筛选中（打字打出一个空格不该把页面切进「显示 M / 共 N」）。
+      expect(hostFilterActive(filter({ query: '   ' }))).toBe(false)
+    })
+
+    it('只看离线 → 只留离线；只看有异常 → 只留异常；两条叠加是「与」', () => {
+      expect(filterHosts(hosts, filter({ onlyOffline: true })).map((h) => h.id)).toEqual(['off'])
+      expect(filterHosts(hosts, filter({ onlyAbnormal: true })).map((h) => h.id)).toEqual(['bad'])
+      expect(filterHosts(hosts, filter({ onlyOffline: true, onlyAbnormal: true }))).toEqual([])
+      // 两条同时成立的那台（既离线又异常）两条筛选都能捞到它 —— 正交不等于互斥。
+      const both = makeHost({ id: 'both', hostname: 'node-both', online: false, dockerOk: false })
+      const set = [both]
+      expect(filterHosts(set, filter({ onlyOffline: true }))).toHaveLength(1)
+      expect(filterHosts(set, filter({ onlyAbnormal: true }))).toHaveLength(1)
+    })
+
+    it('搜索：主机名 / IP 都用、大小写不敏感；组名不参与匹配（避免「搜组名把整组捞出来」的误读）', () => {
+      const prodNode = makeHost({ id: 'p1', hostname: 'Prod-Node-A', group: 'production' })
+      expect(hostMatches(prodNode, filter({ query: 'prod-node' }))).toBe(true)
+      expect(hostMatches(prodNode, filter({ query: 'PROD-NODE' }))).toBe(true)
+      // IP 子串（运维手里拿到的定位信息常常只有地址）
+      expect(hostMatches(makeHost(), filter({ query: '12.105' }))).toBe(true)
+      expect(hostMatches(makeHost(), filter({ query: '192.168.12.105' }))).toBe(true)
+      // 搜组名不该命中（组名不是主机名）：production 这个组名本身不进 name/IP 任一字段。
+      expect(
+        hostMatches(
+          makeHost({ hostname: 'x', primaryIp: '1.2.3.4' }),
+          filter({ query: 'production' })
+        )
+      ).toBe(false)
+      // 前后空白被 trim（粘贴带空格的搜索词照常命中）
+      expect(hostMatches(prodNode, filter({ query: '  prod-node  ' }))).toBe(true)
+    })
+  })
+
+  describe('组内排序', () => {
+    const hosts = [
+      makeHost({ id: 'a', hostname: 'b-host', diskUsedPercent: 10 }),
+      makeHost({ id: 'b', hostname: 'a-host', online: false, diskUsedPercent: 95 }),
+      makeHost({ id: 'c', hostname: 'c-host', dockerOk: false, diskUsedPercent: 60 }),
+      makeHost({ id: 'd', hostname: 'd-host' }) // 未上报水位
+    ]
+
+    it('attention（默认，异常优先）：异常 → 离线 → 其余，同级按名称', () => {
+      expect(sortHosts(hosts, 'attention').map((h) => h.id)).toEqual(['c', 'b', 'a', 'd'])
+    })
+
+    it('disk（磁盘水位）：整机水位降序，未上报殿后（不知道不抢占知道且很高的位置）', () => {
+      expect(sortHosts(hosts, 'disk').map((h) => h.id)).toEqual(['b', 'c', 'a', 'd'])
+    })
+
+    it('name（名称）：名称升序', () => {
+      expect(sortHosts(hosts, 'name').map((h) => h.id)).toEqual(['b', 'a', 'c', 'd'])
+    })
+
+    it('排序返回新数组：不改动入参顺序（入参来自 meta.hosts，原地排序会改掉服务端给的序）', () => {
+      const input = [...hosts]
+      const before = input.map((h) => h.id)
+      sortHosts(input, 'attention')
+      expect(input.map((h) => h.id)).toEqual(before)
+    })
+
+    it('三个排序键都在 UI 选项表里（控件与口径同源）', () => {
+      expect(HOST_SORTS.map((s) => s.key)).toEqual(['attention', 'disk', 'name'])
+      expect(HOST_SORTS.map((s) => s.label)).toEqual(['异常优先', '磁盘水位', '名称'])
+    })
+  })
+
+  describe('分组与组头计数', () => {
+    const hosts = makeScaleHosts()
+    const groups = buildHostGroups(
+      hosts,
+      { query: '', onlyOffline: false, onlyAbnormal: false },
+      'name'
+    )
+
+    it('按 host.group 落组，空组归「未分组」且殿后；命名组按名称升序', () => {
+      expect(groups.map((g) => g.key)).toEqual(['prod', 'stage', ''])
+      expect(groups.map((g) => g.name)).toEqual(['prod', 'stage', '未分组'])
+      expect(groups.map((g) => g.hosts.length)).toEqual([40, 30, 30])
+    })
+
+    it('组头的三个数在原始集合上算对（共 N 台 / 离线 M / 异常 K）', () => {
+      const by = (k: string) => groups.find((g) => g.key === k)!
+      expect([by('prod').offline, by('prod').abnormal]).toEqual([5, 3])
+      expect([by('stage').offline, by('stage').abnormal]).toEqual([5, 3])
+      expect([by('').offline, by('').abnormal]).toEqual([4, 3])
+      // 三个组的数加起来 = 全量（组头不丢人）
+      expect(groups.reduce((n, g) => n + g.hosts.length, 0)).toBe(100)
+      expect(groups.reduce((n, g) => n + g.offline, 0)).toBe(14)
+      expect(groups.reduce((n, g) => n + g.abnormal, 0)).toBe(9)
+    })
+
+    it('筛选后组头计数随之更新；命中的组留下、没命中的组整组退场（不留空组头）', () => {
+      const onlyAbnormal = buildHostGroups(
+        hosts,
+        { query: '', onlyOffline: false, onlyAbnormal: true },
+        'attention'
+      )
+      expect(onlyAbnormal.map((g) => [g.name, g.hosts.length, g.abnormal])).toEqual([
+        ['prod', 3, 3],
+        ['stage', 3, 3],
+        ['未分组', 3, 3]
+      ])
+      // 搜索到别处：没有命中的组不出现（也不留一个「共 0 台」的空组头）。
+      const found = buildHostGroups(
+        hosts,
+        { query: 'node-037', onlyOffline: false, onlyAbnormal: false },
+        'name'
+      )
+      expect(found.map((g) => [g.name, g.hosts.length])).toEqual([['prod', 1]])
+      expect(found[0]!.hosts[0]!.id).toBe('h37')
+    })
+  })
+
+  it('折叠默认态阈值：≤12 台全展开（2 台生产环境行为不变）、>12 台组头摘要', () => {
+    expect(GROUP_COLLAPSE_AT).toBe(12)
+    expect(groupCollapsedByDefault(2)).toBe(false)
+    expect(groupCollapsedByDefault(12)).toBe(false)
+    expect(groupCollapsedByDefault(13)).toBe(true)
+    expect(groupCollapsedByDefault(100)).toBe(true)
+  })
+
+  describe('磁盘面板折叠取行（前 N 行 + 全部水位告警行）', () => {
+    const row = (pct?: number) => ({
+      host: makeHost({ id: `h${pct ?? 'na'}` }),
+      water: diskWaterModel(pct === undefined ? makeHost() : makeHost({ diskUsedPercent: pct }))
+    })
+
+    it('行数 ≤ N：原样全量（2 台生产环境行序与条数一字不改）', () => {
+      const rows = [row(10), row(95)]
+      expect(diskVisibleRows(rows, 10).map((r) => r.water.percent)).toEqual([10, 95])
+    })
+
+    it('行数 > N：前 N 行 + 全部水位告警行；保持原序（展开只是「看见更多」，行不跳位）', () => {
+      // 20 行：水位 0..19（都无告警）→ 只取前 10。
+      const flat = Array.from({ length: 20 }, (_, i) => row(i * 4))
+      expect(diskVisibleRows(flat, 10)).toHaveLength(10)
+      // 第 15 行（下标 14）水位 95%（danger）→ 即便排在 N 之外也被拎出来，
+      // 且位置仍在原序里（不提前、不后置）。
+      const withAlarm = [...flat]
+      withAlarm[14] = row(95)
+      const shown = diskVisibleRows(withAlarm, 10)
+      expect(shown).toHaveLength(11)
+      expect(shown.map((r) => r.water.percent)).toEqual([0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 95])
+    })
+
+    it('未上报水位（available=false）不算告警：不冒充 0%、也不抢占前 N 的位置', () => {
+      const rows = [...Array.from({ length: 15 }, (_, i) => row(i * 5)), row(undefined)]
+      const shown = diskVisibleRows(rows, 10)
+      expect(shown).toHaveLength(10)
+      expect(shown.some((r) => !r.water.available)).toBe(false)
+    })
+  })
+})
+
+describe('渲染冒烟：100 台规模（分组 / 折叠 / 筛选 / 定位）', () => {
+  beforeEach(() => {
+    api.fetchDockerOverview.mockResolvedValue(makeScaleOverview())
+  })
+
+  it('三个组头各带三个数；大组默认折叠（100 台首屏就是全局账，不是几千像素的卡片墙）', async () => {
+    const { w } = await mountOverview()
+
+    const heads = w.findAll('.dov-group__head')
+    expect(heads).toHaveLength(3)
+    expect(heads[0]!.text()).toContain('prod')
+    expect(heads[0]!.text()).toContain('共 40 台')
+    expect(heads[0]!.text()).toContain('离线 5')
+    expect(heads[0]!.text()).toContain('异常 3')
+    expect(heads[2]!.text()).toContain('未分组')
+    // 三组都超过阈值 → 默认全折叠：一台卡片都不渲染（首屏高度不随台数线性膨胀）。
+    expect(w.findAll('.dov-host')).toHaveLength(0)
+    expect(heads.every((h) => h.attributes('aria-expanded') === 'false')).toBe(true)
+    // 分区副标题：未筛选时报分母口径（与改造前同一句话）。
+    expect(w.find('#dov-hosts .dov-section__sub').text()).toBe('共 100 台')
+  })
+
+  it('点组头展开：该组 40 台一次摊开，其余组不受牵连；再点收回', async () => {
+    const { w } = await mountOverview()
+    const head = w.findAll('.dov-group__head')[0]!
+
+    await head.trigger('click')
+    await flush()
+    expect(head.attributes('aria-expanded')).toBe('true')
+    expect(w.findAll('.dov-host')).toHaveLength(40)
+    expect(w.findAll('.dov-hosts')).toHaveLength(1) // 只有展开的那一组有栅格
+
+    await head.trigger('click')
+    await flush()
+    expect(head.attributes('aria-expanded')).toBe('false')
+    expect(w.findAll('.dov-host')).toHaveLength(0)
+  })
+
+  it('「只看有异常」：组头计数随筛选更新、命中组自动摊开（范围已经缩小，不该再要多点一次）', async () => {
+    const { w } = await mountOverview()
+
+    await findChip(w, '只看有异常').trigger('click')
+    await flush()
+
+    const heads = w.findAll('.dov-group__head')
+    // 未分组的 3 台异常机里 77 号同时是离线的（idx%7===0 且 idx%11===0）——
+    // 组头两列各答一问，同一个集合上算，故这里离线是 1 而不是 0。
+    expect(heads.map((h) => h.text().replace(/\s+/g, ''))).toEqual([
+      'prod共3台离线0异常3',
+      'stage共3台离线0异常3',
+      '未分组共3台离线1异常3'
+    ])
+    // 筛后每组 3 台 ≤ 阈值 → 默认展开，9 台异常主机直接可见。
+    expect(w.findAll('.dov-host')).toHaveLength(9)
+    expect(w.find('#dov-hosts .dov-section__sub').text()).toBe('显示 9 / 共 100 台')
+    // 筛选开关的选中态同步到 aria-pressed（视觉态与无障碍态同源）。
+    expect(findChip(w, '只看有异常').attributes('aria-pressed')).toBe('true')
+  })
+
+  it('搜索直达：输入 node-037 后第 37 台主机当场可见（不再是「滚到底逐张找」）', async () => {
+    const { w } = await mountOverview()
+    // 未筛选时第 37 台确实不在面上（大组默认折叠）。
+    expect(w.text()).not.toContain('node-037')
+
+    await w.find('.dov-tools__search input').setValue('node-037')
+    await flush()
+
+    const cards = w.findAll('.dov-host')
+    expect(cards).toHaveLength(1)
+    expect(cards[0]!.text()).toContain('node-037')
+    expect(w.find('#dov-hosts .dov-section__sub').text()).toBe('显示 1 / 共 100 台')
+    // 同一台也能按 IP 找到（运维手里常常只有地址）。
+    await w.find('.dov-tools__search input').setValue('10.0.0.37')
+    await flush()
+    expect(w.findAll('.dov-host')).toHaveLength(1)
+  })
+
+  it('手动折叠被后续筛选清空：搜索是定位动作，命中项无条件可见（最坏组合的守卫）', async () => {
+    const { w } = await mountOverview()
+
+    // 先把 prod 手动折叠（默认就是折叠 → 点一下反而展开，再点一下收回并留下开关）。
+    const head = w.findAll('.dov-group__head')[0]!
+    await head.trigger('click') // 展开
+    await flush()
+    await head.trigger('click') // 收回（此时开关表里 prod = 折叠）
+    await flush()
+    expect(head.attributes('aria-expanded')).toBe('false')
+
+    // 搜索一台 **在 prod 里** 的主机：若沿用上面那个「手动折叠」，结果就是
+    // 「搜到了、面上什么都没有」—— 这正是必须挡住的组合。
+    await w.find('.dov-tools__search input').setValue('node-037')
+    await flush()
+
+    expect(w.findAll('.dov-group__head')).toHaveLength(1)
+    expect(w.findAll('.dov-host')).toHaveLength(1)
+    expect(w.find('.dov-host').text()).toContain('node-037')
+
+    // 排序键的变化**不清空**折叠开关（它不改变哪些主机可见）。
+    await findChip(w, '名称').trigger('click')
+    await flush()
+    expect(w.findAll('.dov-host')).toHaveLength(1)
+  })
+
+  it('筛到 0 台：一句硬结论（不是空白块），清掉筛选即刻回到全局账', async () => {
+    const { w } = await mountOverview()
+    await w.find('.dov-tools__search input').setValue('no-such-host')
+    await flush()
+
+    expect(w.find('.dov-board__none').text()).toBe('无匹配主机')
+    expect(w.findAll('.dov-host')).toHaveLength(0)
+
+    await w.find('.dov-tools__search input').setValue('')
+    await flush()
+    expect(w.find('.dov-board__none').exists()).toBe(false)
+    expect(w.find('#dov-hosts .dov-section__sub').text()).toBe('共 100 台')
+  })
+
+  it('组内排序生效：默认「异常优先」把组里出事的顶到最前，切「名称」后按名排', async () => {
+    const { w } = await mountOverview()
+    await w.findAll('.dov-group__head')[0]!.trigger('click') // 展开 prod（40 台）
+    await flush()
+
+    const firstBy = () =>
+      w.findAll('.dov-group__head')[0]!.element.parentElement!.querySelectorAll('.dov-host')[0]!
+        .textContent!
+
+    // prod 里 idx=11/22/33 是异常主机；姓名序下 prod 的第一台是 node-001。
+    expect(firstBy()).toContain('node-011')
+
+    await findChip(w, '名称').trigger('click')
+    await flush()
+    expect(firstBy()).toContain('node-001')
+
+    await findChip(w, '磁盘水位').trigger('click')
+    await flush()
+    // 水位 = idx % 78：prod（1..40）里最大是 idx=40 → 40%，故它排最前
+    //（按 docker 占用看它是中游 —— 排序键确实是「水位」不是「占用」）。
+    expect(firstBy()).toContain('node-040')
+  })
+
+  it('100 台时 DOM 不随台数失控（默认折叠态只管 3 个组头）', async () => {
+    const { w } = await mountOverview()
+    // 折叠态：卡片节点为 0，整页节点数是「组头 + 工具条」的量级。
+    expect(w.findAll('.dov-host')).toHaveLength(0)
+    expect(w.element.querySelectorAll('#dov-hosts *').length).toBeLessThan(60)
+  })
+
+  it('就绪板不写死高度：不含 calc(…px) 与限高常数（本页随内容增高、整页滚动）', () => {
+    // views/overview.vue 不在扫描面内：它唯一一处 calc(100% - 40px) 是**注释**里引用的
+    // .layout-content 口径（不是本页声明的样式）。本页新增的两个容器（就绪板、磁盘面板）
+    // 一律随内容增高。
+    for (const rel of [
+      'src/modules/docker/components/overview-host-board.vue',
+      'src/modules/docker/components/overview-disk-panel.vue'
+    ]) {
+      const s = readFileSync(join(process.cwd(), rel), 'utf8')
+      // 历史病灶：calc(100% - 256px) 这类写死像素高度常数（多分辨率下必栽）。
+      expect(s, rel).not.toMatch(/calc\([^)]*px/)
+      expect(s, rel).not.toMatch(/max-height/)
+    }
+    // 页根仍是整页滚动（内容再长也只是滚动，不做裁切）。
+    const view = readFileSync(join(process.cwd(), 'src/modules/docker/views/overview.vue'), 'utf8')
+    expect(view).toContain('docker-overview art-full-height overflow-y-auto')
+    expect(view).not.toMatch(/max-height/)
+  })
+})
+
+describe('磁盘面板：100 行规模（TOP-N + 展开全部，折叠的是呈现不是事实）', () => {
+  beforeEach(() => {
+    api.fetchDockerOverview.mockResolvedValue(makeScaleOverview())
+  })
+
+  it('>10 行：默认只摆 10 行 + 展开入口（入口上是总行数这句硬数字）', async () => {
+    const { w } = await mountOverview()
+    const panel = w.find('#dov-disk')
+
+    expect(panel.findAll('.dov-disk__row')).toHaveLength(10)
+    const more = panel.find('.dov-disk__more .dov-disk__go')
+    expect(more.exists()).toBe(true)
+    expect(more.text()).toBe('展开全部 100 行')
+  })
+
+  it('展开：100 行原序全摆出，每台的三条占比与结论一条不少；可再收起', async () => {
+    const { w } = await mountOverview()
+    await w.find('#dov-disk .dov-disk__more .dov-disk__go').trigger('click')
+    await flush()
+
+    const rows = w.findAll('.dov-disk__row')
+    expect(rows).toHaveLength(100)
+    for (const r of rows) {
+      expect(r.findAll('.dov-disk__bar')).toHaveLength(3)
+      expect(r.find('.dov-disk__reclaim').exists()).toBe(true)
+    }
+    const collapse = w.find('#dov-disk .dov-disk__more .dov-disk__go')
+    expect(collapse.text()).toBe('收起')
+    await collapse.trigger('click')
+    await flush()
+    expect(w.findAll('.dov-disk__row')).toHaveLength(10)
+  })
+
+  it('水位告警行不被 N 截断藏掉：盘快满的机器即便 docker 占用小也在折叠态里出现', async () => {
+    // 造一台 docker 占用极小、但盘已 97% 的主机（按占用排序它永远进不了 TOP-10）。
+    const overview = makeScaleOverview()
+    overview.hosts = [
+      ...overview.hosts,
+      makeHost({
+        id: 'tiny-but-full',
+        hostname: 'tiny-full',
+        group: 'prod',
+        diskUsedPercent: 97,
+        diskTotalGb: 100,
+        disk: {
+          imagesMb: 1,
+          volumesMb: 1,
+          buildCacheMb: 1,
+          imagesDanglingMb: 0,
+          danglingImages: 0,
+          unusedVolumes: 0
+        }
+      })
+    ]
+    api.fetchDockerOverview.mockResolvedValue(overview)
+    const { w } = await mountOverview()
+
+    const shown = w.findAll('.dov-disk__row')
+    expect(shown).toHaveLength(11) // 10 + 那台告警机
+    const alarm = shown.find((r) => r.text().includes('tiny-full'))!
+    expect(alarm.find('.dov-disk__water').classes()).toContain('is-danger')
   })
 })

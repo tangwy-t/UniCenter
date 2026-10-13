@@ -51,8 +51,16 @@
       <p v-if="loading" class="dsp-loading">检索中…</p>
       <p v-else-if="error" class="dsp-error">检索失败，请重试</p>
 
-      <!-- 五组结果（顺序固定、空组也出现）。每组：标题带总数 + 截断如实说出口 +
-           逐条（名称单行等宽 / 主机归属胶囊 / hint 次要线索 / 可跳条目点击下钻）。 -->
+      <!-- 未输入态：一句硬提示（怎么触发检索）。与「没有匹配」是两种事实，
+           不能都渲染成五组「—」——否则「还没搜」看起来和「搜不到」一模一样。 -->
+      <p v-else-if="!searched" class="dsp-prompt">输入关键字，回车或点搜索</p>
+
+      <!-- 搜过了但五组全 0：无匹配结论（与未输入态的提示语逐字不同，一眼可辨）。 -->
+      <p v-else-if="noMatch" class="dsp-empty">没有匹配的资源</p>
+
+      <!-- 有结果（含部分组为空）：五组清单（顺序固定、空组也出现）。每组：标题带总数 +
+           截断如实说出口 + 逐条（名称单行等宽 / 主机归属胶囊 / hint 次要线索 /
+           可跳条目点击下钻到条目本身）。 -->
       <div v-else class="dsp-groups">
         <section v-for="g in displayGroups" :key="g.kind" class="dsp-group">
           <header class="dsp-group__head">
@@ -102,12 +110,15 @@
    * 固定、空组也出现（空数组非 null）。
    *
    * 两处诚实性 / 形态取舍：
-   *   - 空 q：**不发请求**（后端虽返回五空组，前端直接给同一结果，省一次往返）、
-   *     **不报错** —— 与契约「空 q → 5 个空组 + 空清单（200）」等价；
+   *   - 空 q：**不发请求**（后端虽返回五空组，前端直接回到未输入态）、**不报错**；
+   *   - 三种结果面彼此可辨：未输入 → 「输入关键字，回车或点搜索」；搜过但全 0 →
+   *     「没有匹配的资源」；有结果 → 五组清单。此前三态同形（都是五组「—」），
+   *     未输入与搜不到看起来一模一样。
    *   - 可跳条目一律 path 形态 push（菜单页注册名 `menu-<menuId>`，插件名没注册 ——
-   *     命名跳转静默失败）。跳转目标按「端点真支持的 query」定：容器/镜像/数据卷/
-   *     网络跳各自列表页带 `?host=`（这几页只认 host 深链，**没有** keyword 深链）；
-   *     Compose 跳工作台 `/docker/projects/:name?host=`（名字就在条目里，能精确定位）。
+   *     命名跳转静默失败）。下钻**落到条目本身**（用条目必填的 `id`）：容器 / 镜像落
+   *     各自详情页（镜像 id 含冒号，作路由参数必须编码），数据卷 / 网络落列表页并带
+   *     `?host=&keyword=<name>`（这两页没有详情页，至少按名把清单收窄到那一条），
+   *     Compose 落工作台 `/docker/projects/:name?host=`。
    *
    * 入口在**总览 hero**（图标钮），与任务中心/事件流/版本一致性同款 —— 不加后端菜单
    * 种子，路由取 isHide 形态（理由见 index.ts）。
@@ -144,22 +155,36 @@
     route: (item: DockerSearchItem) => RouteLocationRaw
   }
 
-  // 下钻目标按「端点真支持的 query」定：四个资源列表页只认 `?host=`（没有 keyword
-  // 深链 —— 故落的是该主机的清单、不再收窄到那一条），Compose 名字在条目里、可精确
-  // 落到工作台。
+  // 下钻目标按「落地真能定位到那条」定（条目带必填 `id`）：
+  //   - 容器 → 容器详情页 `/docker/containers/:id`（容器 id 是十六进制，编码是恒等）；
+  //   - 镜像 → 镜像详情页 `/docker/image-detail/:id` —— 镜像 id 是 `sha256:<64>`，
+  //     含冒号，作路由参数**必须编码**（详情页 decodeURIComponent 解回同一口径）；
+  //   - 数据卷 / 网络：没有详情页 → 落各自列表页并带 `?host=&keyword=<name>`，按名
+  //     把清单收窄到那一条（keyword 是这两页 searchForm 里既有的字段）；
+  //   - Compose → 工作台 `/docker/projects/:name?host=`（名字在条目里，精确落位）。
+  // 一律 path 形态 push（菜单页注册名是 menu-<menuId>，插件名没注册 —— 命名跳转静默失败）。
   const GROUP_META: Record<string, GroupMeta> = {
     containers: {
       label: '容器',
-      route: (i) => ({ path: '/docker/containers', query: { host: i.hostId } })
+      route: (i) => ({
+        path: `/docker/containers/${encodeURIComponent(i.id)}`,
+        query: { host: i.hostId }
+      })
     },
-    images: { label: '镜像', route: (i) => ({ path: '/docker/images', query: { host: i.hostId } }) },
+    images: {
+      label: '镜像',
+      route: (i) => ({
+        path: `/docker/image-detail/${encodeURIComponent(i.id)}`,
+        query: { host: i.hostId }
+      })
+    },
     volumes: {
       label: '数据卷',
-      route: (i) => ({ path: '/docker/volumes', query: { host: i.hostId } })
+      route: (i) => ({ path: '/docker/volumes', query: { host: i.hostId, keyword: i.name } })
     },
     networks: {
       label: '网络',
-      route: (i) => ({ path: '/docker/networks', query: { host: i.hostId } })
+      route: (i) => ({ path: '/docker/networks', query: { host: i.hostId, keyword: i.name } })
     },
     projects: {
       label: 'Compose',
@@ -183,11 +208,15 @@
   const unavailableHosts = ref<DockerUnavailableHostItem[]>([])
   const loading = ref(false)
   const error = ref(false)
+  /** 是否已用**非空**关键字检索过：区分「未输入」（提示语）与「搜了但全 0」（无匹配）。
+   *  初始 / 清空后为 false —— 未输入态与「没有匹配」必须一眼可辨，不能都渲染成五组「—」。 */
+  const searched = ref(false)
   /** 请求序号：连点搜索时旧响应晚到不得覆盖新结果。 */
   let loadSeq = 0
 
   /**
-   * 检索一次。空 q（trim 后）不发请求、不报错，直接给五组空结果 —— 与契约等价。
+   * 检索一次。空 q（trim 后）不发请求、不报错，直接回到**未输入态**（不再给五组空
+   * 结果 —— 未输入与「没有匹配」是两种事实，混同一屏会让人以为搜过了）。
    * 非空 q 走 GET /docker/search（服务端过滤 + 分组限量），失败给就地错误态（不弹
    * toast：搜索框就开着，结论就地显示，见 api.ts 的同款纪律）。
    */
@@ -198,6 +227,7 @@
       unavailableHosts.value = []
       error.value = false
       loading.value = false
+      searched.value = false
       return
     }
     const seq = ++loadSeq
@@ -208,11 +238,13 @@
       if (seq !== loadSeq) return
       groups.value = resp.groups ?? []
       unavailableHosts.value = resp.unavailableHosts ?? []
+      searched.value = true
     } catch {
       if (seq !== loadSeq) return
       error.value = true
       groups.value = []
       unavailableHosts.value = []
+      searched.value = false
     } finally {
       if (seq === loadSeq) loading.value = false
     }
@@ -234,6 +266,9 @@
       route: GROUP_META[kind]?.route
     }))
   })
+
+  /** 已检索过但五组全 0：给「没有匹配的资源」（与「未输入」的提示语是两句话）。 */
+  const noMatch = computed(() => !displayGroups.value.some((g) => g.total > 0))
 
   /** 部分主机未参与检索：只列主机名 + reason 原文（页面零解释文案）。零值不渲染。 */
   const unavailableText = computed(() =>
@@ -306,10 +341,51 @@
       color: var(--el-text-color-secondary);
     }
 
+    // 未输入态提示（怎么触发检索）与无匹配结论：两句硬话，彼此不同、也都不是空块。
+    .dsp-prompt,
+    .dsp-empty {
+      margin: 8px 0;
+      font-size: 13px;
+      color: var(--el-text-color-regular);
+    }
+
+    // 工具行（返回 + 搜索框 + 搜索钮）**常驻卡顶**：卡被页根高度截住时不得被压扁
+    // —— 让位的只能是结果区这一节（否则搜索框会被裁，用户连改关键字都做不到）。
+    :deep(#art-table-header) {
+      flex: none;
+    }
+
+    // 未参与检索提示行与四种结果态的提示语同样是卡内常驻块（不参与高度分配、不进
+    // 滚动区）：「N 台主机未参与检索」掉出卡外就失去了它的**诚实性**作用。
+    .dsp-note,
+    .dsp-loading,
+    .dsp-error,
+    .dsp-prompt,
+    .dsp-empty {
+      flex: none;
+    }
+
     // 五组结果：竖排分区，组间以分隔线隔开。
+    //
+    // **自持滚动（本页唯一滚动目标）**：本页不是 ArtTable（结果面是五组自绘清单），
+    // 拿不到全局单滚动链里 `.art-table-card .art-table { flex: 1 1 auto }` 那一节的高度
+    // 分配 —— 卡体只裁不滚（`.art-table-card .el-card__body { overflow: hidden }`），
+    // 于是结果一多就被**裁掉**、全页还没有任何可滚的层（1920×1080 实测：卡体
+    // clientH 855 / scrollH 1174，末条 bottom 1353 落在视口外，滚轮够不到）。
+    // 这里把结果区自己收成滚动目标：吃满卡内剩余高度（flex: 1 1 auto —— 不能写
+    // basis:0：卡片随内容收缩时卡体没有确定高度，basis:0 会把结果区直接压成 0）并在
+    // 内容超出时自滚。
+    //   装得下：卡自身 `flex: 0 1 auto` 随内容收缩 → 卡体没有多余高度可分，结果区 =
+    //   内容高，**零滚动条**（不出「空白 + 滚动条并存」）；装不下：卡被页根按高度截住
+    //   （min-height: 0），结果区收缩到卡体剩余高度并自滚。
+    // 两侧都不需要任何像素常数：chrome 变（提示行出现/搜索框换行）时高度跟着实测的
+    // 剩余空间走（本模块刚因 `calc(… - 256px)` 栽过一次，事件流页已修 —— 不重蹈）。
     .dsp-groups {
       display: flex;
+      flex: 1 1 auto;
       flex-direction: column;
+      min-height: 0;
+      overflow: auto;
     }
 
     .dsp-group {
