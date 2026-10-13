@@ -1,12 +1,17 @@
 package dockerops
 
 import (
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/mount"
+	"github.com/docker/docker/client"
 )
 
 // toPorts / toMounts 是 SDK 与本域类型之间唯一的翻译层：映射错一位，页面上就会把
@@ -144,6 +149,80 @@ func TestCPUPercent(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			if got := cpuPercent(c.in); got != c.want {
 				t.Errorf("cpuPercent() = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// 一次性读数里 CPU 的两个**原始累计计数器**必须取自 daemon 响应的 cpu_stats
+// （CPUUsage.TotalUsage 与 SystemUsage），而不是 precpu_stats 或别的字段 —— 取错一个
+// 字段不会让任何东西编译失败，快照侧却会算出「看起来合理、其实差了整整一个窗口」的速率。
+//
+// 走**进程内的假 daemon**（httptest，真 HTTP + 真 SDK 解码路径）：与 registry_probe
+// 同一条纪律 —— 单元测试不碰真 docker.sock，但字段映射要由真实 JSON 解码钉住。
+func TestContainerStatsReadsRawCounters(t *testing.T) {
+	const body = `{
+		"cpu_stats": {"cpu_usage": {"total_usage": 7000000000}, "system_cpu_usage": 90000000000, "online_cpus": 3},
+		"precpu_stats": {"cpu_usage": {"total_usage": 1000000000}, "system_cpu_usage": 60000000000},
+		"memory_stats": {"usage": 3145728, "limit": 1073741824},
+		"networks": {"eth0": {"rx_bytes": 111, "tx_bytes": 22}, "eth1": {"rx_bytes": 111, "tx_bytes": 22}}
+	}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, body)
+	}))
+	defer srv.Close()
+	cli, err := client.NewClientWithOpts(client.WithHost(srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &sdkAdapter{cli: cli}
+
+	got, err := a.ContainerStats(context.Background(), "c1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 必须是 cpu_stats 的 7e9/9e10（precpu_stats 是 1e9/6e10 —— 取错了这里就会露出来）
+	if got.CPUTotalUsage != 7_000_000_000 || got.SystemUsage != 90_000_000_000 {
+		t.Fatalf("CPU 原始计数器必须取自 cpu_stats（7e9 / 9e10），实际 %d / %d", got.CPUTotalUsage, got.SystemUsage)
+	}
+	if got.OnlineCPUs != 3 {
+		t.Fatalf("核数应取自 cpu_stats.online_cpus（3），实际 %d", got.OnlineCPUs)
+	}
+	// CPUPercent 是 daemon 按它缓存的 precpu 算出的长窗均值（这里 Δ6e9/Δ30e9 × 3 核 = 60%）：
+	// 快照**不读它**，读法由 TestSnapshotComputesCPURateFromOwnBaseline 钉住。
+	if got.CPUPercent != 60 {
+		t.Fatalf("daemon 侧的 CPUPercent（流式路径同款算法）应为 60，实际 %v", got.CPUPercent)
+	}
+	// 网速是整机口径：一个容器挂多张网卡是常态，两张都要汇总
+	if got.NetRXBytes != 222 || got.NetTXBytes != 44 {
+		t.Fatalf("网卡要汇总多张（222/44），实际 %d/%d", got.NetRXBytes, got.NetTXBytes)
+	}
+	if got.MemUsageMB != 3 || got.MemLimitMB != 1024 {
+		t.Fatalf("内存折算不对: %v / %v", got.MemUsageMB, got.MemLimitMB)
+	}
+}
+
+// 核数（速率公式里的 n）的兜底链：OnlineCPUs → per-cpu 数组长度 → 1。三段都必须存在 ——
+// 老 daemon 不给 OnlineCPUs，刚创建的容器连 per-cpu 数组都还没攒出来。乘 0 会让速率恒为 0
+// （看起来像「这个容器不吃 CPU」），除 0 会得到 Inf/NaN（NaN 会让快照的 JSON 序列化失败）。
+// 快照与流式样本共用这一条口径 —— 两处各写一遍就会有两套核数。
+func TestCPUCount(t *testing.T) {
+	cases := []struct {
+		name string
+		in   container.StatsResponse
+		want int
+	}{
+		{"OnlineCPUs 优先", container.StatsResponse{CPUStats: container.CPUStats{OnlineCPUs: 8,
+			CPUUsage: container.CPUUsage{PercpuUsage: []uint64{1, 2}}}}, 8},
+		{"OnlineCPUs 缺席时退回 per-cpu 数组长度", container.StatsResponse{CPUStats: container.CPUStats{
+			CPUUsage: container.CPUUsage{PercpuUsage: []uint64{1, 2}}}}, 2},
+		{"一个数都没有时按单核算", container.StatsResponse{}, 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := cpuCount(c.in); got != c.want {
+				t.Errorf("cpuCount() = %d, want %d", got, c.want)
 			}
 		})
 	}

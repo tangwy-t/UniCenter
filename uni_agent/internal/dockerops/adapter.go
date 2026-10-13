@@ -125,6 +125,11 @@ func (a *sdkAdapter) ContainerStats(ctx context.Context, id string) (StatsInfo, 
 		MemLimitMB: mb(float64(v.MemoryStats.Limit)),
 		NetRXBytes: sumNet(&v, func(n container.NetworkStats) uint64 { return n.RxBytes }),
 		NetTXBytes: sumNet(&v, func(n container.NetworkStats) uint64 { return n.TxBytes }),
+		// CPU 的两个**原始累计计数器**原样带出：速率由采集侧减它自己的上一帧读数
+		// （one-shot 里 daemon 的 precpu_stats 只是一个缓存的旧基线，见 StatsInfo.CPUPercent）。
+		CPUTotalUsage: v.CPUStats.CPUUsage.TotalUsage,
+		SystemUsage:   v.CPUStats.SystemUsage,
+		OnlineCPUs:    cpuCount(v),
 	}, nil
 }
 
@@ -187,22 +192,33 @@ func rateDelta(prev, cur uint64, dt float64) float64 {
 
 // cpuPercent 计算容器 CPU 占比。
 //
-// 与 docker CLI 同一算法：用 cpu_stats 与 precpu_stats 的差值。ContainerStatsOneShot
-// 一次请求就带上了两者（daemon 记着上一个采样点），故**不**需要两次采样。
+// 与 docker CLI 同一算法：用 cpu_stats 与 precpu_stats 的差值。ContainerStatsStream
+// 的**流式**样本靠它成立（流里 precpu 就是上一秒，故首样本即真值）。
+// **不用于**快照：one-shot 的 daemon 只能拿缓存里的旧采样点当 precpu（算出来是长窗
+// 均值），快照的速率由采集侧减自己的上一帧读数（cpuPercentDelta）。
 func cpuPercent(v container.StatsResponse) float64 {
 	cpuDelta := float64(v.CPUStats.CPUUsage.TotalUsage) - float64(v.PreCPUStats.CPUUsage.TotalUsage)
 	sysDelta := float64(v.CPUStats.SystemUsage) - float64(v.PreCPUStats.SystemUsage)
 	if cpuDelta <= 0 || sysDelta <= 0 {
 		return 0
 	}
-	n := float64(v.CPUStats.OnlineCPUs)
-	if n == 0 {
-		n = float64(len(v.CPUStats.CPUUsage.PercpuUsage))
+	return round2(cpuDelta / sysDelta * float64(cpuCount(v)) * 100)
+}
+
+// cpuCount 取一帧里可用的 CPU 核数（速率公式里的 n）。
+//
+// 兜底链三段都是 daemon 的实情：`OnlineCPUs` 缺席（老 daemon）→ per-cpu 数组的长度；
+// 两者都没有（刚创建的容器还没攒出采样点）→ 按单核算。宁可给一个近似值，也不要
+// 除零/乘零：乘 0 会让速率恒为 0（看起来像「这个容器不吃 CPU」），除 0 会得到 Inf。
+// 采集侧（快照）与流式样本共用这一条口径 —— 两处各写一遍就会有两套核数。
+func cpuCount(v container.StatsResponse) int {
+	if n := int(v.CPUStats.OnlineCPUs); n > 0 {
+		return n
 	}
-	if n == 0 {
-		n = 1
+	if n := len(v.CPUStats.CPUUsage.PercpuUsage); n > 0 {
+		return n
 	}
-	return round2(cpuDelta / sysDelta * n * 100)
+	return 1
 }
 
 // sumNet 汇总各网卡的某个计数器（整机口径：容器可能有多个网络）。

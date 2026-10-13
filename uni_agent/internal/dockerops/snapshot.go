@@ -39,7 +39,7 @@ const statsTimeout = 10 * time.Second
 
 // Snapshotter 采集一帧 DockerState。
 //
-// 它**持有跨帧状态**（上一次的网络累计计数），因为速率只能由两次读数求差得出 ——
+// 它**持有跨帧状态**（上一次的网络与 CPU 累计计数），因为速率只能由两次读数求差得出 ——
 // 与 collect 包的网卡速率同一做法（一次读数里没有「速率」这个量）。
 type Snapshotter struct {
 	api       DockerAPI
@@ -50,15 +50,24 @@ type Snapshotter struct {
 	log      Logger
 	now      func() time.Time
 
-	mu        sync.Mutex
-	prevNet   map[string]netCounters
+	mu sync.Mutex
+	// prevStats 是上一帧各容器的**原始累计计数器**（网络 + CPU）。
+	prevStats map[string]containerCounters
 	prevAt    time.Time
 	flavor    string
 	flavorVer string
 }
 
-type netCounters struct {
-	rx, tx uint64
+// containerCounters 是一帧里读到的**原始累计计数器**：网络字节（rx/tx）与 CPU 纳秒
+// （cpuTotal 取自 CPUStats.CPUUsage.TotalUsage，system 取自 CPUStats.SystemUsage）。
+//
+// 网络与 CPU 共用一份基线而不是各存各的：两者都是「一次读数里没有速率这个量」的派生
+// 值、都要减**同一个**上一帧，共用一个 map 就共用一次整表替换（见 collectStats 收尾），
+// 不会出现「网络基线在、CPU 基线不在」的半帧状态。
+type containerCounters struct {
+	rx, tx   uint64
+	cpuTotal uint64
+	system   uint64
 }
 
 // NewSnapshotter 构造采集器。
@@ -69,7 +78,7 @@ func NewSnapshotter(api DockerAPI, protected *ProtectedList, log Logger, now fun
 	if log == nil {
 		log = nopLogger{}
 	}
-	return &Snapshotter{api: api, protected: protected, log: log, now: now, prevNet: map[string]netCounters{}}
+	return &Snapshotter{api: api, protected: protected, log: log, now: now, prevStats: map[string]containerCounters{}}
 }
 
 // SetCompose 记录 compose 形态（来自 Runtime 的探测缓存，采集不自己探测 ——
@@ -232,17 +241,17 @@ func (s *Snapshotter) collectStats(ctx context.Context, cs []ContainerInfo) map[
 	now := s.now()
 
 	s.mu.Lock()
-	prev, prevAt := s.prevNet, s.prevAt
+	prev, prevAt := s.prevStats, s.prevAt
 	s.mu.Unlock()
 	dt := now.Sub(prevAt).Seconds()
 
 	type result struct {
 		id string
 		m  containerMetrics
-		// rx/tx 是本次读数的**原始累计值**，它要成为下一帧求差的基线。基线必须与速率
+		// cur 是本次读数的**原始累计值**，它要成为下一帧求差的基线。基线必须与速率
 		// 出自同一次 stats 返回：收尾时再问一遍 daemon 会拿到另一个时刻的计数，
 		// 两次读数之间的差就再也对不上 dt。
-		rx, tx uint64
+		cur containerCounters
 	}
 	ch := make(chan result, len(cs))
 	sem := make(chan struct{}, statsConcurrency)
@@ -267,34 +276,70 @@ func (s *Snapshotter) collectStats(ctx context.Context, cs []ContainerInfo) map[
 				// out 里也没有这一项（零值即「读数置零」，与页面按 state 显示「—」一致）。
 				return
 			}
-			m := containerMetrics{cpuPercent: st.CPUPercent, memUsageMB: st.MemUsageMB, memLimitMB: st.MemLimitMB}
-			if p, ok := prev[id]; ok && dt > 0 {
-				// 累计计数器求差；回绕（容器重启后计数归零）时给 0 而不是负数。
-				if st.NetRXBytes >= p.rx {
-					m.rxBytesSec = round2(float64(st.NetRXBytes-p.rx) / dt)
-				}
-				if st.NetTXBytes >= p.tx {
-					m.txBytesSec = round2(float64(st.NetTXBytes-p.tx) / dt)
-				}
+			m := containerMetrics{memUsageMB: st.MemUsageMB, memLimitMB: st.MemLimitMB}
+			cur := containerCounters{
+				rx: st.NetRXBytes, tx: st.NetTXBytes,
+				cpuTotal: st.CPUTotalUsage, system: st.SystemUsage,
 			}
-			ch <- result{id: id, m: m, rx: st.NetRXBytes, tx: st.NetTXBytes}
+			// 两条速率都只在**有自己上一帧读数**时才算得出；首帧没有基线就是 0（见下）。
+			if p, ok := prev[id]; ok {
+				if dt > 0 {
+					// 累计计数器求差；回绕（容器重启后计数归零）时给 0 而不是负数。
+					if st.NetRXBytes >= p.rx {
+						m.rxBytesSec = round2(float64(st.NetRXBytes-p.rx) / dt)
+					}
+					if st.NetTXBytes >= p.tx {
+						m.txBytesSec = round2(float64(st.NetTXBytes-p.tx) / dt)
+					}
+				}
+				m.cpuPercent = cpuPercentDelta(p, cur, st.OnlineCPUs)
+			}
+			ch <- result{id: id, m: m, cur: cur}
 		}(c.ID)
 	}
 	wg.Wait()
 	close(ch)
 
-	next := make(map[string]netCounters, len(cs))
+	next := make(map[string]containerCounters, len(cs))
 	for r := range ch {
 		out[r.id] = r.m
-		next[r.id] = netCounters{rx: r.rx, tx: r.tx}
+		next[r.id] = r.cur
 	}
-	// 本次读数整体替换基线：消失的容器随之出队（否则 s.prevNet 会一直长），
+	// 本次读数整体替换基线：消失的容器随之出队（否则 s.prevStats 会一直长），
 	// 而没取到读数的容器下一帧从头开始（速率 0 一帧，比给个假值好）。
 	s.mu.Lock()
-	s.prevNet = next
+	s.prevStats = next
 	s.prevAt = now
 	s.mu.Unlock()
 	return out
+}
+
+// cpuPercentDelta 用**我们自己的**上一帧读数求容器 CPU 占比（%）。
+//
+// 公式与 adapter 的 cpuPercent 逐项相同（Δcpu / Δsystem × 核数 × 100），唯一的差别是
+// **减法的另一端是谁**：这里减的是上一帧快照自己的读数，而不是 daemon 在一次性请求里
+// 配的那个缓存基线。后者算出来是**长窗均值**、近乎恒定 —— 这条 CPU 历史曲线在生产上
+// 就是一条水平直线（2026-10-13 实测：mysql 留存 60 个点全是 0.36、跨 29 分钟；同容器
+// 同时段实时流 33 条里 20 个不同取值）。内存是绝对量（读一次就是答案），CPU 是派生速率，
+// 必须两次读数求差 —— 差别只在「减法的另一端是谁」。
+//
+// 三条边界（与网速求差同款纪律）：
+//   - 没有基线时（首帧 / 上一帧没取到读数）**调用方直接给 0**，而不是拿 daemon 的旧基线
+//     凑一个看起来像真的数 —— 那正是本次修复的 bug 本身；
+//   - 计数器回绕（容器重启后 total_usage 归零）→ Δ 为负 → 0，不给负数；
+//   - Δsystem ≤ 0（daemon 计数器异常 / 时钟回退）→ 0，不做除法（不除零、不给 Inf/NaN，
+//     而 NaN 会让快照的 JSON 序列化直接失败）。
+func cpuPercentDelta(prev, cur containerCounters, cpus int) float64 {
+	if cur.cpuTotal < prev.cpuTotal || cur.system <= prev.system {
+		return 0
+	}
+	if cpus <= 0 {
+		// adapter 已按 OnlineCPUs → len(PercpuUsage) → 1 的兜底链解出核数（恒 ≥ 1）；
+		// 这里再兜一次底：乘 0 会让速率恒为 0（看起来像「这个容器不吃 CPU」），
+		// 而这是展示层的读数，不是「这台容器没有 CPU」。
+		cpus = 1
+	}
+	return round2(float64(cur.cpuTotal-prev.cpuTotal) / float64(cur.system-prev.system) * float64(cpus) * 100)
 }
 
 type containerMetrics struct {

@@ -59,8 +59,16 @@ type MountInfo struct {
 	RW          bool
 }
 
-// StatsInfo 是容器的一次即时读数。
+// StatsInfo 是容器的一次即时读数：**原始量**（累计计数器与绝对量），不含任何速率。
 type StatsInfo struct {
+	// CPUPercent 是 daemon 用**它自己缓存的** precpu_stats 算出的占比。
+	//
+	// 一次性（stream=false）请求里 daemon 只能配一个缓存里的旧基线，于是这个数是**长窗
+	// 均值**、近乎恒定 —— 历史曲线画出来是一条水平直线（2026-10-13 生产实测：mysql 留存
+	// 60 个点全是 0.36、跨 29 分钟）。故快照侧**不读它**：CPU 与网速一样是**派生速率**，
+	// 只能由采集侧减**自己的**上一帧读数（见 snapshot.go 的 cpuPercentDelta）。
+	// 保留本字段是因为 adapter 在这里如实翻译 daemon 的响应（读数的翻译与速率的取舍分开）；
+	// 流式路径的同名字段在 StatsSample —— 那里 precpu 就是上一秒，用它是正确的。
 	CPUPercent float64
 	MemUsageMB float64
 	MemLimitMB float64
@@ -68,6 +76,14 @@ type StatsInfo struct {
 	// 这个量，速率只能由采集侧对两次读数求差（与 collect 包的网卡速率同一做法）。
 	NetRXBytes uint64
 	NetTXBytes uint64
+	// CPUTotalUsage / SystemUsage 是 CPU 速率的两个**原始累计计数器**（纳秒）：
+	// 前者取自 CPUStats.CPUUsage.TotalUsage（自容器启动累计），后者取自
+	// CPUStats.SystemUsage（宿主累计）。与网速同款 —— 采集侧拿它们减自己上一帧的值。
+	CPUTotalUsage uint64
+	SystemUsage   uint64
+	// OnlineCPUs 是这一帧的可用核数（速率公式里的 n，adapter 已按
+	// OnlineCPUs → len(PercpuUsage) → 1 的兜底链解出，恒 ≥ 1）。
+	OnlineCPUs int
 }
 
 // StatsSample 是 stats 流的一个采样点。

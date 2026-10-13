@@ -739,7 +739,10 @@ func TestSnapshotCollectsEverything(t *testing.T) {
 				State: "exited", Status: "Exited (0) 8 months ago", Created: 1700000000},
 		},
 		stats: map[string]StatsInfo{
-			"c1": {CPUPercent: 0.6, MemUsageMB: 91, MemLimitMB: 1024, NetRXBytes: 2400, NetTXBytes: 1100},
+			// 读数是**原始量**：CPU 的两个累计计数器（首帧无基线，故 CPU% 为 0）、内存、
+			// 网络累计值。CPUTotalUsage/SystemUsage 与 OnlineCPUs 一起构成下一帧求差的基线。
+			"c1": {CPUTotalUsage: 6_000_000_000, SystemUsage: 90_000_000_000, OnlineCPUs: 4,
+				MemUsageMB: 91, MemLimitMB: 1024, NetRXBytes: 2400, NetTXBytes: 1100},
 		},
 		images: []ImageInfo{
 			{ID: "sha256:aaa", RepoTags: []string{"uni-center-core:latest"}, SizeBytes: 96 << 20, Created: 1789000000},
@@ -1041,6 +1044,108 @@ func TestSnapshotComputesNetRateOnSecondTick(t *testing.T) {
 	}
 }
 
+// CPU 速率必须由**我们自己的**两帧读数求差，不许读 daemon 在一次性请求里配的那个
+// 缓存基线（StatsInfo.CPUPercent）—— 后者是**长窗均值**，正是那条「CPU 历史曲线是一条
+// 水平直线」的 bug（生产实测：mysql 留存 60 个点全是 0.36、跨 29 分钟；同容器同时段的
+// 实时流 33 条里有 20 个不同取值）。
+//
+// 钉法：两帧里 daemon 侧的值**恒定钉在 0.36**（照抄生产症状的形状），而两个原始累计
+// 计数器按已知差额推进 —— 出数必须精确等于「按我们自己的基线算出的 80%」，与 0.36 无关。
+// 这条断言就是「不再依赖 precpu_stats」的直接判据：把实现改回去读 st.CPUPercent，它必红。
+func TestSnapshotComputesCPURateFromOwnBaseline(t *testing.T) {
+	const daemonOldBaseline = 0.36 // daemon 侧的答案：缓存旧基线算出的长窗均值
+	api := &stubAPI{containers: []ContainerInfo{{ID: "c1", Name: "c1", Image: "i", State: "running"}},
+		stats: map[string]StatsInfo{"c1": {
+			CPUPercent: daemonOldBaseline,
+			// 100s 的容器 CPU 时间 / 1000s 的宿主 CPU 时间，4 核
+			CPUTotalUsage: 100_000_000_000, SystemUsage: 1_000_000_000_000, OnlineCPUs: 4,
+		}}}
+	now := time.Unix(1790000000, 0)
+	s := NewSnapshotter(api, ParseProtected(""), testLogger(), func() time.Time { return now })
+
+	// 首帧没有可求差的基线 → 0（与网速首样本同款）。**不许**回退 daemon 的 0.36：
+	// 那一帧的实情就是「这一次读数里没有速率」，拿旧基线凑一个看起来像真的数正是本次的 bug。
+	if got := s.Collect(context.Background()).Containers[0].CPUPercent; got != 0 {
+		t.Fatalf("首帧没有基线时必须给 0（不得回退 daemon 的旧基线值），实际 %v", got)
+	}
+
+	// 30 秒后：Δcpu = 2e9、Δsystem = 1e10 → 2e9/1e10 × 4 核 × 100 = 80%
+	api.stats["c1"] = StatsInfo{
+		CPUPercent:    daemonOldBaseline, // daemon 侧依旧是那个恒定值
+		CPUTotalUsage: 102_000_000_000, SystemUsage: 1_010_000_000_000, OnlineCPUs: 4,
+	}
+	now = now.Add(30 * time.Second)
+	if got := s.Collect(context.Background()).Containers[0].CPUPercent; got != 80 {
+		t.Fatalf("CPU%% 应为 80（Δcpu/Δsystem × 4 核，减我们自己的基线），实际 %v", got)
+	}
+}
+
+// CPU 求差的三条边界：重启回绕（Δcpu 为负）给 0 而不是负数；Δsystem ≤ 0（daemon 计数器
+// 异常/时钟回退）给 0，不做除法（不除零，也不给 Inf/NaN —— NaN 会让快照的 JSON 序列化
+// 直接失败）；核数缺席时按单核算，而不是乘 0 变成「这个容器不吃 CPU」。
+func TestSnapshotCPUGuards(t *testing.T) {
+	api := &stubAPI{containers: []ContainerInfo{{ID: "c1", Name: "c1", Image: "i", State: "running"}},
+		stats: map[string]StatsInfo{"c1": {
+			CPUTotalUsage: 500_000_000_000, SystemUsage: 1_000_000_000_000, OnlineCPUs: 2}}}
+	now := time.Unix(1790000000, 0)
+	s := NewSnapshotter(api, ParseProtected(""), testLogger(), func() time.Time { return now })
+	s.Collect(context.Background()) // 首帧：建立基线
+
+	// 回绕：容器重启后 total_usage 归零（新容器的累计值远小于基线）
+	api.stats["c1"] = StatsInfo{CPUTotalUsage: 1_000_000_000, SystemUsage: 1_010_000_000_000, OnlineCPUs: 2}
+	now = now.Add(30 * time.Second)
+	if got := s.Collect(context.Background()).Containers[0].CPUPercent; got != 0 {
+		t.Fatalf("回绕（Δcpu 为负）必须给 0，实际 %v", got)
+	}
+
+	// Δsystem == 0（宿主计数器没动）：不给 Inf/NaN
+	api.stats["c1"] = StatsInfo{CPUTotalUsage: 2_000_000_000, SystemUsage: 1_010_000_000_000, OnlineCPUs: 2}
+	now = now.Add(30 * time.Second)
+	if got := s.Collect(context.Background()).Containers[0].CPUPercent; got != 0 {
+		t.Fatalf("Δsystem ≤ 0 必须给 0（不做除法），实际 %v", got)
+	}
+
+	// Δsystem 为负（时钟回退）：同样给 0
+	api.stats["c1"] = StatsInfo{CPUTotalUsage: 3_000_000_000, SystemUsage: 900_000_000_000, OnlineCPUs: 2}
+	now = now.Add(30 * time.Second)
+	if got := s.Collect(context.Background()).Containers[0].CPUPercent; got != 0 {
+		t.Fatalf("Δsystem < 0（时钟回退）必须给 0，实际 %v", got)
+	}
+
+	// 核数缺席（替身/老 daemon 给 0）→ 按单核算：Δcpu = 2e9、Δsystem = 2e10 → 10%
+	api.stats["c1"] = StatsInfo{CPUTotalUsage: 5_000_000_000, SystemUsage: 920_000_000_000, OnlineCPUs: 0}
+	now = now.Add(30 * time.Second)
+	if got := s.Collect(context.Background()).Containers[0].CPUPercent; got != 10 {
+		t.Fatalf("核数缺席时按单核算（10%%），实际 %v", got)
+	}
+}
+
+// 基线整表替换：容器消失后不得留在基线里 —— 与网速基线同一条纪律（只增不减的 map 会
+// 一直长，而留在里面的陈旧计数还会在「容器没了又回来」时算出凭空的速率）。CPU 与网络
+// 共用一份基线（containerCounters），故这里同时钉住两者的出队。
+func TestSnapshotBaselineReplacedWholesale(t *testing.T) {
+	api := &stubAPI{containers: []ContainerInfo{
+		{ID: "c1", Name: "c1", Image: "i", State: "running"},
+		{ID: "c2", Name: "c2", Image: "i", State: "running"},
+	}, stats: map[string]StatsInfo{
+		"c1": {CPUTotalUsage: 1 << 30, SystemUsage: 1 << 40},
+		"c2": {CPUTotalUsage: 1 << 30, SystemUsage: 1 << 40},
+	}}
+	s := newTestSnapshotter(api, "", testLogger())
+	s.Collect(context.Background())
+	if len(s.prevStats) != 2 {
+		t.Fatalf("首帧应记下两个容器的基线，实际 %d 条", len(s.prevStats))
+	}
+	api.containers = api.containers[:1] // c2 被删了
+	s.Collect(context.Background())
+	if len(s.prevStats) != 1 {
+		t.Fatalf("消失的容器必须随整表替换出队，实际 %d 条: %+v", len(s.prevStats), s.prevStats)
+	}
+	if _, ok := s.prevStats["c2"]; ok {
+		t.Fatal("c2 已从快照里消失，却仍留在基线里")
+	}
+}
+
 // 单个容器的 stats 取不到：该容器读数置零，但**整帧仍然有效**（一次 stats 失败
 // 不该让整台主机的快照消失）。
 func TestSnapshotToleratesPerContainerStatsFailure(t *testing.T) {
@@ -1103,7 +1208,8 @@ func TestSnapshotSizeStaysUnderMessageLimit(t *testing.T) {
 			State: "running", Status: "Up 3 days (healthy)", Created: 1789000000,
 			Labels: map[string]string{composeProjectLabel: "proj", composeServiceLabel: "svc" + id},
 			Ports:  []PortInfo{{Private: 8080, Public: 20000 + i, Type: "tcp"}}})
-		stats[id] = StatsInfo{CPUPercent: 12.34, MemUsageMB: 512.5, MemLimitMB: 1024, NetRXBytes: 1 << 20}
+		stats[id] = StatsInfo{CPUTotalUsage: 1 << 33, SystemUsage: 1 << 40, OnlineCPUs: 4,
+			MemUsageMB: 512.5, MemLimitMB: 1024, NetRXBytes: 1 << 20}
 	}
 	api := &stubAPI{containers: cs, stats: stats}
 	st := newTestSnapshotter(api, defaultProtected, testLogger()).Collect(context.Background())
