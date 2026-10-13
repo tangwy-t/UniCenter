@@ -70,6 +70,8 @@ github.com/tangwy-t/UniCenter/uni_protocol v1.2.6 h1:gfbFJxSyWi6AqKDeoGmY83/Y/Pa
 github.com/tangwy-t/UniCenter/uni_protocol v1.2.6/go.mod h1:EN9rQb1mvDpKN/cJWvbMvBBBCzFbSc4svvR386kqDRQ=
 github.com/tangwy-t/UniCenter/uni_protocol v1.2.7 h1:2W3Icu59/cR2ZZ64TPXg4YQJl8OlkAAUVDEPgPAWQD4=
 github.com/tangwy-t/UniCenter/uni_protocol v1.2.7/go.mod h1:EN9rQb1mvDpKN/cJWvbMvBBBCzFbSc4svvR386kqDRQ=
+github.com/tangwy-t/UniCenter/uni_protocol v1.2.8 h1:kDqPlbgKRD/opW6b+LFSwEsQpsu0A1ib96VMqAaCmxA=
+github.com/tangwy-t/UniCenter/uni_protocol v1.2.8/go.mod h1:EN9rQb1mvDpKN/cJWvbMvBBBCzFbSc4svvR386kqDRQ=
 github.com/tklauser/go-sysconf v0.3.12 h1:0QaGUFOdQaIVdPgfITYzaTegZvdCjmYO52cSFAEVmqU=
 github.com/tklauser/go-sysconf v0.3.12/go.mod h1:Ho14jnntGE1fpdOqQEEaiKRpvIavV0hSfmBq8nJbHYI=
 github.com/tklauser/numcpus v0.6.1 h1:ng9scYS7az0Bk4OZLvrNXNSAO2Pxr1XXRAPyjhIx+Fk=

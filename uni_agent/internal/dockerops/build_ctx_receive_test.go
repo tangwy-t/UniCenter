@@ -3,9 +3,11 @@ package dockerops
 import (
 	"archive/tar"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,8 +21,10 @@ import (
 //
 // 断言面：组装（字节逐位落盘）、sha256 终验、不匹配删除、早期形态闸（gzip 与
 // 未压缩 tar 都收、两者都不是则拒）、序号纪律（乱序/重复/FINAL 之后）、中止与
-// 断连清理、24h 清扫的圈定范围、产物目录不可用的诚实失败。全部**不起真实
-// socket、不碰 docker daemon** —— 接收器只依赖 transferDir 一个事实源（写执行器提供）。
+// 断连清理、产物目录不可用的诚实失败，以及**回收**（v1.4 修正：由定时任务派发的
+// system:transfer-cleanup 驱动，超龄判定与圈定范围不变；上传路径不再清扫 ——
+// 行为面与源码面各一条守卫）。全部**不起真实 socket、不碰 docker daemon** ——
+// 接收器只依赖 transferDir 一个事实源（写执行器提供）。
 
 const testSession = uint64(1790000000000000888)
 
@@ -317,45 +321,186 @@ func TestBuildCtxReceiverAbortAndDisconnectCleanup(t *testing.T) {
 	})
 }
 
-func TestBuildCtxReceiverSweepOnlyStaleUploadArtifacts(t *testing.T) {
+// ── 回收：定时任务驱动的 system:transfer-cleanup（v1.4 修正）─────────────
+//
+// 三条断言各自盯一件事，缺一不可：
+//   - **动作真能清掉 ≥24h 的产物、且不动 <24h 的**（假时钟 + 临时目录，走真实
+//     dispatcher → nodeExecutor → sweep 这条链，而不是直接调 sweep）；
+//   - **暗线已除（行为面）**：上传路径不再清扫 —— 传完一份产物，超龄的那份必须
+//     原样还在；
+//   - **暗线已除（源码面）**：上传路径的函数体里不得出现 sweep 调用，且 sweep
+//     函数本身仍在（回收逻辑不许被这次改写顺手删掉）。
+
+// writeArtifact 造一份产物：写入给定字节数并把 mtime 拨到指定时刻。
+func writeArtifact(t *testing.T, dir, name string, size int, mtime time.Time) {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, bytes.Repeat([]byte("x"), size), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(p, mtime, mtime); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTransferCleanupActionRemovesOnlyStaleArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	sink := &collectSink{}
+	// 走**完整装配**（Runtime.New + 配置下发 + dispatcher）：implementedActions、
+	// 参数校验、successNoter、执行体转调 sweep 全在链上 —— 直接调 sweep 会漏掉
+	// 「这个动作是否真的被登记为已实现」这一层（漏登记的现象是「该操作尚未开放」）。
+	r := New(Deps{
+		StateDir:   t.TempDir(),
+		API:        &stubAPI{},
+		SendState:  func(*agentproto.DockerState) error { return nil },
+		SendResult: sink.send,
+		Log:        testLogger(),
+		Now:        func() time.Time { return now },
+	})
+	r.OnConfig(&agentproto.DockerConfig{ConfigVersion: 1, TransferDir: dir})
+
+	old, fresh := agentproto.DockerBuildCtxTransferName(101), agentproto.DockerBuildCtxTransferName(202)
+	oldPath := filepath.Join(dir, old)
+	writeArtifact(t, dir, old, 4096, now.Add(-buildCtxSweepAge-1*time.Hour))            // 超龄 ✓ 应删
+	writeArtifact(t, dir, fresh, 128, now.Add(-1*time.Hour))                            // 未超龄，保留
+	writeArtifact(t, dir, "user-image.tar", 64, now.Add(-48*time.Hour))                 // save 的自命名产物，保留
+	writeArtifact(t, dir, "build-ctx-oops.tar.gz", 64, now.Add(-48*time.Hour))          // 非推导名（会话号非十进制），保留
+	if err := os.Mkdir(filepath.Join(dir, "build-ctx-999.tar.gz"), 0o700); err != nil { // 同名目录：保留
+		t.Fatal(err)
+	}
+
+	run := func(ref string) *agentproto.DockerCmdResult {
+		t.Helper()
+		before := len(sink.all())
+		r.OnCmd(&agentproto.DockerCmd{Ref: ref, Action: agentproto.DockerActionTransferCleanup})
+		r.dispatcher().ExecuteNow(context.Background(), ref)
+		got := sink.all()
+		if len(got) != before+1 {
+			t.Fatalf("回收指令应恰好回一条结果，实得 %d 条", len(got)-before)
+		}
+		return got[len(got)-1]
+	}
+
+	res := run("1")
+	if !res.OK {
+		t.Fatalf("回收应成功，实得 %+v", res)
+	}
+	if _, err := os.Stat(oldPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("超龄上传产物应被回收: %v", err)
+	}
+	for _, keep := range []string{fresh, "user-image.tar", "build-ctx-oops.tar.gz"} {
+		if _, err := os.Stat(filepath.Join(dir, keep)); err != nil {
+			t.Fatalf("回收误删了 %s: %v", keep, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "build-ctx-999.tar.gz")); err != nil {
+		t.Fatalf("回收碰了同名目录: %v", err)
+	}
+	// 战果（条数 + 释放字节）必须落进 detail：这是这条指令唯一的结果面
+	//（core 的定时任务把 res.Detail 原文记进日志）。
+	if want := fmt.Sprintf("removed=1 freed_bytes=%d", int64(4096)); res.Detail != want {
+		t.Fatalf("detail = %q, want %q", res.Detail, want)
+	}
+	if res.Payload != nil {
+		t.Fatal("回收不带结构化载荷（没有读 payload 的消费者），战果只进 detail")
+	}
+
+	// 再跑一轮：没有超龄产物 = 成功且战果为零（不是「无事可做的报错」）。
+	last := run("2")
+	if !last.OK || last.Detail != "removed=0 freed_bytes=0" {
+		t.Fatalf("空轮应成功且战果为零，实得 %+v", last)
+	}
+}
+
+// 守卫（行为面）：**暗线已除** —— 上传不再清扫超龄产物。
+// 复现被打破的那条前提：载入镜像复用同一通道后产物可到 GB 级，而「传完就不再传」的
+// 机器再也没有任何东西触发清扫；回收必须由定时任务驱动，不能再寄生在上传路径上。
+func TestUploadDoesNotSweepStaleArtifacts(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 	r := newTestReceiver(t, dir, func() time.Time { return now })
 
-	old, fresh := agentproto.DockerBuildCtxTransferName(101), agentproto.DockerBuildCtxTransferName(202)
-	write := func(name string, mtime time.Time) {
-		t.Helper()
-		p := filepath.Join(dir, name)
-		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chtimes(p, mtime, mtime); err != nil {
-			t.Fatal(err)
-		}
-	}
-	write(old, now.Add(-buildCtxSweepAge-1*time.Hour))     // 超龄 ✓ 应删
-	write(fresh, now.Add(-1*time.Hour))                    // 未超龄，保留
-	write("user-image.tar", now.Add(-48*time.Hour))        // save 的自命名产物，保留
-	write("build-ctx-oops.tar.gz", now.Add(-48*time.Hour)) // 非推导名（会话号非十进制），保留
-	if err := os.Mkdir(filepath.Join(dir, "build-ctx-999.tar.gz"), 0o700); err != nil {
-		t.Fatal(err)
-	} // 同名目录：保留
+	stale := agentproto.DockerBuildCtxTransferName(101)
+	writeArtifact(t, dir, stale, 4096, now.Add(-buildCtxSweepAge-1*time.Hour))
 
-	// 清扫挂在 open 上（上传开头）。
-	if err := r.Chunk(testSession, 1, false, gz([]byte("new upload")...)); err != nil {
+	payload := gz([]byte("new upload")...)
+	if err := r.Chunk(testSession, 1, true, payload); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, old)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("超龄上传产物应被清扫: %v", err)
+	if err := r.Finish(testSession, shaHex(payload), int64(len(payload)),
+		agentproto.DockerBuildCtxTransferName(testSession)); err != nil {
+		t.Fatal(err)
 	}
-	for _, keep := range []string{fresh, "user-image.tar", "build-ctx-oops.tar.gz"} {
-		if _, err := os.Stat(filepath.Join(dir, keep)); err != nil {
-			t.Fatalf("清扫误删了 %s: %v", keep, err)
+	if _, err := os.Stat(filepath.Join(dir, stale)); err != nil {
+		t.Fatalf("上传路径不得再清扫超龄产物（回收已改为定时任务 docker-transfer-cleanup）: %v", err)
+	}
+}
+
+// 守卫（源码面）：与 docker_cancel_test 的源码级守卫同款 —— 上传路径的**函数体**里
+// 不得出现 sweep 调用（整文件级断言会被 sweep 函数自身的定义误伤，故按函数体扫）。
+//
+// 行为断言只盖住「一次上传」这条正常分支；源码断言把 drop/Abort/AbortAll 这些
+// 失败与清理分支也一并盖住 —— 那几处正是「顺手补一句清扫」最可能被加回去的地方。
+func TestUploadPathSourceHasNoSweepCall(t *testing.T) {
+	src, err := os.ReadFile("build_ctx_receive.go")
+	if err != nil {
+		t.Fatalf("读取 build_ctx_receive.go 失败: %v", err)
+	}
+	text := string(src)
+	for _, sig := range []string{
+		"func (r *buildCtxReceiver) open(",
+		"func (r *buildCtxReceiver) Chunk(",
+		"func (r *buildCtxReceiver) Finish(",
+		"func (r *buildCtxReceiver) drop(",
+		"func (r *buildCtxReceiver) Abort(",
+		"func (r *buildCtxReceiver) AbortAll(",
+	} {
+		body := funcBodyOf(t, text, sig)
+		if strings.Contains(body, "sweep(") {
+			t.Fatalf("%s 的函数体里出现了 sweep 调用 —— 回收只由 system:transfer-cleanup 驱动（定时任务 docker-transfer-cleanup）", sig)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(dir, "build-ctx-999.tar.gz")); err != nil {
-		t.Fatalf("清扫碰了同名目录: %v", err)
+	// 回收逻辑本身必须还在（本波只换驱动力，不删逻辑）：sweep 仍是本文件的成员，
+	// 且它的唯一调用点在 nodeExecutor.cleanupTransfer 里（runtime.go）。
+	if !strings.Contains(text, "func (r *buildCtxReceiver) sweep(") {
+		t.Fatal("sweep 函数本身必须保留（由 system:transfer-cleanup 驱动）")
 	}
+	rt, err := os.ReadFile("runtime.go")
+	if err != nil {
+		t.Fatalf("读取 runtime.go 失败: %v", err)
+	}
+	if !strings.Contains(string(rt), "e.upload.sweep(") {
+		t.Fatal("sweep 必须由 system:transfer-cleanup 的执行体驱动（runtime.go 的 cleanupTransfer）")
+	}
+}
+
+// funcBodyOf 截出一个函数的函数体（花括号配对；找不到即判死）—— 源码级守卫用，
+// 避免整文件级断言被同文件里的合法用法（sweep 的定义与它自己的注释）误伤。
+func funcBodyOf(t *testing.T, src, sig string) string {
+	t.Helper()
+	idx := strings.Index(src, sig)
+	if idx < 0 {
+		t.Fatalf("源码里找不到 %s", sig)
+	}
+	open := strings.IndexByte(src[idx:], '{')
+	if open < 0 {
+		t.Fatalf("%s 之后没有函数体", sig)
+	}
+	depth := 0
+	for i := idx + open; i < len(src); i++ {
+		switch src[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return src[idx+open : i+1]
+			}
+		}
+	}
+	t.Fatalf("%s 的函数体不闭合", sig)
+	return ""
 }
 
 func TestBuildCtxReceiverUnusableDirFailsHonestly(t *testing.T) {

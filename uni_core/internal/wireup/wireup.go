@@ -635,6 +635,15 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 		AgentPartition: agentPartitionSvc,
 		// 升级巡检（只读扫描 + 判超时）：不加它，卡住的升级尝试会永远停在「升级中」。
 		AgentUpgrade: deviceUpgradeSvc,
+		// 上传产物回收（docker-transfer-cleanup）：枚举 docker 可管主机（同一个
+		// dockerStore）+ 建指令记录（同一个 dockerCmdStore，结果回链与实时可见性
+		// 都靠它）+ 经 agentHub 逐台派发 system:transfer-cleanup。
+		// RequestIDGen 传共享计数器：ref 与用户指令同在一个 docker:cmd:<ref> 键空间，
+		// 两套计数器会重新引入撞号窗口（见 Dockerevents 装配处的同一条理由）。
+		DockerTransferHosts:  dockerStore,
+		DockerTransferCmds:   dockerCmdStore,
+		DockerTransferSender: agentHub,
+		RequestIDGen:         service.NewRequestID,
 		// Log 允许 nil（任务侧退化成 Nop），但装配点没有理由交 nil：4 个指标任务的
 		// 全部可观测性就是那几行结构化读数。
 		Log: log,

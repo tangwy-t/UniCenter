@@ -426,6 +426,10 @@ func TestWriteTimeoutsMirrorSpec(t *testing.T) {
 		agentproto.DockerActionComposeFileValidate: 30 * time.Second,
 		agentproto.DockerActionComposeFileWrite:    30 * time.Second,
 		agentproto.DockerActionComposeFilePatch:    30 * time.Second,
+
+		// 主机级维护：上传产物回收（system:transfer-cleanup），与 volume:remove 同档
+		// 60 秒（本地 ReadDir + 几个 unlink）。
+		agentproto.DockerActionTransferCleanup: 60 * time.Second,
 	}
 	if len(writeTimeouts) != len(spec) {
 		t.Fatalf("时限镜像 %d 行，spec %d 行（逐行对齐是这张表存在的意义）", len(writeTimeouts), len(spec))

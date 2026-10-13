@@ -52,8 +52,8 @@ func TestDockerGoldenPayloadsDecode(t *testing.T) {
 // 多一条 → 协议承诺了一个没有策略的动作。
 func TestDockerActionWhiteListIsComplete(t *testing.T) {
 	all := AllDockerActions()
-	if len(all) != 36 {
-		t.Fatalf("action 白名单应为 36 条（含创建面 container:create、监控面 container:stats、常驻事件流 docker:events、聚合日志 compose:logs、P2 分发闭环 image:build/image:push 与 P3 安全面 image:scan），实际 %d 条: %v", len(all), all)
+	if len(all) != 37 {
+		t.Fatalf("action 白名单应为 37 条（含创建面 container:create、监控面 container:stats、常驻事件流 docker:events、聚合日志 compose:logs、P2 分发闭环 image:build/image:push、P3 安全面 image:scan 与主机级维护 system:transfer-cleanup），实际 %d 条: %v", len(all), all)
 	}
 	seen := map[string]bool{}
 	for _, a := range all {
@@ -175,6 +175,11 @@ func TestDockerOptionValidation(t *testing.T) {
 		// 带上 target 也被放行（host 级动作无视 options 内容，机制上它不产生任何指令）。
 		{"events 空 options 合法", DockerActionEvents, &DockerCmdOptions{}, nil},
 		{"events 带 target 也放行", DockerActionEvents, ok(&DockerCmdOptions{Target: "anything"}), nil},
+		// system:transfer-cleanup（主机级维护，只由 core 的定时任务派发）：零必填、
+		// 零确认 —— 空 options 就是完整形态（回收策略是 agent 侧常量），带上 target
+		// 也被无视（与 events 同一形态：机制上它不读 target）。
+		{"回收空 options 合法", DockerActionTransferCleanup, &DockerCmdOptions{}, nil},
+		{"回收带 target 也放行", DockerActionTransferCleanup, ok(&DockerCmdOptions{Target: "anything"}), nil},
 		// compose:logs（5a）：target 走项目名白名单（复用 compose 项目的校验）；
 		// since 显式拒绝（CLI 公共子集没有 --since —— 静默无视会答非所问）。
 		{"聚合日志缺项目名", DockerActionComposeLogs, &DockerCmdOptions{}, ErrMissingField},

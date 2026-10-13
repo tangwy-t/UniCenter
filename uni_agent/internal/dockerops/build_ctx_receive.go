@@ -46,17 +46,22 @@ import (
 // 页缓存写 + 一行递增哈希），不需要把文件写移出锁外 —— 锁内还保证
 // 「seq 校验 → 写入」的原子序，否则读循环里两个乱序帧会把账目打穿。
 
-// buildCtxSweepAge 是 build-ctx-* 产物的清扫年龄（24h）。选型（任务交付物 ④
-// 的「会话级覆盖 + 24h 清扫」方案）：
+// buildCtxSweepAge 是 build-ctx-* 产物的清扫年龄（24h）。选型：
 //
 //   - **会话级覆盖**：每个上传会话一个唯一推导名（会话号在名字里）——
 //     同一用户连续上传各得各的文件，旧文件等 24h 自然回收；不需要「覆盖」
 //     的原因：image:build 引用的是**确切文件名**（core 在上传响应里给的），
 //     用户下一次上传拿到新名字，即等于覆盖了旧的可用性；
 //   - **24h**：覆盖「上传后立刻构建」的工作窗口，也给被中断/被遗忘的半成品
-//     一个回收期限；清扫时机挂在**每次新上传开头**（上传是产物唯一产生源，
-//     清扫跟着产生源走，不需要额外的定时器契约 —— agent 侧没有与 core 对齐的
-//     定时任务，起一把只干这个的钟是多余的第二套调度）。
+//     一个回收期限；
+//   - **驱动力是定时任务表里的 docker-transfer-cleanup**：core 逐台派发
+//     system:transfer-cleanup，agent 侧的执行体就是本文件的 sweep。
+//
+// 它此前挂在**每次上传的开头**，理由自述为「上传是产物唯一产生源，清扫跟着产生源
+// 走，不必起第二套调度」。那条前提在载入镜像复用同一条通道后**已被打破**：产物可到
+// GB 级（实测 520MB / 1.6GB / 2.87GB），而「传完就不再传」的机器再也没有任何东西
+// 触发清扫 —— 产物会永久占着盘。回收因此改成一件**有自己时刻表的事**（core 的
+// 定时任务表中一行显式任务），不再寄生在别人的路径上。
 const buildCtxSweepAge = 24 * time.Hour
 
 // maxBuildCtxUploadBytes 是组装账目的尺寸闸 = **两档上传产物的较大者**
@@ -367,11 +372,10 @@ func (r *buildCtxReceiver) open(sessionID uint64) (*buildCtxUploadSession, error
 	if err := r.diskRoom(dir, 0); err != nil {
 		return nil, fmt.Errorf("上传会话 %d：%w", sessionID, err)
 	}
-	// 清扫挂在上传开头（上传是 build-ctx-* 的唯一产生源）：回收 ≥24h 的旧产物。
-	if n, err := r.sweep(dir); err == nil && n > 0 && r.log != nil {
-		r.log.Info("构建上下文清扫", "removed", n, "dir", dir)
-	}
-
+	// 这里**不再**清扫超龄产物：回收已改为定时任务表里的 docker-transfer-cleanup
+	// （core 逐台派发 system:transfer-cleanup → 本文件的 sweep）。此前它挂在这里
+	//（「上传是唯一产生源」），而「传完就不再传」的机器在那条形态下永远等不到清扫
+	// —— 理由与代价见 buildCtxSweepAge 的说明。
 	name := agentproto.DockerBuildCtxTransferName(sessionID)
 	path := filepath.Join(dir, name)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, buildCtxFileMode)
@@ -425,16 +429,27 @@ func (r *buildCtxReceiver) drop(sess *buildCtxUploadSession, reason string) {
 	}
 }
 
-// sweep 移除 transferDir 里 ≥24h 的 build-ctx-* 产物（返回移除数）。
+// sweep 移除 transferDir 里 ≥24h 的 build-ctx-* 产物（返回移除条数与释放字节）。
+//
 // 圈定对象只看「推导名形态」：任何别的文件（save 的 .tar、用户文件）都不是
 // 上传产物，碰都不碰 —— 清扫面与上传面同一把名字尺（ParseDockerBuildCtxTransferName）。
-func (r *buildCtxReceiver) sweep(dir string) (int, error) {
+//
+// 谁在驱动它：core 定时任务表里的 docker-transfer-cleanup 逐台派发的
+// system:transfer-cleanup（agent 侧执行体在 runtime.go 的 cleanupTransfer）。
+// 它**不再**挂在上传开头 —— 那条暗线已删（理由见 buildCtxSweepAge 的说明）：
+// 「传完就不再传」的机器也必须被回收到。
+//
+// 释放字节在这里累加而不是让调用方回头 stat：删除是一次「已经拿在手上的事实」，
+// 删完再去看文件大小只会拿到「已经不在」的错，而清理的战果（条数 + 字节）正是
+// 这条指令唯一的结果。
+func (r *buildCtxReceiver) sweep(dir string) (int, int64, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	horizon := r.now().Add(-buildCtxSweepAge)
 	removed := 0
+	var freed int64
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -448,7 +463,8 @@ func (r *buildCtxReceiver) sweep(dir string) (int, error) {
 		}
 		if err := os.Remove(filepath.Join(dir, e.Name())); err == nil {
 			removed++
+			freed += info.Size()
 		}
 	}
-	return removed, nil
+	return removed, freed, nil
 }

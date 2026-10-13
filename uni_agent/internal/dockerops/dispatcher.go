@@ -84,6 +84,11 @@ var implementedActions = map[string]bool{
 	agentproto.DockerActionComposeFileValidate: true,
 	agentproto.DockerActionComposeFileWrite:    true,
 	agentproto.DockerActionComposeFilePatch:    true,
+
+	// 主机级维护：上传产物回收（system:transfer-cleanup）。执行体在 runtime.go 的
+	// cleanupTransfer（转调上传接收器的 sweep）—— 由 core 的定时任务
+	// docker-transfer-cleanup 逐台派发，用户面上没有入口。
+	agentproto.DockerActionTransferCleanup: true,
 }
 
 // writeTimeouts 是操作面 action 的执行时限**镜像**（权威表在 core 的 dockerpolicy，
@@ -139,6 +144,11 @@ var writeTimeouts = map[string]time.Duration{
 	agentproto.DockerActionComposeFileValidate: 30 * time.Second,
 	agentproto.DockerActionComposeFileWrite:    30 * time.Second,
 	agentproto.DockerActionComposeFilePatch:    30 * time.Second,
+
+	// 主机级维护：上传产物回收（system:transfer-cleanup）—— 一次 ReadDir + 几个
+	// unlink 的本地 IO，与 volume:remove 同档 60 秒（core 的 dockerpolicy 行同值，
+	// 逐行对齐守卫在 write_test.go）。
+	agentproto.DockerActionTransferCleanup: 60 * time.Second,
 }
 
 // actionTimeout 取一条指令的执行时限：二期表优先，其余用兜底。

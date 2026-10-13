@@ -105,6 +105,24 @@ var policies = []Policy{
 	// follow 只是读完即 eof），生命周期交给流通道；受理记录用建立窗口
 	//（SessionSetupTimeout），不参与普通写指令的 15 分钟档 sweep。
 	{agentproto.DockerActionComposeLogs, permission.PermDockerInspect, 0, true},
+
+	// system:transfer-cleanup（主机级维护：回收本机 transferDir 里超龄的上传产物）：
+	//
+	//   - **权限档 docker:delete**：本表里「移除东西」的全部同族（image/volume:prune、
+	//     各类 remove、compose:down）都在这一档，而本动作干的就是**删文件**——
+	//     与 prune 同一语义（按策略清掉一批产物），只是清的不是 daemon 资源而是
+	//     主机上的传输产物。刻意不新造权限码：它的威胁面（「能删这批 staging 产物」）
+	//     已被 docker:delete 完整覆盖，多一枚码只会多一处授权死角；
+	//   - **它的发起人是 core 自己**（定时任务表中的 docker-transfer-cleanup 逐台
+	//     下发，用户面上没有入口）。这一行仍然必须有，两个理由：① 权限表与协议白名单
+	//     是**双向**守卫（缺一行的 action 永远取不到权限码，见 dockerpolicy_test）；
+	//     ② 这一列的 Perm 是**指令记录的可见性档**（任务中心读面按它过滤），
+	//     定成 docker:delete 意味着「只有持有该权限的人读得到本轮回收的记录」——
+	//     与它「谁的权限能删这些东西」的授权口径一致；
+	//   - 超时 60 秒（一次 ReadDir + 几个 unlink 的本地 IO，与 volume:remove 同档）。
+	//     agent 侧的 writeTimeouts 必须是同一个数（逐行镜像守卫在 agent 的
+	//     write_test.go）—— 两端对「超时」只能有一个答案。
+	{agentproto.DockerActionTransferCleanup, permission.PermDockerDelete, 60 * time.Second, false},
 }
 
 // All 返回策略表的浅拷贝（顺序 = 书写顺序）。

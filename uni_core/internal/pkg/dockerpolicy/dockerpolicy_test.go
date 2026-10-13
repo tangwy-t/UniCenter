@@ -62,6 +62,10 @@ func TestPolicyTableMatchesSpec(t *testing.T) {
 		// compose:logs（5a）：inspect 档（与 container:logs 同级）+ 会话制（结果 =
 		// 会话句柄，follow 与非 follow 都是流）。
 		{agentproto.DockerActionComposeLogs, permission.PermDockerInspect, 0, true},
+		// system:transfer-cleanup（主机级维护，只由 core 的定时任务派发）：
+		// delete 档（删产物 = prune 同族的「移除东西」，且它是本记录可见性档）
+		// + 60 秒档（本地 ReadDir + unlink；agent 的 writeTimeouts 同值）。
+		{agentproto.DockerActionTransferCleanup, permission.PermDockerDelete, 60 * time.Second, false},
 	}
 	if len(want) != len(All()) {
 		t.Fatalf("策略表 %d 行，期望 %d 行（spec §4.3.1）", len(All()), len(want))

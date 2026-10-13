@@ -4,7 +4,9 @@ import (
 	"context"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/entity"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/agentmetrics"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockerstate"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/service"
+	agentproto "github.com/tangwy-t/UniCenter/uni_protocol"
 	"time"
 )
 
@@ -72,4 +74,41 @@ type AgentPartitionService interface {
 // 一个只会巡检的任务，不可能因为代码写错而把设备升了。
 type AgentUpgradeSweeper interface {
 	SweepStale(ctx context.Context, olderThan time.Duration, limit int) (int, error)
+}
+
+// ── 上传产物回收（docker-transfer-cleanup）的三个能力面 ─────────────────────
+//
+// 三份窄接口而不是一份「大 docker 面」：任务真正要的只有「枚举可管主机」「建/读一条
+// 指令记录」「把指令送出去」这三件事（与 dockerevents 常驻管理器的分解同型）——
+// 它拿不到下发面的其余能力（受理校验、审计、流会话），也就不可能因为代码写错而
+// 从这条路上做出别的动作。三者的实现分别是 dockerstate.Store / dockerstate.CmdStore
+// / agenthub.Hub（装配见 wireup）。
+
+// DockerTransferHosts 是可管 docker 主机的枚举面（由 dockerstate.Store 满足）。
+//
+// Hosts 给「有哪些主机报过快照」的集合，Get 给单台的快照信封。
+// **判据是「这台报过快照」而不是快照里的 docker_ok**：本动作不碰 daemon（agent 侧
+// 只是 ReadDir + unlink），而它要救的包括「daemon 挂了 + 盘被产物占满」那种局面 ——
+// 用 daemon 健康当闸会把最需要回收的那台挡在门外（事件流常驻订阅用 docker_ok 是因为
+// 它真的在订 daemon，两者不是同一件事）。
+type DockerTransferHosts interface {
+	Hosts(ctx context.Context) ([]uint64, error)
+	Get(ctx context.Context, deviceID uint64) (*dockerstate.Envelope, error)
+}
+
+// DockerTransferCmdStore 是指令记录面（由 dockerstate.CmdStore 满足）。
+//
+// 两个方法各有不可替代的理由：
+//   - Create：**必须建记录**——agent 的 result 回写只认「记录存在」的 ref
+//     （不建记录的 result 会被当「过期或伪造」丢掉），而结果正是本任务唯一的战果来源；
+//   - Get：收本轮的终态结果（逐台 succeeded/failed/timeout，见任务里的收结果一段）。
+type DockerTransferCmdStore interface {
+	Create(ctx context.Context, rec *dockerstate.CmdRecord, timeout time.Duration) error
+	Get(ctx context.Context, ref string) (*dockerstate.CmdRecord, error)
+}
+
+// DockerTransferSender 是下行送达面（由 agenthub.Hub 满足）。
+// ErrDeviceOffline 是**逐台**结论，不是整轮的结论（见任务里的错误处置口径）。
+type DockerTransferSender interface {
+	SendToDevice(deviceID uint64, msg *agentproto.Message) error
 }

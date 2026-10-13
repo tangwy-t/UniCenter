@@ -141,6 +141,26 @@ const (
 	// target 是项目名（复用 compose 项目名的白名单与校验）。确认档是标准档：读日志
 	// 不改任何状态，保护档（force）对它没有意义。
 	DockerActionComposeLogs = "compose:logs"
+
+	// DockerActionTransferCleanup 是**主机级维护**：按策略回收本机 transferDir 里
+	// 超龄的上传产物（`build-ctx-<会话>.tar.gz` —— 构建上下文与载入镜像共用同一条
+	// 上传通道，落点同一个目录）。
+	//
+	// 三条口径：
+	//   - **family `system` 是新的**（语义 = 主机级维护）。既有族全是 docker 资源
+	//     前缀（container:/image:/volume:/network:/compose:，docker: 则是域级的
+	//     daemon 自身 —— 它唯一的成员 docker:events 的资源对象就是 daemon），而本条
+	//     的资源对象是**主机文件系统上的产物目录**：执行器一个字节都不碰 daemon
+	//     （纯 os.ReadDir + os.Remove，见 agent 侧 sweep）。挂进 docker: 会让这个
+	//     名字谎称「这是一条 daemon 操作」；
+	//   - **零参数**（Required 空集 + 标准确认档）：回收策略是 **agent 侧常量**
+	//     （产物名形态 + 24h 限龄），不由指令参数决定 —— 「带上 target 也只是被
+	//     无视」的宽松由校验机制的自然语义给出（validateDockerTarget 只在 target
+	//     非空时跑），与 docker:events 同一条形态；
+	//   - **只有 core 的定时任务派发**（任务表中的 docker-transfer-cleanup 逐台
+	//     下发）：用户面上没有入口。权限档见 core 的 dockerpolicy（那条策略行同时
+	//     是「谁能读到这条指令的记录」的可见性档）。
+	DockerActionTransferCleanup = "system:transfer-cleanup"
 )
 
 // 确认档的取值形态（§10 第 1 条）：标准档空、固定文本、照抄目标名、照抄文件名。
@@ -456,6 +476,11 @@ var dockerActionSpecs = []DockerActionSpec{
 	// 聚合日志（5a）：target=项目名必填；follow/tail 与 container:logs 同名同义
 	//（follow 只是 CLI 的 --follow 开关 —— 两种形态都是流会话，见常量注释）。
 	{Action: DockerActionComposeLogs, Required: []string{"target"}},
+
+	// 主机级维护（system:transfer-cleanup）：零参数 —— 回收策略（产物名形态 +
+	// 24h 限龄）是 agent 侧常量，指令面上没有任何可调项，故 Required 为空集、
+	// 确认档标准。与 docker:events 同一形态（没有 target 与必填项的 host 级动作）。
+	{Action: DockerActionTransferCleanup},
 }
 
 // dockerOptionFields 是 DockerCmdOptions 的全部字段名（与 JSON tag 一一对应）。

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -156,6 +157,8 @@ func New(deps Deps) *Runtime {
 		read:   NewReadExecutor(api),
 		write:  r.write,
 		stream: r.stream,
+		// 上传接收器（构造于上）：收口层持有它，system:transfer-cleanup 的执行体是它的 sweep。
+		upload: r.upload,
 	}
 	return r
 }
@@ -171,7 +174,8 @@ var readActions = map[string]bool{
 	agentproto.DockerActionComposeFileRead:  true,
 }
 
-// nodeExecutor 是 dispatcher 看到的**唯一**执行器：只读、二期写与三期流在这里收口。
+// nodeExecutor 是 dispatcher 看到的**唯一**执行器：只读、二期写、三期流与主机级维护
+// 在这里收口。
 //
 // 为什么要有这一层：dispatcher 的串行队列、参数/确认二次校验与按时限超时都对执行器
 // 只有一个入口，分派逻辑不该知道有几个执行器；而读/写/流三个类型各自保持窄依赖。
@@ -179,9 +183,27 @@ type nodeExecutor struct {
 	read   *ReadExecutor
 	write  *WriteExecutor
 	stream *StreamExecutor
+	// upload 是上传接收器（v1.3 的上传通道：构建上下文与载入镜像共用）。收口层持有它
+	// 只为**一件事**：system:transfer-cleanup 的执行体就是它的 sweep（唯一事实源，
+	// 回收逻辑不在这里重写）。方向是单向的 —— executor → 接收器 → 写执行器
+	// （接收器从写执行器取 transferDir 事实源），没有环。
+	upload *buildCtxReceiver
+
+	// mu/note 是本层自己那一格成功附注（见 takeNote）：写执行器的附注槽承载的是它自己
+	// 路径上的话（save/load 的目录回退、prune 的释放量），回收路径的战果在这里单放一格，
+	// 两边不互相覆盖。
+	mu   sync.Mutex
+	note string
 }
 
 func (e *nodeExecutor) Do(ctx context.Context, cmd *agentproto.DockerCmd) ([]byte, error) {
+	// 主机级维护（system:transfer-cleanup）**排在流判定之前**：它是零参数的一次性
+	// 指令，与 IsStreamAction 看的那几项 options 毫无关系；不给它一条明确分支，
+	// 它会落到写执行器的 default（「该操作尚未开放」）上 —— 一个能跑的动作被报成
+	// 未实现，是最难查的那种错。
+	if cmd.Action == agentproto.DockerActionTransferCleanup {
+		return e.cleanupTransfer()
+	}
 	// 流判定要**排在只读之前**：container:logs{follow:true} 与一次性日志是同一个
 	// action，分流依据只有 options.follow（IsStreamAction 是唯一判据）。
 	if IsStreamAction(cmd) {
@@ -193,8 +215,54 @@ func (e *nodeExecutor) Do(ctx context.Context, cmd *agentproto.DockerCmd) ([]byt
 	return e.write.Do(ctx, cmd)
 }
 
-// takeNote 转发写执行器的成功附注（实现 dispatcher 的 successNoter，见 dispatcher.go）。
-func (e *nodeExecutor) takeNote() string { return e.write.takeNote() }
+// cleanupTransfer 是 system:transfer-cleanup 的执行体：按策略回收本机 transferDir
+// 里超龄的上传产物（build-ctx-*，24h 限龄）。
+//
+// 它做三件事，一件都不多做：目录可用性预检 → 调接收器的 sweep（清理逻辑的唯一
+// 事实源）→ 把战果写成成功附注。计数只进 detail 而**不带 payload**：这条指令没有
+// 结构化数据面的消费者（没有 UI 读它），而 detail 是 result 里唯一的自由文本槽，
+// 恰好就是「成功但必须留痕」的那一格（与 prune 的 space_reclaimed 同一去处）。
+func (e *nodeExecutor) cleanupTransfer() ([]byte, error) {
+	if e.upload == nil {
+		// 装配缺陷（生产由 Runtime.New 无条件建立接收器）：回一句结论句而不是
+		// panic —— 这里在 dispatcher 的 worker goroutine 里，panic 会带走整个 agent
+		// 进程，代价远大于一条「未装配」。
+		return nil, &ExecError{Msg: "回收能力未装配"}
+	}
+	dir := e.write.transferDirValue()
+	if !writableDir(dir) {
+		// 与上传接收器 open 的同一句结论（诚实拒绝）：目录不可用时不报「成功清除了
+		// 0 个」—— 那会把「这台机器根本没有产物目录」讲成一个正常结果。
+		return nil, &ExecError{Msg: fmt.Sprintf("产物目录不可用（%s）", dir), Detail: dir}
+	}
+	removed, freed, err := e.upload.sweep(dir)
+	if err != nil {
+		return nil, wrapDocker("回收传输产物失败", err)
+	}
+	e.setNote(fmt.Sprintf("removed=%d freed_bytes=%d", removed, freed))
+	return nil, nil
+}
+
+// setNote 写本层那一格附注（与写执行器的同名方法同纪律：dispatcher 每条指令取一次）。
+func (e *nodeExecutor) setNote(s string) {
+	e.mu.Lock()
+	e.note = s
+	e.mu.Unlock()
+}
+
+// takeNote 实现 dispatcher 的 successNoter：先取本层的（回收的条数与释放字节），
+// 没有才转发写执行器的（save/load 的目录回退、prune 的释放量）—— 一条指令只可能
+// 产出一格附注，两条来源不会同时有话说。
+func (e *nodeExecutor) takeNote() string {
+	e.mu.Lock()
+	n := e.note
+	e.note = ""
+	e.mu.Unlock()
+	if n != "" {
+		return n
+	}
+	return e.write.takeNote()
+}
 
 // takeSessionID 转发流执行器的会话句柄（实现 dispatcher 的 sessionNamer）。
 func (e *nodeExecutor) takeSessionID() string { return e.stream.takeSessionID() }
