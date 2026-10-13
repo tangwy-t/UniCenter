@@ -28,7 +28,9 @@ vi.mock('@/hooks/core/useAuth', () => ({
 }))
 
 import ImageLoadDialog from '../components/image-load-dialog.vue'
-import { MAX_BUILD_CONTEXT_BYTES } from '../utils/build-push'
+
+/** image:load 上传的字节上限（**与 uni_protocol.MaxDockerImageLoadBytes 同源、8GB 档**）。 */
+const MAX_LOAD_BYTES = 8 * 1024 * 1024 * 1024
 
 /** ArtSvgIcon 的轻量替身（真组件靠 unplugin 注册；测试环境里没有）。 */
 const STUBS = {
@@ -104,7 +106,7 @@ async function switchMode(w: VueWrapper, mode: 'local' | 'upload') {
 
 const localInput = (w: VueWrapper) => w.find('input[placeholder="例如 镜像名.tar"]')
 
-/** 模拟选择文件（预检是同步的：后缀/512MB，选完立即落定）。 */
+/** 模拟选择文件（预检是同步的：后缀/8GB 档，选完立即落定）。 */
 async function pickFile(w: VueWrapper, file: File) {
   const input = w.find('input[type="file"]')
   expect(input.exists(), '隐藏的文件选择器应已渲染（上传形态）').toBe(true)
@@ -161,18 +163,47 @@ describe('校验挡提交（可见理由，不藏 title）', () => {
     expect(w.find('.il-field__reason').text()).toBe('请选择要上传的文件')
   })
 
-  it('预检在选文件的瞬间：后缀不在白名单 / 超 512MB 都当场拒，不上传', async () => {
+  it('上传提示是 8GB 档（不是构建那条 512MB）', async () => {
+    const w = await mountDialog()
+    await switchMode(w, 'upload')
+    expect(w.text()).toContain('≤8GB')
+    expect(w.text()).not.toContain('512MB')
+  })
+
+  it('后缀不在白名单当场拒，不上传', async () => {
     const w = await mountDialog()
     await switchMode(w, 'upload')
 
     await pickFile(w, new File([new Uint8Array([1])], 'img.zip'))
     expect(w.text()).toContain('只支持 tar / tar.gz / tgz 文件')
     expect(api.uploadDockerBuildContext).not.toHaveBeenCalled()
+    expect(isDisabled(w, '载入镜像')).toBe(true)
+  })
 
-    const huge = new File([new Uint8Array([1])], 'big.tar')
-    Object.defineProperty(huge, 'size', { value: MAX_BUILD_CONTEXT_BYTES + 1 })
+  it('尺寸预检用 8GB 档：512MB / 1GB 都放行，超 8GB 才拒（与构建那条 512MB 不同档）', async () => {
+    const w = await mountDialog()
+    await switchMode(w, 'upload')
+
+    // 512MB —— 构建上下文那条通道的上限，对载入**不是**门槛（不再被本地拦下）。
+    const halfGig = new File([new Uint8Array([1])], 'big.tar')
+    Object.defineProperty(halfGig, 'size', { value: 512 * 1024 * 1024 })
+    await pickFile(w, halfGig)
+    expect(w.find('.il-field__error').exists()).toBe(false)
+    expect(isDisabled(w, '载入镜像')).toBe(false)
+
+    // 1GB 同样放行。
+    const oneGig = new File([new Uint8Array([1])], 'bigger.tar')
+    Object.defineProperty(oneGig, 'size', { value: 1024 * 1024 * 1024 })
+    await pickFile(w, oneGig)
+    expect(w.find('.il-field__error').exists()).toBe(false)
+    expect(isDisabled(w, '载入镜像')).toBe(false)
+
+    // 超 8GB 才被本地预检拦下（提示里的数字是 8GB，不是 512MB）。
+    const huge = new File([new Uint8Array([1])], 'huge.tar')
+    Object.defineProperty(huge, 'size', { value: MAX_LOAD_BYTES + 1 })
     await pickFile(w, huge)
-    expect(w.text()).toContain('文件超过 512MB 上限')
+    expect(w.text()).toContain('文件超过 8GB 上限')
+    expect(w.text()).not.toContain('512MB')
     expect(api.uploadDockerBuildContext).not.toHaveBeenCalled()
     expect(isDisabled(w, '载入镜像')).toBe(true)
   })
@@ -251,6 +282,8 @@ describe('上传来源：上传 → 自动载入', () => {
     const call = api.uploadDockerBuildContext.mock.calls.at(-1)!
     expect(call[0]).toBe('h1')
     expect((call[1] as File).name).toBe('app.tar')
+    // 用途 = load：服务端据此选 8GB 档尺寸闸（构建上传那条不带该参数 / 缺省 build）。
+    expect(call[4]).toBe('load')
     expect(w.findComponent({ name: 'ElProgress' }).props('percentage')).toBe(42)
     expect(api.sendDockerCmd).not.toHaveBeenCalled()
 

@@ -149,7 +149,8 @@ function lastUploadCall() {
     string,
     File,
     ((p: number) => void) | undefined,
-    AbortSignal | undefined
+    AbortSignal | undefined,
+    ('build' | 'load') | undefined
   ]
 }
 
@@ -240,10 +241,12 @@ describe('上传：进度 → 回填 → 载荷', () => {
     await pickFile(w, gzipFile('app.tar.gz'))
 
     // 调用形状：目标主机 + 文件本体 + 进度回调 + 断流柄（关对话框要能中止）。
-    const [host, file, , signal] = lastUploadCall()
+    const [host, file, , signal, kind] = lastUploadCall()
     expect(host).toBe('h1')
     expect(file.name).toBe('app.tar.gz')
     expect(signal).toBeInstanceOf(AbortSignal)
+    // 构建上传**不带**用途参数（缺省 build、512MB 档）—— 只有载入那条才传 kind=load。
+    expect(kind).toBeUndefined()
     // 进度条吃的是回调给的数（XHR 的 upload 进度经 http 层透传到这里）。
     expect(w.findComponent({ name: 'ElProgress' }).props('percentage')).toBe(42)
 

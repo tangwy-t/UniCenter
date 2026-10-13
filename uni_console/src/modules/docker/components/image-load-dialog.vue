@@ -41,7 +41,7 @@
           <p class="il-field__hint">{{ inputSpec.hint }}</p>
         </template>
 
-        <!-- 上传形态：选文件 → 预检（后缀/512MB，选中的瞬间就拒，不白传一场）
+        <!-- 上传形态：选文件 → 预检（后缀/8GB 档，选中的瞬间就拒，不白传一场）
              → 提交后流式上传（进度条）→ 拿到服务端产物名后自动派发载入。 -->
         <template v-else>
           <!-- 藏起来的原生 file input（与构建对话框同因）：ElUpload 自带一套
@@ -61,7 +61,7 @@
           </div>
           <p v-if="uploadError" class="il-field__error">{{ uploadError }}</p>
           <p v-else class="il-field__hint"
-            >选择本机的 tar 压缩包（≤{{ MAX_MB }}MB），提交后先上传再载入该主机。</p
+            >选择本机的 tar 压缩包（≤{{ MAX_LOAD_GB }}GB），提交后先上传再载入该主机。</p
           >
         </template>
 
@@ -123,8 +123,9 @@
    *   - **两种来源都有实时反馈**：输入态收在对话框里，提交后对话框**不关**，
    *     就地给出「载入进行中」（状态 + 已用时秒表）与终态结论句。
    *
-   * 上传通道复用构建上下文的 ② 端点（POST build-context，落点就是 transferDir——
-   * 正是 image:load 读取的目录）：选文件 → 预检（后缀/512MB）→ 流式上传（XHR 的
+   * 上传通道复用构建上下文的 ② 端点（POST build-context **带 kind=load**，落点就是
+   * transferDir —— 正是 image:load 读取的目录，服务端按 kind=load 选 8GB 档尺寸闸）：
+   * 选文件 → 预检（后缀/8GB 档）→ 流式上传（XHR 的
    * 上传进度，与构建对话框同款）→ 拿服务端产物名自动派发 image:load，用户不必
    * 再手填一次文件名。
    *
@@ -149,7 +150,6 @@
   import { fetchDockerCmdResult, sendDockerCmd, uploadDockerBuildContext } from '../api'
   import { classifyAcceptError } from '../composables/useDockerCmds'
   import { pollDelay } from '../utils/cmd'
-  import { MAX_BUILD_CONTEXT_BYTES } from '../utils/build-push'
   import { lookupDockerAction } from '../utils/actions'
 
   defineOptions({ name: 'DockerImageLoadDialog' })
@@ -186,8 +186,14 @@
   /** 上传文件选择器的后缀白名单（载入读侧 / 上传侧都收 tar / tar.gz / tgz）。 */
   const LOAD_ACCEPT = '.tar,.tar.gz,.tgz'
   const LOAD_ARCHIVE_SUFFIX_RE = /\.(tar|tar\.gz|tgz)$/i
-  /** 上传字节上限的展示数（与协议常量同源，不另写死）。 */
-  const MAX_MB = MAX_BUILD_CONTEXT_BYTES / (1024 * 1024)
+  /**
+   * image:load 上传的字节上限（8GB）—— **与 `uni_protocol.MaxDockerImageLoadBytes`
+   * 同源，服务端才是权威**：本地这把尺只是「选文件的瞬间就拒」的前移便利（上传以
+   * 分钟计，别让用户白传一场），服务端因超限打回的结论照原样显示，不被本地猜测覆盖。
+   */
+  const MAX_LOAD_BYTES = 8 * 1024 * 1024 * 1024
+  /** 展示数（GB，由上面那个数派生，不另写死）。 */
+  const MAX_LOAD_GB = MAX_LOAD_BYTES / 1024 ** 3
 
   /** 轮询兜底上限：载入的等待可到分钟级（大 tar），比轻量指令的 20 次宽松。 */
   const MAX_POLL_ATTEMPTS = 60
@@ -265,8 +271,8 @@
   }
 
   /**
-   * 选定文件：预检（后缀 / 512MB，毫秒级）——失败结论就地给，重选即重试。
-   * 预检是服务端同一把尺的前移：别让用户白传 512MB 才收到 400（上传以分钟计）。
+   * 选定文件：预检（后缀 / 8GB 档，毫秒级）——失败结论就地给，重选即重试。
+   * 预检是服务端同一把尺的前移：别让用户白传上 GB 才收到 400（上传以分钟计）。
    */
   function onFilePicked(e: Event): void {
     const input = e.target as HTMLInputElement
@@ -281,8 +287,8 @@
       uploadError.value = '只支持 tar / tar.gz / tgz 文件'
       return
     }
-    if (file.size > MAX_BUILD_CONTEXT_BYTES) {
-      uploadError.value = `文件超过 ${MAX_MB}MB 上限`
+    if (file.size > MAX_LOAD_BYTES) {
+      uploadError.value = `文件超过 ${MAX_LOAD_GB}GB 上限`
       return
     }
   }
@@ -318,7 +324,9 @@
         (percent) => {
           if (mySeq === seq) uploadPercent.value = percent
         },
-        controller.signal
+        controller.signal,
+        // 用途 = load：服务端据此选 8GB 档尺寸闸（构建上下文那条是 512MB，不共用）。
+        'load'
       )
       if (mySeq !== seq) return
       filename = resp.filename

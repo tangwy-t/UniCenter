@@ -383,6 +383,13 @@ export function cancelDockerCmd(hostId: string, ref: string) {
 }
 
 /**
+ * 构建上下文上传的**用途分档**：`build` = 构建上下文（512MB 档）、`load` =
+ * image:load 的镜像归档（8GB 档）。服务端按 `kind` 选尺寸闸执法 —— 前端只把用途
+ * 如实告诉它，不自己发明上限。
+ */
+export type DockerBuildContextKind = 'build' | 'load'
+
+/**
  * 构建上下文上传（P3·分发输入段）：POST /docker/hosts/:id/build-context，
  * 请求体就是 tar.gz 字节流本身（不是 multipart —— 服务端按 Content-Type 判形），
  * 200 回 `{ filename }`（core 由会话号推导的产物名，直接喂给 image:build 的
@@ -398,22 +405,30 @@ export function cancelDockerCmd(hostId: string, ref: string) {
  *     不覆盖会在第 15 秒被掐断（进度条的尽头是超时）；
  *   - `Content-Type: application/octet-stream`：请求拦截器对「无类型头的对象体」
  *     会 JSON.stringify —— 显式给头，File/Blob 才能原样进 body。
- * 512MB 上限与 gzip 魔数（1f 8b）由服务端执法、客户端预检前移（utils/build-push）；
- * 结论就地显示（对话框还开着），故 showErrorMessage 关掉 —— 与 sendDockerCmd
- * 同一条「结论不放 toast」的纪律。
+ * 尺寸上限与 gzip 魔数（1f 8b）由服务端执法、客户端预检前移：上限**按用途分档**
+ * （构建上下文 512MB / image:load 镜像归档 8GB，服务端按 `kind` 选档，各自协议常量
+ * 定义，前端预检与提示同源）；结论就地显示（对话框还开着），故 showErrorMessage
+ * 关掉 —— 与 sendDockerCmd 同一条「结论不放 toast」的纪律。
  *
  * @param onProgress 上传进度回调（0-100 整数；服务端不回「已收字节」之外的
  *   阶段信息，进度就是传输进度的全部事实）。
  * @param signal 断开用（关对话框/卸载时中止在途上传；服务端收尾见下）。
+ * @param kind 上传用途：`build` = 构建上下文（**缺省**，512MB 档）、`load` =
+ *   image:load 的镜像归档（8GB 档）。服务端按它选尺寸闸；构建上传不带该参数，
+ *   与从前逐字节一致。
  */
 export function uploadDockerBuildContext(
   hostId: string,
   file: Blob,
   onProgress?: (percent: number) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  kind: DockerBuildContextKind = 'build'
 ) {
+  // kind=load 走 query（与 core 侧落点对齐：core 按 ?kind= 选 8GB 档、缺省 build）。
+  // build **不发**该参数 —— 保住构建上传与从前逐字节一致、构建对话框零变化。
+  const kindQuery = kind === 'load' ? '?kind=load' : ''
   return request.post<DockerBuildContextUploadResp>({
-    url: `${PREFIX}/docker/hosts/${hostId}/build-context`,
+    url: `${PREFIX}/docker/hosts/${hostId}/build-context${kindQuery}`,
     data: file,
     headers: { 'Content-Type': 'application/octet-stream' },
     timeout: 0,
