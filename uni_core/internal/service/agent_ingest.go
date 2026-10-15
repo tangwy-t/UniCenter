@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"time"
 
@@ -16,8 +15,6 @@ import (
 	"github.com/tangwy-t/UniCenter/uni_core/internal/model/entity"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/apperror"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/database"
-	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockerstate"
-	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockerstream"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/repository"
 )
@@ -63,121 +60,14 @@ type AgentIngestService struct {
 	repo   AgentDeviceRepository
 	raw    AgentRawStore
 	latest AgentLatestStore
-	// docker / cmd 是 docker 域的两个存储（快照与指令记录）：agent 通道的
-	// docker 三面（快照落库、结果回写）由本服务承接，读面与下发面见 C6 的两个服务。
-	docker *dockerstate.Store
-	cmd    *dockerstate.CmdStore
 	cfg    AgentConfigGetter
 	log    logger.LoggerInterface
-	// streams 是流会话登记面（三期；由 dockerstream.Registry 实现）。
-	// nil = 未装配：result 里的 session_id 被忽略（流端点会因此找不到会话），
-	// 不影响指令结果回写本身。
-	streams DockerSessionRegisterer
-	// events 是事件流常驻订阅的结果出口（六期；由 dockerevents.Manager 实现）。
-	// nil = 未装配：docker:events 的 result 照常回写完记录即止（不会进用户流注册表，
-	// 常驻管理器不在，这条指令也就没有别的去向）。
-	events DockerEventsSinker
-	// audit 是终态审计挂钩（6c；由 DockerCmdAuditor 实现）。
-	// nil = 未装配：结果照常回写，审计关闭 —— 挂钩是**观察者不是参与者**，
-	// 它的缺失只关治理可视性，不关指令功能。
-	audit DockerTerminalAuditor
-	// statsHistory 是快照 ingest 的 stats 留存挂钩（P2；由 dockerstate.StatsHistoryStore
-	// 实现）：把每帧快照的容器 CPU/内存投影进 30 分钟环形序列。nil = 未装配：
-	// 快照照常落库，留存关闭 —— 同样是观察者不是参与者，它的缺失只关抽屉的
-	// 历史曲线，不关快照主链。
-	statsHistory DockerStatsRecorder
-	// scanCache 是 image:scan 结果的缓存写入面（P3·安全面；由 dockerstate.ScanCacheStore
-	// 实现）：一次成功扫描回写后把报告按镜像内容键写进 24h 缓存。nil = 未装配：
-	// 结果照常回写，缓存关闭 —— 观察者纪律同上：它的缺失只影响下一次同镜像扫描
-	// 的秒回，不影响指令主链。
-	scanCache DockerScanRecorder
-	// now 是扫描缓存挂钩的时钟（可替换 —— 测试要一个确定的收帧时刻来断言
-	// scanned_at 的重盖语义；与 DockerCmdService.now 同一条纪律）。
-	now func() time.Time
 }
 
-// DockerSessionRegisterer 是登记一条流会话的能力面（由 dockerstream.Registry 满足）。
-type DockerSessionRegisterer interface {
-	Register(meta dockerstream.Meta) error
-}
-
-// DockerEventsSinker 是常驻订阅指令的结果出口（由 dockerevents.Manager 满足）。
-//
-// 为什么 dockerevents 不进 DockerSessionRegisterer：常驻订阅的用户态（UserID）为零、
-// 且不属于用户流注册表的账（槽位/sweep/接入语义全部不同）—— 结果必须原样交还给
-// **发起它的**管理器认领（按 ref），而不是登记成一条用户会话。
-type DockerEventsSinker interface {
-	OnEventsResult(deviceID uint64, res *agentproto.DockerCmdResult)
-}
-
-// DockerTerminalAuditor 是终态审计的入口（由 DockerCmdAuditor 满足）：ingest 在
-// 完成一次真实的终态转换后调它，异步入账一条执行结果（见 docker_audit.go 的
-// 「观察者不是参与者」纪律）。
-type DockerTerminalAuditor interface {
-	RecordTerminal(rec *dockerstate.CmdRecord)
-}
-
-// DockerStatsRecorder 是快照 ingest 的 stats 留存挂钩入口（由
-// dockerstate.StatsHistoryStore 满足）：每帧快照落库后调它，把容器读数投影进
-// 环形序列（30 分钟窗口，见 dockerstate/stats_history.go 的键设计与体积账）。
-type DockerStatsRecorder interface {
-	Record(ctx context.Context, deviceID uint64, st *agentproto.DockerState, at time.Time) error
-}
-
-// DockerScanRecorder 是 image:scan 结果的缓存写入面（由 dockerstate.ScanCacheStore
-// 满足）：一次成功扫描的 result 回写完成后调它，报告按镜像内容键落进 24h 缓存
-// （键设计与「缓存 DTO 与报告同形」的口径见 dockerstate/scan_cache.go）。
-type DockerScanRecorder interface {
-	Save(ctx context.Context, imageID string, report *agentproto.DockerScanReport, at time.Time) error
-}
-
+// NewAgentIngestService 构造入站服务。
 func NewAgentIngestService(repo AgentDeviceRepository, raw AgentRawStore, latest AgentLatestStore,
-	docker *dockerstate.Store, cmd *dockerstate.CmdStore,
 	cfg AgentConfigGetter, log logger.LoggerInterface) *AgentIngestService {
-	return &AgentIngestService{repo: repo, raw: raw, latest: latest,
-		docker: docker, cmd: cmd, cfg: cfg, log: log, now: time.Now}
-}
-
-// WithDockerSessions 注入流会话登记面（三期）。装配在 wireup 一处完成。
-func (s *AgentIngestService) WithDockerSessions(r DockerSessionRegisterer) *AgentIngestService {
-	s.streams = r
-	return s
-}
-
-// WithDockerEvents 注入事件流常驻订阅的结果出口（六期）。装配在 wireup 一处完成。
-func (s *AgentIngestService) WithDockerEvents(e DockerEventsSinker) *AgentIngestService {
-	s.events = e
-	return s
-}
-
-// WithDockerAudit 注入终态审计挂钩（6c）。装配在 wireup 一处完成。
-func (s *AgentIngestService) WithDockerAudit(a DockerTerminalAuditor) *AgentIngestService {
-	s.audit = a
-	return s
-}
-
-// WithDockerStatsHistory 注入 stats 留存挂钩（P2）。装配在 wireup 一处完成。
-func (s *AgentIngestService) WithDockerStatsHistory(r DockerStatsRecorder) *AgentIngestService {
-	s.statsHistory = r
-	return s
-}
-
-// WithDockerScanCache 注入扫描缓存写入面（P3·安全面）。装配在 wireup 一处完成；
-// 与 DockerCmdService 的读面共用同一个 store 实例。
-func (s *AgentIngestService) WithDockerScanCache(c *dockerstate.ScanCacheStore) *AgentIngestService {
-	if c != nil {
-		s.scanCache = c
-	}
-	return s
-}
-
-// nowValue 返回注入挂钟（未注入时 time.Now —— 构造函数已填缺省，这里兜底
-// 零值形态的测试构造）。
-func (s *AgentIngestService) nowValue() time.Time {
-	if s.now == nil {
-		return time.Now()
-	}
-	return s.now()
+	return &AgentIngestService{repo: repo, raw: raw, latest: latest, cfg: cfg, log: log}
 }
 
 // Enroll 处理带 enroll_token 的首次注册。
@@ -401,137 +291,6 @@ func (s *AgentIngestService) Ingest(ctx context.Context, deviceID uint64, sample
 		return err
 	}
 	return nil
-}
-
-// SaveDockerState 落一帧 docker 快照（agent 通道的 docker 面）。
-//
-// 不碰 DB：快照只存 Redis（spec §2 存储决策）。
-func (s *AgentIngestService) SaveDockerState(ctx context.Context, deviceID uint64, st *agentproto.DockerState) error {
-	if st == nil {
-		return nil
-	}
-	now := time.Now()
-	if err := s.docker.Save(ctx, deviceID, st, now); err != nil {
-		return err
-	}
-	// stats 留存挂钩（P2，观察者不是参与者，与 6c 审计挂钩同款纪律）：
-	//   - **失败只 warn、不改返回值** —— 主链的答案永远是「快照落库是否成功」，
-	//     留存丢一帧只是抽屉历史少一个点（下帧 30s 后就补上）；
-	//   - 与审计挂钩不同，这里**同步**调用而不是 goroutine：留存是时间序列，
-	//     异步会让相邻两帧的样本赛跑（环形里出现乱序的时间轴）；而它的代价
-	//     只是同一量级的一次 Redis pipeline（与上面的 Save 同价），不值得为
-	//     它引入乱序风险。ctx 也因此直接复用帧处理的 ctx（同步返回前有效，
-	//     不存在审计那边「goroutine 逃出帧生命周期」的问题）。
-	//   - 收帧时刻与 Envelope.ReceivedAt 用**同一个** now：历史样本的 t 与页面的
-	//     lastSync 逐字对齐，两条叙事不出现一帧之差。
-	if s.statsHistory != nil {
-		if err := s.statsHistory.Record(ctx, deviceID, st, now); err != nil {
-			s.log.Warn("docker stats history 留存失败（快照主链不受影响）",
-				zap.Uint64("deviceId", deviceID), zap.Error(err))
-		}
-	}
-	return nil
-}
-
-// CompleteDockerCmd 回写一条指令结果。
-//
-// 归属校验（设备的 ref 只由该设备回）在这一层做不了 —— agent 通道只知道
-// 「这一帧来自哪台设备」，而记录里也存了 device_id，两者不一致时**丢弃并告警**：
-// 那是一台设备在回别人的 ref（伪造或串号）。
-func (s *AgentIngestService) CompleteDockerCmd(ctx context.Context, deviceID uint64, res *agentproto.DockerCmdResult) error {
-	if res == nil {
-		return nil
-	}
-	rec, err := s.cmd.Get(ctx, res.Ref)
-	if err != nil {
-		return err
-	}
-	if rec == nil {
-		s.log.Warn("docker result 命中不到指令（已过期或伪造）",
-			zap.Uint64("deviceId", deviceID), zap.String("ref", res.Ref))
-		return nil
-	}
-	if rec.DeviceID != deviceID {
-		s.log.Warn("docker result 归属不符，丢弃",
-			zap.Uint64("fromDevice", deviceID), zap.Uint64("expectDevice", rec.DeviceID), zap.String("ref", res.Ref))
-		return nil
-	}
-	// 终态转换的唯一性保证（审计的幂等键）：一条 ref 只有一次「非终态 → 终态」的
-	// 真实转换。回写**前**把旧状态摘下 —— 重复 result（agent 重发/网络重放）到达时
-	// 记录已是 succeeded/failed，本次回写不再是转换，审计不会入第二条。
-	// sweep 的 timeout 是服务端推断、不经过本挂钩（不入审计 —— 审计记录的是
-	// 被执行的事实，不是推断）；迟到的 result 覆盖 timeout（事实优先于推断）时，
-	// 入账的正是**事实**那条。
-	prev := rec.Status
-	if err := s.cmd.Complete(ctx, rec, res); err != nil {
-		return err
-	}
-	if s.audit != nil && prev != dockerstate.StatusSucceeded && prev != dockerstate.StatusFailed {
-		// 审计挂钩（观察者不是参与者）：只记账、绝不改判 —— 异步与失败豁免都在
-		// DockerCmdAuditor 内部（warn 不阻塞），指令的轮询/流路径零影响。
-		// docker:events 常驻订阅（UserID=0）由挂钩自行豁免。
-		s.audit.RecordTerminal(rec)
-	}
-	// 扫描缓存挂钩（P3·安全面）：成功的 image:scan 把报告按镜像内容键写进 24h
-	// 缓存。同步调用（与 statsHistory 的留存同理 —— 但理由不同：这里是「结果
-	// 刚落地、下一个同类请求可能立刻到」的收尾动作，异步窗口里到达的请求会
-	// 白白等一次分钟级扫描），失败只 warn —— 缓存是加速器，写不进去的最坏
-	// 结果是下一扫不秒回，绝不能反向影响已经成功的结果回写。
-	if s.scanCache != nil && rec.Action == agentproto.DockerActionImageScan &&
-		res.OK && len(res.Payload) > 0 {
-		var report agentproto.DockerScanReport
-		if err := json.Unmarshal(res.Payload, &report); err != nil {
-			s.log.Warn("docker scan 报告解码失败（缓存未写入，指令主链不受影响）",
-				zap.String("ref", rec.Ref), zap.Error(err))
-		} else if !dockerstate.IsDockerScanImageID(report.ImageID) {
-			// agent 填的 image_id 形态不合法（agent 缺陷/被伪造）：不写缓存也不猜键 ——
-			// 键空间只有「sha256:hex64」一种形状（scan_cache 的形态闸）。
-			s.log.Warn("docker scan 报告的 image_id 形态不合法（缓存未写入）",
-				zap.String("ref", rec.Ref), zap.String("imageId", report.ImageID))
-		} else if err := s.scanCache.Save(ctx, report.ImageID, &report, s.nowValue()); err != nil {
-			s.log.Warn("docker scan cache 写入失败（下一扫不秒回，指令主链不受影响）",
-				zap.String("ref", rec.Ref), zap.String("imageId", report.ImageID), zap.Error(err))
-		}
-	}
-	if rec.Action == agentproto.DockerActionEvents {
-		// docker:events 是 core 的**常驻订阅**：不进用户流注册表（无发起人、不占用户
-		// 槽位、不参与用户 sweep），result 原样交还管理器认领。带内调用（本帧处理
-		// 返回之前）保证认领先于该连接后续的帧 —— 与 registerStreamSession 的
-		// 「帧一定晚于 result」是同一时序纪律。
-		if s.events != nil {
-			s.events.OnEventsResult(deviceID, res)
-		}
-		return nil
-	}
-	s.registerStreamSession(rec, res)
-	return nil
-}
-
-// registerStreamSession 把「建立了会话的结果」登记进流注册表（三期）。
-//
-// 必须发生在**结果回写成功之后**（记录里要先有 session_id，轮询才能据此签 ticket）；
-// 也必须在本帧处理返回之前 —— 同一连接的读循环按序处理消息，帧一定晚于 result，
-// 登记晚于帧会让会话前几帧（PTY 的首屏输出）永远找不到主人。
-//
-// 登记失败只记日志（不返回错误）：结果已经落库、轮询路径完好，用户最坏看到
-// 「会话不存在或已结束」，而不是「指令失败」。
-func (s *AgentIngestService) registerStreamSession(rec *dockerstate.CmdRecord, res *agentproto.DockerCmdResult) {
-	if s.streams == nil || rec == nil || res == nil || !res.OK || res.SessionID == "" {
-		return
-	}
-	meta := dockerstream.Meta{
-		SessionID: res.SessionID,
-		DeviceID:  rec.DeviceID,
-		UserID:    rec.UserID,
-		Action:    rec.Action,
-		Ref:       rec.Ref,
-		Kind:      dockerstream.KindForAction(rec.Action),
-		CreatedAt: time.Now(),
-	}
-	if err := s.streams.Register(meta); err != nil {
-		s.log.Warn("docker stream session 登记失败（流端点将找不到会话）",
-			zap.String("ref", rec.Ref), zap.String("session", res.SessionID), zap.Error(err))
-	}
 }
 
 // ── 内部工具 ───────────────────────────────────────────

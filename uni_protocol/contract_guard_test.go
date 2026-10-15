@@ -81,20 +81,6 @@ func typeNameOf(v any) string {
 		return "UpgradeDirective"
 	case *UpgradeStatus:
 		return "UpgradeStatus"
-	case *DockerState:
-		return "DockerState"
-	case *DockerCmd:
-		return "DockerCmd"
-	case *DockerCmdResult:
-		return "DockerCmdResult"
-	case *DockerFrame:
-		return "DockerFrame"
-	case *CoreDockerFrame:
-		return "CoreDockerFrame"
-	case *CoreDockerBuildCtxFinish:
-		return "CoreDockerBuildCtxFinish"
-	case *CoreDockerBuildCtxAbort:
-		return "CoreDockerBuildCtxAbort"
 	default:
 		return ""
 	}

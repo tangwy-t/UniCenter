@@ -10,24 +10,6 @@ const (
 	TypeCoreAgentUpgrade = "core.agent.upgrade"
 	// TypeAgentUpgradeStatus 是设备对一次升级尝试的状态汇报。
 	TypeAgentUpgradeStatus = "agent.upgrade.status"
-	// ── Docker 管理（v1.2.0 新增）────────────────────────────────────────
-	// TypeAgentDockerState 是资源快照（周期上报；Docker 不可达时也发，带 docker_ok=false）。
-	TypeAgentDockerState = "agent.docker.state"
-	// TypeCoreDockerCmd 是一条 Docker 操作指令（ref 关联）。
-	TypeCoreDockerCmd = "core.docker.cmd"
-	// TypeAgentDockerResult 是指令结果（ref 回关联）。
-	TypeAgentDockerResult = "agent.docker.result"
-	// TypeAgentDockerFrame 是流会话的数据帧（日志 chunk / PTY 输出共用）。
-	TypeAgentDockerFrame = "agent.docker.frame"
-	// TypeCoreDockerFrame 是流会话的控制帧（input / resize / cancel）。
-	TypeCoreDockerFrame = "core.docker.frame"
-	// ── 构建上下文上传通道（v1.3：二进制分片帧 + 两条控制消息）───────────
-	// TypeCoreDockerBuildCtxFinish 是上传会话的**完成控制帧**：全部分片转发完后
-	// 送达，携带期望哈希与产物文件名，agent 据此做组装终验。
-	TypeCoreDockerBuildCtxFinish = "core.docker.build_ctx.finish"
-	// TypeCoreDockerBuildCtxAbort 是上传会话的**中止控制帧**：丢弃半成品产物
-	// （HTTP 断开 / 通道中断 / 参数错误的中途收尾走它；v1 无续传，中止即整份重传）。
-	TypeCoreDockerBuildCtxAbort = "core.docker.build_ctx.abort"
 )
 
 // Direction 表示一条消息的允许方向。
