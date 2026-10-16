@@ -51,6 +51,9 @@ AGENT_MODULE := github.com/tangwy-t/UniCenter/uni_agent
 # 它要作为 semver 参与比对（`refs/tags/uni_agent/v0.2.0-3-g1234abcd` 这种形态
 # 在 semver 解析里是非法值，会让设备永远对不上目标版本）。
 # 发版时显式传 AGENT_VERSION=0.2.0 最稳妥；缺省时尽力从 tag 提取。
+# ⚠ 变量名坑（2026-10-16 实测）：agent 的版本**只**认 AGENT_VERSION ——
+# 传 `make uni_agent-release VERSION=0.7.0` 不会生效，产物会自称 `dev`，
+# 上传后控制台判定「设备已是最新」，**永不升级**。故 release 目标里有断言兜底。
 AGENT_VERSION ?= $(shell git describe --tags --match 'uni_agent/v*' --abbrev=0 2>/dev/null | sed 's|^uni_agent/v||' || echo "dev")
 # 空值兜底：`git describe` 在没有匹配 tag 时**静默返回空串**（sed 的成功退出让
 # `|| echo dev` 不生效），而空版本会被 core 以「载荷校验失败」拒掉 —— 设备连不上，
@@ -142,6 +145,13 @@ uni_agent-build: ## 构建 agent 二进制到 uni_agent/bin/uni_agent（注入�
 # 命名带平台后缀：一次发版要同时产出多个平台时，文件名必须能区分，
 # 否则上传到控制台时得靠人记住哪个文件是哪个架构。
 uni_agent-release: ## 构建发布产物(linux/amd64 + sha256)到 dist/
+	@case "$(AGENT_VERSION)" in dev|"") \
+		echo "❌ AGENT_VERSION=$(AGENT_VERSION) —— 发布产物不能自称 dev。" >&2; \
+		echo "   发版必须显式指定：make uni_agent-release AGENT_VERSION=0.7.0" >&2; \
+		echo "   注意 agent 的版本**只**认 AGENT_VERSION；传 VERSION= 对它无效（会静默落回 dev），" >&2; \
+		echo "   而 dev 产物上传后控制台会认为设备已是最新 → 设备永不升级（2026-10-16 实测踩坑）。" >&2; \
+		exit 1;; \
+	esac
 	@mkdir -p dist
 	cd $(AGENT_DIR) && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
 		-ldflags "$(AGENT_LDFLAGS)" -o ../dist/uni_agent_$(AGENT_VERSION)_linux_amd64 .

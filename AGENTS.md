@@ -47,6 +47,9 @@
 18. **凭据**：生产凭据不入库、不写入本文件，只记位置——服务器 `/data/UniCenter/.credentials`、`/data/UniCenter/.env`、本地仓库根 `.env`（均已 gitignore，600）。
     - 拓扑：`192.168.12.105`(bogon, 共享机) = console `http://192.168.12.105:20080` + agent TLS `wss://…:20443` + core(仅容器网内)；`192.168.12.106`(wmind) = 仅 agent `/home/UniCenter`。
 
+19. **agent 发版与升级**（2026-10-16 现场确立）：发布产物必须 `make uni_agent-release AGENT_VERSION=x.y.z` —— agent 版本只认 `AGENT_VERSION`，传 `VERSION=` 无效（静默落回 `dev` → 控制台判定已最新、**设备永不升级**；Makefile 已加断言）。重注册顺序必须是 **`systemctl stop` → 删 `state/agent_token` → `start`**（直接 `restart` 会在 SIGTERM 时把内存里的过期 token 写回，等于没删）。回滚只能 core + agent **同回**：旧 agent 与新 core 不兼容（4003 未知消息类型抖动）。
+20. **库重置的连带项**：重置 `uni_center` 库后 `sys.agent.enrollToken` 为空、两机 agent 持有已失效的 `agent_token` → 设备不会自动回注册。恢复三步：把 enrollToken 设回 `agent.env` 同值 → 两机 stop/删 token/start → 设备行重建。
+
 ## 5. 不得删的守卫（防回归资产）
 
 - `uni_console/src/config/breakpoints.test.ts` — 全局断点守卫

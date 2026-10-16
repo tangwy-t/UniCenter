@@ -426,3 +426,36 @@ exit=0
    ```
    期望：**绿**。这一步成功之前，本手册 §0 的免责声明一直有效。
 6. 复核 `make release-precheck` 仍绿，`git status --short` 为空。
+## 5. 现场操作坑（2026-10-16 实测，已落断言/口径）
+
+### 5.1 agent 发版的变量名坑（已加 Makefile 断言）
+agent 的版本**只**认 `AGENT_VERSION`：
+
+```bash
+make uni_agent-release AGENT_VERSION=0.7.0   # ✅ 正确
+make uni_agent-release VERSION=0.7.0         # ❌ 无效 → 产物自称 dev
+```
+
+传错的后果是**静默**的：产物名 `uni_agent_dev_linux_amd64`、进程自报 `dev`，
+控制台按 semver 比对后认为「设备已是最新」，于是**永不升级**（没有任何报错）。
+`uni_agent-release` 目标现在带断言：`AGENT_VERSION` 为空或为 `dev` 即 `exit 1`。
+
+### 5.2 重注册：必须 stop → 删 token → start
+`agent_token` 落盘发生在**退出路径**上（`main.go`）：直接 `systemctl restart`
+会让旧进程在收到 SIGTERM 时把内存里的**过期 token 写回** `state/agent_token`，
+等于没删。正确顺序：
+
+```bash
+systemctl stop uni_agent
+mv /path/to/state/agent_token /path/to/state/agent_token.bak-$(date +%Y%m%d)
+systemctl start uni_agent      # hasToken=false → enroll → 设备行重建
+```
+
+前提：服务端 `sys_config.sys.agent.enrollToken` 必须非空（新建库为空串，需从
+agent.env 的 `UNI_AGENT_ENROLL_TOKEN` 设回；两机该值应一致）。
+
+### 5.3 回滚语义：core 与 agent 只能同回
+agent 0.7.0 起删除了 docker 能力（协议消息类型同步删除）。**旧 agent + 新 core**
+会互相发未知消息类型（4003 抖动），因此回滚时必须 core 与 agent 一起回，
+不能只回 agent。agent 升级运行时自带 `uni_agent.prev`（上一版二进制），
+`mv uni_agent.prev uni_agent && systemctl restart` 即回 agent 侧。
