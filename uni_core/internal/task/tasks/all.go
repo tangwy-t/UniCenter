@@ -26,12 +26,6 @@ type Deps struct {
 	AgentPartition AgentPartitionService
 	// AgentUpgrade 供升级巡检任务使用（只读扫描 + 判超时，不含任何下发能力）。
 	AgentUpgrade AgentUpgradeSweeper
-	// RequestIDGen 按需生成一次操作的 ref（装配点传 service.NewRequestID）。
-	//
-	// 为什么共用同一个生成器：落在同一个键空间里的 ref 必须由同一个计数器产生
-	// —— 两处各写一份「纳秒 + 自增」会把「同一纳秒、两计数器等值」的撞号窗口
-	// 重新引进来。nil = 用调用方内置的降级实现（测试与零值 Deps{})。
-	RequestIDGen func() string
 	// Log 供 4 个指标任务记录结构化读数（zap 字段）。允许为 nil：任务构造时
 	// 退化成 logger.NewNop()，这样 All(Deps{}) 的零值路径不会 panic。
 	Log logger.LoggerInterface

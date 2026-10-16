@@ -206,7 +206,7 @@ uni_protocol-contract: uni_protocol-deps ## 协议契约门禁(形状漂移+单�
 # 载荷新鲜度守卫。
 # 为什么必须有一条:uni_core 的 Docker 构建**不走工作区** —— go.mod 自带
 # `require uni_protocol vX`,Dockerfile 的 GOPROXY 第一顺位是仓库内离线载荷
-# uni_core/.goproxy;core 只调协议里的 ValidateDockerCmdOptions,不直接引用新
+# uni_core/.goproxy;core 只调协议里的 agentproto.DecodeTypedFor,不直接引用新
 # 符号,故载荷陈旧时**照样编译通过**,行为却是旧的(2026-10-13 现场:「载入镜像」
 # 传 .tar.gz 被 400 打回,请求体却完全合法)。所有构建门禁都发现不了这种陈旧。
 # 本目标断言「载荷里最新版本的 zip 内容 == 当前 uni_protocol 工作树源码」

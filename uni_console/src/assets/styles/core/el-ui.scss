@@ -42,7 +42,7 @@ html:root {
 // hover 由「提浅」翻转成「加深一档」——白字前提下唯一能保住 ≥4.5 的悬停反馈
 // （暗色主题的 light-3 槽本来就被主题工具算成深色，此翻转对暗色是同一值的延续）。
 // :not(...) 三重排除 plain/text/link：它们的填充/文字由 EP 的 button-plain 单独映射
-// （light-9 底、主色文字），归 docker 侧已验收的 primary-text-aa 管辖，本档规则不得越权；
+// （light-9 底、主色文字），归 primary-text-aa 管辖，本档规则不得越权；
 // 各 type 档（danger/success/warning/info）有自己的变量槽，不受影响（选择器只含 --primary）。
 // 禁用态不走这些槽（EP is-disabled 直接落属性），外观不变。
 // html:root 前缀抬高特异性：EP 组件 CSS 经 unplugin 随异步 chunk 后注入，同优先级会被反超。
@@ -222,26 +222,9 @@ html.dark .el-card {
   max-height: calc(100vh - var(--el-dialog-margin-top, 15vh) - 50px);
 }
 
-// ── 弹窗遮罩政策（机制层唯一实现，两档意图）───────────────────────────────
-// 一、阻塞档（默认）：凭据 / 确认 / 配置编辑器等 = :modal="true" —— EP 主题的
-//     全屏遮罩（50% 黑），拦下外侧点击，是这些动作该有的门。
-// 二、观看档：进度弹窗（拉取 / 构建 / 推送）= :modal="false" + 本类
-//     docker-progress-nonblocking —— 进度只是「观看」，不该挡住页面。但 EP 的
-//     对话框包壳（.el-overlay / .el-overlay-dialog）铺满视口，即使 :modal="false"
-//     也会吃掉整页点击（外侧点击落在包壳上，页面收不到，还会被当成「点外面」把窗
-//     收掉）。这里让包壳对指针透明、只有对话框本体可交互 —— 在途时用户照常翻列表/
-//     切筛选/开别的窗口；关窗只有显式路径（X / ESC / 页脚关闭）。
-//     两种写法都给：包壳既可能是组件根元素，也可能是它的后代，只写一种会在 EP 的
-//     DOM 形状变化时静默失效。（收敛前这段在三个进度弹窗的 scoped 里各写一份。）
-.docker-progress-nonblocking,
-.docker-progress-nonblocking .el-overlay-dialog {
-  pointer-events: none;
-}
-
-.docker-progress-nonblocking .el-dialog {
-  pointer-events: auto;
-}
-
+// ── 弹窗遮罩政策（机制层唯一实现）───────────────────────────────────────
+// 凭据 / 确认 / 配置编辑器等 = :modal="true" —— EP 主题的全屏遮罩（50% 黑），
+// 拦下外侧点击，是这些动作该有的门。
 // 抽屉宽度自适应：size 为固定 px 的抽屉（300/420/600px）在窄视口下不超出屏幕
 .el-drawer {
   max-width: calc(100vw - 32px);

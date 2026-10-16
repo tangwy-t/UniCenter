@@ -303,7 +303,7 @@ func (w *bodyCaptureWriter) WriteHeader(code int) {
 // 需要一路穿到 net/http 原始 writer）。必须显式写出来：内嵌的是 gin.ResponseWriter
 // **接口**，而接口的方法集里没有 Unwrap（只有 gin 的具体类型 responseWriter 有），
 // 所以「内嵌接口」的包装不会自动继承它 —— 少了这一行，middleware.LongLived 在
-// 带本包装的 POST 端点（构建上下文上传）上会拿到 ErrNotSupported 而静默失效。
+// 带本包装的 POST 端点（大文件上传那类长活请求体）上会拿到 ErrNotSupported 而静默失效。
 func (w *bodyCaptureWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 // desensitizeJSON replaces sensitive field values (passwords, tokens, secrets, keys, etc.)

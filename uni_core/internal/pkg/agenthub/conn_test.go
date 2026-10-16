@@ -37,7 +37,6 @@ type fakeSocket struct {
 	remote      net.Addr
 	closed      bool
 	dataFrames  [][]byte
-	dataKinds   []int
 	closes      []ctrlFrame
 	pings       int
 }
@@ -98,7 +97,6 @@ func (f *fakeSocket) WriteMessage(kind int, b []byte) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.dataFrames = append(f.dataFrames, cp)
-	f.dataKinds = append(f.dataKinds, kind)
 	return nil
 }
 
@@ -166,15 +164,6 @@ func (f *fakeSocket) frames() [][]byte {
 	defer f.mu.Unlock()
 	out := make([][]byte, len(f.dataFrames))
 	copy(out, f.dataFrames)
-	return out
-}
-
-// kinds 返回出站数据帧的消息类型序列（与 frames 同序）。
-func (f *fakeSocket) kinds() []int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	out := make([]int, len(f.dataKinds))
-	copy(out, f.dataKinds)
 	return out
 }
 
@@ -1732,16 +1721,11 @@ func TestConnDispatchCoversAllAgentToCoreTypes(t *testing.T) {
 	}
 }
 
-// ── 出站二进制通道：分片帧 ────────────────────────────────────────────
+// ── 入站二进制帧：协议未定义，必须被拒 ────────────────────────────────
 //
-// 三组断言钉住二进制通道的「通道面」契约：
-//  1. 入站二进制被拒（4002 —— 二进制帧只有 core→agent 一个方向），
-//     文本帧行为零改动；
-//  2. EnqueueBinary 的背压语义：队列满时**阻塞**（绝不丢弃）、ctx 取消与
-//     连接收尾解除阻塞、无 socket 短接 —— 与 SendMessage 的「丢弃并计数」
-//     刻意相反（分片丢了哈希就断，见 conn.go 的注释）；
-//  3. 写协程按 outbound 的消息类型写 socket：文本走 TextMessage、分片走
-//     BinaryMessage —— 帧序由同一条队列唯一确定。
+// agent→core 方向本就未定义二进制帧（core→agent 的二进制出站通道已随 Docker
+// 管理模块整体移除，协议侧 PackBinaryFrame/UnpackBinaryFrame 同样已删）——
+// 收到即协议违规（4002），文本帧行为零改动。
 
 func TestConnReadLoopRejectsInboundBinary(t *testing.T) {
 	f := newFixture(t, Options{SendQueue: 8})
@@ -1750,109 +1734,4 @@ func TestConnReadLoopRejectsInboundBinary(t *testing.T) {
 	f.sock.pushBinary([]byte("BC-whatever"))
 	f.waitClose(t, agentproto.CloseMalformedMessage)
 	f.expectState(t, StateClosed)
-}
-
-func TestConnEnqueueBinaryBlocksUntilSpace(t *testing.T) {
-	// 不启动写协程：队列深度 1 会被填满，EnqueueBinary 的第 2 次必须阻塞。
-	f := newFixture(t, Options{SendQueue: 1})
-	ctx := context.Background()
-
-	frame1 := []byte("a")
-	frame2 := []byte("b")
-	if err := f.conn.EnqueueBinary(ctx, frame1); err != nil {
-		t.Fatalf("第 1 帧: %v", err)
-	}
-
-	got := make(chan error, 1)
-	go func() { got <- f.conn.EnqueueBinary(ctx, frame2) }()
-
-	select {
-	case err := <-got:
-		t.Fatalf("队列满时 EnqueueBinary 返回了 %v —— 分片必须等待而不是丢弃", err)
-	case <-time.After(50 * time.Millisecond):
-		// 期望：阻塞中。
-	}
-	// 腾出一个槽位：第 2 帧解除阻塞并入队。
-	select {
-	case item := <-f.conn.send:
-		if item.mt != websocket.BinaryMessage {
-			t.Fatalf("队列元素消息类型 = %d, want BinaryMessage", item.mt)
-		}
-	case <-time.After(waitTimeout):
-		t.Fatal("第 1 帧不在队列里（夹具失效）")
-	}
-	select {
-	case err := <-got:
-		if err != nil {
-			t.Fatalf("腾位后仍失败: %v", err)
-		}
-	case <-time.After(waitTimeout):
-		t.Fatal("腾位后 EnqueueBinary 未解除阻塞")
-	}
-}
-
-func TestConnEnqueueBinaryCtxCancelUnblocks(t *testing.T) {
-	f := newFixture(t, Options{SendQueue: 1})
-	if err := f.conn.EnqueueBinary(context.Background(), []byte("fill")); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if err := f.conn.EnqueueBinary(ctx, []byte("x")); !errors.Is(err, context.Canceled) {
-		t.Fatalf("已取消 ctx 应返回 Canceled（上传 handler 据此收场）: %v", err)
-	}
-}
-
-func TestConnEnqueueBinaryAfterCloseReturnsErrConnClosed(t *testing.T) {
-	f := newFixture(t, Options{SendQueue: 1})
-	f.conn.CloseWith(agentproto.CloseServerShutdown, "测试")
-	if err := f.conn.EnqueueBinary(context.Background(), []byte("x")); !errors.Is(err, errConnClosed) {
-		t.Fatalf("关闭后应返回 errConnClosed（调用方折成 503 句号）: %v", err)
-	}
-}
-
-func TestConnEnqueueBinaryShortCircuitsWithoutSocket(t *testing.T) {
-	h := newTestHub(t)
-	bare := newBareConn(h, 1002)
-	if err := bare.EnqueueBinary(context.Background(), []byte("x")); err != nil {
-		t.Fatalf("未接管 socket 必须短路（与 SendMessage 同纪律）: %v", err)
-	}
-}
-
-func TestConnWriteLoopKeepsTextAndBinaryKinds(t *testing.T) {
-	f := newFixture(t, Options{SendQueue: 8})
-	enroll(t, f) // 首帧 hello_ack 是文本 —— 「老消息照旧」的伴随断言
-
-	payload := []byte("chunk-1")
-	if err := f.conn.EnqueueBinary(context.Background(), payload); err != nil {
-		t.Fatal(err)
-	}
-	waitFor(t, "二进制帧被写协程发出", func() bool {
-		return len(f.sock.kinds()) >= 2
-	})
-	kinds := f.sock.kinds()
-	if got := kinds[0]; got != websocket.TextMessage {
-		t.Fatalf("首帧（hello_ack）类型 = %d, want TextMessage —— 文本路径不得被改", got)
-	}
-	if got := kinds[len(kinds)-1]; got != websocket.BinaryMessage {
-		t.Fatalf("末帧类型 = %d, want BinaryMessage", got)
-	}
-	// 发出的字节必须与原样入队的分片逐字节一致（写协程没动分片一个字节）。
-	got := f.sock.frames()[len(f.sock.frames())-1]
-	if !bytesEqual(got, payload) {
-		t.Fatalf("写协程发出的分片被改写: got %q want %q", got, payload)
-	}
-}
-
-// bytesEqual 是本测试的轻量比较（避免为一条断言引入 bytes 包别名冲突）。
-func bytesEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }

@@ -7,7 +7,7 @@
  *   - 保留补丁：墙钟怎么回拨，合成事件都照常送达处理器。
  *
  * 两条用例对应放大复现里实测到的两族：
- *   1) trigger('click') 被吞 —— 现场「按钮可点、弹窗不开、sendDockerCmd 0 调用」；
+ *   1) trigger('click') 被吞 —— 现场「按钮可点、弹窗不开、业务调用 0 次」；
  *   2) setValue 的 input 事件被吞 —— 现场「输入框里字在、v-model 没动、
  *      等 enabled 的 waitUntil 兜到超时」。
  *
@@ -69,7 +69,7 @@ describe('事件时间戳守卫豁免（墙钟回拨）', () => {
   it('回拨后 setValue 的 input 事件仍更新 v-model', async () => {
     const w = mount(InputProbe)
     jumpClockBack()
-    await w.find('input').setValue('nginx:latest')
-    expect(w.find('.model').text()).toBe('nginx:latest')
+    await w.find('input').setValue('示例文本')
+    expect(w.find('.model').text()).toBe('示例文本')
   })
 })

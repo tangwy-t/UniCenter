@@ -444,13 +444,6 @@ func newRequestID() string {
 		strconv.FormatUint(requestIDSeq.Add(1), 10)
 }
 
-// NewRequestID 是 newRequestID 的导出形态，供**跨包**调用方复用。
-//
-// 导出而不复制的原因：同一个键空间里的 ref 必须共用同一个计数器 —— 两个包各写一份
-// 「纳秒 + 自增」会重新打开「同一纳秒、两个计数器等值」的撞号窗口；共享同一个
-// 计数器，进程内的唯一性才是由实现保证的，而不是由运气保证。
-func NewRequestID() string { return newRequestID() }
-
 var requestIDSeq atomic.Uint64
 
 func abs(v int) int {

@@ -454,9 +454,6 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 		AgentPartition: agentPartitionSvc,
 		// 升级巡检（只读扫描 + 判超时）：不加它，卡住的升级尝试会永远停在「升级中」。
 		AgentUpgrade: deviceUpgradeSvc,
-		// RequestIDGen 传共享计数器：同一键空间里的 ref 必须由同一个计数器产生，
-		// 两套计数器会重新引入「同一纳秒、两计数器等值」的撞号窗口。
-		RequestIDGen: service.NewRequestID,
 		// Log 允许 nil（任务侧退化成 Nop），但装配点没有理由交 nil：4 个指标任务的
 		// 全部可观测性就是那几行结构化读数。
 		Log: log,

@@ -9,7 +9,7 @@
 # 而 Dockerfile 里 GOPROXY 的第一顺位指向仓库内的离线载荷
 #   uni_core/.goproxy/...
 # 也就是说：**镜像里编进去的协议 = 载荷里的那个 zip，而不是工作区
-# uni_protocol/ 的当前源码**。core 只调协议里的 `ValidateDockerCmdOptions`，
+# uni_protocol/ 的当前源码**。core 只调协议里的 `agentproto.DecodeTypedFor`，
 # 不直接引用新符号 —— 于是载荷陈旧时照样编译通过，行为却是旧的
 # （现场表现：「载入镜像」传 `.tar.gz` 文件名被 core 以 400「指令参数不合法」
 # 打回，而请求体完全合法），**所有构建门禁全绿也发现不了**。

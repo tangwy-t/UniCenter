@@ -182,7 +182,7 @@ func TestLongLivedTakesOverThroughWriterWrapper(t *testing.T) {
 	}
 }
 
-// TestLongLivedClearsReadDeadlineForLongBody：长活**请求体**（构建上下文上传那类）
+// TestLongLivedClearsReadDeadlineForLongBody：长活**请求体**（大文件上传那类）
 // 不该按「首字节起 ReadTimeout 内必须传完」计 —— 只要还在传就不许掐。
 func TestLongLivedClearsReadDeadlineForLongBody(t *testing.T) {
 	const stall = 300 * time.Millisecond

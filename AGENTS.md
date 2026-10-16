@@ -6,7 +6,7 @@
 ## 0. 速览
 
 - 模块：`uni_core`(Go 后端) · `uni_console`(Vue3+TS, pnpm) · `uni_agent`(Go 宿主端) · `uni_protocol`(零第三方依赖)
-- 规范实体：`docs/superpowers/specs/`、`docs/superpowers/plans/`、`DOCKER_UI_REDESIGN.md`、`RELEASING.md`
+- 规范实体：`docs/superpowers/specs/`、`docs/superpowers/plans/`、`RELEASING.md`
 - 门禁：`make test` / `make lint` / `make contract` / `make release-precheck`；前端 `build` 含 `vue-tsc`；另有 `check:icons`、`check:api-types`
 - 沟通语言：中文
 
@@ -53,9 +53,11 @@
 - `uni_console/src/test/agent-channel-proxy-guard.test.ts` — 20443 通道 XFF 转发
 - `uni_console/src/test/event-clock-guard.test.ts` — 事件时钟
 - `make contract`（协议形状漂移/单源/golden/零依赖）与 `uni_protocol-payload-guard`（离线载荷新鲜度）
-- 测试基线：前端 ~102 文件 / 1800+ 用例全绿；后端 go 全包绿。
+- 测试基线（2026-10-16 实测）：前端 48 文件 / 603 用例全绿；后端 uni_core + uni_protocol + uni_agent go 全包绿。
 
 ## 6. 环境事实
 
 - WSL2 以 root 运行，用户不切用户；工具链在 `/root`；前端包管理器固定 `pnpm`。
-- 本项目历史口径（含 2026-09/10 三轮 Docker 模块审计与修复的详细背景）另存于 Claude 的 memory 目录，本文件只保留仍然适用且用户确认的条目；快照类状态（commit/部署进度）一律以仓库与服务器实测为准，不照抄旧记忆。
+- Go 构建必须 `source /tmp/goenv.sh`：GOPROXY 必须以 file 代理打头（`uni_protocol v1.2.9` 只存在于仓库内离线载荷 `uni_core/.goproxy`，缺了它解析不到该版本）。
+- 前端 node 在 `/root/.nvm/versions/node/v24.15.0/bin`（pnpm 11.24.0 = 仓库 pin，由 corepack 管理）。
+- 本项目历史口径另存于 Claude 的 memory 目录，本文件只保留仍然适用且用户确认的条目；快照类状态（commit/部署进度）一律以仓库与服务器实测为准，不照抄旧记忆。
