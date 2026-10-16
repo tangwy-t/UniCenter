@@ -112,19 +112,6 @@ type DeviceDeps struct {
 	ReleaseHdl *handler.AgentReleaseHandler
 }
 
-// DockerDeps holds Docker management handler dependencies.
-//
-// 指令面的权限码按 action 变化，故这两条路由**没有静态 perm**：由 handler 在解析出
-// action/记录后调用 PermissionGuard.Ensure 强制（与路由级同一套缓存与 admin 通配语义）。
-// JWT 鉴权仍由 auth 组提供；守卫见 handler/docker_test.go 的「每个 action 类别无权限即 403」。
-// 凭据面（RegistryHdl，4c）是静态 perm docker:config —— 凭据管理没有「随 action 变化」
-// 的问题，权限挂在路由上。
-type DockerDeps struct {
-	Hdl *handler.DockerHandler
-	// RegistryHdl 是私有仓库凭据 CRUD（/docker/registries，docker:config）。
-	RegistryHdl *handler.DockerRegistryHandler
-}
-
 // AgentDeps holds agent channel handler dependencies.
 // 与 DeviceDeps 分开：设备管理走 JWT + 权限码，agent 通道是**未鉴权**入口，
 // 两者的鉴权模型不同，混在一起只会让「哪些端点需要 token」变得含糊。
@@ -143,7 +130,6 @@ type Dependencies struct {
 	Config  ConfigDeps
 	File    FileDeps
 	Device  DeviceDeps
-	Docker  DockerDeps
 	Agent   AgentDeps
 }
 
@@ -176,8 +162,8 @@ func Setup(deps Dependencies) *gin.Engine {
 	// 长活响应的写/读截止接管（P0：流式响应被服务端 WriteTimeout(30s) 掐断）：
 	// 一处构造、多处挂载（见 middleware.LongLived 的完整说明）。grace 取
 	// server.writeTimeout —— 对长活端点它被重新解释为「**单次写**最长阻塞时间」
-	// 而不是「整条响应预算」；空闲回收仍归各会话自己的机制（dockerstream 的
-	// 10min idle sweep 等），两者分工不重叠。挂载点即「哪些端点长活」的事实源，
+	// 而不是「整条响应预算」；空闲回收仍归各上传/下载/抓取流程自己的机制，
+	// 两者分工不重叠。挂载点即「哪些端点长活」的事实源，
 	// 遗漏由本包的源码级守卫测试拦住（TestLongLivedRoutesCarryDeadlineMiddleware）；
 	// 反代层（uni_console/nginx.conf 的长活 location 群）与本清单的跨层对齐由
 	// TestNginxLongLivedLocationsMatchRouterMounts 守卫 —— 两条守卫都读本文件，
@@ -547,125 +533,7 @@ func Setup(deps Dependencies) *gin.Engine {
 			devices.POST("/releases/:id/unpublish", perm(permission.PermDeviceReleasePublish), deps.Device.ReleaseHdl.Unpublish)
 			devices.DELETE("/releases/:id", perm(permission.PermDeviceReleaseDelete), deps.Device.ReleaseHdl.Delete)
 		}
-
-		// Docker 管理
-		//
-		// 挂在 auth 组内（JWT + 操作日志 + scope 解析与设备管理同款），
-		// 但**指令面的两条路由没有静态 perm**：docker 的权限码随 action 变化
-		//（logs→inspect、remove→delete…，spec §4.3.1 总表），写在路由上只能是其中一个，
-		// 由 handler 在拿到 action / 指令记录后调用 PermissionGuard.Ensure 判定
-		//（同一套缓存与 admin 通配语义，见 middleware.PermissionGuard.Ensure）。
-		docker := auth.Group("/docker")
-		docker.Use(middleware.SetModuleName("Docker 管理"))
-		{
-			// 读面：控制塔总览、主机清单与快照用 docker:list（与菜单一致）。
-			docker.GET("/overview", perm(permission.PermDockerList), deps.Docker.Hdl.Overview)
-			// 事件聚合流（六期·监控面）：权限与读面其余端点同档 docker:list（它是
-			// 总览页活动流的数据源，不是按指令接入的会话流）。形态同日志/stats ——
-			// auth 组 + fetch + ReadableStream（浏览器能带 Authorization）；服务端
-			// 常驻订阅由 core 自己维护（首个客户端建立、末个客户端取消），处理器
-			// 不做按指令的归属校验。
-			docker.GET("/events", longLived, perm(permission.PermDockerList), deps.Docker.Hdl.EventsStream)
-			// 事件历史（本波）：与流**同一份数据**（管理器的保留窗口：每主机最近
-			// 30 分钟且至多 500 条）的历史读面 —— hostId/type/keyword 过滤 + 游标
-			// 分页，权限与流/读面其余端点同档 docker:list。为什么不挂 longLived：
-			// 它是一次短查询（内存快照即回），不是一个长活连接。
-			// 与流共用窗口是刻意的：流里回放不到的（超出窗口）这里也查不到，
-			// 两个读面不给两套口径。
-			docker.GET("/events/history", perm(permission.PermDockerList), deps.Docker.Hdl.EventsHistory)
-			// 跨主机统一工作负载表：API 路径与前端 /docker/containers 页面同形
-			//（复用既有菜单与路由 path，本切片只换页面背后的数据源 —— 从
-			// 单主机快照换成跨主机聚合），权限与读面其余端点同档 docker:list。
-			docker.GET("/containers", perm(permission.PermDockerList), deps.Docker.Hdl.Workloads)
-			// 跨主机资源清单（9a）：镜像/卷/网络/项目四页沿用容器统一表的
-			// 跨主机模式（前端路径同形，页面背后的数据源从单主机快照换成跨主机
-			// 聚合），权限与读面其余端点同档 docker:list —— 四页与容器页是同一类
-			// 工作面板，权限档分家会让「能看容器不能看镜像」这种怪状态出现。
-			docker.GET("/images", perm(permission.PermDockerList), deps.Docker.Hdl.Images)
-			docker.GET("/volumes", perm(permission.PermDockerList), deps.Docker.Hdl.Volumes)
-			docker.GET("/networks", perm(permission.PermDockerList), deps.Docker.Hdl.Networks)
-			docker.GET("/projects", perm(permission.PermDockerList), deps.Docker.Hdl.Projects)
-			// 全局跨资源检索（4d）：跨 100 台、跨 5 类资源（容器/镜像/卷/网络/项目）按
-			// 名称子串找东西 —— 分页已挡全量，逐页逐主机翻不可行。它与读面其余端点同档
-			// docker:list：它只是把「检索」的入口从「一页一类」提到全局，读的仍是同一批
-			// 快照事实（不改权限面）。
-			docker.GET("/search", perm(permission.PermDockerList), deps.Docker.Hdl.Search)
-			// 镜像版本漂移视图（本波）：以 repoTag 为行给出「同一标签在各主机上的
-			// 内容摘要分布」（有几种摘要、各多少台、哪些是少数派）—— 推新版本任务的
-			// 前置（该推哪个）与验收（推齐了没）都读它。它是镜像读面的一个**派生视图**
-			//（与 /docker/images 同源快照），权限与其余读面同档 docker:list。
-			docker.GET("/image-drift", perm(permission.PermDockerList), deps.Docker.Hdl.ImageDrift)
-			// 镜像目标版本（4c）：声明式目标版本 —— 为一个 repoTag 声明目标内容摘要，
-			// 漂移视图据此算出「待对齐 N 台」。读（清单）与其余读面同档 docker:list；
-			// 写（声明/清除）是分发决策，与 image:build 受理同档 docker:manage。
-			// repoTag 走 **query**（含 : 与 /，无法安全放进 path 段）。
-			docker.GET("/image-targets", perm(permission.PermDockerList), deps.Docker.Hdl.ListImageTargets)
-			docker.POST("/image-targets", perm(permission.PermDockerManage), deps.Docker.Hdl.SetImageTarget)
-			docker.DELETE("/image-targets", perm(permission.PermDockerManage), deps.Docker.Hdl.ClearImageTarget)
-			docker.GET("/hosts", perm(permission.PermDockerList), deps.Docker.Hdl.Hosts)
-			docker.GET("/hosts/:id/state", perm(permission.PermDockerList), deps.Docker.Hdl.State)
-			// 容器 stats 历史（P2 抽屉曲线的历史半边）：30 分钟环形留存（快照 ingest
-			// 观察者写入，见 dockerstate/stats_history.go）。权限 docker:inspect ——
-			// 与 stats 实时流（container:stats 指令的权限码）同档：两处看的是同一个
-			// 容器的同一类读数，权限档分家会让「能看实时不能看历史」这种怪状态出现。
-			// 静态 perm 挂路由（不是流那类按记录判定 —— 留存是读面，没有会话归属）。
-			docker.GET("/hosts/:id/containers/:cid/stats-history", perm(permission.PermDockerInspect), deps.Docker.Hdl.StatsHistory)
-			// 任务中心（6b）：最近指令的任务化列表 —— pull/up 等长任务不再靠弹窗
-			// 转圈，收口成跨主机的可见性。数据全是既有数据面（指令记录 + 6b 补的
-			// 最近枚举索引），权限与读面其余端点同档 docker:list；取消动作走
-			// 显式取消端点（/cmds/:ref/cancel，见下），不再借道进度流 Abort ——
-			// 断开进度流只是停止观看（非流任务仍不提供取消，见 service/docker_tasks.go）。
-			docker.GET("/tasks", perm(permission.PermDockerList), deps.Docker.Hdl.Tasks)
-			// 指令面：**无静态 perm**（权限按 action 决定，见 DockerDeps 的说明）。
-			docker.POST("/hosts/:id/cmds", deps.Docker.Hdl.SendCmd)
-			docker.GET("/hosts/:id/cmds/:ref", deps.Docker.Hdl.CmdResult)
-			// 构建上下文上传（v1.3）：**静态 perm(docker:manage)** —— 与指令面不同，
-			// 它没有「按 action 变化」的权限维度（动作就一个），且不建立指令记录
-			//（也就没有 CmdResult 那套「按记录校验权限与发起人归属」）；docker:manage
-			// 与 image:build 受理同档 —— 上下文是「即将构建并留痕进镜像的代码」。
-			// 字节流由 core 中转（零落盘）成 WSS 二进制分片直达 agent 的 transferDir。
-			docker.POST("/hosts/:id/build-context", longLived, perm(permission.PermDockerManage), deps.Docker.Hdl.BuildContextUpload)
-			// 日志流（三期）：**留在 auth 组**——日志走 fetch + ReadableStream，
-			// 浏览器能给这条请求带 Authorization 头；权限码与归属在处理器内判定。
-			docker.GET("/hosts/:id/cmds/:ref/stream", longLived, deps.Docker.Hdl.LogStream)
-			// stats 实时流（监控面）：与日志流同款形态 —— fetch + ReadableStream
-			// 走 auth 组带 Authorization；权限（docker:inspect）与归属在处理器内判定。
-			docker.GET("/hosts/:id/cmds/:ref/stats", longLived, deps.Docker.Hdl.StatsStream)
-			// 拉取进度流（4b）：同款 fetch 形态，权限（docker:manage，与 image:pull
-			// 受理同档）与归属在处理器内判定；唯一「指令 pending 期间即可接入」的流
-			//（会话由受理时预登记，句柄取协议派生的 pull_<ref>）。**断开只是停止
-			// 观看**（不发 cancel，任务照常跑完）—— 终止操作走下面的显式取消端点。
-			docker.GET("/hosts/:id/cmds/:ref/pull", longLived, deps.Docker.Hdl.PullStream)
-			// 构建/推送进度流（P2）：与拉取进度流同款 fetch 形态与接入纪律，
-			// 句柄取协议派生的 build_<ref>/push_<ref>（受理时预登记，pending 期间
-			// 即可接入）。
-			docker.GET("/hosts/:id/cmds/:ref/build", longLived, deps.Docker.Hdl.BuildStream)
-			docker.GET("/hosts/:id/cmds/:ref/push", longLived, deps.Docker.Hdl.PushStream)
-			// 显式取消（语义收口）：观看与执行解耦 —— 断开进度流只是停止观看，
-			// 「取消」只经由这条端点下发 cancel 帧。与指令面/流端点同款**无静态
-			// perm**：权限码取自记录（进度三族都是 docker:manage），归属再校验
-			// 发起人。**不挂 longLived**：它是一次短请求（202 即回），不是一个
-			// 长活连接（nginx 的白名单也因此不必动）。
-			docker.POST("/hosts/:id/cmds/:ref/cancel", deps.Docker.Hdl.CancelCmd)
-			// 私有仓库凭据（4c）：静态 docker:config —— 凭据是「分发」支柱的密钥
-			// 材料，读（列表）与写（增/改/删）同档；密码任何读路径只回掩码，
-			// 解密只在 image:pull/image:push 的受理注入（service 侧唯一读口）。
-			docker.GET("/registries", perm(permission.PermDockerConfig), deps.Docker.RegistryHdl.List)
-			docker.POST("/registries", perm(permission.PermDockerConfig), deps.Docker.RegistryHdl.Create)
-			docker.PUT("/registries", perm(permission.PermDockerConfig), deps.Docker.RegistryHdl.Update)
-			docker.DELETE("/registries/:registry", perm(permission.PermDockerConfig), deps.Docker.RegistryHdl.Delete)
-		}
 	}
-
-	// 终端流（三期）：**必须挂在 api 组、不得挪进 auth 组** —— 浏览器的 WebSocket
-	// 带不了 Authorization 头，凭据是 result 里签发的一次性 ticket（30s、单次、
-	// 绑 userId+sessionId+device）。挂进 auth 组会让**每一次**终端连接在握手阶段
-	// 收到 401（正文是「未登录或 token 已过期」而不是票据结论），页面表现为
-	// 「终端永远连不上」—— 与 /agent/ws、/agent/releases/:version/download 同型的坑
-	//（2026-09-28 生产联调实测：日志流正常、终端 401，根因就在这里）。
-	// 权限不靠 JWT：票据只可能签发给「已通过 JWT + 权限码 + 归属校验」的人，
-	// 验证链在签发端（见 service/docker_stream.go 的 IssueTicket）。
-	api.GET("/docker/hosts/:id/stream/exec", deps.Docker.Hdl.ExecStream)
 
 	// WebSocket
 	api.GET("/ws", wsPkg.HandleUpgrade(deps.Infra.Hub, deps.Infra.Logger))

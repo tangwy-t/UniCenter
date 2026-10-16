@@ -217,8 +217,7 @@ func (r *RoleRepo) FindUserIDsByRoleID(ctx context.Context, roleID uint64) ([]ui
 	return userIDs, err
 }
 
-// FindRoleIDsByPerm 反查持有指定权限码的角色集合（docker 事件通知的受众
-// 收敛用，满足 dockernotify.RolePermQuery 的口径）。链路：sys_menu.perms
+// FindRoleIDsByPerm 反查持有指定权限码的角色集合。链路：sys_menu.perms
 // （码挂在菜单/按钮上）→ sys_role_menu → 角色并集。
 //
 // SQL 拉取「perms 非空」的 (role_id, perms) 扁平行后在 Go 侧做码匹配，
@@ -237,8 +236,8 @@ func (r *RoleRepo) FindUserIDsByRoleID(ctx context.Context, roleID uint64) ([]ui
 //     FindMenuPerms 同款）。角色软删不显式过滤：角色删除走
 //     DeleteWithAssociations（join 行硬删），该角色自然从结果消失。
 //
-// 结果去重升序：同一码挂多个菜单（docker:list 挂 4 个页面）时同一角色
-// 会出多行，去重是本方法的契约；升序让缓存与 TargetIDs 的呈现稳定。
+// 结果去重升序：同一码挂多个菜单时同一角色会出多行，去重是本方法的契约；
+// 升序让缓存与调用方呈现稳定。
 func (r *RoleRepo) FindRoleIDsByPerm(ctx context.Context, perm string) ([]uint64, error) {
 	if perm == "" {
 		return nil, nil
@@ -272,8 +271,8 @@ func (r *RoleRepo) FindRoleIDsByPerm(ctx context.Context, perm string) ([]uint64
 }
 
 // permCSVContains 判断 perms 串（单码或逗号多码）是否含有 code：
-// 按逗号拆开、trim 后**整词**比对 —— 子串不算命中（docker:listing 不得
-// 顶替 docker:list），空白容错只是对人工录入形态的防御。
+// 按逗号拆开、trim 后**整词**比对 —— 子串不算命中（system:user:listing 不得
+// 顶替 system:user:list），空白容错只是对人工录入形态的防御。
 func permCSVContains(perms, code string) bool {
 	for _, part := range strings.Split(perms, ",") {
 		if strings.TrimSpace(part) == code {

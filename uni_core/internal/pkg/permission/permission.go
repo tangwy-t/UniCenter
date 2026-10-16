@@ -28,14 +28,6 @@ func All() []string {
 		PermDeviceUpgrade,
 		PermDeviceUpgradeGlobal,
 
-		// ── Docker 管理 / docker:* ──
-		PermDockerConfig,
-		PermDockerDelete,
-		PermDockerExec,
-		PermDockerInspect,
-		PermDockerList,
-		PermDockerManage,
-
 		PermCacheDelete,
 		PermCacheList,
 		PermCacheQuery,
@@ -129,8 +121,8 @@ const (
 	// PermDeviceGroup 是「写主机分组 / 标签」（PATCH /devices/:id 的部分更新）。
 	//
 	// 与 enable/disable/delete 一样是**管理侧写权限**，但独立成码：分组/标签是
-	// 平台级的分拣维度（同时被设备列表与 docker 主机清单消费），「能启停设备」
-	// 与「能改它的分组归属」是两种不同的能力，授权面分开授予。
+	// 平台级的分拣维度（设备列表按它筛选），「能启停设备」与「能改它的分组归属」
+	// 是两种不同的能力，授权面分开授予。
 	PermDeviceGroup = "device:index:group"
 	// PermDeviceUpgrade 是「给设备下发升级/回滚目标」（单台 / 多选 / 按筛选）。
 	PermDeviceUpgrade = "device:upgrade"
@@ -143,22 +135,6 @@ const (
 	PermDeviceReleaseUpload  = "device:release:upload"
 	PermDeviceReleasePublish = "device:release:publish"
 	PermDeviceReleaseDelete  = "device:release:delete"
-)
-
-// ── Docker 管理 / docker:* ──────────────────────────────────────────────
-const (
-	PermDockerList    = "docker:list"
-	PermDockerInspect = "docker:inspect"
-	PermDockerManage  = "docker:manage"
-	PermDockerDelete  = "docker:delete"
-	// PermDockerConfig 是配置编辑（表单/YML）与回滚。
-	//
-	// ⚠ 威胁模型同 PermDockerExec：写 yml（image: evil + volumes: ["/:/host"]）+ up
-	// = 宿主机 root，且**比 exec 更持久**（每次 up 都重放）。两码同级独立授予、
-	// 只给管理员 —— 「写配置」不是低危能力。
-	PermDockerConfig = "docker:config"
-	// PermDockerExec 是终端（最高危，独立授予）。
-	PermDockerExec = "docker:exec"
 )
 
 // ── 缓存管理 / system:cache:* ────────────────────────────────────────────

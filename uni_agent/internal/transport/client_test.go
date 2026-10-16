@@ -388,28 +388,3 @@ func TestCAClientAndLoadCAPool(t *testing.T) {
 		t.Fatal("CA 文件缺失必须报错")
 	}
 }
-
-// TestSendDockerFrameRequiresConnection：断线时不排队（与服务端会把流判超时的语义一致），
-// 在线时进 docker 队列（与会话的帧纪律配套：队列满时最多等 5 秒，等不到由会话收摊）。
-func TestSendDockerFrameRequiresConnection(t *testing.T) {
-	c := New(Config{URL: "ws://unused", HeartbeatInterval: time.Second})
-	f := &agentproto.DockerFrame{SessionID: "0123456789abcdef", Seq: 1, Data: []byte("x")}
-	if err := c.SendDockerFrame(f); err == nil {
-		t.Fatal("未连接时必须立刻返回错误（而不是排队等待）")
-	}
-	c.state = stateActive
-	if err := c.SendDockerFrame(f); err != nil {
-		t.Fatalf("在线时应入队: %v", err)
-	}
-	if len(c.dockerCh) != 1 {
-		t.Fatalf("帧必须进 docker 队列，实际 %d", len(c.dockerCh))
-	}
-	// 帧载荷必须能原样解码（base64 的 data 与 seq 都在线上）。
-	msg := <-c.dockerCh
-	if msg.Type != agentproto.TypeAgentDockerFrame {
-		t.Fatalf("类型不符: %s", msg.Type)
-	}
-	if _, err := agentproto.DecodeTypedFor(msg, agentproto.DirAgentToCore); err != nil {
-		t.Fatalf("帧必须能按方向解码: %v", err)
-	}
-}

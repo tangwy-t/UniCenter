@@ -8,24 +8,24 @@ import (
 	"strings"
 	"testing"
 
-	uni_protocol "github.com/tangwy-t/UniCenter/uni_protocol"
+	"github.com/tangwy-t/UniCenter/uni_core/internal/service"
 )
 
 // 长活端点必须挂 middleware.LongLived 的**源码级守卫**（P0）。
 //
 // 为什么需要它：http.Server 的 WriteTimeout 是**整条响应**的绝对截止（net/http 在
 // 请求头解析完的那一刻设成 now+WriteTimeout），任何 >30s 的响应都必然在 30.0s 被
-// 写失败掐断 —— 对 docker 的流式端点，本波「断流 = best-effort cancel」还会把它
-// 升级成「取消操作本身」（QA 终审实测：>30s 的镜像拉取 100% 在 30.0s±0.3s 断路、
-// 镜像不落地）。接管写截止是**逐路由挂载**的（路由表是「哪些端点长活」的事实源），
+// 写失败掐断（生产实测：大文件下载/上传、发布物二进制下发都在 30.0s 那一刻断路）。
+// 接管写截止是**逐路由挂载**的（路由表是「哪些端点长活」的事实源），
 // 而漏挂的失败形态是「这个功能 30s 后莫名失败」—— handler 层测试挂在裸引擎上
 // （没有 http.Server、没有 WriteTimeout）**照样全绿**，与
 // TestEventsStreamRouteMountedWithPerm 同款理由：只有源码级断言拦得住。
 //
 // 两条判定：
 //  1. **类规则**：处理器名以 Stream 结尾的注册行必须挂 —— 新加一条流式端点漏挂，
-//     这里就红。唯一豁免是终端 ExecStream：它升级成 WebSocket 后由 gorilla 在
-//     hijack 时清掉全部 deadline（见 middleware.LongLived 的说明），不需要也不该挂。
+//     这里就红。当前路由表里没有 *Stream 处理器；豁免/新增都以本规则为准
+//    （WebSocket 升级端点由 gorilla 在 hijack 时清掉全部 deadline，不需要也不该挂，
+//     见 middleware.LongLived 的说明）。
 //  2. **清单**：非流式的长活传输（大文件流式下载 / 大请求体上传 / 慢采集）逐条列出
 //     —— 它们是同一根因的另一批受害者，名字上认不出来（Download/Upload/AdaptPprof），
 //     只能显式枚举；清单为空说明端点被改名/删除了，守卫要同步更新。
@@ -38,19 +38,12 @@ func TestLongLivedRoutesCarryDeadlineMiddleware(t *testing.T) {
 
 	// 长活清单（处理器名后缀 → 为什么它长活）。
 	listed := map[string]string{
-		"Docker.Hdl.EventsStream)":       "事件聚合流（总览页活动流，连接常驻）",
-		"Docker.Hdl.LogStream)":          "日志 Follow（container:logs / compose:logs）",
-		"Docker.Hdl.StatsStream)":        "容器 stats 实时流（曲线一直画）",
-		"Docker.Hdl.PullStream)":         "拉取进度流（P0 实测受害端点）",
-		"Docker.Hdl.BuildStream)":        "构建进度流（RUN 一步可能几分钟无输出）",
-		"Docker.Hdl.PushStream)":         "推送进度流（层大时 >30s）",
-		"Docker.Hdl.BuildContextUpload)": "构建上下文 / 载入镜像上传（请求体 ≤512MB / ≤8GB，按用途分档；转完才回响应）",
-		"File.FileHdl.Download)":         "文件下载（ServeContent 流式，大文件 >30s）",
-		"File.FileHdl.Preview)":          "文件预览（ServeContent 流式，支持 Range 拖动）",
-		"File.FileHdl.Upload)":           "文件上传（multipart 请求体，上限可配置）",
-		"ReleaseHdl.Upload)":             "agent 程序包上传（默认上限 200MB，弱网下 >30s 是常态）",
-		"ReleaseHdl.Download)":           "agent 发布物下载（几十 MB 二进制走内网/弱网）",
-		"AdaptPprof())":                  "pprof profile/trace 采集（?seconds=N，N≥30 时写必超时）",
+		"File.FileHdl.Download)": "文件下载（ServeContent 流式，大文件 >30s）",
+		"File.FileHdl.Preview)":  "文件预览（ServeContent 流式，支持 Range 拖动）",
+		"File.FileHdl.Upload)":   "文件上传（multipart 请求体，上限可配置）",
+		"ReleaseHdl.Upload)":     "agent 程序包上传（默认上限 200MB，弱网下 >30s 是常态）",
+		"ReleaseHdl.Download)":   "agent 发布物下载（几十 MB 二进制走内网/弱网）",
+		"AdaptPprof())":          "pprof profile/trace 采集（?seconds=N，N≥30 时写必超时）",
 	}
 
 	found := map[string]int{}
@@ -90,7 +83,7 @@ func TestLongLivedRoutesCarryDeadlineMiddleware(t *testing.T) {
 }
 
 // handlerName 从一条 gin 注册行里取处理器标识（最后一个逗号之后的表达式，
-// 例如 `deps.Docker.Hdl.LogStream`）；取不到返回空串。
+// 例如 `deps.File.FileHdl.Download`）；取不到返回空串。
 func handlerName(line string) string {
 	i := strings.LastIndex(line, ",")
 	if i < 0 {
@@ -99,7 +92,7 @@ func handlerName(line string) string {
 	return strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(line[i+1:]), ")"))
 }
 
-// shortName 取处理器标识的最后一段（`deps.Docker.Hdl.LogStream` → `LogStream`）。
+// shortName 取处理器标识的最后一段（`deps.File.FileHdl.Download` → `Download`）。
 func shortName(handler string) string {
 	if i := strings.LastIndex(handler, "."); i >= 0 {
 		return handler[i+1:]
@@ -115,9 +108,8 @@ func shortName(handler string) string {
 //
 // 为什么需要它：middleware.LongLived 只接管了 Go 服务端自己的 WriteTimeout；
 // 请求还要穿过 nginx —— 长活端点若落回普通 location /api/（proxy_read_timeout
-// 60s），「60s 没有新数据」照样被反代掐断；对 docker 的流式端点，本波
-// 「断流 = best-effort cancel」语义会把掐断升级成取消操作本身（杀拉取）。
-// 修复前 stats/pull/build/push/events/大文件下载逐一漏配，根因是两层清单各自
+// 60s），「60s 没有新数据」照样被反代掐断。
+// 修复前流式端点/大文件下载逐一漏配，根因是两层清单各自
 // 手写、无人对齐 —— 所以这里不维护第二份手写路径清单（必然漂移），而是从
 // router.go 源码**推导**全部 longLived 挂载点，实例化成样例 URL 后按 nginx 的
 // location 选择顺序（先 = 精确，再按出现序的第一个匹配正则，最后最长前缀）求出
@@ -368,49 +360,47 @@ func nginxTimeoutSeconds(body, name string) int {
 	return n
 }
 
-// ── 跨层对齐守卫：nginx 传输层上传上限 ↔ 协议最大上传档 ────────────────────
+// ── 跨层对齐守卫：nginx 传输层上传上限 ↔ 应用层最大上传档 ────────────────────
 
-// TestNginxUploadBodyLimitCoversProtocolMax 断言 nginx 上传 location 的传输层
-// 上限（client_max_body_size）≥ 协议定义的最大上传档（P0）。
+// TestNginxUploadBodyLimitCoversAppMax 断言 nginx 上传 location 的传输层
+// 上限（client_max_body_size）≥ core 应用层定义的最大上传档（P0）。
 //
-// 为什么需要它：上传请求穿过四层执法链 ——
+// 为什么需要它：上传请求穿过多层执法链 ——
 //  ① nginx 传输层   client_max_body_size（本 location 覆盖 server 级）
 //  ② core handler   http.MaxBytesReader（按用途选档封顶）
 //  ③ core service   Content-Length 预检（早退）
-//  ④ agent 组装闸   收分片后按粗上界（两档的较大者）封顶
 //
-// 应用层真上限按用途分档（协议常量）：构建上下文 MaxDockerBuildContextBytes=512MB、
-// 载入镜像 MaxDockerImageLoadBytes=8GB。**传输层必须 ≥ 最大那档**，否则门口的 413
-// 会把合法请求挡在 core 之前（生产实测：525MB 镜像 tar 走「载入镜像 → 从浏览器
-// 上传」被 server 级 512m 打回，请求根本没到 core）。本守卫取协议常量推导上限
-//（不手写数字）：有人把 location 上限调回 512m，或删掉这行（回落 server 级 512m），
-// 都红。
-func TestNginxUploadBodyLimitCoversProtocolMax(t *testing.T) {
+// 应用层真上限里最大的一档是 agent 发布物上传（service.DefaultReleaseMaxSize，
+// 默认 200MB；文件模块的上限走可配置的 sys.file.upload.maxSize）。**传输层必须
+// ≥ 最大那档**，否则门口的 413 会把合法请求挡在 core 之前（生产实测：大体积上传
+// 被 server 级 512m 打回的形态）。本守卫取应用层常量推导上限（不手写数字）：
+// 有人把 location 上限下调到低于该档、或删掉这行（回落 server 级 512m），都红。
+func TestNginxUploadBodyLimitCoversAppMax(t *testing.T) {
 	conf, err := os.ReadFile(nginxConfPath(t))
 	if err != nil {
 		t.Fatalf("读取 nginx.conf 失败: %v", err)
 	}
 	locs := parseNginxLocations(t, string(conf))
 
-	// 样例取 docker build-context：它与 files / devices/releases 共用同一个上传
-	// 专属 location（见 nginx.conf 注释）。
-	sample := "/api/v1/docker/hosts/x/build-context"
+	// 样例取 agent 发布物上传：它与 files 共用同一个上传专属 location
+	//（见 nginx.conf 注释）。
+	sample := "/api/v1/devices/releases"
 	loc := nginxWinner(locs, 80, sample)
 	if loc == nil {
 		t.Fatalf(":80 无任何 location 命中上传通道 %s —— 上传专属 location 被删了？", sample)
 	}
-	if !strings.Contains(loc.pattern, "build-context") {
+	if !strings.Contains(loc.pattern, "devices/releases") {
 		t.Fatalf("上传通道 %s 命中的 location %q 不是上传专属 location —— 被改回普通 /api/（server 级 512m）了？",
 			sample, loc.pattern)
 	}
 
 	got := nginxSizeBytes(loc.body, "client_max_body_size")
-	want := int64(uni_protocol.MaxDockerImageLoadBytes)
+	want := int64(service.DefaultReleaseMaxSize)
 	if got < want {
-		t.Errorf("上传 location %q 的 client_max_body_size=%d 字节 < 协议最大档 %d 字节（%dGB）—— "+
+		t.Errorf("上传 location %q 的 client_max_body_size=%d 字节 < 应用层最大档 %d 字节（%dMB）—— "+
 			"传输层必须 ≥ 最大上传档，否则合法请求在门口就被 413 挡掉（请求到不了 core）；"+
-			"应用层分档由 core handler/service 与 agent 组装闸裁决，门口只管放行",
-			loc.pattern, got, want, want>>30)
+			"应用层分档由 core handler/service 裁决，门口只管放行",
+			loc.pattern, got, want, want>>20)
 	}
 }
 

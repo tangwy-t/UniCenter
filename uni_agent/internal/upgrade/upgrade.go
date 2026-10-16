@@ -157,8 +157,7 @@ func NewForProcess(deps Deps) *Runtime {
 // 是哪来的。现在漏注入在构造那一刻就炸，口径只有一句：**下载客户端由装配方显式
 // 决定**（生产：main 的 transport.CAClient / 无 CA 链路同口径补的客户端；测试：
 // httptest 的客户端）。panic 而不是返回错误：本包的裸构造签名是 *Runtime，且这是
-// 「装配期缺陷」——与 dockerops 的 SetSessions(nil) 同一条纪律（缺陷必须立刻现形，
-// 而不是静默降级）。
+// 「装配期缺陷」—— 缺陷必须立刻现形，而不是静默降级。
 func New(deps Deps) *Runtime {
 	if deps.HTTPClient == nil {
 		panic("upgrade: Deps.HTTPClient 必须显式注入（nil = 装配缺陷；5 分钟默认兜底已删除，见 New 的说明）")

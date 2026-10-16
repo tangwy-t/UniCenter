@@ -531,7 +531,7 @@ func TestEnrollConcurrentConflictRereadsAndIssuesUsableToken(t *testing.T) {
 		goredis.NewClient(&goredis.Options{Addr: miniredis.RunT(t).Addr()}),
 		agentmetrics.RawOptions{Step: 10 * time.Second, MaxPoints: 100})
 	svc := NewAgentIngestService(&missingOnceRepo{DeviceRepo: repo}, raw, agentmetrics.NewLatestStore(
-		goredis.NewClient(&goredis.Options{Addr: miniredis.RunT(t).Addr()})), nil, nil,
+		goredis.NewClient(&goredis.Options{Addr: miniredis.RunT(t).Addr()})),
 		stubCfg{"sys.agent.enrollToken": "secret-token"}, logger.NewNop())
 
 	// 预置设备，模拟「另一个并发请求已经建好了同一台」

@@ -147,33 +147,33 @@ func mustCreate(t *testing.T, db *gorm.DB, v interface{}) {
 	}
 }
 
-// ── FindRoleIDsByPerm（权限码 → 持有角色，docker 通知受众收敛）───────────
+// ── FindRoleIDsByPerm（权限码 → 持有角色）─────────────────────────────────
 //
-// 形态刻意铺开：多菜单同码（docker:list 在种子里就挂 4 个页面）、perms 的
-// CSV 多值形态、子串陷阱（docker:listing 不算命中）、软删菜单排除 —— 这些
+// 形态刻意铺开：多菜单同码（system:user:list 在种子里挂多个页面/按钮）、perms 的
+// CSV 多值形态、子串陷阱（system:user:listing 不算命中）、软删菜单排除 —— 这些
 // 是反查 SQL 与 Go 侧 CSV 匹配的全部行为面。
 
 // seedPermMenus 铺一张「菜单 × 角色」的权限面。
 //
-//	菜单  perms                     挂到角色
-//	m10   docker:list               r1
-//	m11   docker:list               r2（另挂 m12 按钮码）
-//	m12   docker:manage             r2
-//	m13   docker:list,docker:inspect   r3（CSV 多值形态）
-//	m14   (空，目录)               r4（另挂 m16 子串陷阱）
-//	m15   docker:list               r6（稍后软删）
-//	m16   docker:listing            r4（子串陷阱：整词比对不得命中）
+//	菜单  perms                                 挂到角色
+//	m10   system:user:list                      r1
+//	m11   system:user:list                      r2（另挂 m12 按钮码）
+//	m12   system:user:edit                      r2
+//	m13   system:user:list,system:user:query    r3（CSV 多值形态）
+//	m14   (空，目录)                            r4（另挂 m16 子串陷阱）
+//	m15   system:user:list                      r6（稍后软删）
+//	m16   system:user:listing                   r4（子串陷阱：整词比对不得命中）
 func seedPermMenus(t *testing.T, db *gorm.DB) {
 	t.Helper()
 	perm := func(s string) *string { return &s }
 	menus := []entity.SysMenu{
-		{BaseEntity: entity.BaseEntity{ID: 10}, Name: "m10", Perms: perm("docker:list")},
-		{BaseEntity: entity.BaseEntity{ID: 11}, Name: "m11", Perms: perm("docker:list")},
-		{BaseEntity: entity.BaseEntity{ID: 12}, Name: "m12", Perms: perm("docker:manage")},
-		{BaseEntity: entity.BaseEntity{ID: 13}, Name: "m13", Perms: perm("docker:list,docker:inspect")},
+		{BaseEntity: entity.BaseEntity{ID: 10}, Name: "m10", Perms: perm("system:user:list")},
+		{BaseEntity: entity.BaseEntity{ID: 11}, Name: "m11", Perms: perm("system:user:list")},
+		{BaseEntity: entity.BaseEntity{ID: 12}, Name: "m12", Perms: perm("system:user:edit")},
+		{BaseEntity: entity.BaseEntity{ID: 13}, Name: "m13", Perms: perm("system:user:list,system:user:query")},
 		{BaseEntity: entity.BaseEntity{ID: 14}, Name: "m14"}, // 目录：无 perms
-		{BaseEntity: entity.BaseEntity{ID: 15}, Name: "m15", Perms: perm("docker:list")},
-		{BaseEntity: entity.BaseEntity{ID: 16}, Name: "m16", Perms: perm("docker:listing")},
+		{BaseEntity: entity.BaseEntity{ID: 15}, Name: "m15", Perms: perm("system:user:list")},
+		{BaseEntity: entity.BaseEntity{ID: 16}, Name: "m16", Perms: perm("system:user:listing")},
 	}
 	for i := range menus {
 		mustCreate(t, db, &menus[i])
@@ -213,30 +213,30 @@ func TestRoleRepo_FindRoleIDsByPerm(t *testing.T) {
 	repo := NewRoleRepository(db)
 	ctx := context.Background()
 
-	// docker:list：r1（m10）、r2（m11，多菜单同码并集）、r3（CSV 第二形态）；
+	// system:user:list：r1（m10）、r2（m11，多菜单同码并集）、r3（CSV 第二形态）；
 	// r4 只有子串陷阱与空码目录、r6 的菜单已软删 —— 都不得命中。
-	roles, err := repo.FindRoleIDsByPerm(ctx, "docker:list")
+	roles, err := repo.FindRoleIDsByPerm(ctx, "system:user:list")
 	if err != nil {
 		t.Fatalf("FindRoleIDsByPerm: %v", err)
 	}
 	assertUint64Slice(t, roles, []uint64{1, 2, 3})
 
-	// 另一个码各查各的：r2 持有 manage、r3 经 CSV 持有 inspect。
-	manage, err := repo.FindRoleIDsByPerm(ctx, "docker:manage")
+	// 另一个码各查各的：r2 持有 edit、r3 经 CSV 持有 query。
+	manage, err := repo.FindRoleIDsByPerm(ctx, "system:user:edit")
 	if err != nil {
-		t.Fatalf("FindRoleIDsByPerm docker:manage: %v", err)
+		t.Fatalf("FindRoleIDsByPerm system:user:edit: %v", err)
 	}
 	assertUint64Slice(t, manage, []uint64{2})
-	inspect, err := repo.FindRoleIDsByPerm(ctx, "docker:inspect")
+	inspect, err := repo.FindRoleIDsByPerm(ctx, "system:user:query")
 	if err != nil {
-		t.Fatalf("FindRoleIDsByPerm docker:inspect: %v", err)
+		t.Fatalf("FindRoleIDsByPerm system:user:query: %v", err)
 	}
 	assertUint64Slice(t, inspect, []uint64{3})
 
 	// 无人持有：空集合、非错误（受众跳过分支的输入形态）。
-	none, err := repo.FindRoleIDsByPerm(ctx, "docker:nonexist")
+	none, err := repo.FindRoleIDsByPerm(ctx, "system:user:nonexist")
 	if err != nil {
-		t.Fatalf("FindRoleIDsByPerm docker:nonexist: %v", err)
+		t.Fatalf("FindRoleIDsByPerm system:user:nonexist: %v", err)
 	}
 	assertUint64Slice(t, none, []uint64{})
 
@@ -256,13 +256,13 @@ func TestPermCSVContains(t *testing.T) {
 		perms, code string
 		want        bool
 	}{
-		{"docker:list", "docker:list", true},
-		{"docker:list,docker:inspect", "docker:inspect", true}, // CSV 多值
-		{"docker:inspect,docker:list", "docker:list", true},    // 位置无关
-		{" docker:list , docker:manage ", "docker:list", true}, // 空白容错
-		{"docker:listing", "docker:list", false},               // 子串不算命中
-		{"docker:manage", "docker:list", false},
-		{"", "docker:list", false},
+		{"system:user:list", "system:user:list", true},
+		{"system:user:list,system:user:query", "system:user:query", true}, // CSV 多值
+		{"system:user:query,system:user:list", "system:user:list", true},  // 位置无关
+		{" system:user:list , system:user:edit ", "system:user:list", true}, // 空白容错
+		{"system:user:listing", "system:user:list", false},                // 子串不算命中
+		{"system:user:edit", "system:user:list", false},
+		{"", "system:user:list", false},
 	}
 	for _, c := range cases {
 		if got := permCSVContains(c.perms, c.code); got != c.want {

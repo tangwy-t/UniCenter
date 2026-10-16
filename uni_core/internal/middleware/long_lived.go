@@ -19,24 +19,20 @@ import (
 // 把它设成 now+WriteTimeout（见 net/http/server.go 的 readRequest），此后整条响应
 // 无论中间写没写、写了多少，都在这一个绝对窗口里；写 deadline 一到，下一次写就
 // 失败，net/http 随即关连接。对「一次请求一次响应」的普通端点这是正合适的保护；
-// 对长活响应却是误杀：拉取进度流 / 日志 Follow / stats 曲线 / 事件聚合 / 大文件
-// 下载在 30s 那一刻被写失败掐断。本波「断流 = best-effort cancel」语义把它进一步
-// 升级成「取消操作本身」—— QA 终审实测：>30s 的镜像拉取必然在 30.0s（±0.3s）
-// 断路，任务行记「失败·拉取已取消」，镜像不落地。
+// 对长活响应却是误杀：大文件上传/下载、pprof 抓取、发布物二进制下发等端点会在
+// 30s 那一刻被写失败掐断 —— 传输本身没出错，只是整条响应被一个绝对窗口判了死。
 //
 // 本中间件把「整条响应一个绝对截止」换成「每次写一个滚动截止」，让写 deadline
 // 回到它本来的语义 —— **一次写最长阻塞多久**（对端 TCP 收窗关死/网线被拔时写不会
 // 永久挂住），而不是「整条响应必须在 30s 内写完」：
 //
 //   - 进入时清掉绝对写截止（SetWriteDeadline(time.Time{})）：空闲多久都不再被计时。
-//     长活流的**空闲回收仍由既有机制负责**（dockerstream 的 10min idle sweep、
-//     dockerevents 的引用计数、各会话自己的收尾），写 deadline 不再兼职做空闲
-//     回收 —— 两个机制分工不重叠，谁也不替谁兜底。
+//     长活响应的**空闲回收仍由既有机制负责**（各上传/下载/抓取流程自己的收尾），
+//     写 deadline 不再兼职做空闲回收 —— 两个机制分工不重叠，谁也不替谁兜底。
 //   - 用 longLivedWriter 包住 c.Writer：每次 Write/WriteString/Flush 之前把截止
 //     推到 now+grace。数据照常流动的流不会被掐；对端卡死时最迟 grace 后写失败。
 //   - 同理清掉整请求读截止（ReadTimeout 也是从首字节起的绝对窗口）：长活请求体
-//     （构建上下文 / 载入镜像的导出物上传，上限按用途 512MB / 8GB）不该按
-//     「首字节起 30s 内必须传完」计；请求体
+//     （文件上传等大体积上传）不该按「首字节起 30s 内必须传完」计；请求体
 //     的读用 longLivedBody 按「每次读」续期 —— 上传人卡死同样是 grace 后被收住。
 //   - c.Next() 返回后给收尾留一个 grace 窗口：HTTP/1.1 chunked 的终结符
 //     （"0\r\n\r\n"）是 net/http 在 handler 返回之后才写的；若沿用「最后一帧之后
@@ -46,11 +42,11 @@ import (
 // 的口径，长活端点只是不再把它当「整条响应预算」用。grace <= 0（写截止被显式关掉）
 // 时只清除、不续期，等价于该路由无写截止。
 //
-// 挂载点在**路由注册处**（`docker.GET("/events", longLived, ...)`），不按 handler
+// 挂载点在**路由注册处**（`files.GET("/:id/download", longLived, ...)`），不按 handler
 // 逐个打补丁：路由表是「哪些端点长活」的唯一事实源，新端点漏挂会被
 // router 包的 TestLongLivedRoutesCarryDeadlineMiddleware 源码级守卫拦住。
 //
-// 不管的端点：终端 /ws /agent/ws 三条 WebSocket 都在升级时 Hijack 连接，而
+// 不管的端点：/agent/ws 的 WebSocket 在升级时 Hijack 连接，而
 // gorilla 的 Upgrade 在 hijack 后立刻 netConn.SetDeadline(time.Time{})
 // （见 gorilla/websocket server.go：「Clear deadlines set by HTTP server」）——
 // 它们的 deadline 从一开始就归零，天然不受 WriteTimeout 影响。
@@ -144,7 +140,7 @@ func (w *longLivedWriter) Flush() {
 // deadline，链不会断在这里（与 rawResponseWriter 是同一份约定的两端）。
 func (w *longLivedWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
-// longLivedBody 是长活请求体（构建上下文上传）的读包装：每次读前把读截止推到
+// longLivedBody 是长活请求体（文件上传）的读包装：每次读前把读截止推到
 // now+grace —— 语义与写侧对称（传输有界、等待不设截止）。
 type longLivedBody struct {
 	io.ReadCloser

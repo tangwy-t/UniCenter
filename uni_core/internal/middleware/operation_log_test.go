@@ -263,20 +263,20 @@ func TestOperationLogMiddlewarePreservesScopeContext(t *testing.T) {
 }
 
 // TestOperationLogPasswordDesensitized：敏感字段必须在**进审计之前**被掩码 ——
-// 凭据写请求（/docker/registries 的 password）落到 sys_operation_log 的是 "***"，
-// 不是明文；嵌套 JSON 同样递归掩码。
+// 改密/建号请求里的 password 落到 sys_operation_log 的是 "***"，不是明文；
+// 嵌套 JSON 同样递归掩码。
 func TestOperationLogPasswordDesensitized(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	svc := &captureHookSvc{logs: make(chan *entity.SysOperationLog, 1)}
 	r := gin.New()
 	r.Use(OperationLogMiddleware(svc, logger.NewNop()))
-	r.POST("/docker/registries", func(c *gin.Context) {
+	r.POST("/system/users", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"code": 0})
 	})
 
-	body := `{"registry":"harbor.example.com","username":"u","password":"sup3r-s3cret","nested":{"password":"inner-secret"}}`
+	body := `{"username":"u","password":"sup3r-s3cret","nickname":"ops","nested":{"password":"inner-secret"}}`
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/docker/registries", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/system/users", strings.NewReader(body))
 	r.ServeHTTP(w, req)
 
 	entry := waitLog(t, &captureOpLogService{logs: svc.logs})
@@ -290,26 +290,25 @@ func TestOperationLogPasswordDesensitized(t *testing.T) {
 	if !strings.Contains(got, `"password":"***"`) {
 		t.Fatalf("password 字段必须是 *** 掩码形态,实际 %s", got)
 	}
-	if !strings.Contains(got, "harbor.example.com") || !strings.Contains(got, `"username":"u"`) {
-		t.Fatalf("非敏感字段（registry/用户名）必须原样入审计,实际 %s", got)
+	if !strings.Contains(got, "ops") || !strings.Contains(got, `"username":"u"`) {
+		t.Fatalf("非敏感字段（昵称/用户名）必须原样入审计,实际 %s", got)
 	}
 }
 
-// TestOperationLogRegistryOptionIsNotMasked：image:pull 受理审计的 body 里
-// registry 是**凭据键而不是秘密** —— 不含密码、可安全入审计（4c 选型 A 的
-// 「受理审计不碰密码」前提：密码在审计之后才解出注入,body 里只有 registry 名）。
-func TestOperationLogRegistryOptionIsNotMasked(t *testing.T) {
+// TestOperationLogNonSensitiveKeysNotMasked：脱敏只认敏感键名 —— 其余键
+// （含 options 里的嵌套键）必须原样入审计，不得被连坐掩码。
+func TestOperationLogNonSensitiveKeysNotMasked(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	svc := &captureHookSvc{logs: make(chan *entity.SysOperationLog, 1)}
 	r := gin.New()
 	r.Use(OperationLogMiddleware(svc, logger.NewNop()))
-	r.POST("/docker/hosts/7/cmds", func(c *gin.Context) {
-		c.JSON(http.StatusAccepted, gin.H{"code": 0})
+	r.POST("/system/config", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"code": 0})
 	})
 
-	body := `{"action":"image:pull","target":"harbor.example.com/app:1","options":{"registry":"harbor.example.com"}}`
+	body := `{"key":"sys.agent.reportInterval","options":{"group":"agent"},"remark":"调快上报节奏"}`
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/docker/hosts/7/cmds", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/system/config", strings.NewReader(body))
 	r.ServeHTTP(w, req)
 
 	entry := waitLog(t, &captureOpLogService{logs: svc.logs})
@@ -317,40 +316,40 @@ func TestOperationLogRegistryOptionIsNotMasked(t *testing.T) {
 	if entry.RequestParams != nil {
 		got = *entry.RequestParams
 	}
-	if !strings.Contains(got, `"registry":"harbor.example.com"`) {
-		t.Fatalf("registry 凭据键必须原样入审计（它不含秘密）: %s", got)
+	if !strings.Contains(got, `"group":"agent"`) {
+		t.Fatalf("嵌套的非敏感键必须原样入审计: %s", got)
 	}
-	if !strings.Contains(got, "image:pull") {
-		t.Fatalf("action 必须入审计: %s", got)
+	if !strings.Contains(got, "sys.agent.reportInterval") {
+		t.Fatalf("配置键必须入审计: %s", got)
 	}
 }
 
-// TestOperationLogMiddlewareBuildContextBodyExempt 是 P0-3 回归：构建上下文上传
-// 的 gzip 字节绝不进 sys_operation_log.request_params —— 落的是「二进制构建
-// 上下文 N 字节」占位。两条断言各钉一半事实：
+// TestOperationLogMiddlewareBinaryBodyExempt 是 P0-3 回归：octet-stream 上传
+// 的二进制字节绝不进 sys_operation_log.request_params —— 落的是「二进制请求体
+// N 字节」占位。两条断言各钉一半事实：
 //   - handler 读到**完整**原文字节（豁免路径零接触 body —— 上传通道是流式
 //     水管，审计采样不得预读/截断）；
 //   - 审计里只有占位，二进制正文（可辨认的哨兵串）一个字节都不在。
-func TestOperationLogMiddlewareBuildContextBodyExempt(t *testing.T) {
+func TestOperationLogMiddlewareBinaryBodyExempt(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	svc := &captureOpLogService{logs: make(chan *entity.SysOperationLog, 1)}
 	r := gin.New()
 	r.Use(OperationLogMiddleware(svc, logger.NewNop()))
 
 	var handlerBodyLen int
-	r.POST("/api/v1/docker/hosts/:id/build-context", func(c *gin.Context) {
+	r.POST("/api/v1/uploads/binary", func(c *gin.Context) {
 		b, err := io.ReadAll(c.Request.Body)
 		if err != nil {
 			t.Errorf("handler 读 body 失败: %v", err)
 		}
 		handlerBodyLen = len(b)
-		c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{"filename": "build-ctx-1.tar.gz"}})
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{"filename": "artifact-1.bin"}})
 	})
 
 	// gzip 魔数开头的二进制正文：嵌入可辨认哨兵串（若泄漏，断言当场抓到）。
-	body := append([]byte{0x1f, 0x8b}, bytes.Repeat([]byte("SECRET-BUILD-SRC"), 256)...)
+	body := append([]byte{0x1f, 0x8b}, bytes.Repeat([]byte("SECRET-BINARY-BODY"), 256)...)
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/docker/hosts/7/build-context", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/uploads/binary", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/octet-stream")
 	r.ServeHTTP(w, req)
 
@@ -362,10 +361,10 @@ func TestOperationLogMiddlewareBuildContextBodyExempt(t *testing.T) {
 		t.Fatal("占位文案必须落 request_params（这次上传发生过，审计要看得见）")
 	}
 	got := *entry.RequestParams
-	if want := fmt.Sprintf("二进制构建上下文 %d 字节", len(body)); got != want {
+	if want := fmt.Sprintf("二进制请求体 %d 字节", len(body)); got != want {
 		t.Fatalf("request_params = %q, want 占位 %q", got, want)
 	}
-	if strings.Contains(got, "SECRET-BUILD-SRC") {
+	if strings.Contains(got, "SECRET-BINARY-BODY") {
 		t.Fatal("二进制正文不得进审计")
 	}
 }

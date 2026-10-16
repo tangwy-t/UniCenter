@@ -7,29 +7,21 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 	"time"
 
 	agentproto "github.com/tangwy-t/UniCenter/uni_protocol"
 
 	"github.com/tangwy-t/UniCenter/uni_core/internal/handler"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/middleware"
-	"github.com/tangwy-t/UniCenter/uni_core/internal/model/dto/request"
-	"github.com/tangwy-t/UniCenter/uni_core/internal/model/entity"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/agenthub"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/agentmetrics"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/captcha"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/config"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/database"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/datascope"
-	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockerevents"
-	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockernotify"
-	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockerstate"
-	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/dockerstream"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/lifecycle"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/limiter"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/logger"
-	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/permission"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/redis/cache"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/redis/lock"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/redis/pubsub"
@@ -38,7 +30,6 @@ import (
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/sqlhistory"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/storage"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/tracing"
-	"github.com/tangwy-t/UniCenter/uni_core/internal/pkg/util"
 	wsPkg "github.com/tangwy-t/UniCenter/uni_core/internal/pkg/ws"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/repository"
 	"github.com/tangwy-t/UniCenter/uni_core/internal/router"
@@ -80,10 +71,6 @@ const (
 	// defer Unregister 执行完」，量级是毫秒；20ms 让停机几乎立刻完成，
 	// 又不会变成忙等（drain 期的 CPU 不该被这里吃掉）。
 	agentDrainPollInterval = 20 * time.Millisecond
-
-	// dockerCmdSweepInterval 是 docker 指令 sweep 的周期。
-	// 5s 是「指令超时（最短 30s）的 1/6」——够及时，也不至于空转打 Redis。
-	dockerCmdSweepInterval = 5 * time.Second
 
 	// rawWindowShortfallMarker 是「热层窗口跨度短于回填假设」那条启动期 Warn 的
 	// **稳定前缀**：同包测试按它筛日志（文案可以再改，前缀是契约），
@@ -315,39 +302,6 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 		)
 	}
 
-	// ── Docker 管理（agent 侧装配）──────────────────────────────────────
-	// 两个 store 与 agent 通道共用同一个 Redis 客户端：快照/指令记录都是同一族键，
-	// 分成两个客户端只会让「谁清了哪个键」这个问题多一处答案。
-	// 顺序要紧：两者必须早于 agentIngestSvc（它是快照与结果两条入站面的实现）。
-	// 这里传 redis（goredis.UniversalClient）而不是上面的 cacheStore：后者是
-	// *cache.RedisStore（面向缓存的窄封装，不满足 UniversalClient），而这两个 store
-	// 与配置提供者要的是原生客户端（与 WithCursorStore(redis) 同源）。
-	dockerStore := dockerstate.NewStore(redis)
-	dockerCmdStore := dockerstate.NewCmdStore(redis)
-	// 任务历史持久层（8d）：同一个仓储喂三处 —— 终态钩子（写）、任务中心读面（合并）、
-	// 保留清理任务（删）。钩子挂在这里而不是各写入调用方：CmdStore 的终态转换点是
-	// 唯一咽喉（agent result / 缓存秒回 / discard / sweep 全数经过），将来新增路径
-	// 不会漏掉落库（契约见 dockerstate.TerminalHook）。
-	dockerTaskHistoryRepo := repository.NewDockerTaskHistoryRepo(db)
-	dockerCmdStore.WithTerminalHook(service.NewDockerTaskHistoryRecorder(dockerTaskHistoryRepo, log).Record)
-	// stats 留存（P2）：同一个 Redis 客户端、同一族键（docker:stats:history:*）。
-	// 与上面两个 store 同款「一个实例喂两处」：ingest 侧以观察者挂钩写入（快照
-	// 落库后投影），读面以查询/清理面注入 —— 各消费方只声明自己需要的窄接口。
-	dockerStatsHistory := dockerstate.NewStatsHistoryStore(redis)
-	// 扫描缓存（P3·安全面）：docker:scan:<镜像ID>（内容寻址、24h TTL）。同款
-	// 「一个实例喂两处」：ingest 侧在成功扫描的 result 回写后落缓存，下发面在
-	// image:scan 受理时秒回 —— 两边读写的是同一族键。
-	dockerScanCache := dockerstate.NewScanCacheStore(redis)
-	// 流会话注册表（三期）：**内存**而不是 Redis —— 会话的另一端是本进程持有的
-	// agent 连接，跨实例共享不能让另一实例投递帧（多实例在本域是已声明的限制）。
-	// 一次性 ticket 则必须跨实例可见（spec §4.3.2 的键），故走 Redis。
-	dockerSessions := dockerstream.NewRegistry(log)
-	dockerTickets := dockerstate.NewTicketStore(redis)
-	dockerCfgProvider := service.NewDockerConfigProvider(configSvc, redis, log)
-	// config.changed 订阅：只有 sys.docker.* 的变更会自增 docker:config_version
-	//（agent 据此判断「配置变了」，值哈希感知不到「改回原值」这种回摆）。
-	dockerCfgProvider.Watch(broker, log)
-
 	// ── Agent 服务（入湖写路径 + 趋势/下钻查询 + 设备管理）──────────────
 	// 同一个 rawStore 分别以写入面与读取面注入：*agentmetrics.RawStore 同时具备
 	// Append（入湖）/ Query+Bucket（查询）/ Purge（删除连带清理）三面，
@@ -361,17 +315,7 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 	// 这就是 Plan 2B 留下的那条「2C 交接说明」的落点：这个服务至此有了真实
 	// 消费者，不再需要「构造出来只能赋给 `_`」的将就写法。
 	agentIngestSvc := service.NewAgentIngestService(deviceRepo, rawStore, latestStore,
-		dockerStore, dockerCmdStore, configSvc, log).WithDockerSessions(dockerSessions).
-		// 终态审计挂钩（6c）：agent result ingest 的终态转换点入账执行结果（复用
-		// OperationLogService —— 与 HTTP 中间件同一条写路径/用户名反查口径）。
-		// 挂钩是观察者：装配失败只影响审计可视性，不影响结果回写主链。
-		WithDockerAudit(service.NewDockerCmdAuditor(opLogSvc, deviceRepo, log)).
-		// stats 留存挂钩（P2）：快照 ingest 后把容器 CPU/内存投影进 30 分钟环形
-		// 序列。同样是观察者：留存失败只 warn，快照主链零影响（抽屉历史半边）。
-		WithDockerStatsHistory(dockerStatsHistory).
-		// 扫描缓存挂钩（P3·安全面）：成功的 image:scan 报告按镜像内容键落
-		// 24h 缓存。观察者：写失败只 warn，结果回写主链零影响（下一扫不秒回）。
-		WithDockerScanCache(dockerScanCache)
+		configSvc, log)
 	// agentPolicy 是 sys.agent.* 节奏配置（reportInterval / heartbeatInterval）的
 	// 适配器（定义见文末 agentIntervalPolicy），**一个实例喂两处**：
 	//   - 查询服务：Redis 档的原生栅格 = reportInterval（上方的 rawStore Step 也取自
@@ -394,120 +338,6 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 		PongWait:     3 * agentHeartbeat,
 	}, log)
 
-	// ── Docker 管理（读面 + 下发面的服务）─────────────────────────────────
-	// 读面与下发面共用上面那两个 store 实例；拆成两个服务类型的理由见
-	// service/docker.go：读面只碰 Redis 与设备表，下发面才经 agentHub 摸设备 ——
-	// 合成一个类型会让「只想看主机清单」的调用方被迫依赖整条下行链路。
-	// dockerCmdSvc 的 sender 就是上面这个 agentHub：本域不碰 socket，也不缓存连接。
-	dockerSvc := service.NewDockerService(dockerStore, deviceRepo, configSvc, log).
-		// stats 留存读面（P2）：查询历史曲线 + 设备删除时的连带清理（与上面的
-		// 写入挂钩共用同一个 store 实例 —— 两边读写的是同一族键）。
-		WithStatsHistory(dockerStatsHistory).
-		// 镜像目标版本声明（4c）：声明式目标存储面（docker_image_target 表），
-		// 漂移视图据此在每行追加 targetDigest/pendingHosts/alignedCount。
-		WithImageTargets(repository.NewDockerImageTargetRepo(db)).
-		// 宿主磁盘水位（4d）：设备指标宽表（device_metric_5m）最近一条整机行的磁盘列，
-		// 批量 join 进主机清单/总览的 diskUsedPercent/diskTotalGb（答「哪台快满」的分母）——
-		// 与 docker 占用账目（快照里的 DiskUsage）是两回事，互不覆盖。
-		WithHostDiskMetrics(repository.NewDockerHostDiskRepo(db))
-	// 任务面（6b / 8d）：任务中心的读面 = 实时（CmdStore，含在途）∪ 历史（持久层），
-	// 按 ref 合并去重（实时胜）、整体分页。设备表与上面读到的是同一个 repo；
-	// 历史面与终态钩子、清理任务共用同一个仓储实例。
-	dockerTasksSvc := service.NewDockerTaskService(dockerCmdStore, deviceRepo, userRepo, log).
-		WithHistory(dockerTaskHistoryRepo)
-	// 上限预检注入同一个注册表：CountByDevice 与流端点的会话是同一份账目。
-	dockerCmdSvc := service.NewDockerCmdService(dockerCmdStore, agentHub, dockerStore, log).
-		WithStreamSessions(dockerSessions).
-		// 扫描缓存读面（P3·安全面）：image:scan 受理时的秒回快路径 —— 与上面
-		// ingest 侧的写入挂钩共用同一个 store 实例。
-		WithScanCache(dockerScanCache)
-	// 构建上下文上传中转（v1.3）：字节流由浏览器直传，经 agentHub 的二进制帧面
-	// 流式达 agent（core 零落盘）。在线预检与 dockerstream 同一个包装（hub.Get）。
-	dockerBuildCtxSvc := service.NewDockerBuildContextService(agentHub, log).
-		WithOnline(func(deviceID uint64) bool {
-			_, ok := agentHub.Get(deviceID)
-			return ok
-		})
-	// 私有仓库凭据面（4c）：管理 CRUD + image:pull 受理注入的**唯一**解密读口。
-	// 主密钥走 sys 配置键（sys.docker.registry.secret，配置 API 自动掩码）——
-	// 与 jwt 密钥同一通道先例；密码绝不明文落库（AES-256-GCM，见 pkg/seccrypt）。
-	dockerRegistrySvc := service.NewDockerRegistryService(
-		repository.NewDockerRegistryRepo(db), configSvc, log)
-	dockerCmdSvc = dockerCmdSvc.WithRegistryAuth(dockerRegistrySvc)
-	// 流通道面（三期）：ticket 签发/兑换、会话接入、下行 input/resize/cancel 与
-	// 两种清理（空闲超时、设备离线）。在线判定包装 hub.Get —— 设备掉线后它的会话
-	// 已无数据来源，尽快收摊好过让用户对着一个已经死掉的终端等到超时。
-	dockerStreamSvc := service.NewDockerStreamService(dockerSessions, dockerTickets, agentHub, log).
-		WithDeviceOnline(func(deviceID uint64) bool {
-			_, ok := agentHub.Get(deviceID)
-			return ok
-		}).
-		// 拉取进度会话的终态对账（4b）：会话寿命 = 指令寿命 —— 指令还在 pending 就留着
-		//（排队中的拉取一帧没有是常态），终态/消失即移除（不发 cancel：agent 侧的同名
-		// 会话要么已随 eof 收摊、要么从未打开，cancel 只会腰斩排队中的后续拉取）。
-		WithPullPending(func(ctx context.Context, ref string) (bool, error) {
-			rec, err := dockerCmdStore.Get(ctx, ref)
-			if err != nil {
-				return false, err
-			}
-			return rec != nil && rec.Status == dockerstate.StatusPending, nil
-		})
-
-	// ── 事件流常驻订阅管理器（六期·监控面）────────────────────────────────
-	// core 自己是 docker:events 的**常驻客户端**：首个 console 连上 /docker/events 时
-	// 向全部 dockerOk 主机发起订阅、末个断开时全量退订；单台断连/失败退避重试；
-	// 每主机环形缓冲 50 条（打开活动流即回放）。它复用指令通道的受理模型
-	//（dockerCmdStore 建记录 + agentHub 下发），帧的归属路由见下方 agentDeps 的
-	// FrameRouter：用户注册表先认领，ErrNotFound 才落到常驻管理器。
-	// ref 与用户指令共用同一生成器（service.NewRequestID）：docker:cmd:<ref> 是同一
-	// 个键空间，两个计数器会重开撞号窗口。hostname 解析包装 deviceRepo.FindByID
-	//（读不到降级为空名，不毁掉订阅 —— 设备已删由 docker:hosts 集合清理兜底收敛）。
-	//
-	// WithPersistence：保留窗口的**副本**另走一条链落 Redis（每主机一个 ZSET，双限
-	// 与内存侧同源），Hydrate 在启动期把它读回内存 —— core 重启（=发布）后活动流的
-	// 历史页立刻还有数据。写入不落热路径（帧投递侧只做非阻塞入队，满则丢副本），
-	// Redis 不可用时实时流与内存历史照常。装配点与用法见 dockerevents/history.go。
-	dockerEventsMgr := dockerevents.NewManager(dockerevents.Options{}, agentHub,
-		dockerCmdStore, dockerStore,
-		func(ctx context.Context, deviceID uint64) string {
-			if d, err := deviceRepo.FindByID(ctx, deviceID); err == nil && d != nil {
-				return d.Hostname
-			}
-			return ""
-		}, log).
-		WithOnline(func(deviceID uint64) bool {
-			_, ok := agentHub.Get(deviceID)
-			return ok
-		}).
-		WithIDGen(service.NewRequestID).
-		WithPersistence(redis)
-	// 启动即水合（同步一次读，锁外）：必须在 Run 之前 —— 对账循环一起来就会开始
-	// 订阅并记新事件，水合晚一步会与「新事件已经进窗口」混在一起（虽然靠 seq 重编号
-	// 也不会错，但让「历史在前、实时在后」在时间线上天然有序更省解释）。失败只记
-	// 日志（Redis 抖动不阻断启动），枚举源是 docker:hosts。
-	dockerEventsMgr.Hydrate(context.Background())
-	// 结果出口装回入站面（agent_ingest 的 docker:events 分支把 result 交还给管理器认领）。
-	agentIngestSvc.WithDockerEvents(dockerEventsMgr)
-
-	// ── 事件 → 通知联动器（七期·P2：从「看」到「被通知」）─────────────────
-	// 联动器把 docker 事件折成 system-notice 通知：规则最小集（die 且 exit ≠ 0、
-	// health_status: unhealthy）+ 10 分钟窗口节流 + 受众收敛为「持有 docker:list
-	// 的角色」（优先级「重要」），开关与窗口全部走 sys.docker.notify.* 热配置
-	// （configSvc 与 agent 配置同一条链路，改完即生效）。它以**常驻内部消费者**
-	// 身份登记进事件管理器 —— 关键语义：HTTP 客户端全断开时订阅保持常开
-	// （Manager.RegisterResident 的归零判据不含内部面；/docker/events 端点行为
-	// 零改动）。注销函数与进程同寿，刻意不接停机路径：Run 的 ctx 一取消，
-	// 队列与协程自然收手，resident 账目随进程消亡。
-	//
-	// 受众解析件直接吃 roleRepo（结构化满足 dockernotify.RolePermQuery，
-	// SQL 与匹配口径在 repository 侧）；解析/降级/跳过的策略三岔口在
-	// dockerNoticeSink，5 分钟 TTL 缓存在解析件自身 —— 见各自就地注释。
-	dockerNotifyAudience := dockernotify.NewPermAudienceResolver(
-		dockernotify.PermAudienceOptions{}, roleRepo, log)
-	dockerNotify := dockernotify.NewNotifier(dockernotify.Options{}, configSvc,
-		newDockerNoticeSink(noticeSvc, dockerNotifyAudience, log), log)
-	dockerEventsMgr.RegisterResident("通知联动", dockerNotify)
-
 	// ── Agent 升级（编排 + 发布物）─────────────────────────────────────
 	// 编排服务是升级域的**唯一写入口**：agent 通道（对账/上报）与控制台 HTTP
 	// （下发/任务/汇总）共用同一个实例 —— 生效目标与「一次尝试」的口径只有一份。
@@ -529,7 +359,7 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 	// 设备服务注入**升级域的信息面**（生效目标 / 未终结尝试 / 一键回滚版本）：
 	// 列表与详情上的升级字段全部由它供给，设备服务自己不算第二份口径。
 	deviceSvc := service.NewDeviceService(deviceRepo, deviceResourceRepo, rawStore, latestStore,
-		configSvc, deviceUpgradeSvc, dockerSvc, log)
+		configSvc, deviceUpgradeSvc, log)
 	// 总览服务复用**同一批**依赖实例（deviceRepo/latestStore/rawStore/agentPolicy/
 	// configSvc），故总览与详情页对同一 range/同一列/同一在线阈值的解释必然一致。
 	// 注入 agentPolicy（而不是另建一个 policy）是关键：它内部每次调用都读配置，
@@ -579,15 +409,6 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 		// 阈值取 sys.agent.maxFramesPerMin（缺省 900），计数走与上方 rateLimiter 同一个
 		// cacheStore（同一个 Redis 客户端）。未注入 = fail-open，所以这里必须接上。
 		Limiter: newAgentFrameLimiter(cacheStore, configSvc),
-		// docker 域的四个依赖：快照落库、结果回写（都由 agentIngestSvc 承接，
-		// 它们的方法集逐字满足 agenthub 的两个窄接口）、hello_ack 的配置块来源
-		// 与流数据帧的投递面。投递面是**二段路由**（六期）：用户流会话注册表先认领
-		//（dockerSessions），ErrNotFound 才落到事件流常驻管理器（属主不同、账目不相混）。
-		// nil 容忍在连接侧（未装配 = 丢弃并记日志），这里全部接上。
-		DockerState:  agentIngestSvc,
-		DockerResult: agentIngestSvc,
-		DockerConfig: dockerCfgProvider,
-		DockerFrames: dockerevents.FrameRouter{Primary: dockerSessions, Fallback: dockerEventsMgr},
 	}
 
 	// ── 启动期分区 reconcile（**必须**在 scheduler.NewScheduler 之前）─────
@@ -620,13 +441,11 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 		OpLogRepo:    opLogRepo,
 		LoginLogRepo: loginLogRepo,
 		JobLogRepo:   jobLogRepo,
-		// 任务中心历史清理（8d）：与三类日志清理共用 DeleteBefore 窄接口。
-		DockerTaskRepo: dockerTaskHistoryRepo,
-		ConfigRepo:     configRepo,
-		DictTypeRepo:   dictTypeRepo,
-		DictDataRepo:   dictDataRepo,
-		ConfigSvc:      configSvc,
-		CacheStore:     cacheStore,
+		ConfigRepo:   configRepo,
+		DictTypeRepo: dictTypeRepo,
+		DictDataRepo: dictDataRepo,
+		ConfigSvc:    configSvc,
+		CacheStore:   cacheStore,
 		// 设备指标域（Plan 2C）：三个后台服务 + 结构化日志。
 		// AgentFlush 同时供 flush / backfill 两个任务使用 —— 它们是同一实例的两个
 		// 入口（落库 / 回退水位后落库），所以这里只填一次。
@@ -635,15 +454,9 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 		AgentPartition: agentPartitionSvc,
 		// 升级巡检（只读扫描 + 判超时）：不加它，卡住的升级尝试会永远停在「升级中」。
 		AgentUpgrade: deviceUpgradeSvc,
-		// 上传产物回收（docker-transfer-cleanup）：枚举 docker 可管主机（同一个
-		// dockerStore）+ 建指令记录（同一个 dockerCmdStore，结果回链与实时可见性
-		// 都靠它）+ 经 agentHub 逐台派发 system:transfer-cleanup。
-		// RequestIDGen 传共享计数器：ref 与用户指令同在一个 docker:cmd:<ref> 键空间，
-		// 两套计数器会重新引入撞号窗口（见 Dockerevents 装配处的同一条理由）。
-		DockerTransferHosts:  dockerStore,
-		DockerTransferCmds:   dockerCmdStore,
-		DockerTransferSender: agentHub,
-		RequestIDGen:         service.NewRequestID,
+		// RequestIDGen 传共享计数器：同一键空间里的 ref 必须由同一个计数器产生，
+		// 两套计数器会重新引入「同一纳秒、两计数器等值」的撞号窗口。
+		RequestIDGen: service.NewRequestID,
 		// Log 允许 nil（任务侧退化成 Nop），但装配点没有理由交 nil：4 个指标任务的
 		// 全部可观测性就是那几行结构化读数。
 		Log: log,
@@ -692,8 +505,6 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 	agentReleaseHdl := handler.NewAgentReleaseHandler(agentReleaseSvc, agentIngestSvc)
 	serverMonitorHdl := handler.NewServerMonitorHandler(log, serverstats.NewHistoryStore(redis))
 
-	// Docker handler 与指令 sweep 见下方「Docker handler」段（要等 permGuard 构造完）。
-
 	// 服务器监控的采样协程随进程退出:drain 阶段优雅停止(幂等 Close)。
 	lc.RegisterTo("drain", "server-monitor", func(context.Context) error {
 		serverMonitorHdl.Close()
@@ -728,115 +539,6 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 
 	// ── Permission Guard ─────────────────────────────────────────────────
 	permGuard := middleware.NewPermissionGuard(authSvc, sessionStore, configSvc, log)
-
-	// ── Docker handler 与指令 sweep ───────────────────────────────────────
-	// handler 必须拿到 permGuard：指令面的权限码按 action 变化，路由上挂不了静态 perm，
-	// 由 handler 在解析出 action / 指令记录后调用 PermissionGuard.Ensure（同一套
-	// 缓存与 admin 通配语义，见 middleware/permission.go 与 router 的 /docker 组）。
-	dockerHdl := handler.NewDockerHandler(dockerSvc, dockerCmdSvc, dockerStreamSvc, permGuard, log).
-		WithEvents(dockerEventsMgr).WithTasks(dockerTasksSvc).WithBuildContext(dockerBuildCtxSvc)
-	// 凭据 handler（4c）：静态 perm docker:config 挂在 router，处理器不做权限判定。
-	dockerRegistryHdl := handler.NewDockerRegistryHandler(dockerRegistrySvc)
-
-	// 指令 sweep：终结到期未回结果的指令（§4.1 的 timeout 状态）。
-	//
-	// 形状照 db-pool-monitor / sql-monitor 的既有惯例：**worker 自己的 goroutine**
-	// （停止信号走自己的 stop channel），lifecycle 钩子只发信号 + 有界等待后返回。
-	// 刻意**不**把循环体写在钩子里等 `ctx.Done()`：lifecycle 传给钩子的 ctx 就是
-	// runHook 判定「钩子超时」用的那一个（context.WithTimeout(phase.Timeout)），
-	// 在它上面等待等于把整个相位预算耗光，runHook 的 select 会先选中自己的
-	// `<-ctx.Done()` 并记一条 `shutdown timed out after <预算>`，join 进
-	// ShutdownStaged —— e2e/wireup 测试直接断言该错误为空，生产则让每次停机都
-	// 多一条「有组件没停下来」的错误日志，而真相是它**按时**停了。
-	dockerSweepStop := make(chan struct{})
-	dockerSweepDone := make(chan struct{})
-	go func() {
-		defer close(dockerSweepDone)
-		ticker := time.NewTicker(dockerCmdSweepInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-dockerSweepStop:
-				return
-			case <-ticker.C:
-				// 用 Background 而不是钩子的 ctx：sweep 是独立的一轮 IO，
-				// 不该因为「钩子被人等超时了」而在半路被取消。
-				if _, err := dockerCmdSvc.Sweep(context.Background()); err != nil {
-					log.Warn("docker cmd sweep failed", zap.Error(err))
-				}
-				// 流会话 sweep（三期）：空闲超时与设备离线两条清理路径共用这一轮
-				// 心跳（同一张 5s 的钟，运维只需要看一个周期字段）。
-				if _, err := dockerStreamSvc.Sweep(context.Background()); err != nil {
-					log.Warn("docker stream sweep failed", zap.Error(err))
-				}
-			}
-		}
-	}()
-	lc.RegisterTo("cleanup", "docker-cmd-sweep", func(context.Context) error {
-		// 幂等：close 只做一次（重复停机/测试重复调用会 panic）。
-		select {
-		case <-dockerSweepStop:
-		default:
-			close(dockerSweepStop)
-		}
-		<-dockerSweepDone
-		return nil
-	})
-
-	// ── 事件流常驻管理器：对账循环（六期）──────────────────────────────
-	// 与 cmd sweep 同一形状（worker 自己的 goroutine + stop 通道 + 有界收尾）：
-	// 管理器的 Run 内部用「下一次该做什么」的最近时刻自定时（周期对账、退避到点、
-	// 结果窗口到期三个节拍合用一个计时器），stop 只是取消 ctx —— 循环立即收手。
-	// 装配了留存时，Run 还会等落盘协程把队列残余写完再返回（给出「重启前最后一批
-	// 事件已经落 Redis」的保证，上限 persistDrainTimeout）：done 通道因此不只是
-	// 「循环停了」，也是「尾巴写完了」。
-	dockerEventsStop := make(chan struct{})
-	dockerEventsDone := make(chan struct{})
-	go func() {
-		defer close(dockerEventsDone)
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		go func() {
-			<-dockerEventsStop
-			cancel()
-		}()
-		dockerEventsMgr.Run(ctx)
-	}()
-	lc.RegisterTo("cleanup", "docker-events", func(context.Context) error {
-		select {
-		case <-dockerEventsStop:
-		default:
-			close(dockerEventsStop)
-		}
-		<-dockerEventsDone
-		return nil
-	})
-
-	// ── 通知联动工作协程（与事件管理器同款形状）──────────────────────────
-	// 帧路径上的 DeliverDockerEvent 只做非阻塞入队；规则过滤、节流合并、配置读与
-	// 通知发布全部在这个协程里 —— 任何一步阻塞都不会回到 agent 读循环上。停止
-	// 就是取消 ctx：队列未排空的积压自然丢弃（通知是增值面，不为其阻塞停机）。
-	dockerNotifyStop := make(chan struct{})
-	dockerNotifyDone := make(chan struct{})
-	go func() {
-		defer close(dockerNotifyDone)
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		go func() {
-			<-dockerNotifyStop
-			cancel()
-		}()
-		dockerNotify.Run(ctx)
-	}()
-	lc.RegisterTo("cleanup", "docker-notify", func(context.Context) error {
-		select {
-		case <-dockerNotifyStop:
-		default:
-			close(dockerNotifyStop)
-		}
-		<-dockerNotifyDone
-		return nil
-	})
 
 	// ── Agent WS Handler（未鉴权入口）─────────────────────────────────────
 	// hub 是上面的 agentHub（与 4 个后台任务共享同一个 rawStore 与同一族水位），
@@ -923,12 +625,6 @@ func initWith(db *gorm.DB, sqlStats *database.SQLStats, redis goredis.UniversalC
 			DeviceHdl:  deviceHdl,
 			UpgradeHdl: deviceUpgradeHdl,
 			ReleaseHdl: agentReleaseHdl,
-		},
-		// Docker 管理：读面两条路由挂 docker:list，指令面两条在处理器内按 action 判定
-		//（见 router.DockerDeps 与 handler/docker.go）。
-		Docker: router.DockerDeps{
-			Hdl:         dockerHdl,
-			RegistryHdl: dockerRegistryHdl,
 		},
 		// agent WS 入口：hub 与依赖束都是**完整装配**（enroll / 鉴权 / 入湖 /
 		// touch / 策略六个能力面全部接上，且 hub 与 4 个后台任务共享同一批
@@ -1130,100 +826,4 @@ func (n *agentUpgradeNotifier) NotifyUpgrade(ctx context.Context, deviceID uint6
 			zap.Uint64("device_id", deviceID), zap.Error(err))
 	}
 	return err
-}
-
-// ── 通知联动器的通知发布面适配器 ──────────────────────────────────────────
-//
-// dockerNoticeSink 把 dockernotify.Alert 折成一条 system-notice 通知并**立即发布**
-// （Create + Publish 两步复用的正是 notice 服务自己的既有口径：草稿 → 发布 →
-// 广播；联动器是服务内部组件，调 service 层而不是 HTTP 自调）。
-//
-// 受众为什么从「全员广播」收敛为「持有 docker:list 的**角色**」：容器事故的
-// 处置权在能看 docker 面的人手里，全员广播把事故噪音摊给全组织 —— P2 的
-// 「被通知」不该长成「被轰炸」。选角色（而不是反查用户列表）是因为
-// system-notice 原生支持 TargetType=角色（发布时才把角色解析成成员）：
-// 角色加人减人下一条告警即刻生效，**无需任何通知失效/补偿机制**；而权限码
-// → 角色的反查经 PermAudienceResolver（5 分钟 TTL 内存缓存，见其包内注释）
-// 得到 —— 受众策略（降级/跳过口径）集中在本适配器，联动器本体（dockernotify
-// 规则与节流）与事件面零改动。
-type dockerNoticeSink struct {
-	svc      *service.NoticeService
-	audience *dockernotify.PermAudienceResolver
-	log      logger.LoggerInterface
-}
-
-// 编译期断言：适配器必须满足联动器的发布面窄接口（签名漂移时红灯落在这里）。
-var _ dockernotify.NoticeSink = (*dockerNoticeSink)(nil)
-
-func newDockerNoticeSink(svc *service.NoticeService, audience *dockernotify.PermAudienceResolver,
-	log logger.LoggerInterface) *dockerNoticeSink {
-	return &dockerNoticeSink{svc: svc, audience: audience, log: log}
-}
-
-// PublishAlert 解析受众并发布。三岔口（口径都在这，策略不散落）：
-//   - 反查失败 → **降级全员 + warn**：宁误报不漏报。容器事故是组织级信号，
-//     DB 抖动几分钟的窗口里漏掉首条告警，代价大于全员临时多收一条 ——
-//     且节流（dockernotify）兜底，降级不会退化成刷屏；
-//   - 无人持有权限 → **跳过 + info**：没人能看 docker 的部署（或权限还没
-//     授给任何人）里，这条通报没有任何可处置的收件人 —— 发出去就是噪音；
-//   - 正常路径 → 角色定向发布。
-func (s *dockerNoticeSink) PublishAlert(ctx context.Context, alert dockernotify.Alert) error {
-	roles, err := s.audience.Resolve(ctx, permission.PermDockerList)
-	if err != nil {
-		s.log.Warn("docker 通知受众解析失败，降级为全员广播（宁误报不漏报）",
-			zap.String("title", alert.Title), zap.Error(err))
-		return s.createAndPublish(ctx, alert, nil)
-	}
-	if len(roles) == 0 {
-		// 不该有人收的通报就是噪音：跳过（也不留草稿 —— 「曾解析出无人持有」
-		// 不是值得管理面处置的事件）。
-		s.log.Info("无人持有 docker:list 权限，跳过 docker 通知", zap.String("title", alert.Title))
-		return nil
-	}
-	return s.createAndPublish(ctx, alert, roles)
-}
-
-// createAndPublish 走 Create+Publish 两步既有口径。roles == nil 表示降级全员
-// （调用方三岔口里「空集」已走跳过分支，不会以空切片进到这里）。
-func (s *dockerNoticeSink) createAndPublish(ctx context.Context, alert dockernotify.Alert,
-	roles []uint64) error {
-	targetType := entity.NoticeTargetTypeAll
-	targetIDs := ""
-	publishReq := request.PublishNoticeReq{} // 发布收件人：角色定向时显式携带（全员则空）
-	if roles != nil {
-		targetType = entity.NoticeTargetTypeRole
-		parts := make([]string, 0, len(roles))
-		for _, id := range roles {
-			parts = append(parts, strconv.FormatUint(id, 10))
-		}
-		targetIDs = strings.Join(parts, ",")
-		// 发布请求显式带 RoleIDs，而不是依赖服务层「空请求回退 TargetType」的
-		// 分支：发布意图在调用点自包含，notice 服务那条回退逻辑改掉也不影响
-		// 联动器。角色 → 成员的解析由 notice 层发布时完成（裁定：不反查用户）。
-		publishReq.RoleIDs = util.JsonUint64Slice(roles)
-	}
-
-	noticeType := entity.NoticeTypeNotice
-	priority := entity.NoticePriorityImportant
-	content := alert.Content
-	id, err := s.svc.Create(ctx, &request.CreateNoticeReq{
-		Title:      alert.Title,
-		Content:    &content,
-		NoticeType: &noticeType,
-		Priority:   &priority,
-		TargetType: &targetType,
-		TargetIDs:  targetIDs,
-	})
-	if err != nil {
-		return fmt.Errorf("wireup: docker 通知创建失败: %w", err)
-	}
-	// 角色有、成员为空的极端情形：notice 层 Publish 会以「自定义范围未配置
-	// 接收人」拒绝 —— 错误按既有口径上抛（草稿留存、联动器记 warn 不重试），
-	// 不在这里预查成员（那等于把「角色定向」退化回「反查用户」）。
-	if err := s.svc.Publish(ctx, id, &publishReq); err != nil {
-		// 发布失败：草稿**留着** —— 它本身就是「确曾发生」的痕迹，运维从通知
-		// 管理面仍能看到并手动处置；联动器不重试（重试纪律见 dockernotify 包注释）。
-		return fmt.Errorf("wireup: docker 通知发布失败: %w", err)
-	}
-	return nil
 }

@@ -1732,9 +1732,9 @@ func TestConnDispatchCoversAllAgentToCoreTypes(t *testing.T) {
 	}
 }
 
-// ── 构建上下文上传通道（v1.3）：二进制帧 ──────────────────────────────
+// ── 出站二进制通道：分片帧 ────────────────────────────────────────────
 //
-// 三组断言钉住本切片的「通道面」契约：
+// 三组断言钉住二进制通道的「通道面」契约：
 //  1. 入站二进制被拒（4002 —— 二进制帧只有 core→agent 一个方向），
 //     文本帧行为零改动；
 //  2. EnqueueBinary 的背压语义：队列满时**阻塞**（绝不丢弃）、ctx 取消与
@@ -1757,14 +1757,8 @@ func TestConnEnqueueBinaryBlocksUntilSpace(t *testing.T) {
 	f := newFixture(t, Options{SendQueue: 1})
 	ctx := context.Background()
 
-	frame1, err := agentproto.PackBinaryFrame(1, 1, false, []byte("a"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	frame2, err := agentproto.PackBinaryFrame(1, 2, true, []byte("b"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	frame1 := []byte("a")
+	frame2 := []byte("b")
 	if err := f.conn.EnqueueBinary(ctx, frame1); err != nil {
 		t.Fatalf("第 1 帧: %v", err)
 	}
@@ -1830,11 +1824,7 @@ func TestConnWriteLoopKeepsTextAndBinaryKinds(t *testing.T) {
 	enroll(t, f) // 首帧 hello_ack 是文本 —— 「老消息照旧」的伴随断言
 
 	payload := []byte("chunk-1")
-	frame, err := agentproto.PackBinaryFrame(77, 1, true, payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := f.conn.EnqueueBinary(context.Background(), frame); err != nil {
+	if err := f.conn.EnqueueBinary(context.Background(), payload); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, "二进制帧被写协程发出", func() bool {
@@ -1847,14 +1837,10 @@ func TestConnWriteLoopKeepsTextAndBinaryKinds(t *testing.T) {
 	if got := kinds[len(kinds)-1]; got != websocket.BinaryMessage {
 		t.Fatalf("末帧类型 = %d, want BinaryMessage", got)
 	}
-	// 发出的字节必须能解回同一帧（写协程没动分片一个字节）。
+	// 发出的字节必须与原样入队的分片逐字节一致（写协程没动分片一个字节）。
 	got := f.sock.frames()[len(f.sock.frames())-1]
-	dec, err := agentproto.UnpackBinaryFrame(got)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if dec.SessionID != 77 || dec.Seq != 1 || !dec.Final || !bytesEqual(dec.Payload, payload) {
-		t.Fatalf("写协程发出的帧被改写: %+v", dec)
+	if !bytesEqual(got, payload) {
+		t.Fatalf("写协程发出的分片被改写: got %q want %q", got, payload)
 	}
 }
 

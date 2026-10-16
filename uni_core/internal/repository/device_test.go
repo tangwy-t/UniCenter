@@ -715,7 +715,7 @@ func TestDeviceUpdateGroupTagsIdempotentReplayIsNotNotFound(t *testing.T) {
 	}
 }
 
-// TestDeviceFindByIDsBatch 钉住批量取设备的三条契约（docker 主机枚举一次查一百台的底层）：
+// TestDeviceFindByIDsBatch 钉住批量取设备的三条契约（批量下发等一次查一百台的底层）：
 //   - 一条 id IN (...) 取回命中的行（不再逐台 FindByID）；
 //   - **雪花 id 原样**：主键是 19 位（超过 float64 能精确表达的 2^53），中途转一次
 //     float 就会取到另一台设备的行 —— 相邻 id 各拿自己那行才算过；

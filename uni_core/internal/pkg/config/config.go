@@ -126,7 +126,7 @@ func Load() (*Config, error) {
 	// 环境变量覆盖:database.password → DATABASE_PASSWORD。
 	// 没有 replacer 时 AutomaticEnv 只认 "DATABASE.PASSWORD" 这种带点的
 	// 环境变量名 —— 标准环境里根本设置不了,等于死代码,密钥只能写进
-	// 配置文件。激活后 docker/k8s 部署可用 env 注入 DB/Redis 凭据,
+	// 配置文件。激活后容器/k8s 部署可用 env 注入 DB/Redis 凭据,
 	// 配置文件无需携带敏感值。
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	viper.AutomaticEnv()

@@ -389,8 +389,8 @@ func (r *DeviceRepo) SetUpgradeTerminal(ctx context.Context, id uint64, state in
 }
 
 // FindByIDs 按主键批量取设备（软删的设备不会返回）：**一条 `id IN (...)`**，
-// 取代「逐台 FindByID」的 N+1。两个调用方：升级下发（ids 路径）与 docker 主机枚举
-// （一百台主机原来是 100 条 SELECT，全在同一个请求里）。
+// 取代「逐台 FindByID」的 N+1（升级下发的 ids 路径等批量场景用它，
+// 一百台设备原来会变成 100 条 SELECT，全在同一个请求里）。
 //
 // ids 原样交给 GORM（[]uint64，不打成 []any / 不过 float）：主键是雪花 id（19 位，
 // 超过 float64 能精确表达的 2^53），中途转一次 float 就会取到**另一台设备**的行。

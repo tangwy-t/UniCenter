@@ -197,7 +197,7 @@ func TestPermissionGuard_SingleflightNotSharedAcrossScopes(t *testing.T) {
 // 缺登录态时与它们同款的错误（不另造话术）。
 func TestPermissionGuardCallerPerms(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	authSvc := &countingAuthSvc{perms: []string{"docker:manage"}}
+	authSvc := &countingAuthSvc{perms: []string{"system:user:edit"}}
 	guard := NewPermissionGuard(authSvc, stubPermStore{}, stubCfgGateway{}, logger.NewNop())
 
 	mkCtx := func(withClaims bool) *gin.Context {
@@ -214,7 +214,7 @@ func TestPermissionGuardCallerPerms(t *testing.T) {
 	if err != nil {
 		t.Fatalf("应加载成功: %v", err)
 	}
-	if !slices.Equal(got, []string{"docker:manage"}) {
+	if !slices.Equal(got, []string{"system:user:edit"}) {
 		t.Fatalf("权限集必须与回源结果逐字一致: %v", got)
 	}
 	// 第二次调用命中 memo：不再回源（一轮请求只加载一次）。
@@ -235,13 +235,13 @@ func TestPermissionGuardCallerPerms(t *testing.T) {
 // TestHasPermAdminWildcard 钉住判定唯一实现：admin 通配 + 逐码比对，与
 // Permission/Ensure 同源（两条入口现在都调它）。
 func TestHasPermAdminWildcard(t *testing.T) {
-	if !HasPerm([]string{"admin"}, "docker:exec") {
+	if !HasPerm([]string{"admin"}, "system:user:delete") {
 		t.Error("admin 必须通配")
 	}
-	if !HasPerm([]string{"docker:exec", "docker:list"}, "docker:exec") {
+	if !HasPerm([]string{"system:user:delete", "system:user:list"}, "system:user:delete") {
 		t.Error("逐码命中必须通过")
 	}
-	if HasPerm([]string{"docker:list"}, "docker:exec") {
+	if HasPerm([]string{"system:user:list"}, "system:user:delete") {
 		t.Error("不持码必须拒绝")
 	}
 	if HasPerm(nil, "") {

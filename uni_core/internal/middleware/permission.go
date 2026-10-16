@@ -76,9 +76,9 @@ func HasPerm(perms []string, required string) bool {
 
 // CallerPerms 返回调用者的权限集：只读帮助函数，**不改任何既有判定行为**。
 //
-// 存在的理由：docker 指令面的权限**按任务自身的权限码变化**，任务列表要为每一条
-// 条目判定「调用者是否有资格看它的参数原文」—— 这需要一个「读」的口，而 loadUserPerms
-// 是私有的（两条既有入口 Permission/Ensure 都只有「拒/放」两种产出）。本方法复用**同一份**
+// 存在的理由：处理器内需要**读**调用者权限集（按动态权限码自行判定，而不是交给
+// 路由静态拒绝）时 —— 这需要一个「读」的口，而 loadUserPerms 是私有的（两条既有
+// 入口 Permission/Ensure 都只有「拒/放」两种产出）。本方法复用**同一份**
 // 加载逻辑（权限缓存 → singleflight 回源），语义与它们同源：同一个调用者，同一个权限集。
 //
 // 一轮请求只加载一次：结果缓存在 gin context（同一 handler 内多次调用不重复打 permStore）。
@@ -100,9 +100,9 @@ func (g *PermissionGuard) CallerPerms(c *gin.Context) ([]string, error) {
 
 // Ensure 在处理器内做一次权限校验，通过返回 true；不通过时**已写好响应**（403）并返回 false。
 //
-// 为什么需要它：docker 指令面的权限**按 action 变化**（spec §4.3.1 总表：logs→inspect、
-// remove→delete…），无法写在路由上。与「在中间件里解 body 再判定」相比，把判定放在
-// 已知 action 的处理器里更直接 —— 中间件解 body 会与处理器抢读同一个 reader。
+// 为什么需要它：权限码**随请求内容变化**（同一路由下不同动作对应不同码）时就无法写在
+// 路由上。与「在中间件里解 body 再判定」相比，把判定放在已知动作的处理器里更直接 ——
+// 中间件解 body 会与处理器抢读同一个 reader。
 //
 // 它与路由级 Permission **同源**：同一套缓存/回源/singleflight/admin 通配语义，
 // 故「路由放行、处理器拒绝」这种口径分裂在架构上不可能发生。
