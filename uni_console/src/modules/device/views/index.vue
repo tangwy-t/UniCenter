@@ -15,28 +15,21 @@
         :loading="loading"
         @refresh="loadList"
       >
-        <!-- 批量升级的两个入口：多选（勾选后可用）与「按当前筛选下发」。
-             后者是**全量**入口（命中当前筛选的全部设备），故它的确认框会写明
-             命中台数 —— 多一次点击影响上百台，不能不给影响面。 -->
+        <!-- 页面级动作只留「按当前筛选下发」（**全量**入口：命中当前筛选的全部设备，
+             故确认框写明命中台数 —— 多一次点击影响上百台，不能不给影响面）。
+             形态锚定兄弟列表页的工具条先例：#left → toolbar-left → ArtButtonTable
+             （见 system-user/views/index.vue:33、system-role/views/index.vue:18）。
+             选中相关动作改走下方批量条（本次统一：原「已选 0 台 + 三个常驻大按钮」
+             与全站列表页不一致）。 -->
         <template #left>
-          <div v-if="canUpgrade" class="up-bar">
-            <span class="up-bar__sel">已选 {{ selected.length }} 台</span>
-            <ElButton
-              size="small"
-              type="primary"
-              :disabled="selected.length === 0"
-              @click="openUpgradeDialog(selected.map((r) => r.id))"
-            >
-              升级选中
-            </ElButton>
-            <ElButton
-              size="small"
-              :disabled="selected.length === 0"
-              @click="openRollbackDialog"
-            >
-              回滚选中
-            </ElButton>
-            <ElButton size="small" plain @click="openFilterDispatch">按当前筛选下发…</ElButton>
+          <div class="toolbar-left">
+            <ArtButtonTable
+              v-if="canUpgrade"
+              icon="ri:send-plane-2-line"
+              iconClass="bg-theme/12 text-theme"
+              title="按当前筛选下发"
+              @click="openFilterDispatch"
+            />
           </div>
         </template>
       </ArtTableHeader>
@@ -203,6 +196,33 @@
         </ElButton>
       </template>
     </ElDialog>
+
+    <!-- ── 批量操作浮条 ───────────────────────────────────────────────
+         形态照抄全站既有先例 system-file/views/index.vue（`batch-bar`：圆角浮条 +
+         图标 + 计数 + 分隔线 + ArtButtonTable 图标钮），只在有选中时出现 ——
+         与「零占用」取向一致：没选任何行时工具条里不出现批量按钮。
+         统计/交互不一致时以 system-file 那份为准，改样式请两处同步（收敛路径）。 -->
+    <transition name="batch-bar">
+      <div v-if="selected.length" class="batch-bar">
+        <span class="batch-icon"><ArtSvgIcon icon="ri:checkbox-multiple-line" /></span>
+        <span class="batch-text">已选 <b class="text-theme-aa">{{ selected.length }}</b> 台</span>
+        <span class="batch-divider" />
+        <ArtButtonTable
+          class="!mr-0"
+          icon="ri:arrow-up-line"
+          iconClass="bg-theme/12 text-theme"
+          :title="`升级选中（${selected.length}）`"
+          @click="openUpgradeDialog(selected.map((r) => r.id))"
+        />
+        <ArtButtonTable
+          class="!mr-0"
+          icon="ri:arrow-go-back-line"
+          iconClass="bg-warning/12 text-warning"
+          :title="`回滚选中（${selected.length}）`"
+          @click="openRollbackDialog"
+        />
+      </div>
+    </transition>
   </div>
 </template>
 
@@ -1250,20 +1270,52 @@
 
 <style lang="scss" scoped>
   /* 批量升级操作条（表头左侧插槽）：与表头图标按钮同一行，故只做对齐与分隔 */
-  .up-bar {
+  /* ── 批量操作浮条（照抄 system-file/views/index.vue 的 batch-bar 家族）── */
+  .batch-bar {
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    z-index: 1200;
     display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
     align-items: center;
-    padding-left: 4px;
+    gap: 10px;
+    padding: 8px 10px 8px 14px;
+    border: 1px solid var(--default-border);
+    border-radius: 999px;
+    background: var(--default-box-color);
+    box-shadow: 0 10px 32px rgba(15, 23, 42, 0.16);
+    transform: translateX(-50%);
+  }
 
-    &__sel {
-      font-size: 12px;
-      color: var(--el-text-color-regular);
-      font-variant-numeric: tabular-nums;
-      /* 「已选 N 台」是一个计数原子值，不折行。 */
-      white-space: nowrap;
-    }
+  .batch-icon {
+    display: flex;
+    align-items: center;
+    font-size: 17px;
+    color: var(--theme-color);
+  }
+
+  .batch-text {
+    font-size: 13px;
+    color: var(--art-gray-700);
+  }
+
+  .batch-divider {
+    width: 1px;
+    height: 16px;
+    background: var(--default-border);
+  }
+
+  .batch-bar-enter-active,
+  .batch-bar-leave-active {
+    transition:
+      opacity 0.2s ease,
+      transform 0.2s ease;
+  }
+
+  .batch-bar-enter-from,
+  .batch-bar-leave-to {
+    opacity: 0;
+    transform: translate(-50%, 12px);
   }
 
   /* 首拉失败的内联错误态（ElEmpty）：给接近表格空态的留白 */
