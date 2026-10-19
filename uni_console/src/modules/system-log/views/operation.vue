@@ -246,7 +246,7 @@
         hideBelow: 'tablet',
         formatter: (row) => `${row.costTime}ms`
       },
-      { prop: 'operTime', label: '操作时间', minWidth: 150 },
+      { prop: 'operTime', label: '操作时间', minWidth: 175 },
       ...(operationColumnConfig ? [operationColumnConfig] : [])
     ]
   })

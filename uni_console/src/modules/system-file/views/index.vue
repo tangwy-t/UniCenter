@@ -816,7 +816,7 @@
       {
         prop: 'createdAt',
         label: '上传时间',
-        minWidth: 150,
+        minWidth: 175,
         formatter: (row: Api.File.FileItem) => formatTime(row.createdAt)
       },
       ...(operationColumnConfig ? [operationColumnConfig] : [])

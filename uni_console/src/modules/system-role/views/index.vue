@@ -435,7 +435,7 @@
       {
         prop: 'createdAt',
         label: '创建时间',
-        minWidth: 140,
+        minWidth: 175,
         hideBelow: 'desktop',
         formatter: (row) => fmtTime(row.createdAt)
       },

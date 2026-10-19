@@ -124,7 +124,7 @@
       showOverflowTooltip: true,
       hideBelow: 'desktop'
     },
-    { prop: 'loginTime', label: '登录时间', minWidth: 150 }
+    { prop: 'loginTime', label: '登录时间', minWidth: 175 }
   ])
 
   function handleSearch() {

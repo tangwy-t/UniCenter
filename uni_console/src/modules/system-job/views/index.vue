@@ -264,43 +264,48 @@
       {
         prop: 'invokeTarget',
         label: '调用目标',
-        minWidth: 160,
+        // 调用目标列有两行（显示名 + 等宽原文，如 system:transfer-cleanup），
+        // 160 会把原文挤到省略号；220 取全站既有档位（另有 3 处在用）。
+        minWidth: 220,
         formatter: (row) => {
           const displayName = targets.value.find((t) => t.target === row.invokeTarget)?.displayName
           const registered = targets.value.some((t) => t.target === row.invokeTarget)
           const warn = targets.value.length > 0 && !registered
-          return h('div', { class: 'target-cell' }, [
-            h('div', { class: 'target-name-row' }, [
+          // 单行 + 省略：完整信息走 title tooltip，**不再换行**（两行会把行高撑开，
+          // 且窄列下列表节奏被打乱）。有显示名时 tooltip 给出「显示名（等宽原文）」。
+          return h(
+            'div',
+            {
+              class: 'target-cell',
+              title: displayName ? `${displayName}（${row.invokeTarget}）` : row.invokeTarget
+            },
+            [
               h('span', { class: 'target-name' }, displayName || row.invokeTarget),
               warn
                 ? h(ArtSvgIcon, {
                     icon: 'ri:error-warning-line',
-                    class: 'text-warning',
+                    class: 'text-warning shrink-0',
                     title: '该目标未在注册表中'
                   })
                 : null
-            ]),
-            displayName ? h('div', { class: 'target-sub font-mono' }, row.invokeTarget) : null
-          ])
+            ]
+          )
         }
       },
       {
         prop: 'cronExpression',
         label: '执行周期',
-        minWidth: 190,
+        // cron 表达式（如 0 0/5 * * * ?）比普通文本长，240 取全站既有档位。
+        minWidth: 240,
         formatter: (row) => {
           const desc = describeCron(row.cronExpression) || '自定义表达式'
-          return h('div', { class: 'cron-cell' }, [
-            h('div', { class: 'cron-desc' }, desc),
-            h(
-              'div',
-              {
-                class: 'cron-raw font-mono',
-                title: `原始表达式：${row.cronExpression}`
-              },
-              row.cronExpression
-            )
-          ])
+          // 单行 + 省略：页面只留**表达式本身**（硬数据、长度稳定、不会换行），
+          // 人类可读描述移入 title tooltip（描述是长文案，正是它把行撑成两行）。
+          return h(
+            'div',
+            { class: 'cron-cell font-mono', title: `${desc}（${row.cronExpression}）` },
+            row.cronExpression
+          )
         }
       },
       {
@@ -371,18 +376,12 @@
     white-space: nowrap;
   }
 
+  /* 单行形态：显示名/原文 + 告警图标同排，超长一律省略（完整信息在 title tooltip） */
   .target-cell {
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    line-height: 1.45;
-    min-width: 0;
-  }
-
-  .target-name-row {
     display: flex;
     align-items: center;
     gap: 4px;
+    line-height: 1.45;
     min-width: 0;
   }
 
@@ -398,38 +397,12 @@
     color: var(--art-gray-900, #e3e3e8);
   }
 
-  .target-sub {
-    font-size: 11px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    color: var(--color-g-500, #949eb7);
-  }
-
   .cron-cell {
-    display: flex;
-    flex-direction: column;
-    line-height: 1.5;
-  }
-
-  .cron-desc {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     font-size: 13px;
-    color: var(--art-gray-900, #323251);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .dark .cron-desc {
-    color: var(--art-gray-900, #e3e3e8);
-  }
-
-  .cron-raw {
-    font-size: 11px;
-    color: var(--color-g-500, #949eb7);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    line-height: 1.45;
   }
 
   .next-run {

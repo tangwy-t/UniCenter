@@ -273,6 +273,31 @@
   min-height: 0;
 }
 
+// 空态拉伸（2026-10-16 用户报：列表无数据时卡片只占一小条，下方大片留白）。
+//
+// 与上方「内容不足随内容收缩」的裁决**不冲突**：那条针对**有数据**的行少场景
+// （3 行撑满整屏会像一张空表）；这条只针对**空态**（一行都没有）—— 此时卡片吃满
+// 页根剩余高度，空态图与描述在卡内垂直居中，视觉上就是「一张等数据的表」，而不是
+// 一条缩在顶部的窄条。
+//
+// 触发信号用 ArtTable 已有的 `is-empty` 类（components/core/tables/art-table/index.vue:9）
+// 与它既有的 `emptyHeight`（缺省 `100%`，见 index.vue:317）—— 不新增页面级 props、
+// 不改任何页面模板。作用域限定在 `.art-full-height` 页根之下：未用该页根模板的页面
+// （自然流页面）不受影响，也不会碰到 `--art-full-height` 这个全站高度根口径。
+//
+// `el-table__empty-block` 需要显式 `height: 100%`：EP 默认只给 `min-height: 60px`
+// + `position: sticky`（不撑高），空态图因此贴在顶部；给满高后才真正居中。
+// 空态时表内没有行，改这块高度不会影响任何有数据的形态。
+.art-full-height .art-table-card:has(.art-table.is-empty) {
+  flex: 1 1 auto;
+  min-height: 0;
+
+  .el-table__body-wrapper,
+  .el-table__empty-block {
+    height: 100%;
+  }
+}
+
 .el-card.art-table-card {
   @include respond-height-at-most('phoneShort') {
     --el-card-padding: 10px;
