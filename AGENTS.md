@@ -55,12 +55,13 @@
 - `uni_console/src/config/breakpoints.test.ts` — 全局断点守卫
 - `uni_console/src/test/agent-channel-proxy-guard.test.ts` — 20443 通道 XFF 转发
 - `uni_console/src/test/event-clock-guard.test.ts` — 事件时钟
+- `uni_console/src/test/datetime-column-width-guard.test.ts` — 列表页日期时间列宽度（prop 尾缀 Time/At/Date 的列 minWidth 必须 ≥165，否则 `2026-10-16 11:05` 会折行；costTime=耗时属排除项）
 - `make contract`（协议形状漂移/单源/golden/零依赖）与 `uni_protocol-payload-guard`（离线载荷新鲜度）
-- 测试基线（2026-10-16 实测）：前端 48 文件 / 603 用例全绿；后端 uni_core + uni_protocol + uni_agent go 全包绿。
+- 测试基线（2026-10-19 实测）：前端 49 文件 / 605 用例全绿；后端 uni_core + uni_protocol + uni_agent go 全包绿。
 
 ## 6. 环境事实
 
 - WSL2 以 root 运行，用户不切用户；工具链在 `/root`；前端包管理器固定 `pnpm`。
-- Go 构建必须 `source /tmp/goenv.sh`：GOPROXY 必须以 file 代理打头（`uni_protocol v1.2.9` 只存在于仓库内离线载荷 `uni_core/.goproxy`，缺了它解析不到该版本）。
+- Go 构建必须 `source /tmp/goenv.sh`（**/tmp 会被清：若不存在按本节三条重建即可**）：GOPROXY 必须以 file 代理打头（`uni_protocol v1.2.9` 只存在于仓库内离线载荷 `uni_core/.goproxy`，缺了它解析不到该版本）。
 - 前端 node 在 `/root/.nvm/versions/node/v24.15.0/bin`（pnpm 11.24.0 = 仓库 pin，由 corepack 管理）。
 - 本项目历史口径另存于 Claude 的 memory 目录，本文件只保留仍然适用且用户确认的条目；快照类状态（commit/部署进度）一律以仓库与服务器实测为准，不照抄旧记忆。
